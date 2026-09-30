@@ -11,7 +11,7 @@ import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation
 import { applyPacing, applyConvergenceCap } from '../agents/lib/ship-pacing.js';
 import { draftShipState, SHIP_STATE } from '../lib/draft-ship-state.js';
 import { recordOutcome } from '../agents/lib/generator-learning.js';
-import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState, reopenRecommendation, blockRecommendation } from '../store/recommendations.js';
+import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState, reopenRecommendation, blockRecommendation, getRecommendationByFindingId } from '../store/recommendations.js';
 import { recordAttempt } from '../store/recommendation-attempts.js';
 import { classifyAbandonReason, RETRY_POLICY } from '../lib/attempt-classification.js';
 import { query as pgQuery } from '../db.js';
@@ -2041,11 +2041,28 @@ async function finalizeImplemented(siteId, draftId, site, { deployment = null } 
     // Best-effort by design: this is a reporting/learning signal, and failing
     // to schedule it must never make a genuinely merged fix look unmerged.
     try {
+      // Best-effort, deliberately separate from the try below: a lookup
+      // failure here must fall back to goalId: null, not skip scheduling the
+      // measurement itself, which is the real signal.
+      let goalId = null;
+      if (draft.finding_id) {
+        const rec = await getRecommendationByFindingId(siteId, draft.finding_id);
+        goalId = rec?.goal_id ?? null;
+      }
       await scheduleImpactMeasurement(siteId, {
         draftId: draft.id,
         pageUrl: draft.content?.page || draft.input?.page || null,
         generatorId: draft.action_type,
         mergedAt: new Date(),
+        goalId,
+        // Threads the same deployment record fix-verification.js's live
+        // re-check promotes to 'deployed' — measureOne consults it before
+        // trusting that this merge actually reached production (2026-09
+        // lifecycle-gap audit finding #2). null when recordMergeDeployment
+        // above couldn't resolve a commit sha or itself failed — the
+        // measurement still schedules, just without that extra check,
+        // unchanged from before this existed.
+        deploymentId: deployment?.id ?? null,
       });
     } catch (err) {
       console.error(`[action-center] could not schedule impact measurement for draft ${draftId}:`, err.message);

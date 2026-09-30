@@ -171,6 +171,17 @@ export const api = {
       setProspectDiscovery: (id, enabled) => req(`/internal/clients/${id}/prospect-discovery`, { method: 'POST', body: JSON.stringify({ enabled }) }),
       issueCrmWebhookToken: (id) => req(`/internal/clients/${id}/crm-webhook-token`, { method: 'POST' }),
     },
+    // Business Goals — Stage 2 UI for server/agents/lib/goal-alignment.js.
+    goals: {
+      list: (id) => req(`/internal/clients/${id}/goals`),
+      create: (id, body) => req(`/internal/clients/${id}/goals`, { method: 'POST', body: JSON.stringify(body) }),
+      update: (id, goalId, body) => req(`/internal/clients/${id}/goals/${goalId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+      setStatus: (id, goalId, status) => req(`/internal/clients/${id}/goals/${goalId}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
+      // Structures a free-text custom goal via LLM — never saves. The
+      // returned proposal is shown for the user to review/edit and explicitly
+      // confirm before the real create() above fires.
+      structurePreview: (id, description) => req(`/internal/clients/${id}/goals/structure-preview`, { method: 'POST', body: JSON.stringify({ description }) }),
+    },
     // Design-integrity gate: what the design agent found on this site's real
     // pages and what it would write, plus the current sign-off state
     // (server/agents/lib/design-review.js's buildDesignReviewReport).

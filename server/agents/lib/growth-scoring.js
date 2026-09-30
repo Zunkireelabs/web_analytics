@@ -129,6 +129,29 @@ export function confidenceScore(rec, learned) {
     score += adj;
     factors.push(`measured-impact ${(learned.impactConfidence * 100).toFixed(0)}% (${adj >= 0 ? '+' : ''}${adj.toFixed(0)})`);
   }
+  // Real measured clicks/impressions/position deltas (fix-impact.js's
+  // impactByGenerator, 2026-09 lifecycle-gap audit finding #3) — visible for
+  // human review alongside the other factors, deliberately contributing ZERO
+  // score. Folding an unbounded magnitude into this bounded swing would need
+  // an invented normalization constant, exactly the kind of made-up
+  // weighting rule classifyImpact's own comment already refuses to do for
+  // the same numbers; impactConfidence above (already a real, evidenced 0-1
+  // ratio) is the score-affecting signal this magnitude data supports.
+  if (learned.impactMagnitude?.measured) {
+    const m = learned.impactMagnitude;
+    factors.push(`measured-impact-magnitude: ${m.measured} fix(es), clicks ${m.clicksDelta >= 0 ? '+' : ''}${m.clicksDelta}, impressions ${m.impressionsDelta >= 0 ? '+' : ''}${m.impressionsDelta} (+0, informational)`);
+  }
+  // Data Analyst predicted-vs-observed accuracy (analyst-outcome.js's
+  // predictionConfirmed, 2026-09 Data Analyst audit finding #3) — same
+  // additive-only, zero-score treatment as impactMagnitude directly above,
+  // for the same reason: turning "N of M analyst predictions confirmed" into
+  // a score adjustment would need an invented weighting the request
+  // explicitly ruled out ("Do NOT let it override safety, risk, or
+  // deterministic gates"). Visible for human review only.
+  if (learned.analystPredictionAccuracy?.measured) {
+    const a = learned.analystPredictionAccuracy;
+    factors.push(`analyst-prediction-accuracy: ${a.confirmed}/${a.measured} confirmed (+0, informational)`);
+  }
   return { score, factors };
 }
 

@@ -19,6 +19,8 @@ const defaults = {
   getFileContent: async () => null,
   mergeBranchFromBase: async () => ({ ok: true, conflicted: false, synced: false }),
   compareCommits: async () => ({ files: [] }),
+  listOpenPullRequestsForBranch: async () => [],
+  getCommitMessage: async () => { throw new Error('Bad credentials (401)'); },
 };
 
 mock.module(resolve('../../github/client.js'), {
@@ -30,13 +32,14 @@ mock.module(resolve('../../github/client.js'), {
     // beginBatchPush) — stubs exist only so github-ops.js's imports resolve.
     createCommitObject: (...a) => defaults.createCommitObject(...a),
     updateRef: (...a) => defaults.updateRef(...a),
+    getCommitMessage: (...a) => defaults.getCommitMessage(...a),
     beginFileOverlay: () => {},
     endFileOverlay: () => {},
     recordFileOverlayWrites: () => {},
     mergeBranchFromBase: (...a) => defaults.mergeBranchFromBase(...a),
     compareCommits: (...a) => defaults.compareCommits(...a),
     openPullRequest: (...a) => defaults.openPullRequest(...a),
-    listOpenPullRequestsForBranch: async () => [],
+    listOpenPullRequestsForBranch: (...a) => defaults.listOpenPullRequestsForBranch(...a),
     getPullRequest: async () => ({}),
     getCheckRunsForRef: async () => [],
     defaultBranchName: (site) => site.repo_default_branch || 'main',
@@ -303,16 +306,16 @@ describe('beginBatchPush / endBatchPush', () => {
   const batchBranch = 'action-center/batch-1-2026-08-30';
 
   function stubCommitAndRef() {
-    const commits = []; // {parentSha, files, message}
-    const refUpdates = []; // {branch, sha}
+    const commits = []; // {parentSha, files, message, treeBaseSha}
+    const refUpdates = []; // {branch, sha, forced}
     let nextSha = 1;
     defaults.getBranchSha = async () => 'main-tip-sha';
     defaults.createBranch = async () => ({});
-    defaults.createCommitObject = async (site, parentSha, files, message) => {
-      commits.push({ parentSha, files, message });
+    defaults.createCommitObject = async (site, parentSha, files, message, opts = {}) => {
+      commits.push({ parentSha, files, message, treeBaseSha: opts.treeBaseSha });
       return `commit-sha-${nextSha++}`;
     };
-    defaults.updateRef = async (site, branch, sha) => { refUpdates.push({ branch, sha }); };
+    defaults.updateRef = async (site, branch, sha, opts = {}) => { refUpdates.push({ branch, sha, forced: opts.force ?? false }); };
     return { commits, refUpdates };
   }
 
@@ -323,6 +326,8 @@ describe('beginBatchPush / endBatchPush', () => {
     defaults.createCommitObject = async () => { throw new Error('Bad credentials (401)'); };
     defaults.updateRef = async () => { throw new Error('Bad credentials (401)'); };
     defaults.getFileContent = async () => null;
+    defaults.listOpenPullRequestsForBranch = async () => [];
+    defaults.getCommitMessage = async () => { throw new Error('Bad credentials (401)'); };
   }
 
   test('two pushes in one batch stage locally, create no commit, and move the ref exactly once at endBatchPush', async () => {
@@ -345,7 +350,7 @@ describe('beginBatchPush / endBatchPush', () => {
       assert.match(commits[0].message, /draft #1/, 'the single commit subject still references draft #1');
       assert.match(commits[0].message, /draft #2/, 'the single commit subject still references draft #2');
       assert.doesNotMatch(commits[0].message, /\n/, 'the subject must stay one line — batch-pr-recovery matches against the first line only');
-      assert.deepEqual(refUpdates, [{ branch: batchBranch, sha: 'commit-sha-1' }], 'exactly ONE ref move, pointing at the one batch commit');
+      assert.deepEqual(refUpdates, [{ branch: batchBranch, sha: 'commit-sha-1', forced: false }], 'exactly ONE ref move, pointing at the one batch commit, not forced (first commit of the day)');
     } finally {
       resetDefaults();
     }
@@ -418,6 +423,151 @@ describe('beginBatchPush / endBatchPush', () => {
       assert.equal(commits.length, 1, 'the re-entrant begin did not split the batch into two commits');
       assert.equal(commits[0].parentSha, 'main-tip-sha', 'the re-entrant begin did not reset the base sha away from the real branch tip');
       assert.equal(refUpdates.length, 1);
+    } finally {
+      resetDefaults();
+    }
+  });
+});
+
+// The gap ACROSS separate same-day runs: beginBatchPush/endBatchPush above
+// already guarantee ONE commit WITHIN a single run, but a SECOND, separate
+// invocation later the same day (a different cron pass, a human's own
+// "Execute Safe Fixes"/"bulk approve" click) used to stack its own commit on
+// top instead of joining the day's one commit. This block covers
+// endBatchPush's squash: it must still end up as exactly one commit per day.
+describe('endBatchPush — same-day squash (one commit per day, across separate runs)', () => {
+  const batchBranch = 'action-center/batch-1-2026-09-29';
+  const BASE_TIP = 'main-base-sha'; // the site's real default-branch tip, unmoved all day
+  const EARLIER_TODAY_SHA = 'earlier-today-commit-sha'; // today's FIRST run already committed and moved the branch here
+
+  function resetDefaults() {
+    defaults.getBranchSha = async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); };
+    defaults.createBranch = async () => { throw new Error('Bad credentials (401)'); };
+    defaults.createCommitObject = async () => { throw new Error('Bad credentials (401)'); };
+    defaults.updateRef = async () => { throw new Error('Bad credentials (401)'); };
+    defaults.listOpenPullRequestsForBranch = async () => [];
+    defaults.getCommitMessage = async () => { throw new Error('Bad credentials (401)'); };
+  }
+
+  // branchTip: what the batch branch's own ref currently points at (as seen
+  // by pushDraftBranch's first-write read, i.e. state.baseSha) — distinct
+  // from BASE_TIP so the squash path's "is there anything to squash" check
+  // (trueBase vs currentTipSha) has something real to compare.
+  function stubSecondRun({ branchTip, openPrs = [], priorMessage = null, priorMessageOk = true }) {
+    const commits = [];
+    const refUpdates = [];
+    let nextSha = 1;
+    defaults.getBranchSha = async (site, branch) => (branch === batchBranch ? branchTip : BASE_TIP);
+    defaults.createBranch = async () => ({});
+    defaults.createCommitObject = async (site, parentSha, files, message, opts = {}) => {
+      commits.push({ parentSha, files, message, treeBaseSha: opts.treeBaseSha });
+      return `squashed-commit-sha-${nextSha++}`;
+    };
+    defaults.updateRef = async (site, branch, sha, opts = {}) => { refUpdates.push({ branch, sha, forced: opts.force ?? false }); };
+    defaults.listOpenPullRequestsForBranch = async () => openPrs;
+    defaults.getCommitMessage = async () => {
+      if (!priorMessageOk) throw new Error('network error reading prior commit');
+      return priorMessage;
+    };
+    return { commits, refUpdates };
+  }
+
+  test('a second same-day run with no PR open yet squashes into ONE commit off the real pre-today base', async () => {
+    const { commits, refUpdates } = stubSecondRun({
+      branchTip: EARLIER_TODAY_SHA,
+      openPrs: [],
+      priorMessage: 'Action Center: batch — draft #1 (schema)',
+    });
+    try {
+      beginBatchPush(site, batchBranch);
+      await pushDraftBranch(site, { ...draft, id: 2 }, [{ path: 'b.njk', content: 'y' }], { branchName: batchBranch, exists: true });
+      const finalized = await endBatchPush(site, batchBranch);
+
+      assert.deepEqual(finalized, { ok: true, pushed: 1 });
+      assert.equal(commits.length, 1);
+      assert.equal(commits[0].parentSha, BASE_TIP, 'the squashed commit\'s parent skips past today\'s earlier commit, straight to the real pre-today base');
+      assert.equal(commits[0].treeBaseSha, EARLIER_TODAY_SHA, 'the tree still builds on everything already on the branch, so earlier-today\'s files are not lost');
+      assert.match(commits[0].message, /draft #1 \(schema\)/, 'the earlier run\'s real entry is preserved, not discarded');
+      assert.match(commits[0].message, /draft #2/, 'this run\'s new entry is included too');
+      assert.deepEqual(refUpdates, [{ branch: batchBranch, sha: 'squashed-commit-sha-1', forced: true }], 'a non-fast-forward update is required since the new commit is not a descendant of the one it replaces');
+    } finally {
+      resetDefaults();
+    }
+  });
+
+  test('a PR already open for the branch: never squashes, stacks normally instead', async () => {
+    const { commits, refUpdates } = stubSecondRun({
+      branchTip: EARLIER_TODAY_SHA,
+      openPrs: [{ number: 42 }],
+      priorMessage: 'Action Center: batch — draft #1 (schema)',
+    });
+    try {
+      beginBatchPush(site, batchBranch);
+      await pushDraftBranch(site, { ...draft, id: 2 }, [{ path: 'b.njk', content: 'y' }], { branchName: batchBranch, exists: true });
+      await endBatchPush(site, batchBranch);
+
+      assert.equal(commits[0].parentSha, EARLIER_TODAY_SHA, 'stacks on top of the existing commit — never rewrites a commit a human may already be reviewing');
+      assert.equal(refUpdates[0].forced, false, 'an ordinary fast-forward update, not a rewrite');
+      assert.doesNotMatch(commits[0].message, /draft #1/, 'a normal stacked commit carries only THIS run\'s entries, same as before this feature existed');
+    } finally {
+      resetDefaults();
+    }
+  });
+
+  test('could not determine whether a PR is open: refuses to guess, stacks normally', async () => {
+    const { commits } = stubSecondRun({ branchTip: EARLIER_TODAY_SHA, priorMessage: 'Action Center: batch — draft #1' });
+    defaults.listOpenPullRequestsForBranch = async () => { throw new Error('GitHub API unreachable'); };
+    try {
+      beginBatchPush(site, batchBranch);
+      await pushDraftBranch(site, { ...draft, id: 2 }, [{ path: 'b.njk', content: 'y' }], { branchName: batchBranch, exists: true });
+      await endBatchPush(site, batchBranch);
+
+      assert.equal(commits[0].parentSha, EARLIER_TODAY_SHA, 'unknown PR status is treated the same as "a PR might be open" — never squash on a guess');
+    } finally {
+      resetDefaults();
+    }
+  });
+
+  test('the existing tip commit is not one of ours (no recognizable prefix): refuses to guess, stacks normally', async () => {
+    const { commits } = stubSecondRun({
+      branchTip: EARLIER_TODAY_SHA, openPrs: [],
+      priorMessage: 'Manual hotfix pushed directly by a human',
+    });
+    try {
+      beginBatchPush(site, batchBranch);
+      await pushDraftBranch(site, { ...draft, id: 2 }, [{ path: 'b.njk', content: 'y' }], { branchName: batchBranch, exists: true });
+      await endBatchPush(site, batchBranch);
+
+      assert.equal(commits[0].parentSha, EARLIER_TODAY_SHA, 'never absorbs or discards a commit this app did not write itself');
+    } finally {
+      resetDefaults();
+    }
+  });
+
+  test('could not read the prior commit\'s message at all: refuses to guess, stacks normally', async () => {
+    const { commits } = stubSecondRun({ branchTip: EARLIER_TODAY_SHA, openPrs: [], priorMessageOk: false });
+    try {
+      beginBatchPush(site, batchBranch);
+      await pushDraftBranch(site, { ...draft, id: 2 }, [{ path: 'b.njk', content: 'y' }], { branchName: batchBranch, exists: true });
+      await endBatchPush(site, batchBranch);
+
+      assert.equal(commits[0].parentSha, EARLIER_TODAY_SHA);
+    } finally {
+      resetDefaults();
+    }
+  });
+
+  test('the branch tip already equals the real base (first commit of the day): no squash logic even attempted', async () => {
+    const { commits } = stubSecondRun({ branchTip: BASE_TIP, openPrs: [] });
+    let prCheckCalled = false;
+    defaults.listOpenPullRequestsForBranch = async () => { prCheckCalled = true; return []; };
+    try {
+      beginBatchPush(site, batchBranch);
+      await pushDraftBranch(site, { ...draft, id: 1 }, [{ path: 'a.njk', content: 'x' }], { branchName: batchBranch, exists: true });
+      await endBatchPush(site, batchBranch);
+
+      assert.equal(commits[0].parentSha, BASE_TIP);
+      assert.equal(prCheckCalled, false, 'nothing to squash — never even asks whether a PR is open');
     } finally {
       resetDefaults();
     }

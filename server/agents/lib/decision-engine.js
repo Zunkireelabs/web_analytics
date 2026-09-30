@@ -40,6 +40,17 @@ export const DECISION_ACTIONS = Object.freeze([
 // floor before acting) rather than inventing a new threshold concept.
 export const MIN_EVIDENCE_TO_DECIDE = 1;
 
+// Below this confidence, real contradicting evidence (from the model's own
+// self-critique, not a second pass) is enough to override the model's
+// chosen action to 'investigate_further' — a cheap, deterministic gate
+// applied in code, same discipline MIN_EVIDENCE_TO_DECIDE already uses,
+// rather than trusting the model to police its own overconfidence. A HIGH-
+// confidence decision with contradicting evidence is left as-is: the model
+// already weighed that evidence and still judged it not decisive — second-
+// guessing a confident call here would make self-critique indistinguishable
+// from just lowering every decision's effective confidence.
+export const SELF_CRITIQUE_DOWNGRADE_CONFIDENCE = 0.5;
+
 const SYSTEM_PROMPT = `You are the decision-making layer of a website growth-intelligence system. You are given a situation and a bundle of real evidence gathered from multiple sources (SEO agents, analytics investigations, past outcomes). Your job is ONLY to decide what should happen next — you never write content, never invent facts, and never invent numbers not present in the evidence given.
 
 Answer these questions, grounded ONLY in the evidence provided:
@@ -53,6 +64,12 @@ Answer these questions, grounded ONLY in the evidence provided:
 8. Should the system act now, investigate further, or do nothing?
 9. What should execute the action (which capability/generator), if action requires one?
 10. How should success be validated later?
+
+Before finalizing, critique your own decision honestly:
+11. Which of the evidence items given, if any, actually argue AGAINST the action you chose (not just items that are silent on it)?
+12. Is there a plausible alternative explanation for the situation that would call for a different action?
+13. What single fact, if it turned out to be false, would make this decision wrong?
+14. What is the smallest, safest action that would test this hypothesis before committing to the full action?
 
 The action MUST be exactly one of: improve_page, new_page, fix_technical, fix_metadata, internal_linking, investigate_further, do_nothing.
 
@@ -68,7 +85,13 @@ Respond with ONLY a JSON object of this exact shape, no markdown, no prose outsi
   "rationale": string,
   "alternativesConsidered": [ { "action": string, "whyRejected": string } ],
   "confidence": number between 0 and 1,
-  "validationPlan": string
+  "validationPlan": string,
+  "selfCritique": {
+    "contradictingEvidence": string[],
+    "alternativeExplanation": string | null,
+    "wouldBeWrongIf": string,
+    "smallestSafeTest": string | null
+  }
 }`;
 
 function isValidDecisionShape(parsed) {
@@ -78,6 +101,10 @@ function isValidDecisionShape(parsed) {
   if (!Array.isArray(parsed.missingEvidence)) return false;
   if (!Array.isArray(parsed.alternativesConsidered)) return false;
   if (typeof parsed.confidence !== 'number' || parsed.confidence < 0 || parsed.confidence > 1) return false;
+  const sc = parsed.selfCritique;
+  if (!sc || typeof sc !== 'object') return false;
+  if (!Array.isArray(sc.contradictingEvidence)) return false;
+  if (typeof sc.wouldBeWrongIf !== 'string' || !sc.wouldBeWrongIf.trim()) return false;
   return true;
 }
 
@@ -106,6 +133,12 @@ export function createDecisionEngine({
         alternativesConsidered: [],
         confidence: 0,
         validationPlan: null,
+        selfCritique: {
+          contradictingEvidence: [],
+          alternativeExplanation: null,
+          wouldBeWrongIf: 'More evidence arrives and it turns out to support a concrete action after all.',
+          smallestSafeTest: null,
+        },
       });
     }
 
@@ -116,17 +149,31 @@ export function createDecisionEngine({
       validate: isValidDecisionShape,
     });
 
+    // Deterministic downgrade, not left to the model to self-police (same
+    // discipline as the MIN_EVIDENCE_TO_DECIDE gate above): the model's own
+    // self-critique named real evidence against its own chosen action, and
+    // it wasn't confident enough for that to be a considered, overridden
+    // objection. 'investigate_further' and 'do_nothing' need no downgrade —
+    // there is no more-cautious action to fall back to.
+    const hasContradiction = parsed.selfCritique.contradictingEvidence.length > 0;
+    const lowConfidence = parsed.confidence < SELF_CRITIQUE_DOWNGRADE_CONFIDENCE;
+    const downgrade = hasContradiction && lowConfidence
+      && parsed.action !== 'investigate_further' && parsed.action !== 'do_nothing';
+
     return insertDecisionFn(siteId, {
       situation: parsed.situation || situation,
       evidence,
       rootCause: parsed.rootCause ?? null,
       missingEvidence: parsed.missingEvidence || [],
-      action: parsed.action,
-      actionTarget: parsed.actionTarget ?? null,
-      rationale: parsed.rationale,
+      action: downgrade ? 'investigate_further' : parsed.action,
+      actionTarget: downgrade ? null : (parsed.actionTarget ?? null),
+      rationale: downgrade
+        ? `Self-critique found unresolved contradicting evidence at low confidence (${parsed.confidence}) for the originally chosen action ("${parsed.action}"): ${parsed.rationale}`
+        : parsed.rationale,
       alternativesConsidered: parsed.alternativesConsidered || [],
       confidence: parsed.confidence,
       validationPlan: parsed.validationPlan || null,
+      selfCritique: parsed.selfCritique,
     });
   }
 

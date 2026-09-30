@@ -29,7 +29,8 @@ import {
   ShieldAlert,
   XCircle,
   RefreshCw,
-  Lock
+  Lock,
+  Target
 } from 'lucide-react';
 
 const GENERATOR_META = {
@@ -160,6 +161,17 @@ const BLOCKED_KIND_META = {
 function blockedMetaFor(item) {
   return BLOCKED_KIND_META[item?.blockedKind] || BLOCKED_KIND_META['our-config'];
 }
+
+// Server: goal-alignment.js's five levels, on recommendations.goal_alignment
+// (set at sync time by recommendation-coordinator.js, only when the site has
+// an active goal). 'none'/'insufficient_evidence'/no active goal all read as
+// "not tied to a goal" here — the distinction between them is a detector
+// detail, not something the user acts on differently.
+const GOAL_ALIGNMENT_META = {
+  strong: { className: 'bg-emerald-50/70 border-emerald-150 text-emerald-700', textClassName: 'text-emerald-900/85' },
+  partial: { className: 'bg-sky-50/70 border-sky-150 text-sky-700', textClassName: 'text-sky-900/85' },
+  weak: { className: 'bg-slate-50/70 border-slate-150 text-slate-600', textClassName: 'text-slate-700/85' },
+};
 
 // Where a recommendation is in its life (server: recommendation-coordinator.js's
 // deriveLifecycle). One card now persists through the whole lifecycle instead
@@ -1264,6 +1276,30 @@ export default function ActionCenter() {
                             <div className="min-w-0">
                               <div className={`text-[10px] font-black uppercase tracking-widest mb-1 ${blue ? 'text-sky-700' : 'text-amber-700'}`}>{meta.heading}</div>
                               <p className={`text-xs font-medium leading-relaxed ${blue ? 'text-sky-900/85' : 'text-amber-900/85'}`}>{selectedRecommendation.blockedReason}</p>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Never hides the card or its Generate/Fix button either way —
+                          this only ever adds context, it doesn't gate the action. */}
+                      {(() => {
+                        const level = selectedRecommendation.goalAlignment?.level;
+                        const meta = GOAL_ALIGNMENT_META[level];
+                        if (!meta) {
+                          return (
+                            <div className="flex items-start gap-2.5 rounded-2xl p-4 border bg-slate-50/50 border-slate-150">
+                              <Target size={13} className="shrink-0 mt-0.5 text-slate-400" />
+                              <p className="text-xs font-medium text-slate-500">Not tied to an active business goal</p>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className={`flex items-start gap-2.5 rounded-2xl p-4 border ${meta.className}`}>
+                            <Target size={13} className="shrink-0 mt-0.5" />
+                            <div className="min-w-0">
+                              <div className="text-[10px] font-black uppercase tracking-widest mb-1">Why this matters to your goal</div>
+                              <p className={`text-xs font-medium leading-relaxed ${meta.textClassName}`}>{selectedRecommendation.goalAlignment.rationale}</p>
                             </div>
                           </div>
                         );

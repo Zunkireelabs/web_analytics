@@ -14,6 +14,8 @@ import { impactFromPriority } from './findings.js';
 import { createRecommendationGates } from './recommendation-gates.js';
 import { opportunityDraftEligibility } from './analyst-seo-mapping.js';
 import { getSiteById } from '../../store/read.js';
+import { listActiveGoals } from '../../store/site-goals.js';
+import { pickBestGoalAlignment } from './goal-alignment.js';
 
 // THE EVIDENCE-FUSION ENGINE.
 //
@@ -77,6 +79,14 @@ export function familiesForDecliningPage(decline, pageInsights) {
   }
 
   let forecastConfidence = null;
+  // The single strongest root-cause contributor across every decline signal
+  // on this page (2026-09 Data Analyst audit finding — the Python Root Cause
+  // Analysis Engine's own output was computed but never read on the Node
+  // side). Picked by sharePct across whichever of this page's insights carry
+  // one; root_cause.py only ever attaches this to anomaly/trend_shift
+  // insights (its own TRIGGER_INSIGHT_TYPES), so it stays null whenever none
+  // of them do — never guessed at.
+  let topRootCause = null;
   for (const insight of pageInsights) {
     const e = insight.evidence || {};
     const isDeclineSignal =
@@ -97,9 +107,12 @@ export function familiesForDecliningPage(decline, pageInsights) {
     if (insight.insight_type === 'forecast_risk' && typeof e.confidence === 'number') {
       forecastConfidence = forecastConfidence == null ? e.confidence : Math.max(forecastConfidence, e.confidence);
     }
+    if (insight.topRootCause?.sharePct != null && (topRootCause == null || insight.topRootCause.sharePct > topRootCause.sharePct)) {
+      topRootCause = insight.topRootCause;
+    }
   }
 
-  return { families, signals, forecastConfidence };
+  return { families, signals, forecastConfidence, topRootCause };
 }
 
 export function generatorForDecliningPage(decline, page) {
@@ -113,9 +126,19 @@ export function generatorForDecliningPage(decline, page) {
   return { generatorId: 'expand-content', params: { page } };
 }
 
-function buildNarrative({ page, decline, families, signals, forecastConfidence, mapping, mappingText, verdict, direction, action }) {
+// Exported for testing (analyst-fusion.test.js) — same reasoning as
+// familiesForDecliningPage/generatorForDecliningPage above: pure, no
+// database, directly exercisable.
+export function buildNarrative({ page, decline, families, signals, forecastConfidence, topRootCause, mapping, mappingText, verdict, direction, action }) {
   const changeDetail = decline.reasons.join('; ');
   const forecastSignal = signals.find((s) => s.family === 'forecast_risk');
+  // Independently-ranked, not a sole-cause claim — root_cause.py's own module
+  // doc is explicit shares "are not expected to sum to 100%". Appended to
+  // `why`, never folded into `cause` (which stays the product-mapping text)
+  // or presented as more certain than the evidence actually supports.
+  const rootCauseClause = topRootCause
+    ? ` The largest independently-ranked contributor is ${topRootCause.dimensionType} "${topRootCause.dimensionValue}" (~${Math.round(topRootCause.sharePct)}% of the site-level baseline change) — evaluated independently of other dimensions, not necessarily the sole cause.`
+    : '';
   return {
     observed: `${page} shows: ${changeDetail}.`,
     changed: `${signals.length} independent signal(s) across ${families.size} families moved together on this page in the same direction.`,
@@ -123,7 +146,7 @@ function buildNarrative({ page, decline, families, signals, forecastConfidence, 
       ? `The forecast engine projects the decline to continue (${forecastSignal.detail}).`
       : 'No forecast signal is available for this page; the prediction rests on the measured trend alone.',
     why: `${families.size} independent evidence families corroborate the same conclusion` +
-      (forecastConfidence != null ? `, including a forecast at ${(forecastConfidence * 100).toFixed(0)}% confidence` : '') + '.',
+      (forecastConfidence != null ? `, including a forecast at ${(forecastConfidence * 100).toFixed(0)}% confidence` : '') + '.' + rootCauseClause,
     cause: mappingText,
     opportunity: `Impressions already lost: ${decline.impressionsLost}. Impressions at risk if the trend continues: ${decline.impressionsAtRisk}.`,
     action: action ? `${action.generatorId} on ${page}` : 'Monitor — evidence is real but not yet corroborated enough to act autonomously.',
@@ -139,7 +162,7 @@ async function fuseDecliningPages(site, { declines, pageInsights, capabilities, 
     if (primaryDomain && hostnameOf(page) !== primaryDomain) continue;
 
     const pageInsightsHere = pageInsights.filter((i) => i.page === page);
-    const { families, signals, forecastConfidence } = familiesForDecliningPage(decline, pageInsightsHere);
+    const { families, signals, forecastConfidence, topRootCause } = familiesForDecliningPage(decline, pageInsightsHere);
     const corroboration = families.size;
 
     const mapping = await mapPageToProduct(site.id, page, capabilities);
@@ -158,7 +181,7 @@ async function fuseDecliningPages(site, { declines, pageInsights, capabilities, 
     const urgent = decline.reasons.some((r) => r.startsWith('position'));
 
     const findingId = `analyst-fusion:decline-risk:${page}`;
-    const narrative = buildNarrative({ page, decline, families, signals, forecastConfidence, mapping, mappingText, verdict, direction: 'decline-risk', action });
+    const narrative = buildNarrative({ page, decline, families, signals, forecastConfidence, topRootCause, mapping, mappingText, verdict, direction: 'decline-risk', action });
 
     const conclusion = {
       subjectType: 'page', subjectKey: page, direction: 'decline-risk', page,
@@ -167,7 +190,7 @@ async function fuseDecliningPages(site, { declines, pageInsights, capabilities, 
       generatorId: action?.generatorId || null, params: action?.params || { page },
       findingId, verdict, freshnessPresentation: gate.presentation,
       signals, productMapping: { capability: mapping.capability ? { id: mapping.capability.id, name: mapping.capability.name, category: mapping.capability.category } : null, relevance: mapping.relevance, topQueries: mapping.topQueries, surface: { kind: 'expand-existing-page', page } },
-      externalDemand: demand, narrative,
+      externalDemand: demand, narrative, topRootCause,
     };
     const { score, factors } = scoreConclusion(conclusion);
     conclusions.push({ ...conclusion, score, scoreFactors: factors });
@@ -255,13 +278,26 @@ async function fuseGrowthOpportunities(site, { opportunities, pageInsights, capa
 // soft-404 checks, riskTierForGenerator for the same tier assignment,
 // insertRecommendation for the same row shape. Nothing about how a
 // recommendation ships is reinvented here.
-async function shipConclusion(siteId, gates, conclusion) {
+// `activeGoals`: the site's own site_goals rows (Stage 1 of the Business
+// Goals plan) — passed in rather than fetched here so runAnalystFusion pays
+// for the lookup once per run, same "fetched once, not per-item" discipline
+// recommendations.js's own buildRecommendations already uses. Analyst
+// recommendations wrote to the SAME `recommendations` table every other
+// agent's findings do but never carried goal_id/goal_alignment at all (2026-09
+// Data Analyst audit finding) — this makes them visible to the exact same
+// goal-driven prioritization every other recommendation already gets, using
+// the identical evaluator, never a second/different one.
+export async function shipConclusion(siteId, gates, conclusion, activeGoals = []) {
   const page = recommendationPageKey({ generatorId: conclusion.generatorId, params: conclusion.params });
   const existing = await findOpenRecommendation(siteId, page, conclusion.generatorId);
   if (existing) return { recommendationId: existing.id, created: false };
 
   const gateResult = await gates.evaluate(conclusion.generatorId, conclusion.params).catch(() => ({ drop: null, blockedReason: null }));
   if (gateResult.drop) return { recommendationId: null, created: false, dropped: true };
+
+  const goalAlignment = pickBestGoalAlignment(activeGoals, {
+    page: conclusion.page, reason: conclusion.narrative?.why || conclusion.narrative?.observed, tag: conclusion.direction, category: null,
+  });
 
   const predicted = conclusion.direction === 'decline-risk';
   const rec = await insertRecommendation(siteId, {
@@ -276,6 +312,8 @@ async function shipConclusion(siteId, gates, conclusion) {
     blockedReason: gateResult.blockedReason,
     confidence: conclusion.confidence,
     expectedImpact: { label: impactFromPriority(predicted ? 'medium' : 'high'), basis: 'estimate', value: null },
+    goalId: goalAlignment?.goalId ?? null,
+    goalAlignment: goalAlignment ? { level: goalAlignment.level, rationale: goalAlignment.rationale } : null,
   });
   return { recommendationId: rec.id, created: true, blocked: !!gateResult.blockedReason };
 }
@@ -298,11 +336,17 @@ export async function runAnalystFusion(siteId, { site: siteArg } = {}) {
 
   const freshness = await checkAnalystFreshness(siteId);
 
-  const [{ declines, siteWide }, pageInsights, capabilities, growth] = await Promise.all([
+  const [{ declines, siteWide }, pageInsights, capabilities, growth, activeGoals] = await Promise.all([
     loadDeclines(siteId, { timezone: site.timezone || 'UTC' }).catch(() => ({ declines: new Map(), siteWide: null })),
     getRecentPageInsights(siteId).catch(() => []),
     loadVerifiedCapabilities(siteId).catch(() => []),
     buildGrowthOpportunities(siteId).catch(() => ({ opportunities: [] })),
+    // Fetched once per run, not per conclusion — a site with no active goals
+    // (the common case today) pays one empty-result query and every
+    // conclusion below gets goalId/goalAlignment: null, unchanged from
+    // before this feature existed. Same discipline recommendations.js's own
+    // buildRecommendations already uses.
+    listActiveGoals(siteId).catch(() => []),
   ]);
 
   const provider = getSearchDemandProvider();
@@ -322,7 +366,7 @@ export async function runAnalystFusion(siteId, { site: siteArg } = {}) {
   for (const conclusion of deduped) {
     let recommendationId = null;
     if (conclusion.verdict === 'act') {
-      const shipResult = await shipConclusion(siteId, gates, conclusion);
+      const shipResult = await shipConclusion(siteId, gates, conclusion, activeGoals);
       recommendationId = shipResult.recommendationId;
       if (shipResult.created) created++;
     } else {

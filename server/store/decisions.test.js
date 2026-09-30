@@ -31,11 +31,12 @@ describe('decisions store', () => {
       alternativesConsidered: [{ action: 'improve_page', whyRejected: 'no candidate page' }],
       confidence: 0.8,
       validationPlan: 'check GSC in 28 days',
+      selfCritique: { contradictingEvidence: [], alternativeExplanation: null, wouldBeWrongIf: 'x', smallestSafeTest: null },
     });
 
     assert.equal(issued.length, 1);
     assert.match(issued[0].sql, /INSERT INTO decisions/);
-    const [siteId, situation, evidence, rootCause, missingEvidence, action, actionTarget, rationale, alternatives, confidence, validationPlan] = issued[0].params;
+    const [siteId, situation, evidence, rootCause, missingEvidence, action, actionTarget, rationale, alternatives, confidence, validationPlan, selfCritique] = issued[0].params;
     assert.equal(siteId, 7);
     assert.equal(situation, 'Keyword gap');
     assert.equal(JSON.parse(evidence)[0].source, 'growth-queries');
@@ -47,6 +48,7 @@ describe('decisions store', () => {
     assert.equal(JSON.parse(alternatives)[0].action, 'improve_page');
     assert.equal(confidence, 0.8);
     assert.equal(validationPlan, 'check GSC in 28 days');
+    assert.equal(JSON.parse(selfCritique).wouldBeWrongIf, 'x');
   });
 
   test('insertDecision defaults nullable fields correctly when omitted', async () => {
@@ -56,6 +58,7 @@ describe('decisions store', () => {
     assert.equal(params[3], null); // root_cause
     assert.equal(params[6], null); // action_target
     assert.equal(params[10], null); // validation_plan
+    assert.equal(params[11], null); // self_critique
   });
 
   test('getDecision returns the first row or null', async () => {

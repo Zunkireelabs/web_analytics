@@ -48,7 +48,7 @@ mock.module(resolve('./recommendation-gates.js'), {
   },
 });
 
-const { refreshBlockedRecommendations } = await import('./recommendation-coordinator.js');
+const { refreshBlockedRecommendations, CAPABILITY_GAP_BLOCK_PREFIX } = await import('./recommendation-coordinator.js');
 
 beforeEach(() => {
   blockedRows = [];
@@ -184,5 +184,49 @@ describe('refreshBlockedRecommendations — a broken-link-fix row (gates has no 
     assert.equal(result.updated, 0);
     assert.equal(refreshed.length, 0);
     assert.equal(evaluateCalls.length, 0);
+  });
+});
+
+// Third instance of the same failure class as the two regressions above
+// (2026-09 lifecycle-gap audit, "capability-gap recovery" finding): a
+// capability-gap block (action-center-reconciler.js's surfaceCapabilityGaps)
+// is a diagnosis about the GENERATOR, not a condition gates.evaluate() can
+// see. Before this fix, this refresh pass read the generic gate's "clean"
+// verdict (there is nothing wrong with THIS page) as "verified clear" and
+// silently cleared a block that diagnosed a shared defect no single page's
+// gate check could ever confirm or deny — letting the row retry, fail
+// identically against the same undiagnosed generator bug, and re-cluster
+// into a fresh capability gap on the next reconcile pass.
+describe('refreshBlockedRecommendations — a capability-gap-blocked row (gates has no opinion on a generator-level defect)', () => {
+  test('never reaches gates.evaluate and is left exactly as surfaceCapabilityGaps set it', async () => {
+    blockedRows = [{
+      id: 9001, recommendation_type: 'expand-content',
+      params: { page: 'https://zunkireelabs.com/agentic-as-a-service/' },
+      detecting_agents: ['ai-visibility'],
+      blocked_reason: `${CAPABILITY_GAP_BLOCK_PREFIX}expand-content" affecting 3 item(s): This fix could not be applied automatically.`,
+    }];
+    evaluateImpl = () => { throw new Error('must not be reached — a capability-gap block skips gates entirely'); };
+
+    const result = await refreshBlockedRecommendations(1);
+
+    assert.equal(result.checked, 1);
+    assert.equal(result.updated, 0);
+    assert.equal(refreshed.length, 0);
+    assert.equal(evaluateCalls.length, 0);
+  });
+
+  test('a blocked row whose reason merely MENTIONS the phrase mid-sentence is not excluded (prefix match only)', async () => {
+    blockedRows = [{
+      id: 9002, recommendation_type: 'expand-content',
+      params: { page: 'https://zunkireelabs.com/a/' },
+      detecting_agents: ['ai-visibility'],
+      blocked_reason: 'Design Agent setup has failed — see also: Part of a shared capability gap discussion in the team channel.',
+    }];
+    evaluateImpl = () => ({ drop: null, blockedReason: null });
+
+    const result = await refreshBlockedRecommendations(1);
+
+    assert.equal(evaluateCalls.length, 1, 'not a real capability-gap block — must still reach gates normally');
+    assert.equal(result.updated, 1);
   });
 });

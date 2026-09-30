@@ -32,8 +32,8 @@ import { findRootArrayBounds, scanBalanced, findObjectRange, findScalarFieldRang
 // materially different confidence bar and is left to explicit config, same
 // as before this module existed.
 
-const ITEMS_ACTION_TYPES = new Set(['faq', 'qa-content']);
-const FIELD_ACTION_TYPES = { 'expand-content': 'expandedContent', 'internal-links': 'links' };
+const ITEMS_ACTION_TYPES = new Set(['faq']);
+const FIELD_ACTION_TYPES = { 'expand-content': 'expandedContent', 'internal-links': 'links', 'qa-content': 'qaContent' };
 
 // Every direct `key: value` pair inside objRange, string/comment-aware so a
 // nested object's own keys are never mistaken for a top-level one — same

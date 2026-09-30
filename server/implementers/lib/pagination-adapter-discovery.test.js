@@ -93,7 +93,7 @@ describe('discoverDataArrayAdapterConfig', () => {
     });
   });
 
-  test('resolves an items-array field for faq/qa-content', async () => {
+  test('resolves an items-array field for faq', async () => {
     const result = await discoverDataArrayAdapterConfig(
       site, ROUTE, 'faq', 'https://x.com/locations/bhaktapur/',
       { fetchFile: fetchFileFor({ data: locationsJs(), template: TEMPLATE_SOURCE }) },
@@ -101,6 +101,35 @@ describe('discoverDataArrayAdapterConfig', () => {
     assert.ok(result);
     assert.equal(result.config.itemsField, 'faqItems');
     assert.equal(result.config.id, 'data-array-content');
+  });
+
+  // qa-content writes a rendered HTML string (marker-merge.js's
+  // buildMergeValues returns it keyed `qaContent`), same scalar-field shape
+  // as expand-content — not an items array like faq, even though both are
+  // "Q&A-shaped" content. A route whose template renders a distinct raw
+  // field for it (e.g. `location.qaContentHtml`, separate from the faq
+  // items array) must resolve that field, not be refused as ambiguous.
+  test('resolves a scalar field for qa-content, distinct from the faq items array', async () => {
+    const template = `
+<h1>{{ location.name }}</h1>
+<p>{{ location.description }}</p>
+{{ location.qaContentHtml | safe }}
+{% for item in location.faqItems %}
+  <div>{{ item.question }}</div>
+{% endfor %}
+`;
+    const data = `export default [
+      { id: 'bhaktapur', name: 'Bhaktapur', description: 'x', qaContentHtml: '', faqItems: [] },
+    ];\n`;
+    const result = await discoverDataArrayAdapterConfig(
+      site, ROUTE, 'qa-content', 'https://x.com/locations/bhaktapur/',
+      { fetchFile: fetchFileFor({ data, template }) },
+    );
+    assert.ok(result);
+    assert.deepEqual(result.config, {
+      id: 'data-array-content', format: 'js-export-array', dataFile: ROUTE.dataFile, idField: 'id',
+      fields: { qaContent: 'qaContentHtml' },
+    });
   });
 
   test('refuses when the template renders more than one field of the right shape (real ambiguity, not a guess)', async () => {

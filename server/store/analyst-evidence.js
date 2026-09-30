@@ -138,6 +138,28 @@ export async function recordAnalystOutcome(id, outcome) {
 // Reports only rows that have a real measurement. A recommendation still
 // waiting out fix_impact's 31-day window carries no information and would
 // only dilute the averages.
+// Same predicted-vs-observed outcomes as analystOutcomeSummary above, grouped
+// by GENERATOR (recommendation_type) instead of direction/surface — the key
+// generator-learning.js's getLearnedConfidenceMap already uses for every
+// other generator-level signal (2026-09 Data Analyst audit finding: this
+// data was recorded by analyst-outcome.js but never reached that shared
+// learning map at all). Reports only rows with a real measurement, same
+// reasoning as analystOutcomeSummary.
+export async function analystPredictionAccuracyByGenerator(siteId) {
+  const { rows } = await query(
+    `SELECT r.recommendation_type AS generator_id,
+            count(*)::int AS measured,
+            count(*) FILTER (WHERE (ae.outcome->>'predictionConfirmed')::boolean)::int AS confirmed
+       FROM analyst_evidence ae
+       JOIN recommendations r ON r.id = ae.recommendation_id
+      WHERE ae.site_id = $1 AND ae.outcome IS NOT NULL AND ae.outcome->>'predictionConfirmed' IS NOT NULL
+      GROUP BY r.recommendation_type
+      ORDER BY measured DESC`,
+    [siteId]
+  );
+  return rows;
+}
+
 export async function analystOutcomeSummary(siteId) {
   const { rows } = await query(
     `SELECT ae.direction,

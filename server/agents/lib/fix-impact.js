@@ -2,6 +2,7 @@ import {
   getDueImpactMeasurements, recordImpactOutcome, getPageSearchTotals, IMPACT_WINDOW_DAYS,
 } from '../../store/fix-impact.js';
 import { recordOutcome } from './generator-learning.js';
+import { getDeploymentById, deploymentGraceElapsed } from '../../store/deployments.js';
 
 // Measures what a merged fix actually did to real Search Console numbers, which
 // is the one thing this system has never checked about its own work. Every
@@ -95,7 +96,51 @@ export function classifyImpact(delta) {
   return 'impact-neutral';
 }
 
+// Deployment → production-verification gap (2026-09 lifecycle-gap audit,
+// finding #2): scheduleImpactMeasurement used to assume a human's merge WAS
+// a live deploy — "the merge is the only moment we know a fix is genuinely
+// live" (routes/action-center.js's finalizeImplemented, an explicit stated
+// assumption). deployments.js (migration 153) already tracks the real
+// signal — fix-verification.js's live page re-check actually confirming the
+// shipped content is present — this just consults it before trusting the
+// merge date, rather than building a second live-check mechanism.
+//
+// Returns null when it's safe to proceed with measurement (deployed,
+// confirmed by a real re-check, or no deployment tracked for this row at
+// all — unchanged pre-existing behavior). Returns a status string
+// ('await' | 'insufficient-data') otherwise.
+async function resolveDeploymentGate(row) {
+  if (!row.deployment_id) return null; // nothing tracked — measure exactly as before this existed
+  const deployment = await getDeploymentById(row.deployment_id);
+  if (!deployment || deployment.status === 'deployed') return null;
+  // Still within the grace window fix-verification.js itself uses — not yet
+  // confirmed live, but not proven absent either. 'await', not
+  // insufficient-data: this row keeps its existing measure_after untouched,
+  // so runDueImpactMeasurements' own daily sweep naturally re-checks it
+  // tomorrow — the same deploy-aware "wait, don't guess" pattern
+  // AWAIT_RECHECK_HOURS uses in fix-verification.js, without needing a
+  // second reschedule mechanism here.
+  if (!deploymentGraceElapsed(deployment)) return 'await';
+  return 'insufficient-data';
+}
+
 export async function measureOne(row) {
+  const gate = await resolveDeploymentGate(row);
+  if (gate === 'await') return null; // left pending, unchanged — re-checked on the next daily sweep
+  if (gate === 'insufficient-data') {
+    // The grace window elapsed with no live confirmation — this merge may
+    // never have actually deployed. Measuring real GSC data against an
+    // assumed-live date would silently attribute a change this system never
+    // actually confirmed shipped. Same honest status already used for "no
+    // GSC data in the window" — no outcome is logged for the learning loop
+    // either, "we don't know" must never read as neutral/negative.
+    return recordImpactOutcome(row.id, {
+      status: 'insufficient-data',
+      beforeWindow: { reason: 'deployment-not-detected', deploymentId: row.deployment_id },
+      afterWindow: null, delta: null,
+    });
+  }
+
   const windows = measurementWindows(row.merged_at);
   const [before, after] = await Promise.all([
     getPageSearchTotals(row.site_id, row.page_url, windows.before.start, windows.before.end),

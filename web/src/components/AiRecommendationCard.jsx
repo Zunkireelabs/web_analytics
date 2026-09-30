@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useCountUp } from '../useCountUp.js';
 import { timeAgo } from '../api.js';
 import Sparkline from './Sparkline.jsx';
+import { providerCoverageCaveat } from '../lib/provider-coverage.js';
 import { AlertTriangle, Sparkles, HelpCircle, CheckCircle2, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 
 function emptyMessage(meta) {
@@ -57,6 +58,7 @@ export default function AiRecommendationCard({ aiRecommendation, meta, loading }
 
   const history = (aiRecommendation.history || []).map((h) => h.pct).filter((v) => v != null);
   const promptCount = (aiRecommendation.topPrompts?.length || 0) + (aiRecommendation.missedPrompts?.length || 0);
+  const coverageCaveat = providerCoverageCaveat(meta?.providers);
 
   return (
     <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6 hover:shadow-md transition-all duration-300">
@@ -74,6 +76,9 @@ export default function AiRecommendationCard({ aiRecommendation, meta, loading }
           <div className="text-[10.5px] font-semibold text-slate-500 mt-2">
             Mentioned in <span className="text-indigo-650 font-bold">{aiRecommendation.mentionedCount}</span> of <span className="text-slate-800 font-bold">{aiRecommendation.promptsChecked}</span> {aiRecommendation.providerCount > 1 ? 'AI' : 'ChatGPT'} buyer-intent prompts
           </div>
+          {coverageCaveat && (
+            <div className="text-[10px] font-semibold text-amber-700 mt-1">{coverageCaveat.text}</div>
+          )}
         </div>
         {history.length >= 2 && (
           <div className="w-24 h-12 shrink-0 bg-slate-50/50 rounded-xl p-1.5 border border-slate-100">

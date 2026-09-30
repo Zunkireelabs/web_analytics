@@ -9,18 +9,19 @@ import { query } from '../db.js';
 
 export async function insertDecision(siteId, {
   situation, evidence, rootCause = null, missingEvidence = [], action, actionTarget = null,
-  rationale, alternativesConsidered = [], confidence, validationPlan = null,
+  rationale, alternativesConsidered = [], confidence, validationPlan = null, selfCritique = null,
 }) {
   const { rows } = await query(
     `INSERT INTO decisions
        (site_id, situation, evidence, root_cause, missing_evidence, action, action_target,
-        rationale, alternatives_considered, confidence, validation_plan)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        rationale, alternatives_considered, confidence, validation_plan, self_critique)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING *`,
     [
       siteId, situation, JSON.stringify(evidence || []), rootCause ? JSON.stringify(rootCause) : null,
       JSON.stringify(missingEvidence || []), action, actionTarget ? JSON.stringify(actionTarget) : null,
       rationale, JSON.stringify(alternativesConsidered || []), confidence, validationPlan,
+      selfCritique ? JSON.stringify(selfCritique) : null,
     ]
   );
   return rows[0];

@@ -517,8 +517,18 @@ export async function compareCommits(site, base, head) {
 // pointed to by any ref) and only moves the ref once, at the end, via
 // updateRef — so GitHub (and therefore Vercel's per-push preview build)
 // only sees the branch move once per batch, not once per commit.
-export async function createCommitObject(site, parentSha, files, message) {
-  const commitRes = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/git/commits/${parentSha}`);
+//
+// `treeBaseSha` (defaults to `parentSha`, unchanged for every existing
+// caller): the commit whose TREE this new commit's content builds on top
+// of, when it differs from the commit this new commit's PARENT link points
+// to. The one real caller of that split is github-ops.js's same-day squash
+// (endBatchPush) — the new commit's tree must include everything already
+// accumulated on today's batch branch (treeBaseSha = the branch's current
+// tip), but its parent must skip past today's earlier batch commit(s)
+// straight to the site's real pre-today base (parentSha), so the branch
+// ends up with exactly one commit for the day instead of a chain.
+export async function createCommitObject(site, parentSha, files, message, { treeBaseSha = parentSha } = {}) {
+  const commitRes = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/git/commits/${treeBaseSha}`);
   if (!commitRes.ok) throw new Error(`createCommitObject (read commit) failed (${commitRes.status}): ${await commitRes.text()}`);
   const baseTree = (await commitRes.json()).tree.sha;
 
@@ -536,12 +546,30 @@ export async function createCommitObject(site, parentSha, files, message) {
   return (await newCommitRes.json()).sha;
 }
 
+// The first line of `sha`'s own commit message — used only by github-ops.js's
+// same-day squash to recover an earlier batch commit's real human-readable
+// entry list before folding it into a combined message, so squashing never
+// silently drops the record of what an earlier-today invocation shipped.
+export async function getCommitMessage(site, sha) {
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/git/commits/${sha}`);
+  if (!res.ok) throw new Error(`getCommitMessage failed (${res.status}): ${await res.text()}`);
+  const { message } = await res.json();
+  return (message || '').split('\n')[0];
+}
+
 // Moves `branch`'s ref to point at `sha` — the actual "push" GitHub (and
 // Vercel's GitHub integration) sees as a new event. Split out so a caller
 // batching several createCommitObject calls can do this exactly once, for
 // the whole batch, instead of once per commit.
-export async function updateRef(site, branch, sha) {
-  const res = await githubRequest(site, 'PATCH', `/repos/${repoPath(site)}/git/refs/heads/${branch}`, { sha });
+//
+// `force` (default false, unchanged for every existing caller): GitHub
+// rejects a non-fast-forward ref update unless this is set. The one caller
+// that ever needs it is github-ops.js's same-day squash, whose replacement
+// commit is NOT a descendant of the commit it replaces (same tree content,
+// different parent) — an ordinary fast-forward update would be refused.
+export async function updateRef(site, branch, sha, { force = false } = {}) {
+  const body = force ? { sha, force: true } : { sha };
+  const res = await githubRequest(site, 'PATCH', `/repos/${repoPath(site)}/git/refs/heads/${branch}`, body);
   if (!res.ok) throw new Error(`updateRef failed (${res.status}): ${await res.text()}`);
 }
 

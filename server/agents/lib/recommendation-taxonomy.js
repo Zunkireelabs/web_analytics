@@ -75,11 +75,18 @@ const BY_GENERATOR = {
 // privacy-policy, and any future generator) — a pragmatic SEO catch-all so
 // nothing currently visible in Action Center disappears just because it
 // wasn't named there.
-const DEFAULT = { bucket: 'seo', category: 'Technical Fixes' };
+//
+// Exported (not just internal) since 2026-09-29: a finding hitting this
+// object by reference is exactly recommendation-taxonomy.js's own
+// definition of "genuinely unclassified" — the one signal
+// default-bucket-decision.js needs to know whether a given classify() call
+// fell through to here, without re-implementing this module's own matching
+// rules a second time to guess it.
+export const DEFAULT_CLASSIFICATION = { bucket: 'seo', category: 'Technical Fixes' };
 
 export function classify({ source, generatorId }) {
   return BY_SOURCE_AND_GENERATOR[`${source}:${generatorId}`]
     || BY_SOURCE_AND_GENERATOR[`${source}:*`]
     || BY_GENERATOR[generatorId]
-    || DEFAULT;
+    || DEFAULT_CLASSIFICATION;
 }

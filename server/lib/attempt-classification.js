@@ -279,7 +279,13 @@ const RULES = [
     match: (r) => /mergeBranchFromBase failed \(403\)/.test(r) && /resource not accessible by integration/i.test(r),
     failureClass: FAILURE_CLASS.CLIENT_REPO,
     policy: RETRY_POLICY.NEEDS_HUMAN,
-    summary: 'This site’s GitHub token can’t use the branch-merge endpoint the daily batch sync needs (a known fine-grained-PAT limitation) — every draft after the first each day fails identically, regardless of content.',
+    // Messaging only — this does not change what gets escalated or how
+    // (still NEEDS_HUMAN, still no auto-retry, still no merge behavior
+    // change): the remediation itself was already fully diagnosed in the
+    // comment above when this rule was written, it just wasn't surfaced to
+    // whoever reviews the block reason. Attaching it here saves a human a
+    // trip back to this file to learn what to actually do about it.
+    summary: 'This site’s GitHub token can’t use the branch-merge endpoint the daily batch sync needs (a known fine-grained-PAT limitation) — every draft after the first each day fails identically, regardless of content. Needs either a classic PAT or GitHub App installation token for this site (fine-grained PATs don’t support this endpoint at all), or switching the batch-sync step to the Git Data API instead of /merges.',
   },
   {
     // The repository-local search fallback (repo-local-search.js) is

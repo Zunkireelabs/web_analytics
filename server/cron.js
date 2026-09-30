@@ -465,8 +465,8 @@ export function startCron() {
   cron.schedule('35 * * * *', async () => {
     try {
       const { totals } = await reconcileAllSites();
-      if (totals.reclaimed || totals.classified) {
-        console.log(`[cron] action-center reconcile: reclaimed ${totals.reclaimed}, reopened ${totals.reopened}, classified ${totals.classified}, blocked ${totals.blocked}, resolved ${totals.resolved}`);
+      if (totals.reclaimed || totals.classified || totals.capabilityGapsDetected) {
+        console.log(`[cron] action-center reconcile: reclaimed ${totals.reclaimed}, reopened ${totals.reopened}, classified ${totals.classified}, blocked ${totals.blocked}, resolved ${totals.resolved}, capabilityGaps ${totals.capabilityGapsDetected}`);
       }
     } catch (err) {
       console.error('[cron] action-center reconcile error:', err.message);

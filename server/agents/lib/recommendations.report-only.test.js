@@ -35,6 +35,10 @@ mock.module(resolve('../../store/read.js'), {
     getSiteById: async () => ({ id: 1, website_domain: 'example.com' }),
     getSearchPerformanceRange: async () => [],
     getQueriesForPage: async () => [],
+    // makeQueryLookup's widen-before-giving-up step (recommendations.js) —
+    // no GSC data at all here, so it must stay a no-op for this file's
+    // report-only findings, same as the un-widened getQueriesForPage above.
+    getDataRange: async () => ({ earliest: null, freshest: null, latest_visitor: null }),
   },
 });
 // Records every gate call so the test can assert a report-only finding never
@@ -50,6 +54,12 @@ mock.module(resolve('./recommendation-gates.js'), {
       },
     }),
   },
+});
+// No active goals for this file's site — goalId/goalAlignment on every item
+// must come back null, same "absence means unconfigured" convention as
+// every other optional signal here.
+mock.module(resolve('../../store/site-goals.js'), {
+  namedExports: { listActiveGoals: async () => [] },
 });
 
 const { buildRecommendations } = await import('./recommendations.js');
@@ -102,6 +112,10 @@ describe('buildRecommendations — report-only findings', () => {
     // hides every Generate affordance — without it the row would look
     // draftable and satisfy neither.
     assert.equal(item.blockedReason, 'This font-size comes from a shared CSS class, not a per-element override.');
+    // No active goals configured for this site — a report-only finding is
+    // unaffected by the Business Goals feature exactly like every other item.
+    assert.equal(item.goalId, null);
+    assert.equal(item.goalAlignment, null);
   });
 
   test('never runs a draftability gate on a report-only finding', async () => {

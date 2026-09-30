@@ -222,13 +222,26 @@ async function walkCandidates(root, dir = root, out = []) {
 // `priorityDirs` no longer decides WHAT gets searched — everything does —
 // but still orders the scan so a match in a known-relevant directory is
 // found before the rest of the repo is read.
-export async function searchRepoLocalForStrings(site, ref, literals, { priorityDirs = [] } = {}) {
+//
+// `restrictToPriorityDirs`: for the one-narrower-retry callers make after an
+// initial search comes back truncatedCoverage (attempt-classification.js's
+// NEEDS_HUMAN "bounded local search" case — see backend.js's caller). A repo
+// with more real candidate files than MAX_LOCAL_SEARCH_FILES gets a second,
+// SMALLER search scoped to exactly the directories already known relevant
+// (the finding's own source pages) — not a bigger bound, not a second guess
+// at the whole repo, just the one subset most likely to actually contain the
+// match. This does not change MAX_LOCAL_SEARCH_FILES itself, so memory/
+// request bounds are identical either way; it only changes which files are
+// selected out of the repo the first pass already fetched once (no second
+// download). Requires a non-empty priorityDirs — a caller with none has
+// nothing narrower to retry against.
+export async function searchRepoLocalForStrings(site, ref, literals, { priorityDirs = [], restrictToPriorityDirs = false } = {}) {
   const root = await getCheckout(site, ref);
   const allCandidates = await walkCandidates(root);
 
   const priority = allCandidates.filter((p) => priorityDirs.some((dir) => p.startsWith(dir)));
   const prioritySet = new Set(priority);
-  const ordered = [...priority, ...allCandidates.filter((p) => !prioritySet.has(p))];
+  const ordered = restrictToPriorityDirs ? priority : [...priority, ...allCandidates.filter((p) => !prioritySet.has(p))];
   const candidates = ordered.slice(0, MAX_LOCAL_SEARCH_FILES);
 
   const matches = new Set();

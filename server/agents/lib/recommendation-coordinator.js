@@ -80,6 +80,14 @@ const REPORT_ONLY_KINDS = new Set([
   'soft-404',
 ]);
 
+// Marks a blocked_reason as coming from action-center-reconciler.js's
+// surfaceCapabilityGaps (2026-09 lifecycle-gap audit finding #1), not from
+// any condition gates.evaluate() can see or re-derive — it's a diagnosis
+// string about a shared generator defect, not a page/file/config state.
+// Exported so surfaceCapabilityGaps builds its block text with the exact
+// same prefix rather than two copies of one string drifting apart.
+export const CAPABILITY_GAP_BLOCK_PREFIX = 'Part of a shared capability gap on "';
+
 // The real key for a recommendation row — (siteId, page, generatorId) isn't
 // always enough on its own: analytics-install's GA4 and Facebook Pixel
 // findings share the same generatorId AND the same page (the homepage), so
@@ -368,6 +376,19 @@ export async function syncFromGrounded(siteId, grounded) {
         // resolveBlockedReason above.)
         blockedReason: mergedBlockedReason,
         riskTier: blockedRiskTier(mergedBlockedReason, item.generatorId),
+        // Unconditional, not COALESCE'd, same reasoning as blockedReason/
+        // riskTier above: buildRecommendations recomputed this fresh from the
+        // site's CURRENT active goals, so a paused/deleted goal must clear a
+        // stale alignment on the very next sync, not carry it forever.
+        goalId: item.goalId ?? null,
+        goalAlignment: item.goalAlignment ?? null,
+        // COALESCE'd in the store layer, not overwritten unconditionally —
+        // see mergeIntoRecommendation's own comment. item.decisionId is
+        // only ever set for a DEFAULT-bucket finding this run's capped
+        // decide() batch actually reached (default-bucket-decision.js);
+        // null here must mean "no fresh decision this run", not "clear
+        // whatever decision was already recorded".
+        decisionId: item.decisionId ?? null,
       });
     } else {
       // No existing row yet, so there is nothing ship-time could have
@@ -380,6 +401,9 @@ export async function syncFromGrounded(siteId, grounded) {
         params: item.params, findingId: item.id, detectingAgent: item.source,
         priority: item.priority, expectedImpact: item.expectedImpact, riskTier,
         blockedReason: insertBlockedReason,
+        goalId: item.goalId ?? null,
+        goalAlignment: item.goalAlignment ?? null,
+        decisionId: item.decisionId ?? null,
       });
       // DECIDE, audit trail only — this does not gate or change anything;
       // the actual decision (page key, risk tier, blockedReason) is already
@@ -498,6 +522,18 @@ export async function refreshBlockedRecommendations(siteId, { onlyDetectingAgent
     // same reason REPORT_ONLY_KINDS is: nothing about the row changes
     // because a pass with no real opinion asked it to.
     if (rec.recommendation_type === 'broken-link-fix') continue;
+    // Same shape of bug as the two above, on a third source: a capability-gap
+    // block (action-center-reconciler.js's surfaceCapabilityGaps) is a
+    // diagnosis about the GENERATOR, not a condition gates.evaluate() checks
+    // — running the generic page/file gate against it always comes back
+    // "clean" (there was never anything wrong with THIS page), silently
+    // clearing the block with no actual repair having happened, then the row
+    // retries, fails identically against the same undiagnosed generator
+    // defect, and re-clusters into a fresh capability gap next reconcile pass
+    // (2026-09 lifecycle-gap audit finding #1). Skipped here for the same
+    // reason as the other two: nothing about the row changes because this
+    // pass has no real opinion on a generator-level defect.
+    if (rec.blocked_reason?.startsWith(CAPABILITY_GAP_BLOCK_PREFIX)) continue;
     const gate = await gates.evaluate(rec.recommendation_type, rec.params || {}).catch(() => null);
     if (!gate) continue; // could not verify this run — leave the row untouched
     // gate.drop (page proven gone) is deliberately not acted on here: closing
@@ -762,6 +798,11 @@ export async function getRecommendations(siteId) {
         // 'never' — see lib/attempt-classification.js. The UI branches on
         // this to tell "we'll try again" apart from "this needs you".
         lastFailurePolicy: attempts?.lastPolicy || null,
+        // { level: 'strong'|'partial'|'weak'|'none'|'insufficient_evidence',
+        // rationale } from goal-alignment.js at sync time, or null if the
+        // site has no active goals. See ActionCenter.jsx's "why this matters
+        // to your goal" card.
+        goalAlignment: r.goal_alignment || null,
       };
     });
   const lastAnalyzedAt = {};

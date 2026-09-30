@@ -67,6 +67,28 @@ import { applyExactMatchPatches, describePatchFailure } from '../lib/exact-match
 // below) — honestly fails (no-insertion-marker) rather than guessing when
 // that nested key doesn't exist, which is the real, correct outcome for a
 // parent with no unique content for that specific sub-section yet.
+//
+// `itemsParentField` is a SEPARATE, unrelated optional addition — for
+// `itemsField` content that sits one level deeper under a FIXED, non-URL-
+// derived object key on the SAME matched entry (as opposed to `nestedField`
+// above, which derives a second id from the URL itself). Real case: web-
+// zenly's features.json objection-handling FAQ content lives at
+// `objections.items` on each feature entry, not a top-level `faq` array the
+// way solutions.json already has it — `objections` is always the same fixed
+// key, never derived from the page URL. { id: 'data-array-content', format,
+// dataFile, idField, itemsParentField: 'objections', itemsField: 'items' }.
+// Purely additive: omitted, behavior is byte-identical to before this was
+// added (an existing config with only `itemsField` keeps splicing the
+// top-level array exactly as it always has — solutions.json's own `faq`
+// config is unaffected). When set, both computeChange and isDataReady first
+// narrow to the `itemsParentField` object (findObjectFieldRange) before
+// looking for `itemsField` inside it, and honestly fail
+// (no-insertion-marker) rather than guess if that parent object itself
+// doesn't exist on a given entry — same fails-closed posture as
+// `nestedField`. Can combine with `nestedField` (nestedField narrows to a
+// URL-derived sub-object first, itemsParentField narrows further into a
+// fixed key on that sub-object), though no real tenant needs that
+// combination yet.
 export const meta = {
   id: 'data-array-content',
   description: 'Config-driven writer for array-of-objects content files (Eleventy data arrays, JSON collections) — file path/id field/items field/format all come from the tenant\'s own url_file_map config.',
@@ -138,6 +160,7 @@ export async function isDataReady(site, page, config, fetchFile = getFileContent
   const objRange = findObjectRange(file.content, idField, id, format);
   if (!objRange) return false;
   if (config.nestedField) return !!resolveNestedObjectRange(file.content, objRange, config, nestedId);
+  if (config.itemsParentField) return !!findObjectFieldRange(file.content, objRange, config.itemsParentField, format);
   return true;
 }
 
@@ -504,6 +527,12 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
       objRange = resolveNestedObjectRange(file.content, objRange, config, nestedId);
       if (!objRange) {
         return { ok: false, reason: 'no-insertion-marker', error: `"${id}" has no "${config.nestedField}.${nestedId}" entry in ${config.dataFile} — this page has no unique content for that section yet.` };
+      }
+    }
+    if (config.itemsParentField) {
+      objRange = findObjectFieldRange(file.content, objRange, config.itemsParentField, format);
+      if (!objRange) {
+        return { ok: false, reason: 'no-insertion-marker', error: `"${id}" has no "${config.itemsParentField}" object in ${config.dataFile} — cannot locate "${config.itemsField}" inside it.` };
       }
     }
     arrayRange = findArrayFieldRange(file.content, objRange, config.itemsField, format);
