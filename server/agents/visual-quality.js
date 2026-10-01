@@ -1,9 +1,11 @@
 import { launchBrowser, capturePage } from '../design-agent/live-analysis/capture.js';
 import { classifyPageType } from '../design-agent/live-analysis/schema.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
+import { getSiteById } from '../store/read.js';
 import { analyzePageUrl, effortForGenerator } from './lib/page-content.js';
 import { makeFinding, priorityByRank, impactFromPriority } from './lib/findings.js';
 import { findOpenRecommendation, insertRecommendation } from '../store/recommendations.js';
+import { isDryRun } from './lib/dry-run-context.js';
 import { recommendationPageKey } from './lib/recommendation-coordinator.js';
 import { callLLMWithImages, extractJson } from '../llm.js';
 import { checkBrowserAvailable } from './lib/browser-preflight.js';
@@ -52,7 +54,7 @@ const VISUAL_BATCH_SIZE = Number(process.env.VISUAL_QUALITY_BATCH_SIZE) || 8;
 // classifyPageType stands in for discoverPages' page-type tagging — the
 // prompt's summarizeBlocksForPrompt reads page.pageType, and URL-shape
 // classification is the same heuristic discoverPages itself used.
-async function capturePagesFor(urls, { screenshots = true, launchBrowserFn = launchBrowser } = {}) {
+async function capturePagesFor(urls, { screenshots = true, launchBrowserFn = launchBrowser, propertyType } = {}) {
   if (!urls.length) return { pages: [] };
   const browser = await launchBrowserFn();
   try {
@@ -65,7 +67,7 @@ async function capturePagesFor(urls, { screenshots = true, launchBrowserFn = lau
         console.warn(`[visual-quality] could not capture ${url}: ${err.message}`);
         return null;
       });
-      if (captured) pages.push({ ...captured, pageType: classifyPageType(url) });
+      if (captured) pages.push({ ...captured, pageType: classifyPageType(url, { propertyType }) });
     }
     return { pages };
   } finally {
@@ -83,10 +85,12 @@ async function capturePagesFor(urls, { screenshots = true, launchBrowserFn = lau
 export async function defaultCapture(siteId, {
   start, end, screenshots = true, batchSize = VISUAL_BATCH_SIZE,
   selectCandidates = selectCandidatePages, capturePages = capturePagesFor, mark = markPagesChecked,
+  fetchSite = getSiteById,
 } = {}) {
   const { batch } = await selectCandidates(siteId, 'visual-quality', { start, end, batchSize });
   if (!batch.length) return { pages: [] };
-  const { pages } = await capturePages(batch, { screenshots });
+  const site = await fetchSite(siteId).catch(() => null);
+  const { pages } = await capturePages(batch, { screenshots, propertyType: site?.property_type });
   await mark(siteId, 'visual-quality', batch);
   return { pages };
 }
@@ -136,6 +140,7 @@ export const meta = {
   name: 'Visual Quality Agent',
   description: 'Real headless-browser screenshots of a page-type-diverse sample of the site\'s own live pages, judged by a vision-capable Claude call for four known, already-fixable defect shapes (broken/empty tables, raw-text comparison content, stale FAQ schema, duplicate FAQ sections) — confirmed defects ship autonomously through the existing content-integrity-repair pipeline; unconfirmed ones surface as a manual Action Center review, never silently.',
   category: 'content',
+  requiresCapabilities: ['public-web'],
   version: 1,
   dataSources: [
     { id: 'live-browser-capture', status: 'connected', description: 'Playwright headless capture of the site\'s own real rendered pages, including a real screenshot per page — same plumbing as the Design Agent\'s live-site capture, with screenshots opted in.' },
@@ -368,7 +373,7 @@ export async function run({
     const recKey = recommendationPageKey({ generatorId: 'content-integrity-repair', params });
     // eslint-disable-next-line no-await-in-loop
     const existing = await findOpenRecommendation(siteId, recKey, 'content-integrity-repair');
-    if (!existing) {
+    if (!existing && !isDryRun()) { // a dry run must not mint a recommendation row
       // eslint-disable-next-line no-await-in-loop
       await insertRecommendation(siteId, {
         page: recKey,

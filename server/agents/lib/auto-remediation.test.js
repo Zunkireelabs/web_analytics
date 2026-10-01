@@ -108,6 +108,12 @@ function rec(id, { riskTier = 'safe', type = 'meta-title', detectingAgents = ['o
   };
 }
 
+// protected-pages.js's lookup reads GSC from the real DB; these tests exercise
+// the loop itself, so nothing is protected (the guard has its own tests in
+// protected-pages.test.js).
+mock.module(resolve('../../store/protected-pages.js'), {
+  namedExports: { getProtectedPageSet: async () => ({ pages: new Set(), unknown: false }) },
+});
 mock.module(resolve('../../store/recommendations.js'), {
   namedExports: {
     listOpenRecommendations: async () => recommendations,

@@ -186,7 +186,7 @@ export async function getKeywordGapsInCluster(siteId, topicCluster, excludeGapId
 
 export async function getKeywordClusters(siteId, clusterType) {
   const { rows } = await query(
-    `SELECT cluster_name, cluster_type, keywords_json, avg_impressions, avg_position, gap_score
+    `SELECT cluster_name, cluster_type, keywords_json, avg_impressions, avg_position, gap_score, created_at
        FROM keyword_clusters
       WHERE site_id = $1 AND ($2::text IS NULL OR cluster_type = $2)
       ORDER BY created_at DESC`,
@@ -279,15 +279,28 @@ export async function setGapClassification(siteId, gapId, { searchIntent, produc
 // Product Understanding Layer (migration 111). 'verified' rows are the only
 // ones classifyGapRelevance ever reads — a 'proposed' row an agent adds is
 // invisible to routing decisions until a human approves it.
-export async function getProductCapabilities(siteId, status) {
+//
+// `kind` (migration 176) defaults to 'capability', so every pre-existing
+// caller — classifyGapRelevance, the visibility snapshots, the Analyst page —
+// still sees only capability rows. The richer product knowledge (flow /
+// pricing / audience / proof) is read through getProductKnowledge instead.
+export async function getProductCapabilities(siteId, status, { kind = 'capability' } = {}) {
   const { rows } = await query(
-    `SELECT id, site_id, name, category, description, industries_json AS industries, status, source, created_at, updated_at
+    `SELECT id, site_id, name, category, description, industries_json AS industries, kind, details_json AS details,
+            status, source, created_at, updated_at
        FROM product_capabilities
-      WHERE site_id = $1 AND ($2::text IS NULL OR status = $2)
+      WHERE site_id = $1 AND ($2::text IS NULL OR status = $2) AND ($3::text IS NULL OR kind = $3)
       ORDER BY created_at DESC`,
-    [siteId, status || null]
+    [siteId, status || null, kind || null]
   );
   return rows;
+}
+
+// Every kind of product knowledge for a site, for the generators that WRITE
+// about the product (landing/feature/how-it-works copy). Verified rows only
+// by default — a 'proposed' row is invisible until a human approves it.
+export async function getProductKnowledge(siteId, status = 'verified') {
+  return getProductCapabilities(siteId, status, { kind: null });
 }
 
 // Added through the Analyst page's own form, so 'human' + 'verified' is the
@@ -295,12 +308,14 @@ export async function getProductCapabilities(siteId, status) {
 // separate, not-yet-built entry point that would insert source='agent_proposed',
 // status='proposed' instead. No such writer exists yet, so every row today
 // is human-asserted ground truth, per the "do not invent capabilities" rule.
-export async function createProductCapability(siteId, { name, category, description, industries }) {
+export async function createProductCapability(siteId, { name, category, description, industries, kind = 'capability', details }) {
   const { rows } = await query(
-    `INSERT INTO product_capabilities (site_id, name, category, description, industries_json, status, source)
-     VALUES ($1, $2, $3, $4, $5, 'verified', 'human')
-     RETURNING id, site_id, name, category, description, industries_json AS industries, status, source, created_at, updated_at`,
-    [siteId, name, category || null, description || null, JSON.stringify(industries || [])]
+    `INSERT INTO product_capabilities (site_id, name, category, description, industries_json, kind, details_json, status, source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'verified', 'human')
+     RETURNING id, site_id, name, category, description, industries_json AS industries, kind, details_json AS details,
+               status, source, created_at, updated_at`,
+    [siteId, name, category || null, description || null, JSON.stringify(industries || []), kind,
+      JSON.stringify(details && typeof details === 'object' ? details : {})]
   );
   return rows[0];
 }

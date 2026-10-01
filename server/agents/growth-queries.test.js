@@ -79,6 +79,22 @@ describe('termOverlap', () => {
   });
 });
 
+describe('termOverlap — whole-word matching', () => {
+  test('a 3-letter term does not match inside a longer, unrelated word', () => {
+    assert.equal(termOverlap('a guide to seoul and duke university', 'seo uk'), 0);
+    assert.equal(termOverlap('a happy little application', 'app'), 0);
+  });
+
+  test('the same term matches as a whole word, and a plural folds', () => {
+    assert.equal(termOverlap('the uk seo guide', 'seo uk'), 1);
+    assert.equal(termOverlap('student visas explained', 'student visa'), 1);
+  });
+
+  test('punctuation around a word does not defeat the match', () => {
+    assert.equal(termOverlap('Study in the UK, USA & Canada.', 'uk study'), 1);
+  });
+});
+
 describe('urlSlugOverlap', () => {
   test('a URL whose path words match the query scores high', () => {
     assert.ok(urlSlugOverlap('https://example.com/blog/travel-analytics-guide', 'travel analytics') > 0.5);

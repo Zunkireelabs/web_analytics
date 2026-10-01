@@ -180,6 +180,8 @@ export const api = {
       // Structures a free-text custom goal via LLM — never saves. The
       // returned proposal is shown for the user to review/edit and explicitly
       // confirm before the real create() above fires.
+      // Product sites only (404 for a website tenant): funnel counts read from prospects / trial_signups.
+      progress: (id, days) => req(`/internal/clients/${id}/goals/progress${days ? `?days=${days}` : ''}`),
       structurePreview: (id, description) => req(`/internal/clients/${id}/goals/structure-preview`, { method: 'POST', body: JSON.stringify({ description }) }),
     },
     // Design-integrity gate: what the design agent found on this site's real
@@ -289,8 +291,12 @@ export const api = {
     narrative: (siteId) => req(`/internal/keywords/${siteId}/narrative`),
     // Product Understanding Layer (migration 111) — this site's OWN verified
     // capabilities, not topics it merely ranks for.
-    capabilities: (siteId, status) =>
-      req(`/internal/keywords/${siteId}/capabilities${status ? `?status=${status}` : ''}`),
+    // `kind` (migration 176): omitted = capabilities only (what every existing
+    // caller has always received); 'all' = every kind of product knowledge.
+    capabilities: (siteId, status, kind) => {
+      const qs = [status && `status=${status}`, kind && `kind=${kind}`].filter(Boolean).join('&');
+      return req(`/internal/keywords/${siteId}/capabilities${qs ? `?${qs}` : ''}`);
+    },
     addCapability: (siteId, capability) =>
       req(`/internal/keywords/${siteId}/capabilities`, { method: 'POST', body: JSON.stringify(capability) }),
     updateCapabilityStatus: (siteId, capabilityId, status) =>

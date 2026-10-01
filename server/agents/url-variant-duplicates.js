@@ -3,19 +3,26 @@ import { listPageInventory } from '../store/page-inventory.js';
 import { makeFinding, impactFromPriority, effortFromDifficulty } from './lib/findings.js';
 import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS, isLikelyFunctionalQueryParam } from './lib/duplicate-evidence.js';
 import { getOrClassifyPageContentType } from './lib/page-content-classifier.js';
+import { createVariantProber, isSelfCanonical, normalizeUrlForCompare } from './lib/live-probe.js';
+import { makeVerification, VERDICT } from './lib/verdict.js';
 
 export const meta = {
   id: 'url-variant-duplicates',
   name: 'URL Variant Duplicate Detector',
   description: 'Groups a site\'s own already-known real URLs (crawl/sitemap/GSC) by a normalized key — trailing slash, case, and percent-encoding stripped — and flags when two structurally different URLs both resolve to the same page. Confidence-gated (lib/duplicate-evidence.js): 90 days of real GSC clicks/impressions decide a clean winner outright, or — when 2+ variants each earn real traffic — a second check for substantial query-set overlap across every pair can still confirm they compete for the same search intent before auto-consolidating.',
   category: 'technical',
+  requiresCapabilities: ['public-web'],
   version: 1,
 };
 
-// No LLM, no live fetch — purely a normalize-and-group pass over data this
-// platform already collected for other reasons (page_inventory), so this
-// check keeps working even during an LLM outage and costs nothing extra to
-// run daily.
+// Grouping is a normalize-and-group pass over page_inventory, but a group of
+// inventory STRINGS is not evidence of duplicate pages: page_inventory also
+// holds 404s and redirecting aliases (an http/www/trailing-slash variant that
+// 301s to its sibling is the redirect doing its job). So every variant of a
+// candidate group is live-probed (bounded per run) and only variants that
+// genuinely answer 200 on their own address count; a variant already
+// canonicalized to the winner is excluded, and a canonical action never
+// targets a redirecting URL.
 function normalizeKey(pageUrl) {
   try {
     const u = new URL(pageUrl);
@@ -27,7 +34,7 @@ function normalizeKey(pageUrl) {
   }
 }
 
-export async function run({ siteId }) {
+export async function run({ siteId, dryRun = false }) {
   const site = await getSiteById(siteId);
   if (!site) {
     return {
@@ -52,11 +59,26 @@ export async function run({ siteId }) {
     groups.get(key).add(row.page);
   }
 
-  const dupGroups = [...groups.entries()].filter(([, pages]) => pages.size > 1);
+  const rawDupGroups = [...groups.entries()].filter(([, pages]) => pages.size > 1);
+  // Live-verify every variant before any traffic/LLM work; keep only groups
+  // that still have 2+ genuinely live, separately-addressable variants.
+  const probeVariants = createVariantProber();
+  const probeByPage = new Map();
+  const dupGroups = [];
+  let droppedGroups = 0;
+  let unverifiableGroups = 0;
+  for (const [key, pagesSet] of [...rawDupGroups].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const probes = await probeVariants([...pagesSet]);
+    for (const [p, r] of probes) probeByPage.set(p, r);
+    if ([...probes.values()].some((r) => r.verdict === 'unverifiable')) { unverifiableGroups++; continue; }
+    const livePages = [...pagesSet].filter((p) => probes.get(p).verdict === 'live');
+    if (livePages.length < 2) { droppedGroups++; continue; }
+    dupGroups.push([key, new Set(livePages)]);
+  }
   if (!dupGroups.length) {
     return {
       meta, status: 'ok',
-      facts: { checkedCount: live.length, groupsWithDuplicates: 0, findings: [] },
+      facts: { checkedCount: live.length, groupsWithDuplicates: 0, droppedGroups, unverifiableGroups, findings: [] },
       narrative: null, generatedAt: new Date().toISOString(),
     };
   }
@@ -84,14 +106,24 @@ export async function run({ siteId }) {
     // cached via the same classifier templated-duplicates.js already uses.
     const functionalParamPages = new Set(pages.filter((p) => isLikelyFunctionalQueryParam(p)));
     const pagePurposeByPage = new Map();
-    for (const p of pages) {
+    // dryRun runs (previews/audits) must be side-effect free: the
+    // classifier upserts its cache and can call the LLM, so it is skipped.
+    for (const p of dryRun ? [] : pages) {
       const purpose = await getOrClassifyPageContentType(siteId, p).catch(() => null);
       if (purpose?.contentType) pagePurposeByPage.set(p, purpose.contentType);
     }
     const decision = await decideWinner(traffic, { siteId, start: evidenceStart, end: evidenceEnd, signals: { functionalParamPages, pagePurposeByPage } });
 
+    const verification = makeVerification(VERDICT.CONFIRMED, 'http-probe', `${pages.length} variants each returned 200 on their own address with no redirect`);
     if (decision.winner) {
-      const losers = pages.filter((p) => p !== decision.winner.page);
+      // Already consolidated: a loser whose own canonical already names the
+      // winner needs nothing. The winner must itself be self-canonical,
+      // otherwise "canonicalize to it" would point at a page that defers
+      // elsewhere.
+      const losers = pages.filter((p) => p !== decision.winner.page
+        && normalizeUrlForCompare(probeByPage.get(p)?.canonical || '') !== normalizeUrlForCompare(decision.winner.page));
+      const winnerProbe = probeByPage.get(decision.winner.page);
+      if (!losers.length || (winnerProbe && !isSelfCanonical(winnerProbe))) continue;
       findings.push(makeFinding({
         id: `url-variant-duplicates:key:${key}`,
         evidence: { normalizedKey: key, variants: pages, traffic, winner: decision.winner.page, confidence: 'high', queryOverlap: decision.queryOverlap },
@@ -99,6 +131,7 @@ export async function run({ siteId }) {
           ? `${pages.length} URL variants of the same page — ${decision.winner.page} earns more real clicks (${decision.winner.clicks}) than every other variant, and their real search queries overlap substantially, confirming they compete for the same search intent. Confident enough to consolidate automatically.`
           : `${pages.length} URL variants of the same page — ${decision.winner.page} has all ${decision.winner.clicks} real click(s)/${decision.winner.impressions} impression(s) across the last ${EVIDENCE_LOOKBACK_DAYS} days, and the other ${losers.length} variant(s) have none. This is confident enough to consolidate automatically: the losing variant(s) will get a canonical tag pointing at the real one.`,
         priority: 'medium',
+        verification,
         // Auto-drafted through the SAME safe canonical generator every
         // self-referential canonical already uses — one loser per
         // recommendation, since each is its own separate page/file/PR
@@ -141,6 +174,7 @@ export async function run({ siteId }) {
       evidence: { normalizedKey: key, variants: pages, traffic, confidence: decision.confidence, queryOverlap: decision.queryOverlap },
       whyItMatters: `${pages.length} different URLs (${pages.join(', ')}) all resolve to the same page once trailing slash, case, and encoding are normalized — Google can index these as separate, competing URLs instead of recognizing them as one.${withTraffic.length > 1 ? ` Real traffic evidence is split across ${withTraffic.length} of the variants${decision.queryOverlap && !decision.queryOverlap.overlapping ? ', and their real search queries don\'t overlap substantially, so they may genuinely be serving different intents' : ' with no confirmed shared search intent'}, so which one should win isn't unambiguous.` : ' No real click/impression evidence across the last 90 days points to a clear winner.'}`,
       priority: 'medium',
+      verification,
       recommendedAction: null,
       // 'leave-both-independent-intent' is an active, evidenced autonomous
       // decision, not a punt — see query-param-duplicates.js's identical
@@ -168,7 +202,7 @@ export async function run({ siteId }) {
   }
 
   const facts = {
-    checkedCount: live.length, groupsWithDuplicates: dupGroups.length,
+    checkedCount: live.length, groupsWithDuplicates: dupGroups.length, droppedGroups, unverifiableGroups,
     autoConsolidated: findings.filter((f) => f.recommendedAction).length,
     findings,
   };

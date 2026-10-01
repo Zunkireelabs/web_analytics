@@ -15,6 +15,12 @@ function page(overrides = {}) {
   return { url: 'https://example.com/a', pageType: 'other', title: 'A', sections: [section()], ...overrides };
 }
 
+// A text item carrying the computed style capture.js reads off the live DOM —
+// typography-drift judges what an element RENDERS as, not its class tokens.
+function txt(role, tag, classes, fontSize = '16px', fontWeight = '400') {
+  return { role, text: 'x', tag, style: { fontSize, fontWeight }, classes };
+}
+
 const BASE_PROFILE = {
   version: 2,
   typography: { heading: { section: 'text-3xl font-bold', item: 'text-xl font-semibold' }, body: 'text-gray-600 leading-relaxed' },
@@ -89,11 +95,16 @@ describe('compareSectionsToProfile — typography drift', () => {
     const p = page({
       sections: [section({
         role: 'faq',
-        textHierarchy: [{ role: 'heading', text: 'Q', tag: 'h3', style: null, classes: 'text-sm text-black' }],
+        textHierarchy: [
+          txt('heading', 'h3', 'text-xl font-semibold', '20px', '600'), // a live element following the convention
+          txt('heading', 'h3', 'text-sm text-black', '14px', '400'),
+        ],
       })],
     });
     const findings = compareSectionsToProfile(BASE_PROFILE, [p]);
-    assert.ok(findings.some((f) => f.id === 'typography-drift' && f.evidence.textRole === 'heading'));
+    const drift = findings.find((f) => f.id === 'typography-drift' && f.evidence.textRole === 'heading');
+    assert.ok(drift);
+    assert.equal(drift.verification.verdict, 'confirmed');
   });
 
   test('a heading class matching the real convention is never flagged', () => {
@@ -123,8 +134,9 @@ describe('compareSectionsToProfile — typography drift', () => {
       sections: [section({
         role: 'content',
         textHierarchy: [
-          { role: 'heading', text: 'x', tag: 'h2', style: null, classes: 'text-3xl font-bold' }, // matches heading.section
-          { role: 'body', text: 'y', tag: 'p', style: null, classes: 'totally-different' }, // does not
+          txt('heading', 'h2', 'text-3xl font-bold', '30px', '700'), // matches heading.section
+          txt('body', 'p', 'text-gray-600 leading-relaxed', '16px', '400'), // follows the body convention
+          txt('body', 'p', 'totally-different', '13px', '400'), // does not, and renders differently
         ],
       })],
     });
@@ -159,7 +171,10 @@ describe('compareSectionsToProfile — h1 resolved per hero/standard context', (
     const p = page({
       sections: [section({
         role: 'content',
-        textHierarchy: [{ role: 'heading', text: 'Privacy Policy', tag: 'h1', style: null, classes: 'text-6xl font-black' }],
+        textHierarchy: [
+          txt('heading', 'h1', 'text-4xl font-bold', '36px', '700'),
+          txt('heading', 'h1', 'text-6xl font-black', '60px', '900'),
+        ],
       })],
     });
     const findings = compareSectionsToProfile(PROFILE_WITH_PAGE_CONTEXT, [p]);
@@ -222,7 +237,10 @@ describe('compareSectionsToProfile — h3/h4 resolved per page type (pageTypePat
     const locationPage = page({
       pageType: 'location',
       sections: [section({
-        textHierarchy: [{ role: 'subheading', text: 'Fall Intake', tag: 'h4', style: null, classes: 'totally-unrelated-classes' }],
+        textHierarchy: [
+          txt('subheading', 'h4', 'font-bold text-navy text-sm', '14px', '700'),
+          txt('subheading', 'h4', 'totally-unrelated-classes', '20px', '400'),
+        ],
       })],
     });
     const findings = compareSectionsToProfile(PROFILE_WITH_PAGE_TYPE_PATTERNS, [locationPage]);
@@ -309,5 +327,73 @@ describe('compareSectionsToProfile — responsive measurements supersede the cla
     const responsive = { pages: [{ url: 'https://example.com/x', byViewport: { mobile: { blocks: [] } } }] };
     const findings = compareSectionsToProfile(BASE_PROFILE, [p], { responsive });
     assert.ok(findings.some((f) => f.id === 'table-style-drift'));
+  });
+});
+
+describe('compareSectionsToProfile — typography drift judges rendered style, not class tokens', () => {
+  const drifts = (profile, pages) => compareSectionsToProfile(profile, pages).filter((f) => f.id === 'typography-drift');
+
+  test('different class tokens that RENDER like the convention followers are not drift', () => {
+    const p = page({
+      sections: [section({
+        role: 'faq',
+        textHierarchy: [
+          txt('heading', 'h3', 'text-xl font-semibold', '20px', '600'),
+          txt('heading', 'h3', 'text-[20px] font-semibold', '20px', '600'),
+        ],
+      })],
+    });
+    assert.equal(drifts(BASE_PROFILE, [p]).length, 0);
+  });
+
+  test('a stale stored convention that no live element follows abstains (profile problem, not drift)', () => {
+    // Stored `text-3xl md:text-4xl lg:text-5xl`; every live h2 is
+    // `text-[28px] sm:text-[32px] lg:text-[36px]`.
+    const staleProfile = { ...BASE_PROFILE, typography: { ...BASE_PROFILE.typography, heading: { section: 'text-3xl md:text-4xl lg:text-5xl font-bold' } } };
+    const p = page({
+      sections: [section({
+        textHierarchy: [
+          txt('heading', 'h2', 'text-[28px] sm:text-[32px] lg:text-[36px] font-bold', '36px', '700'),
+          txt('heading', 'h2', 'text-[28px] sm:text-[32px] lg:text-[36px] font-bold', '36px', '700'),
+        ],
+      })],
+    });
+    assert.equal(drifts(staleProfile, [p]).length, 0);
+  });
+
+  test('sr-only headings are never flagged', () => {
+    const p = page({
+      sections: [section({
+        textHierarchy: [
+          txt('heading', 'h2', 'text-3xl font-bold', '30px', '700'),
+          txt('heading', 'h2', 'sr-only', '30px', '700'),
+        ],
+      })],
+    });
+    assert.equal(drifts(BASE_PROFILE, [p]).length, 0);
+  });
+
+  test('sub-12px eyebrow labels are never flagged', () => {
+    const p = page({
+      sections: [section({
+        textHierarchy: [
+          txt('heading', 'h2', 'text-3xl font-bold', '30px', '700'),
+          txt('heading', 'h2', 'font-mono uppercase tracking-widest', '9.5px', '500'),
+        ],
+      })],
+    });
+    assert.equal(drifts(BASE_PROFILE, [p]).length, 0);
+  });
+
+  test('an item with no computed style abstains', () => {
+    const p = page({
+      sections: [section({
+        textHierarchy: [
+          txt('heading', 'h2', 'text-3xl font-bold', '30px', '700'),
+          { role: 'heading', text: 'x', tag: 'h2', style: null, classes: 'totally-different' },
+        ],
+      })],
+    });
+    assert.equal(drifts(BASE_PROFILE, [p]).length, 0);
   });
 });

@@ -1,3 +1,4 @@
+import { isDryRun } from '../agents/lib/dry-run-context.js';
 import { query } from '../db.js';
 
 // Generic per-agent rotation bookkeeping (migration 027) — lets any
@@ -17,7 +18,7 @@ export async function getCheckedAtForPages(siteId, agentId, pages) {
 }
 
 export async function markPagesChecked(siteId, agentId, pages) {
-  if (!pages.length) return;
+  if (!pages.length || isDryRun()) return; // a dry run must not advance the rotation
   await Promise.all(pages.map((page) => query(
     `INSERT INTO agent_page_rotation (site_id, agent_id, page, checked_at)
      VALUES ($1, $2, $3, now())

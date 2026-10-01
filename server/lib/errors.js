@@ -40,8 +40,49 @@ export class UserFacingError extends Error {
 // developer can find the real error later without the customer ever seeing
 // it. `context` is a short string identifying the call site (e.g.
 // 'github-ops.pushDraftBranch'), not customer-facing.
+//
+// STORM SUPPRESSION. A failing integration repeats the SAME error on every
+// poll/cron tick. One token-permission 403 (getCheckRunsForRef) wrote 44,121
+// identical internal_errors rows in six days — 45MB of a 57MB table, in a
+// database whose whole free-plan allowance is 500MB. Ordinary behavior is
+// unchanged: every failure gets its own record and its own ref, so two
+// failures can always be told apart. Only a STORM is capped: once the same
+// error (same context, message, underlying cause and call site) has been
+// recorded DEDUPE_MAX_PER_WINDOW times inside DEDUPE_WINDOW_MS, further
+// occurrences in that window reuse the latest recorded ref instead of
+// inserting. The "ref: <id>" promise holds — it still resolves to a real row
+// for the same error — and console output stays complete, since logs are where
+// per-occurrence timing already lives. In-memory on purpose: no extra DB read
+// on the error path, and a restart just resets the window (extra rows, never
+// lost ones). Bounded so a flood of DISTINCT errors can't grow it.
+const DEDUPE_WINDOW_MS = 10 * 60 * 1000;
+const DEDUPE_MAX_PER_WINDOW = 3;
+const DEDUPE_MAX_KEYS = 500;
+const recentErrors = new Map(); // key -> { windowStart, count, lastId }
+
+export function __resetInternalErrorDedupe() { recentErrors.clear(); }
+
 export function logInternal(context, err) {
+  const message = err?.message || String(err);
+  // The cause is part of the identity: wrappers (UserFacingError around a
+  // Docker/LLM failure) share one generic message while the real, distinct
+  // diagnostic lives in err.cause. So is the top of the stack: the same message
+  // raised from two different call paths is two different bugs.
+  const stackSig = String(err?.stack || '').split('\n').slice(1, 3).map((l) => l.trim()).join('|');
+  const key = `${context}\u0000${message}\u0000${err?.cause?.message || ''}\u0000${stackSig}`;
+  const now = Date.now();
+  let entry = recentErrors.get(key);
+  if (!entry || now - entry.windowStart >= DEDUPE_WINDOW_MS) entry = { windowStart: now, count: 0, lastId: null };
+  if (entry.count >= DEDUPE_MAX_PER_WINDOW) {
+    console.error(`[internal-error:${entry.lastId}] ${context} (repeat storm, not re-recorded):`, message);
+    return entry.lastId;
+  }
   const id = randomUUID().slice(0, 8);
+  entry.count += 1;
+  entry.lastId = id;
+  recentErrors.delete(key); // re-insert at the end so Map order tracks recency
+  recentErrors.set(key, entry);
+  if (recentErrors.size > DEDUPE_MAX_KEYS) recentErrors.delete(recentErrors.keys().next().value);
   console.error(`[internal-error:${id}] ${context}:`, err?.stack || err?.message || err);
   // err.cause is where the ACTUAL diagnostic detail often lives — e.g.
   // openhands-handler.js wraps every Design Agent failure in a

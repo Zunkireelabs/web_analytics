@@ -248,3 +248,17 @@ const SAFE_GENERATOR_IDS = new Set([
 export function riskTierForGenerator(generatorId) {
   return SAFE_GENERATOR_IDS.has(generatorId) ? 'safe' : 'manual';
 }
+
+// Findings whose DETECTION is a heuristic rather than an observed defect, so
+// the generator's own safe tier (which only says the FIX is mechanically safe)
+// is not enough to let them ship unreviewed. Measured 2026-10-01: 250 of 611
+// open zunkireelabs rows were geo-signals checklist items ("cite external
+// sources", "add datePublished") on pages with 0-6 impressions, all auto-
+// eligible, and typography-drift rows were flagging deliberate per-page
+// heading sizes. The row stays visible; it just needs a human decision.
+// Per-finding, deliberately not a change to any generator's tier above.
+export function requiresHumanReview(item) {
+  if (item?.source === 'geo-signals') return true;
+  const fixType = item?.params?.fixType;
+  return typeof fixType === 'string' && fixType.startsWith('typography-drift');
+}

@@ -39,12 +39,52 @@ export async function getLatestAgentRuns(siteId, agentIds) {
   return rows;
 }
 
+// Same "latest run per agent" selection as getLatestAgentRuns, minus the
+// payload: a persisted run's `facts`/`narrative`/`input` average ~26KB per row,
+// and the two callers that only need a status/timestamp (agent status list,
+// staleness context) were re-reading all of it on every call — ~4,500 calls ×
+// ~14 rows in the 2026-08-21..10-01 pg_stat_statements window, a main source
+// of the Supabase egress overage. The few fields those callers pull OUT of
+// `facts` are extracted in SQL instead, so the blob never crosses the wire.
+// Anything that needs real findings/narrative (getLatestFindings, copilot,
+// insights, command-center) must keep using getLatestAgentRuns.
+export async function getLatestAgentRunSummaries(siteId, agentIds) {
+  const { rows } = await query(
+    `SELECT DISTINCT ON (agent_id) id, agent_id, agent_version, status, error, took_ms, created_at,
+            CASE WHEN jsonb_typeof(facts->'findings') = 'array' THEN jsonb_array_length(facts->'findings') END AS finding_count,
+            facts->'authorityScore' AS authority_score,
+            facts->'siteScore'->'overall' AS site_score_overall
+       FROM agent_runs
+      WHERE site_id = $1 AND agent_id = ANY($2)
+      ORDER BY agent_id, created_at DESC`,
+    [siteId, agentIds]
+  );
+  return rows;
+}
+
 // Agent-agnostic read of each agent's latest persisted structured findings
 // (see agents/types.js `Finding`) — the single shared path the orchestrator
 // (live runs) and lib/insights.js (cached reads for Reports) both call, so
 // "how to read a finding out of the DB" exists exactly once.
 export async function getLatestFindings(siteId, agentIds) {
-  const runs = await getLatestAgentRuns(siteId, agentIds);
+  // Reads ONLY the handful of fields mapped below, not the whole `facts` blob
+  // (avg ~26KB/run; the rest is per-agent working data nothing here touches).
+  // Same row shape the mapper always saw — `facts`/`input` come back as small
+  // objects holding just those keys — so the mapping is unchanged. Measured on
+  // production's latest runs: facts 1,168KB -> 550KB (53% smaller).
+  const { rows: runs } = await query(
+    `SELECT DISTINCT ON (agent_id) agent_id, agent_version, status, narrative, created_at,
+            jsonb_build_object('start', input->'start', 'end', input->'end') AS input,
+            jsonb_build_object(
+              'findings', facts->'findings',
+              'checkedPages', facts->'checkedPages',
+              'linkCrawl', jsonb_build_object('checkedPages', facts->'linkCrawl'->'checkedPages')
+            ) AS facts
+       FROM agent_runs
+      WHERE site_id = $1 AND agent_id = ANY($2)
+      ORDER BY agent_id, created_at DESC`,
+    [siteId, agentIds]
+  );
   return runs
     .filter((r) => r.status === 'ok')
     .map((r) => ({

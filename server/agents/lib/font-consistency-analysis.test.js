@@ -102,82 +102,85 @@ describe('findFontSizeOutliers', () => {
     assert.deepEqual(findFontSizeOutliers(pages), []);
   });
 
-  test('a page type with too few sampled pages falls back to the sitewide majority', () => {
+  test('a page type with too few sampled pages abstains rather than falling back to the sitewide majority', () => {
     const pages = [
       page('https://example.com/a', [h('h1', '32px', '<h1>A</h1>')], [], 'other'),
       page('https://example.com/b', [h('h1', '32px', '<h1>B</h1>')], [], 'other'),
       page('https://example.com/c', [h('h1', '32px', '<h1>C</h1>')], [], 'other'),
-      // Only one 'landing' page — not enough evidence for its own bucket, so
-      // it is judged against the sitewide majority above and flagged.
       page('https://example.com/lp', [h('h1', '18px', '<h1 style="font-size: 18px;">LP</h1>')], [], 'landing'),
     ];
-    const outliers = findFontSizeOutliers(pages);
-    assert.equal(outliers.length, 1);
-    assert.equal(outliers[0].url, 'https://example.com/lp');
-    assert.equal(outliers[0].scope, 'site');
+    assert.deepEqual(findFontSizeOutliers(pages), []);
   });
 
-  test('a class-driven outlier carries a resolvable siteConvention when the bucket has one', () => {
+  test('a class-driven outlier carries a resolvable siteConvention when the same component has one', () => {
     const pages = [
-      page('https://example.com/a', [h('h1', '32px', '<h1 class="text-h1">A</h1>', null, 'text-h1')]),
-      page('https://example.com/b', [h('h1', '32px', '<h1 class="text-h1">B</h1>', null, 'text-h1')]),
-      page('https://example.com/c', [h('h1', '18px', '<h1 class="hero-sm">C</h1>', null, 'hero-sm')]),
+      page('https://example.com/a', [h('h2', '32px', '<h2>A</h2>', null, 'font-bold text-4xl')]),
+      page('https://example.com/b', [h('h2', '32px', '<h2>B</h2>', null, 'font-bold text-4xl')]),
+      page('https://example.com/c', [h('h2', '18px', '<h2>C</h2>', null, 'font-bold text-lg')]),
     ];
     const outliers = findFontSizeOutliers(pages);
     assert.equal(outliers.length, 1);
-    assert.equal(outliers[0].siteConvention, 'text-h1');
+    assert.equal(outliers[0].siteConvention, 'font-bold text-4xl');
   });
 
   test('siteConvention is null when the outlier already carries the resolved convention (not a class problem)', () => {
     const pages = [
-      page('https://example.com/a', [h('h1', '32px', '<h1 class="text-h1">A</h1>', null, 'text-h1')]),
-      page('https://example.com/b', [h('h1', '32px', '<h1 class="text-h1">B</h1>', null, 'text-h1')]),
-      page('https://example.com/c', [h('h1', '18px', '<h1 class="text-h1">C</h1>', null, 'text-h1')]),
+      page('https://example.com/a', [h('h2', '32px', '<h2>A</h2>', null, 'text-4xl')]),
+      page('https://example.com/b', [h('h2', '32px', '<h2>B</h2>', null, 'text-4xl')]),
+      page('https://example.com/c', [h('h2', '18px', '<h2>C</h2>', null, 'text-4xl')]),
     ];
     const outliers = findFontSizeOutliers(pages);
     assert.equal(outliers.length, 1);
     assert.equal(outliers[0].siteConvention, null);
   });
 
-  test('an unclassed outlier with a page-unique ancestor wrapper and a flat value gets a scopedSelector', () => {
-    // Chayce's own real shape: bare <h1>, no class, styled via ".hiw-hero h1"
-    // — a wrapper class no other sampled page uses.
-    const pages = [
-      page('https://example.com/a', [h('h1', '48px', '<h1>A</h1>', null, '', 'page-hero', '48px')]),
-      page('https://example.com/b', [h('h1', '48px', '<h1>B</h1>', null, '', 'page-hero', '48px')]),
-      page('https://example.com/c', [h('h1', '48px', '<h1>C</h1>', null, '', 'page-hero', '48px')]),
-      page('https://example.com/how-it-works', [h('h1', '74px', '<h1>D</h1>', null, '', 'hiw-hero', '74px')]),
-    ];
-    const outliers = findFontSizeOutliers(pages);
-    assert.equal(outliers.length, 1);
-    assert.deepEqual(outliers[0].scopedSelector, { ancestorClass: 'hiw-hero', tag: 'h1' });
-    assert.equal(outliers[0].scopedButFluid, null);
+  test('a footer h4 and a card h4 are different components and are never compared', () => {
+    const f = (url, size) => page(url, [
+      { ...h('h4', '16px', '<h4>Card</h4>'), landmark: 'main' },
+      { ...h('h4', size, '<h4>Footer</h4>'), landmark: 'footer' },
+    ]);
+    const pages = [f('https://example.com/a', '18px'), f('https://example.com/b', '18px'), f('https://example.com/c', '18px')];
+    assert.deepEqual(findFontSizeOutliers(pages), []);
   });
 
-  test('an ancestor wrapper class reused across other pages never gets a scopedSelector (real cross-page blast radius)', () => {
+  test('a deliberately larger homepage h1 is not an outlier against interior h1s (no sitewide fallback)', () => {
     const pages = [
-      page('https://example.com/a', [h('h1', '48px', '<h1>A</h1>', null, '', 'page-hero', '48px')]),
-      page('https://example.com/b', [h('h1', '48px', '<h1>B</h1>', null, '', 'page-hero', '48px')]),
-      page('https://example.com/c', [h('h1', '48px', '<h1>C</h1>', null, '', 'page-hero', '48px')]),
-      // Same wrapper class as the majority pages, not unique to itself.
-      page('https://example.com/d', [h('h1', '30px', '<h1>D</h1>', null, '', 'page-hero', '30px')]),
+      page('https://example.com/', [h('h1', '57px', '<h1>Home</h1>')], [], 'homepage'),
+      page('https://example.com/a', [h('h1', '48px', '<h1>A</h1>')], [], 'service'),
+      page('https://example.com/b', [h('h1', '48px', '<h1>B</h1>')], [], 'service'),
+      page('https://example.com/c', [h('h1', '48px', '<h1>C</h1>')], [], 'service'),
     ];
-    const outliers = findFontSizeOutliers(pages);
-    assert.equal(outliers.length, 1);
-    assert.equal(outliers[0].scopedSelector, null);
+    assert.deepEqual(findFontSizeOutliers(pages), []);
   });
 
-  test('a page-unique ancestor wrapper with a fluid declared value is reported as scopedButFluid, not auto-fixable', () => {
+  test('sr-only / hidden samples are ignored', () => {
     const pages = [
-      page('https://example.com/a', [h('h1', '48px', '<h1>A</h1>', null, '', 'page-hero', '48px')]),
-      page('https://example.com/b', [h('h1', '48px', '<h1>B</h1>', null, '', 'page-hero', '48px')]),
-      page('https://example.com/c', [h('h1', '48px', '<h1>C</h1>', null, '', 'page-hero', '48px')]),
-      page('https://example.com/how-it-works', [h('h1', '74px', '<h1>D</h1>', null, '', 'hiw-hero', 'clamp(40px,6vw,74px)')]),
+      page('https://example.com/a', [h('h2', '32px', '<h2>A</h2>')]),
+      page('https://example.com/b', [h('h2', '32px', '<h2>B</h2>')]),
+      page('https://example.com/c', [h('h2', '32px', '<h2>C</h2>')]),
+      page('https://example.com/d', [h('h2', '16px', '<h2 class="sr-only">D</h2>', null, 'sr-only'), { ...h('h2', '16px', '<h2>E</h2>'), hidden: true }]),
+    ];
+    assert.deepEqual(findFontSizeOutliers(pages), []);
+  });
+
+  test('a responsive-sized element is not judged from one viewport snapshot', () => {
+    const pages = [
+      page('https://example.com/a', [h('h2', '36px', '<h2>A</h2>', null, 'text-[28px] md:text-[36px]')]),
+      page('https://example.com/b', [h('h2', '36px', '<h2>B</h2>', null, 'text-[28px] md:text-[36px]')]),
+      page('https://example.com/c', [h('h2', '28px', '<h2>C</h2>', null, 'text-[28px] md:text-[36px]')]),
+    ];
+    assert.deepEqual(findFontSizeOutliers(pages), []);
+  });
+
+  test('no class swap is offered when the convention is responsive', () => {
+    const pages = [
+      page('https://example.com/a', [h('h2', '36px', '<h2>A</h2>', null, 'font-bold text-2xl md:text-4xl')]),
+      page('https://example.com/b', [h('h2', '36px', '<h2>B</h2>', null, 'font-bold text-2xl md:text-4xl')]),
+      page('https://example.com/c', [h('h2', '18px', '<h2>C</h2>', null, 'font-bold text-lg')]),
     ];
     const outliers = findFontSizeOutliers(pages);
     assert.equal(outliers.length, 1);
-    assert.equal(outliers[0].scopedSelector, null);
-    assert.equal(outliers[0].scopedButFluid, 'clamp(40px,6vw,74px)');
+    assert.equal(outliers[0].siteConvention, null);
   });
 });
 

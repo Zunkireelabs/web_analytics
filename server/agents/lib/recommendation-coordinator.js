@@ -2,7 +2,9 @@ import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, 
 import { getLiveDraftsByFindingId } from '../../store/drafts.js';
 import { attemptSummaryByFinding } from '../../store/recommendation-attempts.js';
 import { categoryByAgentId } from './command-center.js';
-import { riskTierForGenerator } from './risk-tiers.js';
+import { riskTierForGenerator, requiresHumanReview } from './risk-tiers.js';
+import { isProtectedChange } from './protected-pages.js';
+import { getProtectedPageSet } from '../../store/protected-pages.js';
 import { createRecommendationGates } from './recommendation-gates.js';
 import { classify } from './recommendation-taxonomy.js';
 import { recheckLink } from './technical-seo-analysis.js';
@@ -295,8 +297,8 @@ export function hasDeclaredDedupIdentity(generatorId, pageKeyedIds) {
 // setting item.blockedReason, rather than each one inventing its own way to
 // stay out of the autonomous path — which is exactly how one of them would
 // eventually forget to.
-function blockedRiskTier(blockedReason, generatorId) {
-  return blockedReason ? 'manual' : riskTierForGenerator(generatorId);
+function blockedRiskTier(blockedReason, generatorId, item, protectedPages = null) {
+  return blockedReason || requiresHumanReview(item) || isProtectedChange(item, protectedPages) ? 'manual' : riskTierForGenerator(generatorId);
 }
 
 // recommendation-gates.js's evaluate() deliberately never rules on
@@ -335,6 +337,7 @@ function resolveBlockedReason(existing, item) {
 }
 
 export async function syncFromGrounded(siteId, grounded) {
+  const protectedPages = await getProtectedPageSet(siteId);
   for (const item of grounded.items) {
     if (!item.generatorId) continue; // buildRecommendations already filters these, but stay defensive
     const page = recommendationPageKey(item);
@@ -375,7 +378,7 @@ export async function syncFromGrounded(siteId, grounded) {
         // (broken-link-fix is the one documented exception — see
         // resolveBlockedReason above.)
         blockedReason: mergedBlockedReason,
-        riskTier: blockedRiskTier(mergedBlockedReason, item.generatorId),
+        riskTier: blockedRiskTier(mergedBlockedReason, item.generatorId, item, protectedPages),
         // Unconditional, not COALESCE'd, same reasoning as blockedReason/
         // riskTier above: buildRecommendations recomputed this fresh from the
         // site's CURRENT active goals, so a paused/deleted goal must clear a
@@ -395,7 +398,7 @@ export async function syncFromGrounded(siteId, grounded) {
       // blocked — item.blockedReason (the gate system's own verdict, null
       // for broken-link-fix) is the whole story on first insert either way.
       const insertBlockedReason = item.blockedReason ?? null;
-      const riskTier = blockedRiskTier(insertBlockedReason, item.generatorId);
+      const riskTier = blockedRiskTier(insertBlockedReason, item.generatorId, item, protectedPages);
       const created = await insertRecommendation(siteId, {
         page, recommendationType: item.generatorId, issue: item.tag, reason: item.reason,
         params: item.params, findingId: item.id, detectingAgent: item.source,
@@ -620,6 +623,18 @@ export async function recheckRecommendation(siteId, recommendationId, { refreshE
   try {
     output = await runAgent(agentId, { siteId, start, end, params: { pages: [rec.page] } }, { persist: false });
   } catch (err) {
+    // `detecting_agents[0]` is a LABEL for who raised the finding, not always a
+    // registered, runnable agent: 'design-consistency' is the weekly whole-site
+    // scan (agents/lib/design-consistency.js, run from cron.js/job.js), which has
+    // no per-page agent to re-run. runAgent rejects an unregistered id with a 404
+    // "Unknown agent" before doing any work. That is an expected "can't re-check
+    // this one", not a failure — treating it as one logged an internal error on
+    // every reconciler pass (77 rows in three days, 2026-09-28..30) and told the
+    // user "could not be re-checked right now" about something that can never be
+    // re-checked this way. The scan re-evaluates it on its own next run.
+    if (err?.status === 404 && /^Unknown agent /.test(err.message || '')) {
+      return { status: 'open', changed: false, reason: 'Raised by a whole-site scan rather than a per-page check — it is re-evaluated by that scan\'s next run.' };
+    }
     const { message } = safeMessage('recommendation-coordinator.recheckRecommendation', err, 'This recommendation could not be re-checked right now — it stays open until the next run.');
     return { status: 'open', changed: false, reason: message };
   }

@@ -1,6 +1,7 @@
 import { listAgentMeta } from '../registry.js';
 import {
   getLatestAgentRuns as getLatestAgentRunsRaw,
+  getLatestAgentRunSummaries as getLatestAgentRunSummariesRaw,
   getLatestFindings as getLatestFindingsRaw,
 } from '../../store/agent-runs.js';
 
@@ -28,6 +29,14 @@ function isFresh(agentVersion, currentVersion) {
 
 export async function getLatestAgentRuns(siteId, agentIds) {
   const [runs, versions] = await Promise.all([getLatestAgentRunsRaw(siteId, agentIds), currentVersions()]);
+  return runs.filter((r) => isFresh(r.agent_version, versions.get(r.agent_id)));
+}
+
+// Payload-free twin of getLatestAgentRuns above (status/timestamps only, see
+// store/agent-runs.js) with the same stale-version filtering, so a caller that
+// switches to it keeps the exact "stale row == never ran" semantics.
+export async function getLatestAgentRunSummaries(siteId, agentIds) {
+  const [runs, versions] = await Promise.all([getLatestAgentRunSummariesRaw(siteId, agentIds), currentVersions()]);
   return runs.filter((r) => isFresh(r.agent_version, versions.get(r.agent_id)));
 }
 

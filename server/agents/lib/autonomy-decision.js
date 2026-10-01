@@ -12,6 +12,8 @@
 // happen to this?" through one function instead of re-deriving the answer
 // (and risking disagreeing) in two places.
 
+import { isProtectedChange, PROTECTED_PAGE_REASON } from './protected-pages.js';
+
 export const AUTONOMY_DECISION = {
   SAFE_TO_AUTO_EXECUTE: 'SAFE_TO_AUTO_EXECUTE',
   NEEDS_HUMAN_REVIEW: 'NEEDS_HUMAN_REVIEW',
@@ -37,7 +39,7 @@ const REJECTED_STATUSES = new Set(['unfixable', 'dismissed', 'superseded']);
 // once fetches the map ONCE, not per item. Omitting it (every pre-Phase-5
 // call site, and every existing test) falls back to exactly the Phase 4
 // behavior — learning is additive, never a prerequisite.
-export function classifyRecommendation(rec, learnedMap = null) {
+export function classifyRecommendation(rec, learnedMap = null, protectedPages = null) {
   if (!rec) return { decision: AUTONOMY_DECISION.UNSAFE_REJECTED, reason: 'no recommendation given' };
 
   if (REJECTED_STATUSES.has(rec.status)) {
@@ -52,6 +54,13 @@ export function classifyRecommendation(rec, learnedMap = null) {
     // design-drift.js/recommendation-gates.js — so this is never a dead end,
     // only a pause.
     return { decision: AUTONOMY_DECISION.NEEDS_HUMAN_REVIEW, reason: rec.blocked_reason };
+  }
+
+  // A change that can alter a page that already earns clicks needs a person,
+  // whatever the generator's tier says. Optional like learnedMap: omitting it
+  // is the pre-guard behaviour, so every existing caller and test is unchanged.
+  if (isProtectedChange(rec, protectedPages)) {
+    return { decision: AUTONOMY_DECISION.NEEDS_HUMAN_REVIEW, reason: PROTECTED_PAGE_REASON };
   }
 
   if (rec.risk_tier === 'safe') {

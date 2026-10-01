@@ -38,6 +38,21 @@ function extractStyleSamplesInPage(maxParagraphs) {
     }
     return null;
   }
+  // Which page region the element lives in — what keeps a footer h4 and a
+  // card h4 (or a hero paragraph and a caption) from being compared as if
+  // they were the same component (see componentKey in
+  // font-consistency-analysis.js).
+  function landmarkOf(el) {
+    const l = el.closest('header, nav, footer, aside, main, article');
+    return l ? l.tagName.toLowerCase() : '';
+  }
+  // Visually hidden text (sr-only clip pattern, display:none, 0-size) has no
+  // rendered size a visitor sees.
+  function isVisuallyHidden(el, cs) {
+    if (cs.display === 'none' || cs.visibility === 'hidden') return true;
+    const r = el.getBoundingClientRect();
+    return r.width <= 1 || r.height <= 1;
+  }
   function sample(el, { captureAncestor = false } = {}) {
     if (!el) return null;
     const cs = window.getComputedStyle(el);
@@ -49,21 +64,23 @@ function extractStyleSamplesInPage(maxParagraphs) {
       inlineStyle: el.getAttribute('style') || null,
       outerHtml: el.outerHTML,
       text: el.textContent.trim().slice(0, 120),
-      // Only meaningful (and only ever looked up) for a heading with no
+      // Only meaningful (and only ever looked up) for an element with no
       // class of its own — see extractStyleSamplesInPage's caller.
       ancestorClass: captureAncestor && !classes ? nearestAncestorClass(el) : null,
+      landmark: landmarkOf(el),
+      hidden: isVisuallyHidden(el, cs),
     };
   }
   const headings = [...document.querySelectorAll('h1, h2, h3, h4')].map((el) => sample(el, { captureAncestor: true })).filter(Boolean);
   const paragraphs = [...document.querySelectorAll('main p, article p, body > p')]
     .slice(0, maxParagraphs)
-    .map((el) => sample(el))
+    .map((el) => sample(el, { captureAncestor: true }))
     .filter(Boolean);
   return { headings, paragraphs };
 }
 /* eslint-enable no-undef */
 
-export async function captureFontSamplePage(browserPage, url) {
+export async function captureFontSamplePage(browserPage, url, { propertyType } = {}) {
   await browserPage.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   const { headings, paragraphs } = await browserPage.evaluate(extractStyleSamplesInPage, MAX_PARAGRAPHS_PER_PAGE);
 
@@ -91,7 +108,7 @@ export async function captureFontSamplePage(browserPage, url) {
   // findFontSizeOutliers judge a template against ITS OWN majority instead of
   // one flat sitewide majority (see that file) — this site's own real page
   // shape, never a value carried over from another tenant.
-  return { url, pageType: classifyPageType(url), headings, paragraphs };
+  return { url, pageType: classifyPageType(url, { propertyType }), headings, paragraphs };
 }
 
 // Orchestrates the whole-site capture for one agent run: discover a
@@ -121,12 +138,15 @@ export async function captureFontSamples(homepageUrl, {
   maxPages = DEFAULT_MAX_PAGES,
   launchBrowserFn = launchBrowser,
   extraUrls = [],
+  // sites.property_type — lets a product site's pricing/features/etc. pages be
+  // judged against their OWN template instead of one blended 'other'.
+  propertyType,
 } = {}) {
   const browser = await launchBrowserFn();
   try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
-    const targets = await discoverPages(page, homepageUrl, { maxPages });
+    const targets = await discoverPages(page, homepageUrl, { maxPages, propertyType });
 
     // Anchors first, then the rotation slice with anchors removed — a URL in
     // both sets must be captured once, not twice: a duplicated page would
@@ -139,7 +159,7 @@ export async function captureFontSamples(homepageUrl, {
     const pages = [];
     for (const url of urls) {
       // eslint-disable-next-line no-await-in-loop
-      const captured = await captureFontSamplePage(page, url).catch((err) => {
+      const captured = await captureFontSamplePage(page, url, { propertyType }).catch((err) => {
         console.warn(`[font-consistency/capture] could not capture ${url}: ${err.message}`);
         return null;
       });

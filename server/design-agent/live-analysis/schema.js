@@ -26,9 +26,19 @@
 // last (re)derived.
 export const DESIGN_PROFILE_VERSION = 2;
 
+// Page types only a PRODUCT site (sites.property_type = 'product') is
+// classified into — see classifyPageType's `propertyType` option. A SaaS
+// product's marketing site is built from pricing / features / how-it-works /
+// demo / case-study pages that a services site doesn't have, and lumping them
+// into 'other' meant one blended pattern for visually unrelated pages.
+export const PRODUCT_PAGE_TYPES = Object.freeze([
+  'pricing', 'features', 'how-it-works', 'demo', 'case-study',
+]);
+
 export const PAGE_TYPES = Object.freeze([
   'homepage', 'service', 'location', 'landing', 'faq',
   'blog-listing', 'blog-article', 'legal', 'other',
+  ...PRODUCT_PAGE_TYPES,
 ]);
 
 // URL-shape heuristics only — there is no pageType concept anywhere else in
@@ -51,10 +61,29 @@ export const PAGE_TYPES = Object.freeze([
 // recognized as inline prose).
 const BLOG_LISTING_RE = /\/(blog|articles?|news|resources?|guides?|insights?|learn)\/?$/;
 const BLOG_ARTICLE_RE = /\/(blog|articles?|news|resources?|guides?|insights?|learn)\/.+/;
-export function classifyPageType(url) {
+// Product-site URL shapes, checked ONLY for propertyType === 'product' and
+// BEFORE the blog/article rules below: a product site files its case studies
+// under /resources/ or /case-studies/, which BLOG_ARTICLE_RE would otherwise
+// swallow as a blog post. Not applied to website tenants — their /products/*
+// stays 'service' and their /resources/*-case-study stays 'blog-article', so
+// every stored design profile and page template for them is unaffected.
+const PRODUCT_PAGE_RULES = Object.freeze([
+  ['pricing', /\/(pricing|plans?|packages?)\/?$/],
+  ['how-it-works', /\/how-it-works\b/],
+  ['demo', /\/(demo|book-a-demo|request-demo|get-started|free-trial|trial)\b/],
+  ['case-study', /(\/(case-stud(y|ies)|customers?|success-stor(y|ies))(\/|$)|-case-study\/?$)/],
+  ['features', /\/(features?|capabilities)(\/|$)/],
+]);
+
+// `propertyType` is optional and defaults to the original website behaviour,
+// so every existing caller keeps its exact result.
+export function classifyPageType(url, { propertyType } = {}) {
   let path = '/';
   try { path = new URL(url).pathname.toLowerCase(); } catch { return 'other'; }
   if (path === '/' || path === '') return 'homepage';
+  if (propertyType === 'product') {
+    for (const [type, re] of PRODUCT_PAGE_RULES) if (re.test(path)) return type;
+  }
   if (BLOG_LISTING_RE.test(path)) return 'blog-listing';
   if (BLOG_ARTICLE_RE.test(path)) return 'blog-article';
   if (/\/(faq|faqs|help|support)\b/.test(path)) return 'faq';

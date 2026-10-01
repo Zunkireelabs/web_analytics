@@ -27,15 +27,31 @@ let contentTypeByPage = null;
 mock.module(resolve('./lib/page-content-classifier.js'), {
   namedExports: {
     getOrClassifyPageContentType: async (siteId, page) => {
+      classifierCalls++;
       const type = typeof contentTypeByPage === 'function' ? contentTypeByPage(page) : contentTypeByPage;
       return type ? { contentType: type, confidence: 0.9, classifiedBy: 'path' } : null;
     },
   },
 });
 
+// Live probe: default every variant to a live, self-canonical 200 so the
+// pre-existing grouping/evidence tests are unchanged; individual tests
+// override probeByUrl to model redirects/404s/canonicals.
+let probeByUrl = new Map();
+let classifierCalls = 0;
+mock.module(resolve('./lib/live-probe.js'), {
+  namedExports: {
+    createVariantProber: () => async (pages) => new Map(pages.map((p) => [p, probeByUrl.get(p) || { url: p, verdict: 'live', status: 200, canonical: null }])),
+    isSelfCanonical: (p) => !p.canonical || p.canonical === p.url,
+    normalizeUrlForCompare: (u) => String(u),
+  },
+});
+
 const { run } = await import('./url-variant-duplicates.js');
 
 beforeEach(() => {
+  probeByUrl = new Map();
+  classifierCalls = 0;
   site = { id: 1, timezone: 'UTC' };
   inventory = [];
   perfRowsByPage = new Map();
@@ -222,6 +238,53 @@ describe('url-variant-duplicates agent', () => {
       // recommendation = one drafted PR target) — the other loser is still
       // named in evidence.variants for a human/future run to see.
       assert.notEqual(finding.recommendedAction.params.page, 'https://example.com/about/');
+    });
+  });
+
+  describe('live verification', () => {
+    const dup = () => {
+      inventory = [
+        { page: 'https://example.com/about', orphaned: false },
+        { page: 'https://example.com/about/', orphaned: false },
+      ];
+      perfRowsByPage.set('https://example.com/about/', { clicks: 10, impressions: 100 });
+    };
+
+    test('a variant that 301s to its sibling is not a live duplicate -> no finding', async () => {
+      dup();
+      probeByUrl.set('https://example.com/about', { url: 'https://example.com/about', verdict: 'redirect', status: 301, redirectsTo: 'https://example.com/about/' });
+      const result = await run({ siteId: 1 });
+      assert.deepEqual(result.facts.findings, []);
+      assert.equal(result.facts.droppedGroups, 1);
+    });
+
+    test('an unverifiable probe withholds the group entirely', async () => {
+      dup();
+      probeByUrl.set('https://example.com/about', { url: 'https://example.com/about', verdict: 'unverifiable', status: 403 });
+      const result = await run({ siteId: 1 });
+      assert.deepEqual(result.facts.findings, []);
+      assert.equal(result.facts.unverifiableGroups, 1);
+    });
+
+    test('a loser whose canonical already equals the winner needs no action', async () => {
+      dup();
+      probeByUrl.set('https://example.com/about', { url: 'https://example.com/about', verdict: 'live', status: 200, canonical: 'https://example.com/about/' });
+      const result = await run({ siteId: 1 });
+      assert.deepEqual(result.facts.findings, []);
+    });
+
+    test('a confirmed finding carries a confirmed verification', async () => {
+      dup();
+      const result = await run({ siteId: 1 });
+      assert.equal(result.facts.findings[0].verification.verdict, 'confirmed');
+    });
+
+    test('dryRun never touches the classifier (no cache write / LLM call)', async () => {
+      dup();
+      await run({ siteId: 1, dryRun: true });
+      assert.equal(classifierCalls, 0);
+      await run({ siteId: 1 });
+      assert.ok(classifierCalls > 0);
     });
   });
 });

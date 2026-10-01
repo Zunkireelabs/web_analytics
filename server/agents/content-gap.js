@@ -14,7 +14,7 @@ export const meta = {
   description: 'Analyzes the site\'s own ranking pages for on-page completeness gaps, cross-references real tracked-competitor structural signals, and suggests possibly-missing entities.',
   category: 'content',
   version: 5,
-  requiresCapabilities: ['gsc'],
+  requiresCapabilities: ['gsc', 'public-web'],
   // True topical/SERP-based gap detection (a specific topic a competitor
   // ranks for that this site has no page for at all) still has no real data
   // source — that's a different, still-unbuilt question from what's below.
@@ -59,6 +59,29 @@ const MIN_TRACKED_COMPETITORS = 2; // below this, a "X of Y" ratio isn't a real 
 // GSC URL Inspection calls), so there's no equivalent hard ceiling to
 // respect on this side; revisit if ship-side rate-limit abandons increase.
 const MAX_PAGES = 40;
+// Pages where "subtopics this page does not cover" is not a meaningful
+// question: a team/about/contact page or a blog INDEX/pagination page is a
+// listing or brand page, not a topic page, so an LLM asked what it "lacks"
+// invents blog topics (confirmed live: 'Use Cases for AI in Education' and
+// 'Client Success Stories' suggested for /team/). Never asks the model.
+const NON_TOPICAL_PATH_RE = /\/(team|about|about-us|contact|contact-us|careers|privacy|privacy-policy|terms|cookie-policy)(\/|$)|\/blog\/page\/\d+|\/blog\/?$/i;
+export function isTopicalPage(pagePath = '') {
+  try { return !NON_TOPICAL_PATH_RE.test(new URL(pagePath, 'https://x.invalid').pathname); } catch { return true; }
+}
+
+// The model's "not covered" claim is an inference, so it is checked against
+// the very text it read: a suggested entity whose every meaningful word is
+// already on the page is covered, not a gap. Returns the suggestions that
+// survive.
+const ENTITY_STOPWORDS = new Set(['with', 'from', 'that', 'this', 'and', 'for', 'the', 'into', 'about', 'using']);
+export function dropAlreadyCovered(suggestions, bodyText) {
+  const text = String(bodyText || '').toLowerCase();
+  return (suggestions || []).filter((s) => {
+    const toks = String(s.entity || '').toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 3 && !ENTITY_STOPWORDS.has(t));
+    return !(toks.length && toks.every((t) => text.includes(t)));
+  });
+}
+
 const MAX_AI_SUGGESTION_PAGES = 6; // bounds LLM cost — entity suggestions run only for the top-impression pages
 const AI_SUGGESTION_MAX_ITEMS = 4;
 
@@ -94,8 +117,8 @@ async function suggestMissingEntities(bodyText, queryText, seoPolicy, siteProfil
   try {
     const parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
     if (!Array.isArray(parsed)) return { suggestions: [], error: 'unexpected-format' };
-    const clean = parsed
-      .filter((s) => s && typeof s.entity === 'string' && ['low', 'medium', 'high'].includes(s.confidence))
+    const clean = dropAlreadyCovered(parsed
+      .filter((s) => s && typeof s.entity === 'string' && ['low', 'medium', 'high'].includes(s.confidence)), bodyText)
       .slice(0, AI_SUGGESTION_MAX_ITEMS);
     return { suggestions: clean, error: null };
   } catch {
@@ -163,7 +186,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     return {
       ...base,
       gaps: contentGapsFor(fetched.analysis, topQueries),
-      aiEligible: true,
+      aiEligible: isTopicalPage(page),
       fetchError: null,
       _analysis: fetched.analysis,
       _topQuery: topQueries[0] || '',

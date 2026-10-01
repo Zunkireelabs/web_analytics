@@ -24,6 +24,7 @@ mock.module(resolve('../store/page-inventory.js'), {
 mock.module(resolve('./lib/page-content-classifier.js'), {
   namedExports: {
     getOrClassifyPageContentType: async (siteId, page) => {
+      classifierCalls++;
       const type = typeof contentTypeByPage === 'function' ? contentTypeByPage(page) : contentTypeByPage;
       return type ? { contentType: type, confidence: 0.9, classifiedBy: 'path' } : null;
     },
@@ -33,7 +34,16 @@ mock.module(resolve('../llm.js'), {
   namedExports: { callLLM: async () => 'narrative' },
 });
 
-const { run } = await import('./templated-duplicates.js');
+const { run: realRun, isCatchAllPattern } = await import('./templated-duplicates.js');
+
+// Default sampled body: every page identical (a true duplicate family), so the
+// pre-existing evidence tests exercise the traffic logic unchanged. Individual
+// tests override bodyFor to model distinct/near-identical content.
+const SHARED_BODY = 'we provide professional services in your city with experienced local teams and transparent pricing for every customer';
+let bodyFor = () => SHARED_BODY;
+let classifierCalls = 0;
+const pageCache = async (page) => ({ ok: true, analysis: { wordCount: 400, bodyText: bodyFor(page), wasRedirected: false } });
+const run = (input) => realRun({ pageCache, ...input });
 
 const LOCATION_PATTERN = { match: '^/locations/([^/]+)/([^/]+)/?$' };
 const OLD_ENOUGH = new Date(Date.now() - 200 * 24 * 60 * 60 * 1000).toISOString(); // well past the 90-day evidence window
@@ -44,6 +54,8 @@ function pagesFor(pattern, count, { base = 'https://example.com', firstSeenAt = 
 }
 
 beforeEach(() => {
+  bodyFor = () => SHARED_BODY;
+  classifierCalls = 0;
   site = { id: 1, timezone: 'UTC', url_file_map: { patterns: [LOCATION_PATTERN] } };
   inventory = [];
   contentTypeByPage = 'service';
@@ -149,6 +161,60 @@ describe('templated-duplicates agent', () => {
       const finding = result.facts.findings[0];
       assert.notEqual(finding.evidence.confidence, 'high');
       assert.equal(finding.recommendedAction, null);
+    });
+  });
+
+  describe('content-similarity gate and catch-all patterns', () => {
+    test('a catch-all pattern (^/([^/]+)/?$) never forms a family, even with 195 pages', async () => {
+      const CATCH_ALL = { match: '^/([^/]+)/?$' };
+      site = { id: 1, timezone: 'UTC', url_file_map: { patterns: [CATCH_ALL] } };
+      inventory = Array.from({ length: 195 }, (_, i) => ({ page: `https://example.com/page-${i}/`, orphaned: false, first_seen_at: OLD_ENOUGH }));
+      const result = await run({ siteId: 1 });
+      assert.deepEqual(result.facts.findings, []);
+      assert.deepEqual(result.facts.catchAllPatternsSkipped, ['^/([^/]+)/?$']);
+    });
+
+    test('isCatchAllPattern: literal-prefixed patterns are fine, bare captures and .* are catch-all', () => {
+      assert.equal(isCatchAllPattern('^/locations/([^/]+)/([^/]+)/?$'), false);
+      assert.equal(isCatchAllPattern('^/([^/]+)/?$'), true);
+      assert.equal(isCatchAllPattern('.*'), true);
+      assert.equal(isCatchAllPattern('^/.+'), true);
+    });
+
+    test('a family of genuinely distinct pages (low similarity) produces no finding', async () => {
+      inventory = pagesFor(LOCATION_PATTERN, 10);
+      bodyFor = (page) => `${page} ${Array.from({ length: 60 }, (_, i) => `${page.replace(/\W/g, '')}w${i}`).join(' ')}`;
+      const result = await run({ siteId: 1 });
+      assert.deepEqual(result.facts.findings, []);
+      assert.equal(result.facts.distinctGroups, 1);
+    });
+
+    test('similar-but-not-identical content with a clean traffic winner is NOT auto-canonicalized', async () => {
+      inventory = pagesFor(LOCATION_PATTERN, 8);
+      perfRowsByPage.set(inventory[0].page, { clicks: 15, impressions: 200 });
+      // ~0.9 similarity: one distinguishing token per page out of ~20.
+      bodyFor = (page) => `${SHARED_BODY} plus ${page.replace(/\W/g, '')}`;
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.ok(finding, 'still reported');
+      assert.equal(finding.recommendedAction, null);
+      assert.ok(finding.reportOnly);
+      assert.equal(result.facts.autoConsolidated, 0);
+    });
+
+    test('unreadable sample pages are unverifiable: nothing asserted', async () => {
+      inventory = pagesFor(LOCATION_PATTERN, 10);
+      const result = await realRun({ siteId: 1, pageCache: async () => ({ ok: false }) });
+      assert.deepEqual(result.facts.findings, []);
+      assert.equal(result.facts.unverifiableGroups, 1);
+    });
+
+    test('dryRun never calls the classifier and never auto-actions', async () => {
+      inventory = pagesFor(LOCATION_PATTERN, 8);
+      perfRowsByPage.set(inventory[0].page, { clicks: 15, impressions: 200 });
+      const result = await run({ siteId: 1, dryRun: true });
+      assert.equal(classifierCalls, 0);
+      assert.equal(result.facts.findings[0]?.recommendedAction ?? null, null);
     });
   });
 });

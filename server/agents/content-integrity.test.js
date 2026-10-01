@@ -406,3 +406,45 @@ describe('content-integrity run() — faq-cross-page-inconsistency recommendedAc
     } finally { mockLLMResponse = 'stub narrative'; }
   });
 });
+
+describe('findInconsistentFaqQuestions — only genuine contradictions', () => {
+  test('wording differences without conflicting numbers are not a contradiction', () => {
+    const reachable = [
+      page('https://example.com/a', [{ question: 'When do you ship?', answer: 'Within 2 business days.' }]),
+      page('https://example.com/b', [{ question: 'When do you ship?', answer: 'We usually ship within 2 business days, depending on stock.' }]),
+    ];
+    assert.deepEqual(findInconsistentFaqQuestions(reachable), []);
+  });
+
+  test('differing prose with no numbers is not asserted as inconsistent', () => {
+    const reachable = [
+      page('https://example.com/a', [{ question: 'Do you ship abroad?', answer: 'Yes, worldwide.' }]),
+      page('https://example.com/b', [{ question: 'Do you ship abroad?', answer: 'Yes, we deliver internationally.' }]),
+    ];
+    assert.deepEqual(findInconsistentFaqQuestions(reachable), []);
+  });
+
+  test('query-param URLs are dropped from the comparison', () => {
+    const reachable = [
+      page('https://example.com/a', [{ question: 'When do you ship?', answer: 'Within 2 business days.' }]),
+      page('https://example.com/b?utm=x', [{ question: 'When do you ship?', answer: 'Within 5 business days.' }]),
+    ];
+    assert.deepEqual(findInconsistentFaqQuestions(reachable), []);
+  });
+
+  test('a page whose canonical points elsewhere is dropped from the comparison', () => {
+    const reachable = [
+      page('https://example.com/a', [{ question: 'When do you ship?', answer: 'Within 2 business days.' }]),
+      { page: 'https://example.com/b', analysis: { canonicalUrl: 'https://example.com/a', faqVisibleItems: [{ question: 'When do you ship?', answer: 'Within 5 business days.' }] } },
+    ];
+    assert.deepEqual(findInconsistentFaqQuestions(reachable), []);
+  });
+
+  test('www/trailing-slash canonical of the same page is still compared', () => {
+    const reachable = [
+      page('https://example.com/a', [{ question: 'When do you ship?', answer: 'Within 2 business days.' }]),
+      { page: 'https://example.com/b', analysis: { canonicalUrl: 'https://www.example.com/b/', faqVisibleItems: [{ question: 'When do you ship?', answer: 'Within 5 business days.' }] } },
+    ];
+    assert.equal(findInconsistentFaqQuestions(reachable).length, 1);
+  });
+});

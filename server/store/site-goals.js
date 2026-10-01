@@ -9,7 +9,11 @@ import { query } from '../db.js';
 export const GOAL_TYPES = Object.freeze([
   'generate_leads', 'increase_organic_traffic', 'increase_conversions',
   'reduce_bounce_rate', 'increase_organic_visibility', 'increase_qualified_traffic',
-  'grow_bookings', 'grow_sales', 'custom',
+  'grow_bookings', 'grow_sales',
+  // Product-site goals (migration 177) — see store/product-funnel.js for how
+  // progress against these is read from prospects / trial_signups.
+  'book_demos', 'grow_signups', 'activate_users',
+  'custom',
 ]);
 
 function shapeGoal(row) {

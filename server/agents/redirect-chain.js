@@ -8,10 +8,25 @@ export const meta = {
   name: 'Redirect Chain Detector',
   description: 'Checks whether a site\'s own known pages redirect through more than one hop before reaching their final destination — distinct from technical-seo.js\'s existing redirect-chain check, which only catches a chain when some OTHER page links to it; this catches the page\'s own URL being multi-hop even with no stale internal link pointing at it (an old URL scheme, a migrated path, a sitemap/GSC-remembered address). Auto-fixable when the site tracks an nginx config (url_file_map.siteRoot.nginxConfig — the same file soft-404.js already patches): the fix reuses implementers/lib/redirect-chain-nginx-inject.js\'s exact-match-or-refuse rewrite, which only ever proceeds when the intermediate hop is found as exactly one recognized nginx redirect rule whose live target still matches what this agent actually observed.',
   category: 'technical',
+  requiresCapabilities: ['public-web'],
   version: 1,
 };
 
 const MAX_PAGES = 20;
+
+// An nginx mapping alone does not prove the live site is served BY that
+// nginx (a repo can carry a stale nginx.conf while the site runs on Vercel/
+// Netlify, where the rewrite would ship and change nothing). tech_stack is
+// free-text and staff-entered (see site-fingerprint.js) — only a stack that
+// explicitly records an nginx-served static build offers the auto-fix;
+// unset/unknown means a human decides, never a guess.
+const NGINX_SERVED_STACKS = new Set(['nginx', 'static', 'eleventy', '11ty', 'hugo', 'jekyll', 'astro', 'gatsby', 'next-static']);
+const MANAGED_HOST_RE = /vercel|netlify|cloudflare|github[\s-]*pages|amplify|firebase|render\.com|heroku/i;
+export function isNginxServedSite(site) {
+  const stack = String(site?.tech_stack || '').toLowerCase().trim();
+  if (!stack || MANAGED_HOST_RE.test(stack)) return false;
+  return NGINX_SERVED_STACKS.has(stack);
+}
 // A single 301/302 straight to the final destination is normal and not
 // flagged — this only fires once a page's own address requires TWO OR MORE
 // hops, which is always redundant: whatever created each intermediate hop
@@ -40,7 +55,11 @@ export async function run({ siteId, start, end, params }) {
   const results = await Promise.all(batch.map(async (page) => ({ page, result: await followRedirectsWithRetry(page) })));
   if (!params?.pages?.length) await markPagesChecked(siteId, 'redirect-chain', batch);
 
-  const chained = results.filter((r) => !r.result.error && r.result.hops >= MIN_HOPS_TO_FLAG);
+  // A target that blocks every automated attempt (403/429/503 under both UAs)
+  // cannot be observed, so its chain length proves nothing — skip, never flag.
+  const unverifiableCount = results.filter((r) => r.result.unverifiable).length;
+  const chained = results.filter((r) => !r.result.unverifiable && !r.result.error && r.result.hops >= MIN_HOPS_TO_FLAG);
+  const nginxServed = isNginxServedSite(site);
 
   const findings = chained.map((r) => {
     const chain = r.result.chain;
@@ -56,7 +75,7 @@ export async function run({ siteId, start, end, params }) {
     // checkable question, not a guess. The implementer asks that question
     // and refuses (never force-applies) the moment the answer isn't a
     // clean yes — same discipline as soft-404-nginx.
-    const canAttemptAutoFix = Boolean(nginxConfigPath && immediateNextHop && finalHop?.url);
+    const canAttemptAutoFix = Boolean(nginxConfigPath && nginxServed && immediateNextHop && finalHop?.url);
 
     return makeFinding({
       id: `redirect-chain:page:${r.page}`,
@@ -76,7 +95,7 @@ export async function run({ siteId, start, end, params }) {
         kind: 'redirect-chain',
         label: `${r.result.hops}-hop redirect chain`,
         page: r.page,
-        whyBlocked: 'Collapsing this to one direct redirect means editing whatever created each intermediate hop — this site has no tracked nginx config to check against, so the owning system isn\'t identifiable from here.',
+        whyBlocked: 'Collapsing this to one direct redirect means editing whatever created each intermediate hop — this site has no tracked nginx config, or its recorded hosting stack is not confirmed to be nginx-served, so the owning system isn\'t identifiable from here.',
       },
       expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: impressionsByPage.get(r.page) || 0 },
     });
@@ -86,6 +105,7 @@ export async function run({ siteId, start, end, params }) {
     rangeStart: start, rangeEnd: end, batchSize: batch.length,
     checkedPages: batch,
     pagesChecked: results.map((r) => ({ page: r.page, hops: r.result.hops, ok: !r.result.error, error: r.result.error })),
+    unverifiableCount,
     autoFixAttempted: findings.filter((f) => f.recommendedAction).length,
     findings,
   };

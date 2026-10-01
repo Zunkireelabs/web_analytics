@@ -1,6 +1,7 @@
 import pLimit from 'p-limit';
 import { getSearchPerformanceForPages } from '../store/read.js';
 import { makeFinding, aggregateSystemicFinding } from './lib/findings.js';
+import { VERDICT, makeVerification } from './lib/verdict.js';
 import { analyzePageUrl, effortForGenerator, inferSchemaType } from './lib/page-content.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { callLLM } from '../llm.js';
@@ -31,6 +32,7 @@ export const meta = {
   name: 'Content Integrity Agent',
   description: 'Checks already-live pages for broken/empty/misaligned table markup, comparison content shipped as raw text instead of a real table, FAQ content out of sync with its own schema or duplicated on a page, the same FAQ question answered inconsistently across different pages, and FAQ content that doesn\'t topically match the page it\'s on.',
   category: 'content',
+  requiresCapabilities: ['public-web'],
   version: 1,
 };
 
@@ -86,6 +88,10 @@ function pickSafeOrTopImpression(affected, isSafe) {
 export function findInconsistentFaqQuestions(reachable) {
   const questionAnswers = new Map(); // normalized question -> normalized answer -> {answer, pages[]}
   for (const r of reachable) {
+    // A query-param URL or a page whose own canonical points elsewhere is a
+    // duplicate/variant of another page — comparing it would "find" the same
+    // page disagreeing with itself.
+    if (!isComparablePage(r)) continue;
     for (const item of r.analysis.faqVisibleItems || []) {
       if (!item.answer) continue;
       const q = item.question.toLowerCase().replace(/\s+/g, ' ').trim();
@@ -97,8 +103,42 @@ export function findInconsistentFaqQuestions(reachable) {
     }
   }
   return [...questionAnswers.entries()]
-    .filter(([, variants]) => variants.size >= 2)
+    .filter(([, variants]) => variants.size >= 2 && hasNumericContradiction([...variants.values()]))
     .map(([question, variants]) => ({ question, variants: [...variants.values()] }));
+}
+
+// Different WORDING is not a contradiction ("Within 2 days." vs "We ship in 2
+// days, usually."). A contradiction needs facts that cannot both be true;
+// the only fact class detectable without a judgement call is a number, so two
+// answers that each state numbers and disagree on them are flagged, and
+// string inequality alone never is.
+const numberSet = (text) => new Set((text.match(/\d+(?:[.,]\d+)?/g) || []).map((n) => n.replace(',', '')));
+function hasNumericContradiction(variants) {
+  const sets = variants.map((v) => numberSet(v.answer)).filter((s) => s.size > 0);
+  for (let i = 0; i < sets.length; i++) {
+    for (let j = i + 1; j < sets.length; j++) {
+      const a = [...sets[i]];
+      const b = [...sets[j]];
+      // Disagree when neither stated-number set is a subset of the other.
+      if (!a.every((n) => sets[j].has(n)) && !b.every((n) => sets[i].has(n))) return true;
+    }
+  }
+  return false;
+}
+
+function isComparablePage(r) {
+  let url;
+  try { url = new URL(r.page); } catch { return false; }
+  if (url.search) return false;
+  const canonical = r.analysis?.canonicalUrl;
+  if (canonical) {
+    try {
+      const c = new URL(canonical);
+      const norm = (u) => `${u.hostname.replace(/^www\./, '')}${u.pathname.replace(/\/$/, '')}`;
+      if (norm(c) !== norm(url)) return false;
+    } catch { /* unparseable canonical — don't exclude on it */ }
+  }
+  return true;
 }
 
 // A lighter-weight, purpose-built decision for "which page's FAQ answer is
@@ -311,14 +351,16 @@ export async function run({ siteId, start, end, pageCache, params }) {
     },
   });
 
+  const affectedHaveMultipleFaqBlocks = reachable.some((r) => r.analysis.faqCountMismatch && r.analysis.faqPageBlockCount >= 2);
   const faqMismatchFinding = aggregateSystemicFinding({
     id: 'content-integrity:faq-schema-mismatch',
     affected: reachable.filter((r) => r.analysis.faqCountMismatch),
     checkedCount: reachable.length,
     getPage: (r) => r.page,
     getImpressions: (r) => r.impressions,
-    whyItMatters: (n, c) => `${n} of ${c} checked pages have an FAQPage schema whose question count doesn't match the real number of visible FAQ questions on the page — the structured data no longer describes what a visitor actually sees.`,
-    extraEvidence: (affected) => ({ samples: affected.slice(0, 5).map((r) => ({ page: r.page, schemaCount: r.analysis.faqMainEntityCount, visibleCount: r.analysis.faqVisibleQuestionCount })) }),
+    whyItMatters: (n, c) => `${n} of ${c} checked pages have an FAQPage schema whose question count doesn't match the real number of visible FAQ questions on the page — the structured data no longer describes what a visitor actually sees.`
+      + (affectedHaveMultipleFaqBlocks ? ' Some of these pages carry more than one FAQPage block, which is itself an error — a page should declare exactly one.' : ''),
+    extraEvidence: (affected) => ({ samples: affected.slice(0, 5).map((r) => ({ page: r.page, schemaCount: r.analysis.faqMainEntityCount, schemaBlockCounts: r.analysis.faqSchemaBlockCounts, visibleCount: r.analysis.faqVisibleQuestionCount })) }),
     pickRepresentative: (affected) => pickSafeOrTopImpression(affected, (a) => a.faqSchemaSimple && a.faqExtractionComplete),
     recommendedAction: (representative) => {
       const a = representative.analysis;
@@ -448,11 +490,14 @@ export async function run({ siteId, start, end, pageCache, params }) {
         affectedCount: inconsistentFaqQuestions.length, checkedCount: reachable.length,
         samples: inconsistentFaqQuestions.slice(0, 5), decidedCount,
       },
-      whyItMatters: `${inconsistentFaqQuestions.length} FAQ question(s) appear on more than one checked page with a different real answer each time — visitors get inconsistent information depending which page they land on.`
+      whyItMatters: `${inconsistentFaqQuestions.length} FAQ question(s) appear on more than one checked page with conflicting figures in the answer each time — visitors get inconsistent information depending which page they land on.`
         + (decidedCount ? ` ${decidedCount} of these were resolved from real evidence (an independently-confirmed off-topic FAQ, a freshness signal, or a genuinely different declared page purpose).` : ''),
       priority: 'medium',
       recommendedAction,
       expectedImpact: { label: 'Medium', basis: 'computed', value: inconsistentFaqQuestions.length },
+      // Only entries whose answers state conflicting numbers reach here (see
+      // findInconsistentFaqQuestions) — wording differences never do.
+      verification: makeVerification(VERDICT.CONFIRMED, 'numeric-contradiction', 'same question answered with conflicting numbers on canonical pages'),
     });
   }
 

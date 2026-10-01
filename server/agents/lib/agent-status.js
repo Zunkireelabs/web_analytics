@@ -1,6 +1,6 @@
 import { listAgentMeta } from '../registry.js';
-import { getLatestAgentRuns } from '../../store/agent-runs.js';
-import { listDrafts } from '../../store/drafts.js';
+import { getLatestAgentRunSummaries } from '../../store/agent-runs.js';
+import { getLatestGeoAuditScore } from '../../store/drafts.js';
 
 // Real 0-100 score for the handful of agents that compute one on their own
 // run (authority, ai-visibility). geo-signals doesn't compute a score
@@ -9,8 +9,8 @@ import { listDrafts } from '../../store/drafts.js';
 // in separately. Every other agent has no comparable self-score; returning
 // null for them means the UI shows no badge, never a fabricated number.
 function scoreForAgent(agentId, row, geoAuditScore) {
-  if (agentId === 'authority') return row?.facts?.authorityScore ?? null;
-  if (agentId === 'ai-visibility') return row?.facts?.siteScore?.overall ?? null;
+  if (agentId === 'authority') return row?.authority_score ?? null;
+  if (agentId === 'ai-visibility') return row?.site_score_overall ?? null;
   if (agentId === 'geo-signals') return geoAuditScore;
   return null;
 }
@@ -21,19 +21,18 @@ function scoreForAgent(agentId, row, geoAuditScore) {
 // fabricated/simulated "running" state, only what's actually in agent_runs.
 export async function getAgentStatusList(siteId) {
   const meta = await listAgentMeta();
-  const [rows, geoAuditDrafts] = await Promise.all([
-    getLatestAgentRuns(siteId, meta.map((m) => m.id)),
-    listDrafts(siteId, { actionType: 'geo-audit' }),
+  const [rows, geoAuditScore] = await Promise.all([
+    getLatestAgentRunSummaries(siteId, meta.map((m) => m.id)),
+    getLatestGeoAuditScore(siteId),
   ]);
   const byId = new Map(rows.map((r) => [r.agent_id, r]));
-  const geoAuditScore = geoAuditDrafts[0]?.content?.score?.overall ?? null;
   return meta.map((m) => {
     const row = byId.get(m.id);
     return {
       ...m,
       lastRunStatus: row?.status || null,
       lastRunAt: row?.created_at || null,
-      lastRunFindings: Array.isArray(row?.facts?.findings) ? row.facts.findings.length : null,
+      lastRunFindings: row?.finding_count ?? null,
       lastRunScore: scoreForAgent(m.id, row, geoAuditScore),
     };
   });

@@ -1,5 +1,6 @@
-import { test, describe, mock } from 'node:test';
+import { test, describe, mock, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { __resetInternalErrorDedupe } from '../../lib/errors.js';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
@@ -62,6 +63,12 @@ const draft = { id: 42, action_type: 'schema', branch_name: 'action-center/batch
 // travelling alongside it, drafts.apply_error says only "could not be pushed" —
 // which is exactly the state four real drafts on site 1 sat in for three days.
 describe('persisted GitHub failures carry a correlation ref', () => {
+  // logInternal caps a STORM of identical errors (lib/errors.js) with
+  // process-wide state. These cases deliberately repeat the same failure, so
+  // each one starts with a clean window — otherwise the "distinct refs" test
+  // below would be the 4th identical failure and hit the cap.
+  beforeEach(() => __resetInternalErrorDedupe());
+
   const cases = [
     ['pushDraftBranch', () => pushDraftBranch(site, draft, [{ path: 'a.njk', content: 'x' }], 'main')],
     ['openPrForBranch', () => openPrForBranch(site, draft, draft.branch_name)],

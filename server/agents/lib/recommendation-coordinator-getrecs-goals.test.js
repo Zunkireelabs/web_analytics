@@ -30,7 +30,7 @@ mock.module(resolve('../../store/recommendations.js'), {
 mock.module(resolve('../../store/drafts.js'), { namedExports: { getLiveDraftsByFindingId: async () => new Map() } });
 mock.module(resolve('../../store/recommendation-attempts.js'), { namedExports: { attemptSummaryByFinding: async () => new Map() } });
 mock.module(resolve('./command-center.js'), { namedExports: { categoryByAgentId: async () => new Map() } });
-mock.module(resolve('./risk-tiers.js'), { namedExports: { riskTierForGenerator: () => 'safe' } });
+mock.module(resolve('./risk-tiers.js'), { namedExports: { riskTierForGenerator: () => 'safe', requiresHumanReview: () => false } });
 mock.module(resolve('../../store/admin/audit-log.js'), { namedExports: { recordAuditEvent: async () => {} } });
 mock.module(resolve('./recommendation-gates.js'), { namedExports: { createRecommendationGates: () => ({ evaluate: async () => ({ drop: null, blockedReason: null }) }) } });
 mock.module(resolve('./technical-seo-analysis.js'), { namedExports: { recheckLink: async () => ({}) } });

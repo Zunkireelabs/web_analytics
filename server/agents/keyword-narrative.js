@@ -15,15 +15,34 @@ import { pickCannibalizationWinner } from './lib/cannibalization-decision.js';
 // topic is covered.
 const MIN_CLUSTER_PAGE_IMPRESSIONS = 10;
 
+// Lowercased word tokens with a trailing plural 's' folded, so "visa" and
+// "visas" / "scholarship" and "scholarships" are the same word.
+const tokenize = (text) => String(text).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+  .map((t) => (t.length > 3 && t.endsWith('s') ? t.slice(0, -1) : t));
+
+// Does a real GSC query count as one of the cluster's keywords? Exact-string
+// matching missed every reordered/pluralised/extended variant ("study in uk"
+// vs "uk study"), so a cluster whose traffic landed on a real page was told
+// "no existing page covers it". Token-set matching: one side's words must all
+// appear (whole-word, not substring) in the other's, and a one-word side only
+// counts when both sides are that single word — "visa" must not claim every
+// "student visa uk" query. Exported for tests.
+export function keywordMatchesQuery(keyword, queryText) {
+  const k = new Set(tokenize(keyword));
+  const q = new Set(tokenize(queryText));
+  if (!k.size || !q.size) return false;
+  const [small, big] = k.size <= q.size ? [k, q] : [q, k];
+  if (small.size < 2 && big.size !== small.size) return false;
+  return [...small].every((t) => big.has(t));
+}
+
 // Real GSC rows (query, page, clicks, impressions, avgPosition) whose query
-// text matches one of this cluster's own keywords, aggregated per landing
-// page. Case-insensitive exact match only — no fuzzy/semantic matching,
-// since a wrong match here would misroute the whole routing decision below.
+// text matches one of this cluster's own keywords (token-set match, see
+// keywordMatchesQuery), aggregated per landing page.
 function matchedPagesForCluster(keywords, queryPageMetrics) {
-  const keywordSet = new Set(keywords.map((k) => k.toLowerCase()));
   const byPage = new Map();
   for (const r of queryPageMetrics) {
-    if (!keywordSet.has(r.query.toLowerCase())) continue;
+    if (!keywords.some((k) => keywordMatchesQuery(k, r.query))) continue;
     if (!byPage.has(r.page)) byPage.set(r.page, { page: r.page, clicks: 0, impressions: 0, positionWeighted: 0 });
     const p = byPage.get(r.page);
     p.clicks += r.clicks;
@@ -39,6 +58,7 @@ const SYSTEM_PROMPT = `You are an SEO and AI visibility analyst.
 Write a brief 3 paragraph narrative summary.
 Be specific, use real data given to you.
 Never invent numbers or keywords.
+Each content cluster's avgPosition/avgImpressions are a stored 14-day snapshot from the last clustering run (snapshotDate when present), not current figures — say "as of the last clustering snapshot" when citing them.
 Keep it under 150 words total.
 
 Paragraph 1 - Keyword Opportunities:
@@ -100,6 +120,11 @@ async function collectFacts(siteId) {
         gapScore: Number(c.gap_score),
         avgPosition: c.avg_position != null ? Number(c.avg_position) : null,
         avgImpressions: Number(c.avg_impressions),
+        // avgPosition/avgImpressions are the stored values from the clustering
+        // run (a 14-day snapshot), not re-derived now — dated so nobody reads
+        // them as current. snapshotDate is null until getKeywordClusters
+        // (store/data-analyst.js) also selects created_at.
+        snapshotDate: c.created_at ? new Date(c.created_at).toISOString().slice(0, 10) : null,
         keywords: Array.isArray(c.keywords_json) ? c.keywords_json.map((k) => k.keyword).filter(Boolean) : [],
       })),
       aiVisibility: visibility ? { overall: visibility.overall, categories: visibility.categories } : null,
@@ -266,9 +291,11 @@ export async function run({ siteId }) {
   const narrative = await callLLM(SYSTEM_PROMPT, `Facts: ${JSON.stringify(facts)}`, { maxTokens: 400 })
     .catch((err) => { console.warn('[agents] keyword-narrative narrative failed:', err.message); return null; });
 
-  // Dashboard-read side effect lives here now, not in a second parallel
-  // code path — see runKeywordNarrativeForAllSites below for why.
-  if (narrative) await saveKeywordNarrative(siteId, narrative);
+  // NOT persisted here: run() cannot tell whether it was called with
+  // persist:true (runner.js does not pass it in) — a persist:false/ad-hoc run
+  // (Copilot tool call, orchestrator dry run) used to overwrite the dashboard's
+  // saved narrative as a side effect. The dashboard row is written by the
+  // persist:true caller, runKeywordNarrativeForAllSites below.
 
   return {
     meta, status: 'ok',
@@ -293,6 +320,9 @@ export async function runKeywordNarrativeForAllSites() {
   for (const site of sites) {
     try {
       const output = await runAgent('keyword-narrative', { siteId: site.id }, { persist: true });
+      // Dashboard-read side effect, only on this persist:true path (moved out
+      // of run(), see the note there).
+      if (output.status === 'ok' && output.narrative) await saveKeywordNarrative(site.id, output.narrative);
       results.push({ siteId: site.id, status: output.status });
     } catch (err) {
       console.error(`[keyword-narrative] site ${site.id} "${site.name}" failed:`, err.message);

@@ -11,6 +11,8 @@ import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation
 import { applyPacing, applyConvergenceCap } from '../agents/lib/ship-pacing.js';
 import { draftShipState, SHIP_STATE } from '../lib/draft-ship-state.js';
 import { recordOutcome } from '../agents/lib/generator-learning.js';
+import { getProtectedPageSet } from '../store/protected-pages.js';
+import { isProtectedChange } from '../agents/lib/protected-pages.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState, reopenRecommendation, blockRecommendation, getRecommendationByFindingId } from '../store/recommendations.js';
 import { recordAttempt } from '../store/recommendation-attempts.js';
 import { classifyAbandonReason, RETRY_POLICY } from '../lib/attempt-classification.js';
@@ -18,7 +20,7 @@ import { query as pgQuery } from '../db.js';
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
 import { scheduleImpactMeasurement } from '../store/fix-impact.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
-import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
+import { getLatestAgentRunSummaries } from '../agents/lib/fresh-runs.js';
 import { saveAgentRun } from '../store/agent-runs.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
@@ -203,7 +205,7 @@ router.get('/action-center/recommendations', async (req, res, next) => {
 export async function buildStalenessContext(siteId) {
   const [meta, runs] = await Promise.all([
     listAgentMeta(),
-    getLatestAgentRuns(siteId, RECOMMENDATION_AGENT_IDS),
+    getLatestAgentRunSummaries(siteId, RECOMMENDATION_AGENT_IDS),
   ]);
   const nameById = new Map(meta.map((m) => [m.id, m]));
   const byId = new Map(runs.map((r) => [r.agent_id, r]));
@@ -1565,12 +1567,17 @@ export async function prepareSafeFixesJob(siteId, { userId, limit = SAFE_FIX_BAT
   // shipped. auto-remediation.js applies both rules BEFORE its daily budget
   // for exactly this reason. 4x covers a batch that is overwhelmingly one
   // paced generator while keeping the query bounded.
-  const [rawSelected, site, pendingDraftFilePaths, draftedFindingIds] = await Promise.all([
+  const [rawSelectedAll, site, pendingDraftFilePaths, draftedFindingIds, protectedPages] = await Promise.all([
     listOpenSafeRecommendations(siteId, limit * 4),
     getSiteById(siteId),
     getPendingDraftFilePaths(siteId),
     getDraftedFindingIds(siteId),
+    getProtectedPageSet(siteId),
   ]);
+  // This bulk path is a selector the unattended rules must also bind: a
+  // title/canonical/redirect/content change on a page that earns clicks is
+  // held for a person, same as in auto-remediation.js (protected-pages.js).
+  const rawSelected = rawSelectedAll.filter((r) => !isProtectedChange(r, protectedPages));
   const job = await createExecutionJob(siteId, { trigger: 'bulk', requestedBy: userId });
 
   // Same exclusion auto-remediation.js's unattended path already applies
