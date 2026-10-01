@@ -293,7 +293,12 @@ export async function generate({ siteId, params }) {
       // decide not to cite. Government/research/documentation/publication
       // sources are untouched; only a host matching this site's own active
       // competitor_profiles is removed. See agents/lib/competitor-policy.js.
-      const { allowed, removed } = await filterCompetitorCandidates(rawSources, siteId);
+      // The site's own pages are never a citation: a "source" that is the
+      // page itself (confirmed in a live sample) or a sibling page is an
+      // internal link, not external authority, and defeats the signal.
+      const ownHost = hostOf(siteForStructuralCheck?.website_domain ? (/^https?:/.test(siteForStructuralCheck.website_domain) ? siteForStructuralCheck.website_domain : `https://${siteForStructuralCheck.website_domain}`) : page);
+      const external = rawSources.filter((s) => { const h = hostOf(s.url); return h && ownHost && h !== ownHost && !h.endsWith(`.${ownHost}`); });
+      const { allowed, removed } = await filterCompetitorCandidates(external, siteId);
       if (removed.length) {
         console.warn(`[expand-content] filtered ${removed.length} competitor source(s) from citation candidates for site ${siteId}: ${removed.map((s) => s.url).join(', ')}`);
       }

@@ -75,3 +75,9 @@ describe('shared search cache', () => {
     } finally { globalThis.fetch = original; }
   });
 });
+
+describe('own-site sources', () => {
+  test('hostOf treats www and apex as the same host, so own-domain filtering catches both', () => {
+    assert.equal(hostOf('https://www.zunkireelabs.com/blog/x'), hostOf('https://zunkireelabs.com/'));
+  });
+});
