@@ -126,12 +126,17 @@ export async function fetchHtml(url) {
 // unmodified document, so boilerplate-stripping must never touch that `$`.
 function extractMainText(html) {
   const $clean = cheerio.load(html);
+  // Everything a reader can see, nav/header/footer included — for checks that
+  // ask "does the page mention X anywhere" (title-keyword consistency), where
+  // the first narrow MAIN_CONTENT_SELECTORS container is the wrong haystack.
+  $clean('script, style, noscript').remove();
+  const fullText = $clean('body').text().replace(/\s+/g, ' ').trim();
   $clean(BOILERPLATE_SELECTORS).remove();
   for (const selector of MAIN_CONTENT_SELECTORS) {
     const text = $clean(selector).first().text().replace(/\s+/g, ' ').trim();
-    if (text.split(' ').filter(Boolean).length >= MIN_GROUNDING_WORDS) return { text, selector };
+    if (text.split(' ').filter(Boolean).length >= MIN_GROUNDING_WORDS) return { text, selector, fullText };
   }
-  return { text: $clean('body').text().replace(/\s+/g, ' ').trim(), selector: null };
+  return { text: $clean('body').text().replace(/\s+/g, ' ').trim(), selector: null, fullText };
 }
 
 // Shared by every generator that grounds an LLM prompt in a live page's real
@@ -164,6 +169,57 @@ export function requireGroundedContent(analysis, { generatorId } = {}) {
   );
 }
 
+// Query-intent gate for comparison content: a comparison section is only
+// "missing" when a real ranking query signals comparison intent. Shared by
+// contentGapChecks and geo-signals.js so the two agents cannot drift.
+export const COMPARISON_INTENT_RE = /\bvs\.?\b|\bversus\b|\bcompar(e|ison)\b|\bbest\b/i;
+export function hasComparisonQueryIntent(queries) {
+  return [].concat(queries || []).some((q) => typeof q === 'string' && COMPARISON_INTENT_RE.test(q));
+}
+
+// Article-like pages are the only ones where author/date/review/citation
+// signals are a meaningful expectation — a service, legal, contact or
+// product page has no byline or publish date by design. Decided from the page's
+// own declarations (og:type, Article-family schema) or an article URL
+// segment, never guessed; false when none of those say so.
+const ARTICLE_SCHEMA_TYPES = new Set(['Article', 'BlogPosting', 'NewsArticle', 'TechArticle', 'ScholarlyArticle', 'Report']);
+const ARTICLE_PATH_RE = /\/(blog|articles?|news|guides?|posts?|insights|resources)\/[^/]+/i;
+export function isArticleLikePage({ schemaTypes = [], openGraphType = null, pagePath = '' } = {}) {
+  if ((schemaTypes || []).some((t) => ARTICLE_SCHEMA_TYPES.has(t))) return true;
+  if ((openGraphType || '').toLowerCase() === 'article') return true;
+  return ARTICLE_PATH_RE.test(pagePath || '');
+}
+
+// Legal/policy pages never need FAQ/comparison/author gaps; used to gate FAQ.
+const LEGAL_PATH_RE = /\/(privacy|privacy-policy|terms|terms-of-service|terms-and-conditions|terms-of-use|legal|cookies?|cookie-policy|disclaimer|refund-policy|imprint)(\/|$)/i;
+export function isLegalPath(pagePath = '') {
+  return LEGAL_PATH_RE.test(pagePath || '');
+}
+
+// Visible text of a FAQ question trigger with decorative children (icon
+// glyphs, "+"/"−" toggles, chevrons) removed — `<summary>Q?<span>+</span>`
+// reads "Q?+" as raw text, which a plain endsWith('?') check rejected.
+const DECORATIVE_CHILD_SELECTOR = 'svg, i, [aria-hidden="true"], [class*="icon" i], [class*="chevron" i], [class*="arrow" i], [class*="toggle" i], [class*="caret" i]';
+const TRAILING_DECORATION_RE = /[\s+\-−–—×✕✖▼▲▾▴▸›»⌄∨∧^]+$/u;
+export function questionTextOf($, el) {
+  const clone = $(el).clone();
+  clone.find(DECORATIVE_CHILD_SELECTOR).remove();
+  return clone.text().replace(/\s+/g, ' ').trim().replace(TRAILING_DECORATION_RE, '').trim();
+}
+
+// Looser than the strict accordion detector (button/summary/dt questions):
+// any sign the page shows FAQ-shaped content a visitor can read — a FAQ-
+// marked container, a visible "FAQ"/"Frequently asked" heading, a question
+// phrased as an h2-h4, or a <p><strong>Question?</strong> pair (the platform's
+// own FAQ output). Used ONLY to abstain from asserting "no visible FAQ".
+export function hasLooseVisibleFaq($, _headingText, hasFaqMarkup) {
+  if (hasFaqMarkup) return true;
+  if (/faq|frequently asked/i.test($('h1, h2, h3, h4').text())) return true;
+  const isQuestion = (t) => t.length > 0 && t.length < 200 && t.endsWith('?');
+  if ($('h2, h3, h4').toArray().some((el) => isQuestion(questionTextOf($, el)))) return true;
+  return $('p > strong, p > b').toArray().some((el) => isQuestion(questionTextOf($, el)));
+}
+
 export function analyzePage(html, pageUrl) {
   const $ = cheerio.load(html);
   const title = $('title').first().text().trim();
@@ -186,6 +242,10 @@ export function analyzePage(html, pageUrl) {
   // questionElements (the real visible accordion count) so a schema/visible
   // mismatch is a genuine detected fact, not a guess.
   let faqMainEntityCount = 0;
+  // Per-FAQPage-block mainEntity counts (one entry per block, document order)
+  // — faqMainEntityCount above keeps only the max, which hides a second block
+  // that disagrees with the first. 2+ FAQPage blocks is itself a real defect.
+  const faqSchemaBlockCounts = [];
   // Duplicate-schema and invalid-JSON-LD are real, technical issues a
   // generator now DOES auto-fix, exact-match-or-refuse only — see
   // generators/schema-repair.js + implementers/lib/schema-repair-inject.js.
@@ -240,6 +300,7 @@ export function analyzePage(html, pageUrl) {
           hasFaqSchema = true;
           const entities = [].concat(block.mainEntity || []).flat();
           faqMainEntityCount = Math.max(faqMainEntityCount, entities.length);
+          faqSchemaBlockCounts.push(entities.length);
         }
         if (types.includes('Review') || types.includes('AggregateRating')) hasReviewSchema = true;
         const rating = block.aggregateRating;
@@ -265,7 +326,7 @@ export function analyzePage(html, pageUrl) {
   // question elements whose text ends in "?".
   const hasFaqMarkup = $('[id*="faq" i], [class*="faq" i], [aria-label*="faq" i], [aria-label*="frequently asked" i], [x-ref*="faq" i]').length > 0;
   const questionElements = $('button, summary, dt, [role="button"]').filter((_, el) => {
-    const text = $(el).text().trim();
+    const text = questionTextOf($, el);
     return text.length > 0 && text.length < 200 && text.endsWith('?');
   });
   const hasFaqAccordion = questionElements.length >= 2;
@@ -304,10 +365,7 @@ export function analyzePage(html, pageUrl) {
     }
     // Unambiguous next-sibling fallback: exactly one sibling between this
     // question and the next question-like element, with real text.
-    const siblings = $el.nextUntil($('button, summary, dt, [role="button"]').filter((__, q) => {
-      const t = $(q).text().trim();
-      return t.length > 0 && t.length < 200 && t.endsWith('?');
-    }));
+    const siblings = $el.nextUntil(questionElements);
     if (siblings.length === 1) {
       const text = siblings.first().text().trim();
       if (text) return text;
@@ -316,7 +374,7 @@ export function analyzePage(html, pageUrl) {
   }
 
   const faqVisibleItems = questionElements.get().map((el) => ({
-    question: $(el).text().trim(),
+    question: questionTextOf($, el),
     answer: extractAnswerFor(el),
   }));
   const faqVisibleQuestionCount = faqVisibleItems.length;
@@ -329,7 +387,10 @@ export function analyzePage(html, pageUrl) {
   // block when nothing else in that tag would be lost by doing so.
   const faqSchemaBlock = schemaScriptBlocks.find((b) => b.types.includes('FAQPage')) || null;
   const faqSchemaRaw = faqSchemaBlock ? faqSchemaBlock.raw : null;
-  const faqSchemaSimple = !!faqSchemaBlock && faqSchemaBlock.types.length === 1 && faqSchemaBlock.types[0] === 'FAQPage';
+  // Exactly one FAQPage block: with two, "the" block to resync is ambiguous
+  // (and the duplication is the real defect), so never offer the auto-fix.
+  const faqSchemaSimple = !!faqSchemaBlock && faqSchemaBlock.types.length === 1 && faqSchemaBlock.types[0] === 'FAQPage'
+    && faqSchemaBlockCounts.length === 1;
 
   // Real question count the FAQPage schema claims (faqMainEntityCount, from
   // the JSON-LD loop above) vs. the real number of visible accordion
@@ -337,8 +398,11 @@ export function analyzePage(html, pageUrl) {
   // actually sees have drifted apart (a stale schema after a content edit,
   // or a schema block copy-pasted from a different page). Only checked when
   // both signals are actually present, never inferred from just one side.
+  // Compared against EACH FAQPage block, not just the first/largest: a second
+  // block that disagrees with the visible FAQ is a mismatch too.
+  const faqPageBlockCount = faqSchemaBlockCounts.length;
   const faqCountMismatch = hasFaqSchema && faqMainEntityCount > 0 && hasFaqAccordion
-    && faqMainEntityCount !== faqVisibleQuestionCount;
+    && faqSchemaBlockCounts.some((n) => n > 0 && n !== faqVisibleQuestionCount);
 
   // The case faqCountMismatch structurally cannot catch, and the worst one:
   // an FAQPage schema on a page with NO visible FAQ whatsoever. The check
@@ -352,7 +416,13 @@ export function analyzePage(html, pageUrl) {
   // complete, confident reading of both (schema says N, page shows none).
   // Real instance: /resources/ai-search-playbook/ on site 1, 5 schema
   // questions and no FAQ on the page at all.
-  const faqSchemaWithoutVisible = hasFaqSchema && faqMainEntityCount > 0 && faqVisibleQuestionCount === 0;
+  //
+  // Zero is only asserted when NO other FAQ-shaped content exists: the strict
+  // accordion count above only sees button/summary/dt questions, but the
+  // platform's own FAQ output (and many sites) use h2-h4 or <p><strong>
+  // questions, or a visible "FAQ" section heading. Unsure => abstain.
+  const faqSchemaWithoutVisible = hasFaqSchema && faqMainEntityCount > 0 && faqVisibleQuestionCount === 0
+    && !hasLooseVisibleFaq($, headingText, hasFaqMarkup);
 
   // Distinct FAQ-marked containers (id/class containing "faq") that each
   // independently qualify as a real accordion (2+ visible questions), kept
@@ -364,10 +434,8 @@ export function analyzePage(html, pageUrl) {
   const faqContainers = $('[id*="faq" i], [class*="faq" i]').toArray()
     .map((el) => {
       const $el = $(el);
-      const qs = $el.find('button, summary, dt, [role="button"]').filter((__, q) => {
-        const t = $(q).text().trim();
-        return t.length > 0 && t.length < 200 && t.endsWith('?');
-      }).map((__, q) => $(q).text().trim()).get();
+      const qs = $el.find('button, summary, dt, [role="button"]').map((__, q) => questionTextOf($, q)).get()
+        .filter((t) => t.length > 0 && t.length < 200 && t.endsWith('?'));
       return { el, questions: qs, html: $.html(el) };
     })
     .filter((c) => c.questions.length >= 2)
@@ -423,9 +491,11 @@ export function analyzePage(html, pageUrl) {
 
   let host = null;
   let isRootPage = false;
+  let pagePath = '';
   try {
     const parsed = new URL(pageUrl);
     host = parsed.hostname;
+    pagePath = parsed.pathname;
     // Same segment check breadcrumbs.js itself refuses on (no real trail to
     // draft for the homepage) — computed here too so the gap never fires in
     // the first place, see contentGapChecks below.
@@ -498,7 +568,7 @@ export function analyzePage(html, pageUrl) {
     });
   }
 
-  const { text: bodyText, selector: mainContentSelector } = extractMainText(html);
+  const { text: bodyText, selector: mainContentSelector, fullText } = extractMainText(html);
   const wordCount = bodyText ? bodyText.split(' ').filter(Boolean).length : 0;
 
   const images = $('img');
@@ -762,8 +832,24 @@ export function analyzePage(html, pageUrl) {
     if (!hasLabel) formInputsMissingLabel++;
   });
 
-  const hasAccessibleName = (el) => $(el).text().trim().length > 0 || !!$(el).attr('aria-label') || !!$(el).attr('title') || $(el).find('img[alt]').filter((_, img) => ($(img).attr('alt') || '').trim()).length > 0;
-  const emptyInteractiveElements = $('button, a[href]').filter((_, el) => !hasAccessibleName(el)).length;
+  // Framework-bound names (Alpine x-text/:aria-label, Vue v-text/v-bind, a
+  // {{ binding }} in the text) resolve at runtime and are named in the real DOM
+  // even though the static HTML shows nothing — never count them as empty.
+  const FRAMEWORK_NAME_ATTRS = ['x-text', 'x-html', 'v-text', 'v-html', ':aria-label', 'x-bind:aria-label', 'v-bind:aria-label', ':title', 'x-bind:title', 'aria-labelledby'];
+  const hasAccessibleName = (el) => {
+    const $el = $(el);
+    if ($el.text().trim().length > 0 || !!$el.attr('aria-label') || !!$el.attr('title')) return true;
+    if ($el.find('img[alt]').filter((_, img) => ($(img).attr('alt') || '').trim()).length > 0) return true;
+    if (FRAMEWORK_NAME_ATTRS.some((a) => $el.attr(a) != null)) return true;
+    // A bound child (<span x-text="...">) names the control just as well.
+    if ($el.find('[x-text], [v-text], [x-html], [v-html]').length > 0) return true;
+    if (/\{\{[\s\S]*\}\}/.test($el.html() || '')) return true;
+    return false;
+  };
+  // An id'd control with an empty body is almost always populated by script
+  // after load (a cart/count/menu button) — static HTML cannot prove it empty.
+  const isJsPopulated = (el) => !!$(el).attr('id') && $(el).children().length === 0 && $(el).text().trim() === '';
+  const emptyInteractiveElements = $('button, a[href]').filter((_, el) => !hasAccessibleName(el) && !isJsPopulated(el)).length;
 
   const idOccurrences = new Map(); // id -> [{tag, snippet}]
   $('[id]').each((_, el) => {
@@ -800,8 +886,11 @@ export function analyzePage(html, pageUrl) {
   // 'no' or a maximum-scale of 1 (or less) both block pinch-zoom — a real,
   // common anti-pattern that actively hurts low-vision users, not merely a
   // missing best-practice.
-  const viewportBlocksZoom = /user-scalable\s*=\s*no/i.test(viewportContent || '')
-    || /maximum-scale\s*=\s*(0(\.\d+)?|1(\.0*)?)\b/i.test(viewportContent || '');
+  // maximum-scale is parsed as a number: the old regex's trailing \b let
+  // "maximum-scale=1.5" match its "1" prefix, flagging a zoomable page.
+  const maxScaleMatch = /maximum-scale\s*=\s*([0-9]*\.?[0-9]+)/i.exec(viewportContent || '');
+  const viewportBlocksZoom = /user-scalable\s*=\s*(no|0)\b/i.test(viewportContent || '')
+    || (maxScaleMatch != null && Number(maxScaleMatch[1]) <= 1);
 
   // Page-weight signals — real counts off the actual fetched HTML, not
   // guessed. See MAX_INLINE_STYLE_COUNT/MAX_HTML_SIZE_BYTES for the
@@ -820,6 +909,8 @@ export function analyzePage(html, pageUrl) {
     malformedSchemaBlocks, // transient, like bodyText/imagesMissingAlt — real raw text of each block above, for generators/schema-repair.js
     schemaScriptBlocks, // transient — {raw, types}[] per real <script> tag, document order, for schema-repair.js's duplicate-removal fix to anchor an exact-match patch against
     hasFaq: hasFaqSchema || hasFaqHeading,
+    faqPageBlockCount, // number of FAQPage JSON-LD blocks — 2+ is itself a defect
+    faqSchemaBlockCounts, // mainEntity count per FAQPage block
     hasFaqSchema, // split out from hasFaq — FAQPage schema is a stronger, machine-readable signal than a heading
     hasFaqHeading,
     hasComparisonContent: hasComparisonTable || hasComparisonHeading,
@@ -841,6 +932,15 @@ export function analyzePage(html, pageUrl) {
     hasCanonical: $('link[rel="canonical"]').length > 0,
     canonicalUrl, // real resolved target, null if absent or unparseable — see contentGapChecks' cross-domain check
     pageHost: host, // this page's own hostname, already resolved above for internalLinks — exposed so callers can compare canonicalUrl's host without re-parsing pageUrl
+    pagePath, // this page's own URL path — see isArticleLikePage/isLegalPath gates in contentGapChecks
+    isArticlePage: isArticleLikePage({ schemaTypes: [...schemaTypes], openGraphType: ($('meta[property="og:type"]').first().attr('content') || '').trim(), pagePath }), // author/freshness/review/citation signals only apply to article-like pages
+    isLegalPage: isLegalPath(pagePath),
+    // Strict accordion questions OR any looser FAQ-shaped visible content —
+    // the signal other agents use to avoid asserting "no FAQ" / "no question headings".
+    hasVisibleFaqContent: faqVisibleQuestionCount > 0 || hasLooseVisibleFaq($, headingText, hasFaqMarkup),
+    // Title keywords vs the FULL visible text — bodyText below is only the
+    // first matching content container, which is often one narrow block.
+    keywordConsistency: titleKeywordConsistency(title, fullText),
     isRootPage, // true for the homepage (no path segments) — see contentGapChecks' breadcrumbs check below
     hasOpenGraph: $('meta[property="og:title"]').length > 0 || $('meta[property="og:description"]').length > 0,
     // Raw og:type value, null when absent — the page's own declaration of
@@ -1383,7 +1483,9 @@ function contentGapChecks(analysis, queryTexts = []) {
   else if (analysis.h1Count > 1) gaps.push({ type: 'Missing H1', detail: `${analysis.h1Count} H1 tags found — should be exactly one.` });
   if (analysis.h2Count === 0) gaps.push({ type: 'Missing H2', detail: 'No H2 subheadings — thin content structure.' });
 
-  if (!analysis.hasFaq) gaps.push({ type: 'Missing FAQ', detail: 'No FAQ schema, heading, or Q&A accordion detected.' });
+  // FAQ is a content/service/location-page concern — never a legal/policy
+  // page — and is not "missing" when any visible FAQ-shaped content exists.
+  if (!analysis.hasFaq && !analysis.hasVisibleFaqContent && !analysis.isLegalPage) gaps.push({ type: 'Missing FAQ', detail: 'No FAQ schema, heading, or Q&A accordion detected.' });
   if (!analysis.hasSchema) gaps.push({ type: 'Missing schema', detail: 'No structured data (JSON-LD) found on the page.' });
 
   const titleLen = analysis.title?.length || 0;
@@ -1398,7 +1500,7 @@ function contentGapChecks(analysis, queryTexts = []) {
     if (descLen > MAX_META_DESCRIPTION_LEN) gaps.push({ type: 'Meta description length', detail: `Meta description is ${descLen} characters — Google typically truncates past ${MAX_META_DESCRIPTION_LEN}.` });
   }
 
-  const comparisonQuery = queries.find((q) => /\bvs\.?\b|\bversus\b|\bcompar(e|ison)\b|\bbest\b/i.test(q));
+  const comparisonQuery = queries.find((q) => COMPARISON_INTENT_RE.test(q));
   if (comparisonQuery && !analysis.hasComparisonContent) {
     gaps.push({ type: 'Missing comparisons', detail: `Ranking query "${comparisonQuery}" signals comparison intent, but no comparison table or section was found.` });
   }
@@ -1418,11 +1520,17 @@ function contentGapChecks(analysis, queryTexts = []) {
     // looks like a mistake.
     let canonicalHost = null;
     try { canonicalHost = new URL(analysis.canonicalUrl).hostname; } catch { /* leave null — already-invalid canonicalUrl */ }
-    if (canonicalHost && canonicalHost !== analysis.pageHost) {
+    // www vs apex is the same site, and a page that 3xx'd was analysed as its
+    // destination's HTML — its canonical says nothing about the requested URL.
+    const bare = (h) => String(h).toLowerCase().replace(/^www\./, '');
+    if (canonicalHost && !analysis.wasRedirected && bare(canonicalHost) !== bare(analysis.pageHost)) {
       gaps.push({ type: 'Canonical points to a different domain', detail: `Canonical tag points to "${analysis.canonicalUrl}" — a different domain than this page (${analysis.pageHost}).` });
     }
   }
-  const keywordConsistency = titleKeywordConsistency(analysis.title, analysis.bodyText);
+  // Prefer the full-visible-text result; when absent (hand-built analysis)
+  // only trust bodyText if it was NOT a narrow sub-container pick.
+  const keywordConsistency = analysis.keywordConsistency
+    || (analysis.mainContentSelector ? { checked: false, ratio: null, missingWords: [] } : titleKeywordConsistency(analysis.title, analysis.bodyText));
   if (keywordConsistency.checked && keywordConsistency.ratio < 0.5) {
     gaps.push({ type: 'Keyword consistency', detail: `Title's key terms barely appear in the page body (missing: ${keywordConsistency.missingWords.join(', ')}) — the title may no longer reflect what the page actually covers.` });
   }
@@ -1447,23 +1555,25 @@ function contentGapChecks(analysis, queryTexts = []) {
     gaps.push({ type: 'Invalid structured data', detail: `${analysis.malformedJsonLdBlocks} JSON-LD <script> block(s) on this page failed to parse as valid JSON.` });
   }
   if (analysis.listCount === 0) gaps.push({ type: 'Missing structured lists', detail: 'No ordered/unordered lists — lists help answer-engine extraction.' });
-  if (analysis.questionHeadingCount === 0) gaps.push({ type: 'Missing question-style headings', detail: 'No headings phrased as questions — reduces AEO/featured-snippet eligibility.' });
+  if (analysis.questionHeadingCount === 0 && !analysis.hasVisibleFaqContent) gaps.push({ type: 'Missing question-style headings', detail: 'No headings phrased as questions — reduces AEO/featured-snippet eligibility.' });
 
   // GEO (Generative Engine Optimization) gaps — confirmed via a cross-check
   // against the sibling audit tool's geo checks (authorExpertise.js,
   // freshnessSignals.js, reviewRatingSchema.js, externalCitations.js): real,
   // previously-uncovered signals in what AI assistants weigh when deciding
   // what to cite/recommend, on top of the classic SEO gaps above.
-  if (!analysis.hasAuthorSignal) {
+  // Author/date/review/citation signals are only expected on article-like pages.
+  const articleLike = !!analysis.isArticlePage;
+  if (articleLike && !analysis.hasAuthorSignal) {
     gaps.push({ type: 'Missing author/expertise signal', detail: 'No author schema, rel="author", itemprop="author", meta author tag, or visible byline found — unattributed content is less likely to be cited by generative engines.' });
   }
-  if (!analysis.hasFreshnessSignal) {
+  if (articleLike && !analysis.hasFreshnessSignal) {
     gaps.push({ type: 'Missing freshness signal', detail: 'No publish or last-updated date found (no datePublished/dateModified schema, article date meta tags, or a <time> element) — generative engines favor recently-updated content when choosing what to cite.' });
   }
-  if (!analysis.hasReviewSchema) {
+  if (articleLike && !analysis.hasReviewSchema) {
     gaps.push({ type: 'Missing review/rating schema', detail: 'No Review or AggregateRating schema found — this is only worth adding if the page has real reviews/ratings to mark up; never fabricate rating data to fill this gap.' });
   }
-  if (!analysis.hasExternalCitations) {
+  if (articleLike && !analysis.hasExternalCitations) {
     gaps.push({
       type: 'Missing external citations',
       detail: analysis.externalCitationDomainCount === 1
@@ -1478,10 +1588,16 @@ function contentGapChecks(analysis, queryTexts = []) {
 // Fetches and analyzes `url` once, returning a reusable base analysis. Pass
 // the same result into recommendationsFor() for every query that lands on
 // this page, so shared pages aren't re-fetched.
+const stripWww = (u) => String(u).replace(/^(https?:\/\/)www\./i, '$1');
 export async function analyzePageUrl(url) {
   const fetched = await fetchHtml(url);
   if (!fetched.ok) return { ok: false, error: fetched.error };
-  return { ok: true, analysis: analyzePage(fetched.html, url) };
+  const analysis = analyzePage(fetched.html, url);
+  // fetch() follows redirects silently, so a page that 3xx'd was analysed as
+  // the DESTINATION's HTML under the original URL. Flag it so URL-relative
+  // checks (canonical host) can skip rather than judge the wrong page.
+  analysis.wasRedirected = !!fetched.url && stripWww(fetched.url).replace(/\/$/, '') !== stripWww(url).replace(/\/$/, '');
+  return { ok: true, analysis };
 }
 
 // Query-specific recommendations (title match depends on the query) built

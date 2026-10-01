@@ -13,6 +13,8 @@ function analysisWith(overrides) {
     hasExternalCitations: true,
     hasReviewSchema: true,
     questionHeadingCount: 1,
+    isArticlePage: true,
+    hasVisibleFaqContent: false,
     ...overrides,
   };
 }
@@ -35,7 +37,8 @@ describe('geo-signals — recommendationsFor', () => {
       { key: 'hasExternalCitations', generatorId: 'expand-content' },
     ];
     for (const { key, generatorId } of cases) {
-      const recs = recommendationsFor(analysisWith({ [key]: false }), '/p', 'query', []);
+      // comparison content is only missing for a comparison-intent query
+      const recs = recommendationsFor(analysisWith({ [key]: false }), '/p', 'acme vs rival', []);
       assert.equal(recs.length, 1, `expected exactly one recommendation for ${key}`);
       assert.equal(recs[0].generatorId, generatorId, `${key} should still route to ${generatorId}`);
     }
@@ -55,5 +58,38 @@ describe('geo-signals — recommendationsFor', () => {
     const recs = recommendationsFor(analysisWith({ questionHeadingCount: 0 }), '/p', 'query', []);
     assert.equal(recs.length, 1);
     assert.equal(recs[0].generatorId, 'qa-content');
+  });
+});
+
+describe('geo-signals — applicability gates', () => {
+  test('comparison content is not asked for without a comparison-intent query', () => {
+    const recs = recommendationsFor(analysisWith({ hasComparisonContent: false }), '/p', 'acme pricing', []);
+    assert.equal(recs.length, 0);
+  });
+
+  test('date, citation and review signals are not asked for on a non-article page', () => {
+    const recs = recommendationsFor(
+      analysisWith({ isArticlePage: false, hasFreshnessSignal: false, hasExternalCitations: false, hasReviewSchema: false }),
+      '/services/web', 'web design', [],
+    );
+    assert.equal(recs.length, 0);
+  });
+
+  test('qa-content is skipped when a visible FAQ exists, even with no h1-h3 question headings', () => {
+    const recs = recommendationsFor(analysisWith({ questionHeadingCount: 0, hasVisibleFaqContent: true }), '/p', 'q', []);
+    assert.equal(recs.length, 0);
+  });
+});
+
+import { citationPagesBeyondCap } from './geo-signals.js';
+describe('citation action cap', () => {
+  const page = (url, impressions, focus = 'external-citations') => ({ page: url, impressions, recommendations: [{ params: { focus } }] });
+  test('only the top pages by impressions keep the citations action', () => {
+    const pages = [page('a', 5), page('b', 90), page('c', 40), page('d', 1)];
+    assert.deepEqual([...citationPagesBeyondCap(pages, 2)].sort(), ['a', 'd']);
+  });
+  test('pages without the citations signal never count toward the cap', () => {
+    const pages = [page('a', 5, 'comparison-content'), page('b', 90), page('c', 40)];
+    assert.equal(citationPagesBeyondCap(pages, 2).size, 0);
   });
 });

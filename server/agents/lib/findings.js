@@ -45,9 +45,11 @@ export const impactFromPriority = (priority) => PRIORITY_TO_IMPACT_LABEL[priorit
 
 export function makeFinding({
   id, evidence, whyItMatters, priority, recommendedAction = null, expectedImpact,
-  reportOnly = null,
+  reportOnly = null, verification = null,
 }) {
-  return { id, evidence, whyItMatters, priority, recommendedAction, expectedImpact, reportOnly };
+  // `verification` ({verdict, method, reason}, see verdict.js) is opt-in: null
+  // means a legacy detector that has not declared how it proved the defect.
+  return { id, evidence, whyItMatters, priority, recommendedAction, expectedImpact, reportOnly, verification };
 }
 
 // For a check whose failure is usually one shared, sitewide root cause (a

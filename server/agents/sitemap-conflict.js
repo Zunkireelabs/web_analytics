@@ -10,6 +10,7 @@ export const meta = {
   name: 'Sitemap/Index-Signal Conflict Detector',
   description: 'Cross-references this site\'s own sitemap against Google\'s real per-page index inspection (technical_seo_checks.index_status) and flags a listed URL that is itself blocked by robots.txt, blocked by a noindex directive, or not Google\'s chosen canonical. Auto-resolves the two cases where the evidence unambiguously identifies which real signal is wrong: a robots.txt Disallow rule that the site\'s own sitemap contradicts (same safe Allow-override primitive as technical-seo.js\'s robots-blocked check), and a page with no self-asserted canonical where Google has already, authoritatively, picked a different one (draft a canonical agreeing with Google\'s own verdict).',
   category: 'technical',
+  requiresCapabilities: ['public-web'],
   version: 1,
 };
 
@@ -58,6 +59,17 @@ export async function run({ siteId }) {
     return {
       meta, status: 'insufficient-data', facts: null, narrative: null,
       message: 'No technical-seo inspection data yet for any sitemap URL — nothing to cross-reference.', generatedAt: new Date().toISOString(),
+    };
+  }
+
+  // GSC inspection data must actually be present: rows exist for pages that
+  // were only checked for other signals (index_status null), and treating
+  // "never inspected" as "no conflict" reported a clean ok on a site this
+  // agent had not observed at all.
+  if (!signals.some((s) => s.index_status)) {
+    return {
+      meta, status: 'insufficient-data', facts: null, narrative: null,
+      message: 'No Google index-inspection (GSC) verdict recorded for any sitemap URL yet — nothing to cross-reference.', generatedAt: new Date().toISOString(),
     };
   }
 

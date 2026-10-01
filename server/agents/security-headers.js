@@ -9,6 +9,7 @@ export const meta = {
   name: 'Security Headers Agent',
   description: 'Checks real HTTP response headers (HSTS, Content-Security-Policy, X-Content-Type-Options, clickjacking protection, Referrer-Policy) across the site\'s own pages.',
   category: 'security',
+  requiresCapabilities: ['public-web'],
   version: 1,
   // No external data source — every signal here is read directly off the
   // real HTTP response headers this site's own server already sends, same
@@ -48,17 +49,39 @@ const CHECKS = [
     key: 'referrer-policy',
     label: 'Referrer-Policy',
     detail: 'controls how much of this site\'s own URL structure leaks to other sites via the Referer header when a user clicks an outbound link',
+    // Browsers already default to strict-origin-when-cross-origin when the
+    // header is absent, so this is hardening, not an exposed defect.
+    informational: true,
   },
 ];
 
+// http:// and https:// (and www/apex, trailing-slash) variants of one page are
+// one page for a response-header check — the http variant normally 301s, and
+// counting both double-weights the same page in "N of M pages lack X".
+export function dedupePageVariants(pages) {
+  const seen = new Map();
+  for (const page of pages) {
+    let key = page;
+    try {
+      const u = new URL(page);
+      key = `${u.hostname.replace(/^www\./, '').toLowerCase()}${u.pathname.replace(/\/+$/, '') || '/'}${u.search}`;
+    } catch { /* keep raw string as its own key */ }
+    const prev = seen.get(key);
+    // Prefer the https variant — that's what visitors actually get.
+    if (!prev || (/^http:/i.test(prev) && /^https:/i.test(page))) seen.set(key, page);
+  }
+  return [...seen.values()];
+}
+
 export async function run({ siteId, start, end, params }) {
-  const { batch, impressionsByPage } = params?.pages?.length
+  const { batch: rawBatch, impressionsByPage } = params?.pages?.length
     ? await getSearchPerformanceForPages(siteId, start, end, params.pages).then((rows) => ({
       batch: params.pages,
       impressionsByPage: new Map(rows.map((r) => [r.dim_value, Number(r.impressions)])),
     }))
     : await selectCandidatePages(siteId, 'security-headers', { start, end, batchSize: MAX_PAGES });
 
+  const batch = dedupePageVariants(rawBatch);
   if (!batch.length) {
     return {
       meta, status: 'insufficient-data', facts: null, narrative: null,
@@ -68,7 +91,7 @@ export async function run({ siteId, start, end, params }) {
   }
 
   const fetched = await Promise.all(batch.map(async (page) => ({ page, result: await fetchResponseHeaders(page) })));
-  if (!params?.pages?.length) await markPagesChecked(siteId, 'security-headers', batch);
+  if (!params?.pages?.length) await markPagesChecked(siteId, 'security-headers', rawBatch);
 
   const reachable = fetched.filter((r) => r.result.ok);
 
@@ -91,6 +114,13 @@ export async function run({ siteId, start, end, params }) {
       whyItMatters: (n, c) => `${check.label} is missing on ${n} of ${c} checked pages — it ${check.detail}.`,
       recommendedAction: null, // a response-header fix is a server/CDN config change, not draftable content
     });
+    if (finding && check.informational) {
+      // Hardening, not an exposed defect (browser default already applies):
+      // low priority and kept OUT of the combined nginx-fix action below.
+      finding.priority = 'low';
+      finding.expectedImpact = { ...finding.expectedImpact, label: 'Low' };
+      finding.evidence = { ...finding.evidence, informational: true };
+    }
     return finding ? [finding] : [];
   });
 
@@ -105,7 +135,7 @@ export async function run({ siteId, start, end, params }) {
   // every chunk, since headers are set once at the server level, not
   // per-page) rather than summing a count across chunks that would only be
   // correct for a genuinely per-page fact.
-  const missingKeys = findings.map((f) => f.id.replace('security-headers:', ''));
+  const missingKeys = findings.filter((f) => !f.evidence?.informational).map((f) => f.id.replace('security-headers:', ''));
   if (missingKeys.length) {
     const totalImpressions = reachable.reduce((sum, r) => sum + (impressionsByPage.get(r.page) || 0), 0);
     findings.push(makeFinding({
@@ -130,7 +160,7 @@ export async function run({ siteId, start, end, params }) {
     // pagesChecked below (per-page ok/error detail) because recommendation
     // auto-close (recommendation-coordinator.js) needs a uniform shape
     // across every batch-rotated agent, not each agent's own result shape.
-    checkedPages: batch,
+    checkedPages: rawBatch,
     pagesChecked: fetched.map((r) => ({ page: r.page, ok: r.result.ok, error: r.result.ok ? null : r.result.error })),
     findings,
   };

@@ -132,35 +132,61 @@ function modeClassesForFontSize(entries, targetFontSize) {
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
 }
 
-// Whether `targetEntry`'s ancestor wrapper class is not shared by ANY other
-// page's entry in this same run's real captured evidence for this element
-// group — bounded to what was actually captured, never a guess about pages
-// that weren't sampled. A name reused across pages (Chayce's own
-// ".page-hero", independently duplicated into 8 separate templates) means a
-// fix keyed on it could land on more than the one intended page, so this
-// only ever returns true for a wrapper class genuinely unique in the
-// evidence gathered.
-function ancestorClassIsPageUnique(entries, targetEntry) {
-  const cls = targetEntry.sample.ancestorClass;
-  if (!cls) return false;
-  return !entries.some((e) => e.url !== targetEntry.url && e.sample.ancestorClass === cls);
+// A font-size utility token (text-xl, text-[28px], md:text-[36px]) — what a
+// component's classes say about HOW BIG it is, as opposed to what it IS.
+const SIZE_TOKEN_RE = /^(?:[a-z0-9-]+:)*text-(?:xs|sm|base|lg|xl|\d+xl|\[[\d.]+(?:px|rem|em)\])$/i;
+const RESPONSIVE_SIZE_TOKEN_RE = /^[a-z0-9-]+:.*text-(?:xs|sm|base|lg|xl|\d+xl|\[[\d.]+(?:px|rem|em)\])$/i;
+
+function classTokenList(classes) {
+  return (classes || '').trim().split(/\s+/).filter(Boolean);
 }
 
-// Groups real captured samples (from font-consistency-capture.js) by real
-// role — one group per heading level (h1/h2/h3/h4), one group for body
-// paragraphs — then, WITHIN each role, checks a sample against its own
-// page-type/template's real majority first, falling back to the sitewide
-// majority only when that template doesn't have enough of its own evidence
-// to have an opinion. This is what lets a site that legitimately runs a
-// bigger h1 on its landing-style templates than on its interior pages (a
-// real, confirmed design decision on THIS site, never a rule carried over
-// from another tenant) stay unflagged, while a template with too few sampled
-// pages of its own still gets checked against something.
+// True when the element's own classes set a size per breakpoint. One
+// getComputedStyle snapshot (a single viewport) cannot say what such an
+// element is supposed to render at, so it is never judged by that snapshot.
+function hasResponsiveSizeClass(classes) {
+  return classTokenList(classes).some((t) => RESPONSIVE_SIZE_TOKEN_RE.test(t));
+}
+
+// Visually hidden text (sr-only / display:none) has no rendered size a
+// visitor sees — comparing it to visible headings is always a false positive.
+function isHiddenSample(sample) {
+  return sample.srOnly === true || sample.hidden === true
+    || classTokenList(sample.classes).some((t) => t === 'sr-only' || t === 'hidden' || t === 'invisible');
+}
+
+function isHeroSample(tag, sample) {
+  return tag === 'h1' || sample.landmark === 'header'
+    || /hero|banner/i.test(`${sample.classes || ''} ${sample.ancestorClass || ''}`);
+}
+
+// What COMPONENT an element is, independent of how big it is: tag + the
+// landmark it sits in (footer/nav/aside/main/...) + its classes with the
+// font-size tokens removed. A bare element (no classes) is identified by its
+// nearest classed ancestor instead. A footer h4 and a card h4 therefore never
+// share a key, and neither do a hero paragraph and a caption.
+function componentKey(tag, sample) {
+  const rest = classTokenList(sample.classes).filter((t) => !SIZE_TOKEN_RE.test(t)).sort().join(' ');
+  const scope = rest || `@${sample.ancestorClass || ''}`;
+  return `${tag}|${sample.landmark || ''}|${scope}`;
+}
+
+// Groups real captured samples (from font-consistency-capture.js) by
+// COMPONENT (componentKey) — same tag, same landmark, same non-size classes —
+// then checks a sample against the real majority of its OWN page-type/
+// template within that component. There is deliberately NO sitewide fallback:
+// a template with too few sampled pages of its own has no evidence of what it
+// is supposed to look like, and "the rest of the site is different" is
+// exactly how a deliberately larger homepage h1, or a footer h4 vs. a card
+// h4, used to be reported as defects (177 + 219 false outliers audited
+// 2026-09-30). Thin evidence abstains.
 export function findFontSizeOutliers(pages) {
-  const byTag = new Map(); // tag -> [{url, pageType, sample}]
+  const byComponent = new Map(); // componentKey -> {tag, entries:[{url, pageType, sample}]}
   const push = (tag, url, pageType, sample) => {
-    if (!byTag.has(tag)) byTag.set(tag, []);
-    byTag.get(tag).push({ url, pageType, sample });
+    if (!sample || isHiddenSample(sample)) return;
+    const key = componentKey(tag, sample);
+    if (!byComponent.has(key)) byComponent.set(key, { tag, entries: [] });
+    byComponent.get(key).entries.push({ url, pageType, sample });
   };
   for (const p of pages || []) {
     const pageType = p.pageType || null;
@@ -169,9 +195,7 @@ export function findFontSizeOutliers(pages) {
   }
 
   const outliers = [];
-  for (const [group, entries] of byTag) {
-    const siteMode = computeMode(entries);
-
+  for (const { tag: group, entries } of byComponent.values()) {
     const byType = new Map();
     for (const e of entries) {
       const key = e.pageType || '__unknown__';
@@ -180,55 +204,43 @@ export function findFontSizeOutliers(pages) {
     }
 
     for (const [pageType, typeEntries] of byType) {
-      const typeMode = computeMode(typeEntries);
-      const expected = typeMode || siteMode;
+      const expected = computeMode(typeEntries);
       if (!expected) continue;
-      const scope = typeMode ? 'template' : 'site';
-      const poolEntries = typeMode ? typeEntries : entries;
       for (const e of typeEntries) {
-        if (e.sample.fontSize !== expected) {
-          const siteConvention = modeClassesForFontSize(poolEntries, expected);
-          const resolvedConvention = siteConvention && !sameClassTokens(e.sample.classes, siteConvention) ? siteConvention : null;
-          // The scoped-selector fix only ever applies where the class-swap
-          // fix genuinely cannot: the element itself carries no class at all
-          // (styled purely via an ancestor wrapper + tag selector), so there
-          // is nothing for modeClassesForFontSize/swapAnchorClass to act on.
-          // Only offered when this run's own evidence already proves BOTH
-          // that the ancestor wrapper class is unique to this one page, AND
-          // that the real authored declaration (captured alongside the
-          // computed value — see font-consistency-capture.js) is a plain
-          // length, not a fluid/responsive expression (clamp()/vw/calc()) —
-          // flattening one of those would require inventing new responsive
-          // bounds nobody has evidenced, so it stays genuinely unfixable,
-          // not merely undetected.
-          const pageScoped = !resolvedConvention && !e.sample.classes && e.sample.ancestorClass
-            && ancestorClassIsPageUnique(entries, e);
-          const rawDeclaration = e.sample.rawFontSizeDeclaration;
-          const scopedSelector = pageScoped && rawDeclaration && isFlatLength(rawDeclaration)
-            ? { ancestorClass: e.sample.ancestorClass, tag: group }
-            : null;
-          // Surfaced even when NOT fixable, so the reportOnly reason can
-          // name the real, specific cause (a page-scoped fluid expression)
-          // instead of the generic "shared CSS, ask a human" text this used
-          // to give regardless of the actual reason.
-          const scopedButFluid = pageScoped && rawDeclaration && !isFlatLength(rawDeclaration) ? rawDeclaration : null;
-          outliers.push({
-            group,
-            pageType: pageType === '__unknown__' ? null : pageType,
-            scope,
-            url: e.url,
-            expectedFontSize: expected,
-            actualFontSize: e.sample.fontSize,
-            // null when the outlier's own classes already token-match the
-            // resolved convention (or there's nothing to compare) — a
-            // class-swap fix would be a no-op, so this stays unfixable by
-            // class, same as before.
-            siteConvention: resolvedConvention,
-            scopedSelector,
-            scopedButFluid,
-            sample: e.sample,
-          });
-        }
+        if (e.sample.fontSize === expected) continue;
+        const inlineOverride = hasInlineFontSizeOverride(e.sample.outerHtml);
+        // A responsive element is only ever judged when an inline style
+        // proves a one-element override; otherwise one viewport's computed
+        // size says nothing about the authored responsive design.
+        if (!inlineOverride && hasResponsiveSizeClass(e.sample.classes)) continue;
+        const siteConvention = modeClassesForFontSize(typeEntries, expected);
+        // A class swap is only offered when it is the SAME component (the
+        // key guarantees it), nobody on either side sizes it per breakpoint,
+        // and it is not a hero element — a hero's size is a deliberate
+        // design decision, never something to be normalised by a detector.
+        const swapSafe = siteConvention && !hasResponsiveSizeClass(siteConvention)
+          && !isHeroSample(group, e.sample) && !sameClassTokens(e.sample.classes, siteConvention);
+        const resolvedConvention = swapSafe ? siteConvention : null;
+        // The page-scoped ancestor-selector fix (buildScopedFontSizeFix) is
+        // never offered from here any more: an element is only ever compared
+        // to others under the SAME ancestor wrapper (componentKey), so a
+        // wrapper class "unique to this one page" can no longer be shown to
+        // be the odd one out, and a bare hero h1 must not be normalised.
+        // The fields stay on the outlier shape for font-consistency.js.
+        outliers.push({
+          group,
+          pageType: pageType === '__unknown__' ? null : pageType,
+          scope: 'template',
+          url: e.url,
+          expectedFontSize: expected,
+          actualFontSize: e.sample.fontSize,
+          // null when a class swap is not provably safe (responsive,
+          // hero, or the outlier already carries the convention's classes).
+          siteConvention: resolvedConvention,
+          scopedSelector: null,
+          scopedButFluid: null,
+          sample: e.sample,
+        });
       }
     }
   }

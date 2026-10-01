@@ -6,6 +6,9 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 let site;
 let fetchStatus;
 let fetchError;
+let probeBody;
+let homeBody;
+let fetched;
 
 mock.module(resolve('../store/read.js'), {
   namedExports: { getSiteById: async () => site },
@@ -17,9 +20,14 @@ beforeEach(() => {
   site = { id: 1, website_domain: 'example.com', tech_stack: 'eleventy' };
   fetchStatus = 200;
   fetchError = null;
-  global.fetch = async () => {
+  probeBody = '<html>home</html>';
+  homeBody = '<html>home</html>';
+  fetched = [];
+  global.fetch = async (url) => {
+    fetched.push(url);
     if (fetchError) throw fetchError;
-    return { status: fetchStatus };
+    const isProbe = String(url).includes('__action-center-soft-404-probe__');
+    return { status: isProbe ? fetchStatus : 200, text: async () => (isProbe ? probeBody : homeBody) };
   };
 });
 
@@ -80,5 +88,38 @@ describe('soft-404 agent', () => {
     fetchError = new Error('ETIMEDOUT');
     const result = await run({ siteId: 1 });
     assert.equal(result.status, 'insufficient-data');
+  });
+
+  test('normalizes a website_domain stored as a full URL (https://x.com/) instead of throwing', async () => {
+    site.website_domain = 'https://example.com/';
+    const result = await run({ siteId: 1 });
+    assert.equal(result.status, 'ok');
+    assert.equal(result.facts.probeUrl, 'https://example.com/__action-center-soft-404-probe__/');
+    assert.equal(result.facts.findings.length, 1);
+  });
+
+  test('a 2xx whose body differs from the homepage is a legitimate fallback, not a soft-404', async () => {
+    probeBody = '<html>custom not found page</html>';
+    const result = await run({ siteId: 1 });
+    assert.equal(result.status, 'ok');
+    assert.deepEqual(result.facts.findings, []);
+  });
+
+  test('a redirect (e.g. www -> apex 301 for every path) is not a soft-404', async () => {
+    fetchStatus = 301;
+    const result = await run({ siteId: 1 });
+    assert.deepEqual(result.facts.findings, []);
+  });
+
+  test('a 2xx with an empty body cannot be a fingerprint match', async () => {
+    probeBody = '';
+    homeBody = '';
+    const result = await run({ siteId: 1 });
+    assert.deepEqual(result.facts.findings, []);
+  });
+
+  test('the confirmed finding carries a confirmed verification', async () => {
+    const result = await run({ siteId: 1 });
+    assert.equal(result.facts.findings[0].verification.verdict, 'confirmed');
   });
 });

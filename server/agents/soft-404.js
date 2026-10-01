@@ -2,12 +2,14 @@ import { getSiteById } from '../store/read.js';
 import { makeFinding, impactFromPriority } from './lib/findings.js';
 import { effortForGenerator, isPrivateOrLocalHost } from './lib/page-content.js';
 import { safeMessage } from '../lib/errors.js';
+import { makeVerification, VERDICT } from './lib/verdict.js';
 
 export const meta = {
   id: 'soft-404',
   name: 'Soft-404 Detector',
   description: 'Probes this site\'s own live server with a guaranteed-nonexistent URL and flags it if the response is 2xx instead of a real 404 — a common static-site misconfiguration where every stale, mistyped, or removed URL silently serves the homepage instead of "not found".',
   category: 'technical',
+  requiresCapabilities: ['public-web'],
   version: 1,
 };
 
@@ -38,6 +40,24 @@ const PROBE_PATH = '/__action-center-soft-404-probe__/';
 // a draftable action, so a human decides.
 const STATIC_SITE_GENERATORS = new Set(['eleventy', '11ty', 'hugo', 'jekyll', 'astro', 'gatsby', 'next-static']);
 
+async function fetchOnce(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      redirect: 'manual',
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ZunkireeAnalyticsBot/1.0; +soft-404-agent)' },
+    });
+    const text = res.status >= 200 && res.status < 300 && typeof res.text === 'function'
+      ? String(await res.text()).replace(/\s+/g, ' ').trim()
+      : '';
+    return { status: res.status, text };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function run({ siteId }) {
   const site = await getSiteById(siteId);
   if (!site?.website_domain) {
@@ -48,8 +68,18 @@ export async function run({ siteId }) {
     };
   }
 
+  // website_domain is stored both bare ("x.com") and as a full URL
+  // ("https://x.com/") depending on the tenant — blindly prefixing https://
+  // produced "https://https://x.com/", threw, and left this agent dead on
+  // every site stored the second way.
+  let origin;
   let hostname;
-  try { hostname = new URL(`https://${site.website_domain}`).hostname; } catch { hostname = null; }
+  try {
+    const d = String(site.website_domain).trim();
+    const u = new URL(/^https?:/i.test(d) ? d : `https://${d}`);
+    origin = u.origin;
+    hostname = u.hostname;
+  } catch { origin = null; hostname = null; }
   if (!hostname || isPrivateOrLocalHost(hostname)) {
     return {
       meta, status: 'insufficient-data', facts: null, narrative: null,
@@ -58,17 +88,21 @@ export async function run({ siteId }) {
     };
   }
 
-  const probeUrl = `https://${site.website_domain}${PROBE_PATH}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const probeUrl = `${origin}${PROBE_PATH}`;
   let status;
+  let probeText;
+  let homeText = null;
   try {
-    const res = await fetch(probeUrl, {
-      signal: controller.signal,
-      redirect: 'follow',
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ZunkireeAnalyticsBot/1.0; +soft-404-agent)' },
-    });
-    status = res.status;
+    // redirect:'manual' — a 301 to the canonical host (zunkireelabs.com's
+    // www answers EVERY path with one) is not a soft-404; only a same-origin
+    // 2xx that serves content is.
+    const probe = await fetchOnce(probeUrl);
+    status = probe.status;
+    probeText = probe.text;
+    if (status >= 200 && status < 300 && probeText) {
+      const home = await fetchOnce(`${origin}/`);
+      if (home.status >= 200 && home.status < 300) homeText = home.text;
+    }
   } catch (err) {
     const { message } = safeMessage(`soft-404.run:${site.id}`, err, 'this site could not be probed right now');
     return {
@@ -76,15 +110,21 @@ export async function run({ siteId }) {
       message,
       generatedAt: new Date().toISOString(),
     };
-  } finally {
-    clearTimeout(timeout);
   }
 
-  const isSoftNotFound = status >= 200 && status < 300;
+  const is2xx = status >= 200 && status < 300;
+  // A 2xx is only a homepage-fallback soft-404 when its body actually IS the
+  // homepage. A normal SPA/static host answering with its own not-found page
+  // or a distinct shell is legitimate; an empty body or an unfetchable
+  // homepage cannot prove anything, so it is not asserted either.
+  const isSoftNotFound = is2xx && Boolean(probeText) && homeText != null && probeText === homeText;
   if (!isSoftNotFound) {
     return {
       meta, status: 'ok',
-      facts: { probeUrl, responseStatus: status, findings: [] },
+      facts: {
+        probeUrl, responseStatus: status, findings: [],
+        ...(is2xx ? { note: homeText == null ? 'probe returned 2xx but the homepage could not be fetched to compare — not asserted' : 'probe returned 2xx but its body differs from the homepage — not a homepage fallback' } : {}),
+      },
       narrative: null, generatedAt: new Date().toISOString(),
     };
   }
@@ -96,6 +136,7 @@ export async function run({ siteId }) {
     evidence: { probeUrl, responseStatus: status, techStack: site.tech_stack || null },
     whyItMatters: `A guaranteed-nonexistent URL (${probeUrl}) returned HTTP ${status} instead of a real 404 — the server falls back to serving the homepage for any unmatched route. Every stale, mistyped, or removed URL search engines have ever seen for this domain now looks like duplicate homepage content instead of "not found", which is a common cause of mass "duplicate without user-selected canonical" reports in Search Console.`,
     priority,
+    verification: makeVerification(VERDICT.CONFIRMED, 'soft-404-fingerprint', 'nonexistent path returns 2xx with a body identical to the homepage'),
     recommendedAction: isKnownStaticGenerator ? {
       label: 'Return a real 404 status for unmatched routes',
       generatorId: 'soft-404-nginx',

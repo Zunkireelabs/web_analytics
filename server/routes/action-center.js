@@ -11,6 +11,8 @@ import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation
 import { applyPacing, applyConvergenceCap } from '../agents/lib/ship-pacing.js';
 import { draftShipState, SHIP_STATE } from '../lib/draft-ship-state.js';
 import { recordOutcome } from '../agents/lib/generator-learning.js';
+import { getProtectedPageSet } from '../store/protected-pages.js';
+import { isProtectedChange } from '../agents/lib/protected-pages.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState, reopenRecommendation, blockRecommendation, getRecommendationByFindingId } from '../store/recommendations.js';
 import { recordAttempt } from '../store/recommendation-attempts.js';
 import { classifyAbandonReason, RETRY_POLICY } from '../lib/attempt-classification.js';
@@ -1565,12 +1567,17 @@ export async function prepareSafeFixesJob(siteId, { userId, limit = SAFE_FIX_BAT
   // shipped. auto-remediation.js applies both rules BEFORE its daily budget
   // for exactly this reason. 4x covers a batch that is overwhelmingly one
   // paced generator while keeping the query bounded.
-  const [rawSelected, site, pendingDraftFilePaths, draftedFindingIds] = await Promise.all([
+  const [rawSelectedAll, site, pendingDraftFilePaths, draftedFindingIds, protectedPages] = await Promise.all([
     listOpenSafeRecommendations(siteId, limit * 4),
     getSiteById(siteId),
     getPendingDraftFilePaths(siteId),
     getDraftedFindingIds(siteId),
+    getProtectedPageSet(siteId),
   ]);
+  // This bulk path is a selector the unattended rules must also bind: a
+  // title/canonical/redirect/content change on a page that earns clicks is
+  // held for a person, same as in auto-remediation.js (protected-pages.js).
+  const rawSelected = rawSelectedAll.filter((r) => !isProtectedChange(r, protectedPages));
   const job = await createExecutionJob(siteId, { trigger: 'bulk', requestedBy: userId });
 
   // Same exclusion auto-remediation.js's unattended path already applies

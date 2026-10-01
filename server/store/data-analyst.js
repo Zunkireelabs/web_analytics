@@ -186,7 +186,7 @@ export async function getKeywordGapsInCluster(siteId, topicCluster, excludeGapId
 
 export async function getKeywordClusters(siteId, clusterType) {
   const { rows } = await query(
-    `SELECT cluster_name, cluster_type, keywords_json, avg_impressions, avg_position, gap_score
+    `SELECT cluster_name, cluster_type, keywords_json, avg_impressions, avg_position, gap_score, created_at
        FROM keyword_clusters
       WHERE site_id = $1 AND ($2::text IS NULL OR cluster_type = $2)
       ORDER BY created_at DESC`,

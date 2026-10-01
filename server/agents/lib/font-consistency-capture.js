@@ -38,6 +38,21 @@ function extractStyleSamplesInPage(maxParagraphs) {
     }
     return null;
   }
+  // Which page region the element lives in — what keeps a footer h4 and a
+  // card h4 (or a hero paragraph and a caption) from being compared as if
+  // they were the same component (see componentKey in
+  // font-consistency-analysis.js).
+  function landmarkOf(el) {
+    const l = el.closest('header, nav, footer, aside, main, article');
+    return l ? l.tagName.toLowerCase() : '';
+  }
+  // Visually hidden text (sr-only clip pattern, display:none, 0-size) has no
+  // rendered size a visitor sees.
+  function isVisuallyHidden(el, cs) {
+    if (cs.display === 'none' || cs.visibility === 'hidden') return true;
+    const r = el.getBoundingClientRect();
+    return r.width <= 1 || r.height <= 1;
+  }
   function sample(el, { captureAncestor = false } = {}) {
     if (!el) return null;
     const cs = window.getComputedStyle(el);
@@ -49,15 +64,17 @@ function extractStyleSamplesInPage(maxParagraphs) {
       inlineStyle: el.getAttribute('style') || null,
       outerHtml: el.outerHTML,
       text: el.textContent.trim().slice(0, 120),
-      // Only meaningful (and only ever looked up) for a heading with no
+      // Only meaningful (and only ever looked up) for an element with no
       // class of its own — see extractStyleSamplesInPage's caller.
       ancestorClass: captureAncestor && !classes ? nearestAncestorClass(el) : null,
+      landmark: landmarkOf(el),
+      hidden: isVisuallyHidden(el, cs),
     };
   }
   const headings = [...document.querySelectorAll('h1, h2, h3, h4')].map((el) => sample(el, { captureAncestor: true })).filter(Boolean);
   const paragraphs = [...document.querySelectorAll('main p, article p, body > p')]
     .slice(0, maxParagraphs)
-    .map((el) => sample(el))
+    .map((el) => sample(el, { captureAncestor: true }))
     .filter(Boolean);
   return { headings, paragraphs };
 }

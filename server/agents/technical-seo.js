@@ -1,6 +1,8 @@
 import { getSiteById, getSearchPerformanceForPages, getQueriesForPage } from '../store/read.js';
 import { priorityByRank, impactFromPriority, makeFinding, aggregateSystemicFinding } from './lib/findings.js';
 import { effortForGenerator, inferSchemaType, fetchTextIfExists, checkHttpsStatus, MAX_INLINE_STYLE_COUNT, MAX_HTML_SIZE_BYTES } from './lib/page-content.js';
+import { probeMany } from './lib/live-probe.js';
+import { MAX_CRAWL_DEPTH } from './lib/site-discovery.js';
 import { runPageChecks, detectDuplicateTitles, crawlInternalLinks, crawlExternalCitations } from './lib/technical-seo-analysis.js';
 import { upsertTechnicalSeoCheck, getCheckedAtForPages as getTechnicalSeoCheckedAt } from '../store/technical-seo-checks.js';
 import { selectCandidatePages } from './lib/candidate-pages.js';
@@ -20,6 +22,7 @@ export const meta = {
   name: 'Technical SEO Agent',
   description: 'Checks real Google index status, Core Web Vitals, technical page health, and broken links/redirects — whether Google can actually see and serve your pages well.',
   category: 'seo',
+  requiresCapabilities: ['public-web'],
   version: 7,
   // v7 makes the compression finding (added in v4, see below) draftable:
   // when the site tracks its own nginx config (url_file_map.siteRoot.
@@ -164,7 +167,7 @@ export function missingSchemaFinding(pageResults) {
   });
 }
 
-export async function run({ siteId, start, end, pageCache, params }) {
+export async function run({ siteId, start, end, pageCache, params, dryRun = false }) {
   const site = await getSiteById(siteId);
   const nginxConfigPath = site?.url_file_map?.siteRoot?.nginxConfig || null;
   // params.pages (from the bulk full-site-audit engine, agents/lib/bulk-audit.js)
@@ -205,7 +208,9 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // Persist each checked page's snapshot — drives next run's rotation
   // (checked_at) and (for duplicate-title detection) accumulates real
   // titles site-wide over time, not just this run's batch.
-  await Promise.all(pageResults.map((r) => upsertTechnicalSeoCheck(siteId, r.page, {
+  // A dryRun leaves no trace: these snapshots feed the NEXT run's rotation and
+  // duplicate-title detection, so a preview must not write them.
+  if (!dryRun) await Promise.all(pageResults.map((r) => upsertTechnicalSeoCheck(siteId, r.page, {
     indexStatus: r.indexStatus, coreWebVitals: r.coreWebVitals, technicalAudit: r.technicalAudit,
     brokenLinks: null, // filled in below once the crawl results are known
     lastImpressions: r.impressions,
@@ -217,7 +222,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const crawl = await crawlInternalLinks(pageResults);
   const citationCrawl = await crawlExternalCitations(pageResults);
   // Re-upsert with the per-page broken-link slice now that the crawl is done.
-  await Promise.all(pageResults.map((r) => {
+  if (!dryRun) await Promise.all(pageResults.map((r) => {
     const broken = crawl.broken.filter((b) => b.sourcePages.includes(r.page));
     const redirectChains = crawl.redirectChains.filter((c) => c.sourcePages.includes(r.page));
     if (!broken.length && !redirectChains.length) return null;
@@ -230,7 +235,18 @@ export async function run({ siteId, start, end, pageCache, params }) {
     }).catch((err) => console.error(`[agents] technical-seo: failed to persist link results for ${r.page}:`, err.message));
   }));
 
-  const duplicateGroups = await detectDuplicateTitles(siteId, pageResults.map((r) => ({ page: r.page, technicalAudit: r.technicalAudit, impressions: r.impressions })));
+  const candidateGroups = await detectDuplicateTitles(siteId, pageResults.map((r) => ({ page: r.page, technicalAudit: r.technicalAudit, impressions: r.impressions })));
+  // Stored titles can belong to pages that have since been redirected (or
+  // were recorded as a redirect's DESTINATION title before that was caught —
+  // confirmed on zunkireelabs.com: three 301 aliases of one post counted as
+  // "4 pages with the same title"). Only a page that is live right now at its
+  // own URL counts toward a duplicate; anything unprobed or unverifiable is
+  // left out rather than asserted.
+  const probed = await probeMany([...new Set(candidateGroups.flatMap((g) => g.pages.map((p) => p.page)))], { maxProbes: 40 });
+  const liveNow = new Set(probed.results.filter((p) => p.verdict === 'live').map((p) => p.url));
+  const duplicateGroups = candidateGroups
+    .map((g) => ({ ...g, pages: g.pages.filter((p) => liveNow.has(p.page)) }))
+    .filter((g) => g.pages.length >= 2);
 
   // GSC quota visibility — a rotating-quota problem should be visible on
   // Integration Health, not silently degrade every page's indexStatus to an
@@ -241,7 +257,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // would silently split into two never-reconciled states depending on
   // which path last wrote to it.
   const quotaExceeded = pageResults.some((r) => r.indexStatus.quotaExceeded);
-  await recordIntegrationCheck('gsc-url-inspection', null, {
+  if (!dryRun) await recordIntegrationCheck('gsc-url-inspection', null, {
     ok: !quotaExceeded,
     authStatus: quotaExceeded ? 'quota_exceeded' : 'ok',
     errorMessage: quotaExceeded ? 'GSC URL Inspection quota exceeded this run — some pages were not checked.' : null,
@@ -440,8 +456,8 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // mismatch Google's data AND the page's current live tag still agree is
   // real.
   const canonicalMismatchCandidates = pageResults.filter((r) =>
-    r.indexStatus.ok && r.indexStatus.googleCanonical && r.technicalAudit.ok && r.technicalAudit.canonicalUrl
-    && r.technicalAudit.canonicalUrl !== r.indexStatus.googleCanonical);
+    r.indexStatus.ok && r.indexStatus.googleCanonical && r.technicalAudit.ok && r.analysis?.canonicalUrl
+    && r.analysis.canonicalUrl !== r.indexStatus.googleCanonical);
   const canonicalFindings = [
     aggregateSystemicFinding({
       id: 'technical-seo:site:missing-canonical',
@@ -458,7 +474,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       checkedCount: pageResults.filter((r) => r.indexStatus.ok).length,
       getPage: (r) => r.page,
       getImpressions: (r) => r.impressions,
-      extraEvidence: (affected) => ({ samples: affected.slice(0, 5).map((r) => ({ page: r.page, googleCanonical: r.indexStatus.googleCanonical, userCanonical: r.technicalAudit.canonicalUrl })) }),
+      extraEvidence: (affected) => ({ samples: affected.slice(0, 5).map((r) => ({ page: r.page, googleCanonical: r.indexStatus.googleCanonical, userCanonical: r.analysis?.canonicalUrl })) }),
       whyItMatters: (n, c) => `Google's chosen canonical disagrees with the page's own declared canonical on ${n} of ${c} checked pages.`,
       recommendedAction: null,
     }),
@@ -516,6 +532,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
         // fabricated URL.
         : { label: 'Remove broken link', generatorId: 'broken-link-fix', params: { page: c.sourcePages[0], href: c.href, sourcePages: c.sourcePages }, effort: effortForGenerator('broken-link-fix') },
       expectedImpact: { label: impactFromPriority(brokenPriorities[i]), basis: 'computed', value: sourceImpressions(c.sourcePages) },
+      verification: c.verification,
     });
   });
 
@@ -534,6 +551,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     priority: citationPriorities[i],
     recommendedAction: { label: 'Remove invalid citation', generatorId: 'broken-link-fix', params: { page: c.sourcePages[0], href: c.href, sourcePages: c.sourcePages }, effort: effortForGenerator('broken-link-fix') },
     expectedImpact: { label: impactFromPriority(citationPriorities[i]), basis: 'computed', value: sourceImpressions(c.sourcePages) },
+    verification: c.verification,
   }));
 
   const chainCandidates = [...crawl.redirectChains].sort((a, b) => sourceImpressions(b.sourcePages) - sourceImpressions(a.sourcePages) || b.hops - a.hops);
@@ -563,7 +581,12 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const orphanedFindings = orphanedPages.map((p, i) => makeFinding({
     id: `technical-seo:orphaned:${p.page}`,
     evidence: { page: p.page, knownSince: p.first_seen_at },
-    whyItMatters: `${p.page} is listed in the sitemap but no internal link on the site actually points to it — search engines and users can only reach it directly.`,
+    // What the weekly crawl proved is only "not reached within MAX_CRAWL_DEPTH
+    // clicks of the homepage" — NOT "nothing links to it". Confirmed live on
+    // zunkireelabs.com: all 20 flagged blog posts ARE linked, but only from
+    // /blog/page/4 and /blog/page/9-11, deeper than the crawl goes. The honest
+    // finding is "buried", so that is what is said.
+    whyItMatters: `${p.page} is listed in the sitemap but the site crawl could not reach it within ${MAX_CRAWL_DEPTH} clicks of the homepage — it may be linked only from deep pagination pages, which buries it for search engines and visitors.`,
     priority: orphanedPriorities[i],
     recommendedAction: null,
     expectedImpact: { label: impactFromPriority(orphanedPriorities[i]), basis: 'estimate', value: null },
@@ -708,8 +731,8 @@ export async function run({ siteId, start, end, pageCache, params }) {
     })),
     sitemaps: sitemapResult.ok ? sitemapResult.sitemaps : [],
     sitemapsError: sitemapResult.ok ? null : sitemapResult.error,
-    linkCrawl: { checked: crawl.checked, brokenCount: crawl.broken.length, redirectChainCount: crawl.redirectChains.length, checkedPages: crawl.checkedPages },
-    citationCrawl: { checked: citationCrawl.checked, brokenCount: citationCrawl.broken.length, checkedPages: citationCrawl.checkedPages },
+    linkCrawl: { checked: crawl.checked, brokenCount: crawl.broken.length, unverifiableCount: crawl.unverifiableCount, redirectChainCount: crawl.redirectChains.length, checkedPages: crawl.checkedPages },
+    citationCrawl: { checked: citationCrawl.checked, brokenCount: citationCrawl.broken.length, unverifiableCount: citationCrawl.unverifiableCount, checkedPages: citationCrawl.checkedPages },
     orphanedPageCount: orphanedPages.length,
     sitemapUrlCount: sitemapUrls.length,
     crossDomainSitemapUrlCount: crossDomainUrls.length,

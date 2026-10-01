@@ -99,7 +99,7 @@ describe('redirect-chain agent', () => {
 
   describe('with a tracked nginx config', () => {
     beforeEach(() => {
-      site = { id: 1, url_file_map: { siteRoot: { nginxConfig: 'nginx/static.conf' } } };
+      site = { id: 1, tech_stack: 'eleventy', url_file_map: { siteRoot: { nginxConfig: 'nginx/static.conf' } } };
     });
 
     test('offers an auto-fix attempt via redirect-chain-nginx, with the observed hop/final target as params', async () => {
@@ -120,6 +120,40 @@ describe('redirect-chain agent', () => {
       });
       assert.equal(finding.reportOnly, null);
       assert.equal(result.facts.autoFixAttempted, 1);
+    });
+
+    const oldChain = {
+      hops: 2, error: null, finalStatus: 200,
+      chain: [
+        { url: 'https://example.com/old/', status: 301 },
+        { url: 'https://example.com/mid/', status: 301 },
+        { url: 'https://example.com/new/', status: 200 },
+      ],
+    };
+
+    test('does not offer the nginx fix for a Vercel-hosted site even with an nginx mapping', async () => {
+      site.tech_stack = 'next on vercel';
+      candidateBatch = ['https://example.com/old/'];
+      redirectResultByPage.set('https://example.com/old/', oldChain);
+      const result = await run({ siteId: 1, start: '2026-01-01', end: '2026-01-07' });
+      assert.equal(result.facts.findings[0].recommendedAction, null);
+      assert.ok(result.facts.findings[0].reportOnly);
+    });
+
+    test('does not offer the nginx fix when tech_stack is unknown', async () => {
+      site.tech_stack = null;
+      candidateBatch = ['https://example.com/old/'];
+      redirectResultByPage.set('https://example.com/old/', oldChain);
+      const result = await run({ siteId: 1, start: '2026-01-01', end: '2026-01-07' });
+      assert.equal(result.facts.findings[0].recommendedAction, null);
+    });
+
+    test('skips an unverifiable result entirely', async () => {
+      candidateBatch = ['https://example.com/old/'];
+      redirectResultByPage.set('https://example.com/old/', { ...oldChain, unverifiable: true });
+      const result = await run({ siteId: 1, start: '2026-01-01', end: '2026-01-07' });
+      assert.deepEqual(result.facts.findings, []);
+      assert.equal(result.facts.unverifiableCount, 1);
     });
   });
 });

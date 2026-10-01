@@ -23,6 +23,7 @@ export const meta = {
   name: 'Blog Image Agent',
   description: 'Finds existing blog posts published with no featured image at all, sharing their featured image with another post, or pointing at a local asset file that was never actually committed.',
   category: 'content',
+  requiresCapabilities: ['public-web'],
   version: 1,
 };
 

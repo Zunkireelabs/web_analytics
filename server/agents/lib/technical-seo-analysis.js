@@ -3,6 +3,7 @@ import { inspectUrl } from '../../ingest/gsc-technical.js';
 import { fetchCoreWebVitals, configured as pagespeedConfigured } from '../../ingest/pagespeed.js';
 import { listTitlesForSite } from '../../store/technical-seo-checks.js';
 import { describeFetchFailure } from '../../lib/errors.js';
+import { classifyLinkProbe, VERDICT } from './verdict.js';
 
 // Rotation-batch selection now lives in agents/lib/candidate-pages.js
 // (selectCandidatePages, called from technical-seo.js with an adapter over
@@ -60,12 +61,20 @@ export async function runPageChecks(site, pages, pageCache) {
       // Content-Encoding, not guessed from response size or file extension.
       fetchResponseHeaders(page).catch((err) => ({ ok: false, error: describeFetchFailure('technical-seo-analysis.fetchResponseHeaders', err) })),
     ]);
+    // A URL that 3xx'd was fetched as its DESTINATION's HTML (fetch follows
+    // redirects silently), so its title/canonical/schema belong to another
+    // page. Confirmed live on zunkireelabs.com: /products/ai-booking-engine/
+    // 301s to /resources/zenly-case-study/ and was reported as a canonical
+    // mismatch; three 301 aliases were counted as duplicate-title pages. A
+    // redirected URL is not a live page of its own — no per-page checks.
+    const redirected = pageAnalysis.ok && pageAnalysis.analysis?.wasRedirected === true;
     return {
       page,
-      analysis: pageAnalysis.ok ? pageAnalysis.analysis : null,
-      technicalAudit: pageAnalysis.ok
+      redirected,
+      analysis: pageAnalysis.ok && !redirected ? pageAnalysis.analysis : null,
+      technicalAudit: pageAnalysis.ok && !redirected
         ? { ok: true, hasCanonical: pageAnalysis.analysis.hasCanonical, hasSchema: pageAnalysis.analysis.hasSchema, schemaTypes: pageAnalysis.analysis.schemaTypes, title: pageAnalysis.analysis.title }
-        : { ok: false, error: pageAnalysis.error },
+        : { ok: false, error: redirected ? 'redirected' : pageAnalysis.error },
       indexStatus,
       coreWebVitals,
       compression: headers.ok
@@ -83,6 +92,9 @@ export async function runPageChecks(site, pages, pageCache) {
 export async function detectDuplicateTitles(siteId, batchResults) {
   const known = await listTitlesForSite(siteId);
   const byTitle = new Map();
+  // www and apex (and a trailing slash) are one page, not two: the www host
+  // just 301s to the apex, so counting both reports a page as its own duplicate.
+  const pageKey = (u) => { try { const x = new URL(u); return `${x.protocol}//${x.hostname.replace(/^www\./, '')}${x.pathname.replace(/\/$/, '')}${x.search}`; } catch { return u; } };
   const record = (page, title, impressions) => {
     if (!title) return;
     if (!byTitle.has(title)) byTitle.set(title, []);
@@ -93,7 +105,7 @@ export async function detectDuplicateTitles(siteId, batchResults) {
 
   const duplicateGroups = [];
   for (const [title, entries] of byTitle) {
-    const uniquePages = [...new Map(entries.map((e) => [e.page, e])).values()];
+    const uniquePages = [...new Map(entries.map((e) => [pageKey(e.page), e])).values()];
     if (uniquePages.length >= 2) duplicateGroups.push({ title, pages: uniquePages });
   }
   return duplicateGroups;
@@ -207,8 +219,14 @@ export async function fetchSoftNotFoundFingerprint(origin) {
   const timeout = setTimeout(() => controller.abort(), REDIRECT_HOP_TIMEOUT_MS);
   try {
     const res = await fetch(`${origin}/__seo-audit-nonexistent-check__`, { method: 'GET', redirect: 'manual', signal: controller.signal, headers: UA_HEADER });
-    const text = await res.text();
-    return { status: res.status, text: normalizeBody(text) };
+    const text = normalizeBody(await res.text());
+    // A soft-404 is a 2xx that serves "nothing here" content. Anything else
+    // (a true 404, or a 301 to the canonical host — confirmed live on
+    // zunkireelabs.com's www host, where a nonexistent path AND every real
+    // page answer an identical 17-byte 301) is not a soft-404 fingerprint, and
+    // comparing real pages against it flags every one of them.
+    if (res.status < 200 || res.status >= 300 || !text) return null;
+    return { origin, status: res.status, text };
   } catch {
     return null;
   } finally {
@@ -222,7 +240,13 @@ export async function fetchSoftNotFoundFingerprint(origin) {
 // is treated as a soft 404: it 200'd, but with the "nothing's here" content.
 export async function isSoftNotFound(url, fingerprint) {
   if (!fingerprint) return false;
-  try { if (new URL(url).pathname === '/') return false; } catch { return false; }
+  // Same host only: the fingerprint describes how THIS origin answers a
+  // missing path, not how another host (www vs apex) does.
+  try {
+    const u = new URL(url);
+    if (u.pathname === '/') return false;
+    if (fingerprint.origin && u.origin !== fingerprint.origin) return false;
+  } catch { return false; }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REDIRECT_HOP_TIMEOUT_MS);
@@ -230,7 +254,7 @@ export async function isSoftNotFound(url, fingerprint) {
     const res = await fetch(url, { method: 'GET', redirect: 'manual', signal: controller.signal, headers: UA_HEADER });
     if (res.status !== fingerprint.status) return false;
     const text = normalizeBody(await res.text());
-    return text === fingerprint.text;
+    return !!text && text === fingerprint.text;
   } catch {
     return false;
   } finally {
@@ -287,7 +311,8 @@ export async function crawlInternalLinks(pageResults, maxChecks = MAX_LINK_CHECK
   }
   const finalResults = unreliable ? results.map((r) => ({ ...r, softNotFound: false })) : results;
 
-  const broken = finalResults.filter((r) => !r.unverifiable && (r.error || (r.finalStatus != null && r.finalStatus >= 400) || r.softNotFound));
+  const verified = finalResults.map((r) => ({ ...r, verification: classifyLinkProbe(r) }));
+  const broken = verified.filter((r) => r.verification.verdict === VERDICT.CONFIRMED);
   const redirectChains = finalResults.filter((r) => !r.error && r.hops >= LONG_CHAIN_HOP_THRESHOLD);
   // Every source page that had at least one outbound link actually checked
   // this run — as opposed to every page in the batch, most of which never
@@ -298,7 +323,7 @@ export async function crawlInternalLinks(pageResults, maxChecks = MAX_LINK_CHECK
   // actually re-checked, not just "not this run's rotation."
   const checkedPages = new Set();
   for (const r of finalResults) for (const p of r.sourcePages) checkedPages.add(p);
-  return { checked: finalResults.length, broken, redirectChains, checkedPages: [...checkedPages] };
+  return { checked: finalResults.length, broken, unverifiableCount: verified.filter((r) => r.verification.verdict === VERDICT.UNVERIFIABLE).length, redirectChains, checkedPages: [...checkedPages] };
 }
 
 // Same liveness check as crawlInternalLinks, scoped to real EXTERNAL
@@ -326,10 +351,11 @@ export async function crawlExternalCitations(pageResults, maxChecks = MAX_LINK_C
     return { href, sourcePages: [...sourcesByHref.get(href)], ...r };
   }));
 
-  const broken = results.filter((r) => !r.unverifiable && (r.error || (r.finalStatus != null && r.finalStatus >= 400)));
+  const verified = results.map((r) => ({ ...r, verification: classifyLinkProbe(r) }));
+  const broken = verified.filter((r) => r.verification.verdict === VERDICT.CONFIRMED);
   const checkedPages = new Set();
   for (const r of results) for (const p of r.sourcePages) checkedPages.add(p);
-  return { checked: results.length, broken, checkedPages: [...checkedPages] };
+  return { checked: results.length, broken, unverifiableCount: verified.filter((r) => r.verification.verdict === VERDICT.UNVERIFIABLE).length, checkedPages: [...checkedPages] };
 }
 
 // On-demand single-link check for the manual "re-check now" action
@@ -347,6 +373,7 @@ export async function recheckLink(href) {
   ]);
   const eligible = !redirectResult.error && redirectResult.finalStatus != null && redirectResult.finalStatus >= 200 && redirectResult.finalStatus < 300;
   const softNotFound = eligible && await isSoftNotFound(href, fingerprint);
-  const broken = !redirectResult.unverifiable && (!!redirectResult.error || (redirectResult.finalStatus != null && redirectResult.finalStatus >= 400) || softNotFound);
-  return { broken, finalStatus: redirectResult.finalStatus, error: redirectResult.error, softNotFound, unverifiable: !!redirectResult.unverifiable };
+  const verification = classifyLinkProbe({ ...redirectResult, softNotFound });
+  const broken = verification.verdict === VERDICT.CONFIRMED;
+  return { broken, verification, finalStatus: redirectResult.finalStatus, error: redirectResult.error, softNotFound, unverifiable: !!redirectResult.unverifiable };
 }

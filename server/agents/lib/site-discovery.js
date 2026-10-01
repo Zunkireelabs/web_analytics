@@ -52,21 +52,27 @@ export function parseUrlsetXml(xmlText) {
 // having to re-fetch separately — fetchSitemapUrls/discoverFromSitemaps
 // below are thin projections of this, so every existing URL-only caller
 // (job.js, technical-seo.js, bulk-audit.js) is unaffected.
-async function fetchSitemapEntries(path, depth = 0) {
+//
+// `state` (optional) is set to { failed: true } whenever any sitemap or child
+// sitemap could not be read, so a caller that diffs against the result
+// (agents/sitemap.js) can tell "the sitemap is empty/partial because the
+// fetch failed" from "the sitemap really lacks these URLs". Every other
+// caller ignores it and gets the same [] fallback as before.
+async function fetchSitemapEntries(path, depth = 0, state = null) {
   let hostname;
-  try { hostname = new URL(path).hostname; } catch { return []; }
-  if (isPrivateOrLocalHost(hostname)) return [];
+  try { hostname = new URL(path).hostname; } catch { if (state) state.failed = true; return []; }
+  if (isPrivateOrLocalHost(hostname)) { if (state) state.failed = true; return []; }
 
   const fetched = await fetchTextIfExists(path);
-  if (!fetched.ok) return [];
+  if (!fetched.ok) { if (state) state.failed = true; return []; }
 
   const $ = cheerio.load(fetched.text, { xmlMode: true });
   const isIndex = $('sitemapindex').length > 0;
 
   if (isIndex) {
-    if (depth >= 1) return []; // one level of recursion only, hard stop
+    if (depth >= 1) { if (state) state.failed = true; return []; } // one level of recursion only, hard stop
     const childPaths = $('sitemapindex > sitemap > loc').map((_, el) => $(el).text().trim()).get().filter(Boolean);
-    const children = await Promise.all(childPaths.map((p) => fetchSitemapEntries(p, depth + 1)));
+    const children = await Promise.all(childPaths.map((p) => fetchSitemapEntries(p, depth + 1, state)));
     return children.flat();
   }
 
@@ -84,10 +90,21 @@ async function fetchSitemapUrls(path, depth = 0) {
 // against page_inventory and to preserve existing entries' metadata when
 // drafting an additive sitemap update.
 export async function discoverSitemapEntries(site) {
-  const sitemapResult = await listSitemaps(site);
-  if (!sitemapResult.ok || !sitemapResult.sitemaps.length) return [];
+  return (await discoverSitemapEntriesChecked(site)).entries;
+}
 
-  const perSitemap = await Promise.all(sitemapResult.sitemaps.map((s) => fetchSitemapEntries(s.path)));
+// Same data as discoverSitemapEntries plus whether the read was COMPLETE:
+// { ok, entries, reason }. ok is false when the sitemap list call failed,
+// no sitemap is registered, any (child) sitemap could not be fetched, or
+// nothing parsed — in all of those the entry list is empty or partial, and
+// diffing page_inventory against it would call every URL "missing".
+export async function discoverSitemapEntriesChecked(site) {
+  const sitemapResult = await listSitemaps(site);
+  if (!sitemapResult.ok) return { ok: false, entries: [], reason: 'sitemap list could not be read' };
+  if (!sitemapResult.sitemaps.length) return { ok: false, entries: [], reason: 'no sitemap registered' };
+
+  const state = { failed: false };
+  const perSitemap = await Promise.all(sitemapResult.sitemaps.map((s) => fetchSitemapEntries(s.path, 0, state)));
   const seen = new Set();
   const entries = [];
   for (const entry of perSitemap.flat()) {
@@ -95,7 +112,12 @@ export async function discoverSitemapEntries(site) {
     seen.add(entry.loc);
     entries.push(entry);
   }
-  return entries.slice(0, MAX_SITEMAP_URLS);
+  const capped = entries.slice(0, MAX_SITEMAP_URLS);
+  if (!capped.length) return { ok: false, entries: [], reason: 'sitemap fetched but contained no URLs' };
+  if (state.failed) return { ok: false, entries: capped, reason: 'one or more sitemap files could not be fetched' };
+  // A sitemap truncated at the cap is also partial.
+  if (entries.length > MAX_SITEMAP_URLS) return { ok: false, entries: capped, reason: 'sitemap larger than the read cap' };
+  return { ok: true, entries: capped, reason: null };
 }
 
 // Every real URL from every sitemap GSC knows about for this site, deduped,

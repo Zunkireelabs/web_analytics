@@ -14,15 +14,28 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 // the question that used to be a human blocker.
 
 let deviceRows;
-let deltaRows;
 let cannibalized;
+// GA4 device sessions per window, keyed off the requested start date: the
+// agent now compares SHARE of sessions from the full breakdown (not a top-N
+// delta slice) behind a coverage guard.
+let ga4Recent;
+let ga4Prior;
+
+// Every date in [start, end] — the coverage the agent asks the store for.
+const allDates = (start, end) => {
+  const out = [];
+  for (let t = Date.parse(start); t <= Date.parse(end); t += 86400000) out.push(new Date(t).toISOString().slice(0, 10));
+  return out;
+};
 
 mock.module(resolve('../store/read.js'), {
   namedExports: {
     getSearchPerformanceRange: async () => deviceRows,
-    getGa4BreakdownDelta: async () => deltaRows,
+    getGa4BreakdownRange: async (_site, start) => (start >= '2026-08-01' ? ga4Recent : ga4Prior),
+    getBreakdownDataDates: async (_site, _src, _dim, start, end) => allDates(start, end),
     getGscBreakdownRange: async () => [],
     getTopMovers: async () => ({ gainers: [], droppers: [] }),
+    getQueryPerformance: async () => null,
     getCannibalizedQueries: async () => cannibalized,
     getSiteById: async () => ({ id: 1, name: 'Example' }),
     // device-ctr-diagnosis.js's own dependencies — the mobile deficit test
@@ -52,7 +65,7 @@ describe('device-intelligence surfaces a real CTR deficit', () => {
       { dim_value: 'MOBILE', clicks: 10, impressions: 10000, ctr: 0.001, avg_position: 12 },
       { dim_value: 'DESKTOP', clicks: 900, impressions: 10000, ctr: 0.09, avg_position: 8 },
     ];
-    deltaRows = { gainers: [], droppers: [] };
+    ga4Recent = []; ga4Prior = [];
 
     const result = await device.run(RANGE);
     const lowCtr = (result.facts?.findings || []).find((f) => f.id.startsWith('device-intelligence:low-ctr:'));
@@ -69,7 +82,10 @@ describe('device-intelligence surfaces a real CTR deficit', () => {
       { dim_value: 'MOBILE', clicks: 500, impressions: 10000, ctr: 0.05, avg_position: 9 },
       { dim_value: 'DESKTOP', clicks: 500, impressions: 10000, ctr: 0.05, avg_position: 9 },
     ];
-    deltaRows = { gainers: [], droppers: [{ dim_value: 'tablet', recent: 10, prior: 50, delta: -40 }] };
+    // Tablet's SHARE of sessions fell from 25% to ~4.8% while the mix of
+    // the other two held — a real shift, not just a smaller absolute count.
+    ga4Recent = [{ dim_value: 'mobile', sessions: 100 }, { dim_value: 'desktop', sessions: 100 }, { dim_value: 'tablet', sessions: 10 }];
+    ga4Prior = [{ dim_value: 'mobile', sessions: 75 }, { dim_value: 'desktop', sessions: 75 }, { dim_value: 'tablet', sessions: 50 }];
 
     const result = await device.run(RANGE);
     const declining = (result.facts?.findings || []).find((f) => f.id.startsWith('device-intelligence:declining:'));

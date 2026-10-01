@@ -4,6 +4,7 @@ import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js
 import { analyzePageUrl, effortForGenerator } from './lib/page-content.js';
 import { makeFinding, priorityByRank, impactFromPriority } from './lib/findings.js';
 import { findOpenRecommendation, insertRecommendation } from '../store/recommendations.js';
+import { isDryRun } from './lib/dry-run-context.js';
 import { recommendationPageKey } from './lib/recommendation-coordinator.js';
 import { callLLMWithImages, extractJson } from '../llm.js';
 import { checkBrowserAvailable } from './lib/browser-preflight.js';
@@ -136,6 +137,7 @@ export const meta = {
   name: 'Visual Quality Agent',
   description: 'Real headless-browser screenshots of a page-type-diverse sample of the site\'s own live pages, judged by a vision-capable Claude call for four known, already-fixable defect shapes (broken/empty tables, raw-text comparison content, stale FAQ schema, duplicate FAQ sections) — confirmed defects ship autonomously through the existing content-integrity-repair pipeline; unconfirmed ones surface as a manual Action Center review, never silently.',
   category: 'content',
+  requiresCapabilities: ['public-web'],
   version: 1,
   dataSources: [
     { id: 'live-browser-capture', status: 'connected', description: 'Playwright headless capture of the site\'s own real rendered pages, including a real screenshot per page — same plumbing as the Design Agent\'s live-site capture, with screenshots opted in.' },
@@ -368,7 +370,7 @@ export async function run({
     const recKey = recommendationPageKey({ generatorId: 'content-integrity-repair', params });
     // eslint-disable-next-line no-await-in-loop
     const existing = await findOpenRecommendation(siteId, recKey, 'content-integrity-repair');
-    if (!existing) {
+    if (!existing && !isDryRun()) { // a dry run must not mint a recommendation row
       // eslint-disable-next-line no-await-in-loop
       await insertRecommendation(siteId, {
         page: recKey,

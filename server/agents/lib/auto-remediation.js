@@ -24,6 +24,8 @@ import { laneBudgets, ANALYST_MAX, AUTONOMOUS_DRAFT_SOURCES } from '../../lib/au
 import { countDraftsBySourcesToday } from '../../store/drafts.js';
 import { listByState as listQueueItemsByState, markShipped as markQueueItemShipped, releaseItem as releaseQueueItem, countShippedFileEditsToday, QUEUE_STATES } from '../../store/shipping-queue.js';
 import { recordFixOutcome } from '../../agent-memory.js';
+import { getProtectedPageSet } from '../../store/protected-pages.js';
+import { splitProtectedQueueItems, splitProtectedFileEdits, protectedFilePaths } from './protected-pages.js';
 import { sanitizeForCustomer } from '../../lib/errors.js';
 import { verifyRecommendation, VERIFICATION_DECISION } from '../../generators/lib/verification-layer.js';
 
@@ -178,7 +180,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // getOrInitBatchBranch's own sync-corruption check (github-ops.js) is the
   // second line of defense at the git level for anything that still slips
   // through.
-  const [rows, draftedFindingIds, pendingDraftFilePaths, draftsSpentToday, fileEditsSpentToday, learnedMap] = await Promise.all([
+  const [rows, draftedFindingIds, pendingDraftFilePaths, draftsSpentToday, fileEditsSpentToday, learnedMap, protectedPages] = await Promise.all([
     listOpenRecommendations(siteId),
     getDraftedFindingIds(siteId),
     getPendingDraftFilePaths(siteId),
@@ -203,6 +205,9 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // which is what makes learning actually change behavior rather than
     // only change what gets displayed.
     getLearnedConfidenceMap(siteId).catch(() => new Map()),
+    // Pages that earn clicks / rank near the top: a title, canonical, redirect
+    // or content change there is never unattended (protected-pages.js).
+    getProtectedPageSet(siteId),
   ]);
   // The shared ceiling's real spend for today: every autonomous fix shipped
   // by ANY source, whether it produced a `drafts` row or a file-edits queue
@@ -259,7 +264,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
   const eligible = rows.filter((r) => {
     if (r.finding_ids.some((fid) => draftedFindingIds.has(fid))) return false;
     if (pendingDraftFilePaths.has(resolveFile(site, r.page))) return false;
-    const decision = classifyRecommendation(r, learnedMap).decision;
+    const decision = classifyRecommendation(r, learnedMap, protectedPages).decision;
     if (decision === AUTONOMY_DECISION.SAFE_TO_AUTO_EXECUTE) return true;
     return isProbationProbe(r);
   });
@@ -364,14 +369,26 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // file-edits work computed remaining=0 from analyticsCandidates=0 alone
   // and returned before the drain code below ever ran, silently leaving
   // genuinely prepared, already-validated work unshipped.
-  const learnedRepairQueueItems = (await listQueueItemsByState(siteId, QUEUE_STATES.QUEUED)).filter((r) => r.source === 'learned-repair');
+  const learnedRepairAll = (await listQueueItemsByState(siteId, QUEUE_STATES.QUEUED)).filter((r) => r.source === 'learned-repair');
+  // The shared queue's lanes never pass through classifyRecommendation, so the
+  // protected-page rule is applied where they are drained (protected-pages.js).
+  const { kept: learnedRepairQueueItems, held: learnedRepairHeld } = splitProtectedQueueItems(learnedRepairAll, protectedPages);
+  if (learnedRepairHeld.length) {
+    console.log(`[auto-remediation] ${clientLabel}: ${learnedRepairHeld.length} learned-repair item(s) target a page that earns clicks / ranks near the top — held for a person, not shipped.`);
+  }
   // Every producer that queues its own PRE-COMPUTED, already-validated file
   // edits rather than a draft — content-repair (repair-site-content-live.js)
   // and template-capability-repair (repair-template-capability.js). Both
   // share the identical shape (params.edits, params.commitMessage) and the
   // identical drain treatment below, so they are not distinguished by
   // source here — only by `kind`.
-  const fileEditsQueueItems = (await listQueueItemsByState(siteId, QUEUE_STATES.PREPARED)).filter((r) => r.kind === 'file-edits');
+  const fileEditsAll = (await listQueueItemsByState(siteId, QUEUE_STATES.PREPARED)).filter((r) => r.kind === 'file-edits');
+  const { items: fileEditsQueueItems, held: fileEditsHeld } = splitProtectedFileEdits(
+    fileEditsAll, protectedFilePaths(site, protectedPages, resolveFile), { unknown: protectedPages.unknown },
+  );
+  for (const h of fileEditsHeld) {
+    console.log(`[auto-remediation] ${clientLabel}: file-edits item ${h.itemId} — held ${h.paths.length} edit(s) on ranking page file(s) for a person: ${h.paths.slice(0, 5).join(', ')}.`);
+  }
   const sharedQueueDemand = learnedRepairQueueItems.length + fileEditsQueueItems.length;
 
   const analyticsCandidates = candidates.length - decliningCandidates.length + sharedQueueDemand;

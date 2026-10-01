@@ -1,4 +1,4 @@
-import { getSiteById, getSearchPerformanceRange, getTopPagePerQuery } from '../store/read.js';
+import { getSiteById, getSearchPerformanceRange, getTopPagePerQuery, getQueryPerformance } from '../store/read.js';
 import { listPageInventory } from '../store/page-inventory.js';
 import { analyzePageUrl } from './lib/page-content.js';
 import { knownDomain, filterOwnDomainPages } from './lib/site-domain.js';
@@ -77,11 +77,18 @@ export function isNewRow(row) {
   return !!row && row.first_seen_at?.getTime?.() === row.last_seen_at?.getTime?.();
 }
 
+// Whole-word matching, not substring: a bare .includes() matched a 3-letter
+// term like "uk"/"seo"/"app" inside unrelated words ("duke", "seoul",
+// "happy"), so a page counted as covering a query it never mentions. A
+// trailing plural 's' is folded so "visa"/"visas" still match.
+const foldWord = (w) => (w.length > 3 && w.endsWith('s') ? w.slice(0, -1) : w);
+const wordSet = (text) => new Set(String(text).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).map(foldWord));
+
 export function termOverlap(haystack, queryText) {
-  const terms = queryText.toLowerCase().split(/\s+/).filter((t) => t.length > 2);
+  const terms = String(queryText).toLowerCase().split(/\s+/).filter((t) => t.length > 2).map((t) => foldWord(t.replace(/[^\p{L}\p{N}]+/gu, ''))).filter(Boolean);
   if (!terms.length) return 0;
-  const hay = haystack.toLowerCase();
-  return terms.filter((t) => hay.includes(t)).length / terms.length;
+  const words = wordSet(haystack);
+  return terms.filter((t) => words.has(t)).length / terms.length;
 }
 
 export function urlSlugOverlap(url, queryText) {
@@ -332,7 +339,18 @@ export async function run({ siteId, start, end }) {
         console.warn(`[agents] growth-queries: google-cse check failed for query ${d.query_id}:`, err.message);
       }
     }
-    const nowShowing = gscQueriesRaw.find((q) => q.dim_value === d.query_text);
+    // Direct lookup of THIS query, not a search of the top-GSC_DISCOVERY_LIMIT
+    // list: a freshly-drafted page's query usually starts with a handful of
+    // impressions, far below the top 200, so scanning that list reported "no
+    // impressions yet" for exactly the queries this check exists to catch.
+    // Read-only; falls back to the top-list match if the lookup itself fails.
+    let nowShowing = null;
+    try {
+      nowShowing = await getQueryPerformance(siteId, d.query_text, start, end);
+    } catch (err) {
+      console.warn(`[agents] growth-queries: direct GSC lookup failed for query ${d.query_id}:`, err.message);
+      nowShowing = gscQueriesRaw.find((q) => q.dim_value === d.query_text) || null;
+    }
     await recordGrowthQueryCheck(siteId, d.query_id, {
       checkType: 'gsc-impressions', found: !!nowShowing, position: nowShowing ? Number(nowShowing.avg_position) : null, detail: null,
     });

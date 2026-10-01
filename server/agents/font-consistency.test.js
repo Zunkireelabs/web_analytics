@@ -81,9 +81,9 @@ describe('font-consistency agent', () => {
 
   test('flags a CSS-class outlier and routes it through typography-drift when a real site convention is resolvable', async () => {
     const pages = [
-      { url: 'https://example.com/a', headings: [h('h1', '32px', '<h1 class="text-h1">A</h1>', 'text-h1')], paragraphs: [] },
-      { url: 'https://example.com/b', headings: [h('h1', '32px', '<h1 class="text-h1">B</h1>', 'text-h1')], paragraphs: [] },
-      { url: 'https://example.com/c', headings: [h('h1', '18px', '<h1 class="hero-sm">C</h1>', 'hero-sm')], paragraphs: [] },
+      { url: 'https://example.com/a', headings: [h('h2', '32px', '<h2 class="font-bold text-4xl">A</h2>', 'font-bold text-4xl')], paragraphs: [] },
+      { url: 'https://example.com/b', headings: [h('h2', '32px', '<h2 class="font-bold text-4xl">B</h2>', 'font-bold text-4xl')], paragraphs: [] },
+      { url: 'https://example.com/c', headings: [h('h2', '18px', '<h2 class="font-bold text-lg">C</h2>', 'font-bold text-lg')], paragraphs: [] },
     ];
     const result = await run({
       siteId: 1,
@@ -95,14 +95,13 @@ describe('font-consistency agent', () => {
     assert.ok(finding.recommendedAction);
     assert.equal(finding.recommendedAction.generatorId, 'content-integrity-repair');
     assert.equal(finding.recommendedAction.params.fixType, 'typography-drift');
-    assert.equal(finding.recommendedAction.params.siteConvention, 'text-h1');
+    assert.equal(finding.recommendedAction.params.siteConvention, 'font-bold text-4xl');
     assert.equal(finding.recommendedAction.params.page, 'https://example.com/c');
   });
 
-  test('flags an unclassed, page-uniquely-scoped outlier and routes it through typography-drift-scoped', async () => {
-    // Chayce's real shape: bare <h1>, no class of its own, styled entirely
-    // via ".hiw-hero h1" — a wrapper class no other sampled page reuses,
-    // with a plain (non-fluid) declared value.
+  test('a bare hero h1 on a page-unique wrapper is never auto-fixed or compared to other wrappers', async () => {
+    // Chayce's shape: ".hiw-hero h1" is deliberately larger. It is a
+    // different component (different wrapper) and a hero — no finding.
     const pages = [
       { url: 'https://example.com/a', headings: [h('h1', '48px', '<h1>A</h1>', '', 'page-hero', '48px')], paragraphs: [] },
       { url: 'https://example.com/b', headings: [h('h1', '48px', '<h1>B</h1>', '', 'page-hero', '48px')], paragraphs: [] },
@@ -114,43 +113,28 @@ describe('font-consistency agent', () => {
       fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => pages,
     });
-    assert.equal(result.facts.findings.length, 1);
-    const finding = result.facts.findings[0];
-    assert.ok(finding.recommendedAction);
-    assert.equal(finding.recommendedAction.generatorId, 'content-integrity-repair');
-    assert.equal(finding.recommendedAction.params.fixType, 'typography-drift-scoped');
-    assert.equal(finding.recommendedAction.params.ancestorClass, 'hiw-hero');
-    assert.equal(finding.recommendedAction.params.tag, 'h1');
-    assert.equal(finding.recommendedAction.params.expectedFontSize, '48px');
-    assert.equal(finding.recommendedAction.params.page, 'https://example.com/how-it-works');
-    assert.equal(finding.reportOnly, null);
+    assert.equal(result.facts.findings.length, 0);
   });
 
-  test('a page-uniquely-scoped outlier with a fluid declared value stays reportOnly with a specific, real reason', async () => {
+  test('a surviving finding carries a confirmed verification', async () => {
     const pages = [
-      { url: 'https://example.com/a', headings: [h('h1', '48px', '<h1>A</h1>', '', 'page-hero', '48px')], paragraphs: [] },
-      { url: 'https://example.com/b', headings: [h('h1', '48px', '<h1>B</h1>', '', 'page-hero', '48px')], paragraphs: [] },
-      { url: 'https://example.com/c', headings: [h('h1', '48px', '<h1>C</h1>', '', 'page-hero', '48px')], paragraphs: [] },
-      { url: 'https://example.com/how-it-works', headings: [h('h1', '74px', '<h1>D</h1>', '', 'hiw-hero', 'clamp(40px,6vw,74px)')], paragraphs: [] },
+      { url: 'https://example.com/a', headings: [h('h1', '32px', '<h1>A</h1>')], paragraphs: [] },
+      { url: 'https://example.com/b', headings: [h('h1', '32px', '<h1>B</h1>')], paragraphs: [] },
+      { url: 'https://example.com/c', headings: [h('h1', '18px', '<h1 style="font-size: 18px;">C</h1>')], paragraphs: [] },
     ];
     const result = await run({
       siteId: 1,
       fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => pages,
     });
-    assert.equal(result.facts.findings.length, 1);
-    const finding = result.facts.findings[0];
-    assert.equal(finding.recommendedAction, null);
-    assert.equal(finding.reportOnly.kind, 'font-size-inconsistency');
-    assert.match(finding.reportOnly.whyBlocked, /confirmed scoped to only this one page/);
-    assert.match(finding.reportOnly.whyBlocked, /clamp\(40px,6vw,74px\)/);
+    assert.equal(result.facts.findings[0].verification.verdict, 'confirmed');
   });
 
   test('flags an outlier but attaches no recommendedAction when its class already matches the resolved convention', async () => {
     const pages = [
-      { url: 'https://example.com/a', headings: [h('h1', '32px', '<h1 class="text-h1">A</h1>', 'text-h1')], paragraphs: [] },
-      { url: 'https://example.com/b', headings: [h('h1', '32px', '<h1 class="text-h1">B</h1>', 'text-h1')], paragraphs: [] },
-      { url: 'https://example.com/c', headings: [h('h1', '18px', '<h1 class="text-h1">C</h1>', 'text-h1')], paragraphs: [] },
+      { url: 'https://example.com/a', headings: [h('h2', '32px', '<h2 class="text-h1">A</h2>', 'text-h1')], paragraphs: [] },
+      { url: 'https://example.com/b', headings: [h('h2', '32px', '<h2 class="text-h1">B</h2>', 'text-h1')], paragraphs: [] },
+      { url: 'https://example.com/c', headings: [h('h2', '18px', '<h2 class="text-h1">C</h2>', 'text-h1')], paragraphs: [] },
     ];
     const result = await run({
       siteId: 1,
