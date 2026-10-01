@@ -623,6 +623,18 @@ export async function recheckRecommendation(siteId, recommendationId, { refreshE
   try {
     output = await runAgent(agentId, { siteId, start, end, params: { pages: [rec.page] } }, { persist: false });
   } catch (err) {
+    // `detecting_agents[0]` is a LABEL for who raised the finding, not always a
+    // registered, runnable agent: 'design-consistency' is the weekly whole-site
+    // scan (agents/lib/design-consistency.js, run from cron.js/job.js), which has
+    // no per-page agent to re-run. runAgent rejects an unregistered id with a 404
+    // "Unknown agent" before doing any work. That is an expected "can't re-check
+    // this one", not a failure — treating it as one logged an internal error on
+    // every reconciler pass (77 rows in three days, 2026-09-28..30) and told the
+    // user "could not be re-checked right now" about something that can never be
+    // re-checked this way. The scan re-evaluates it on its own next run.
+    if (err?.status === 404 && /^Unknown agent /.test(err.message || '')) {
+      return { status: 'open', changed: false, reason: 'Raised by a whole-site scan rather than a per-page check — it is re-evaluated by that scan\'s next run.' };
+    }
     const { message } = safeMessage('recommendation-coordinator.recheckRecommendation', err, 'This recommendation could not be re-checked right now — it stays open until the next run.');
     return { status: 'open', changed: false, reason: message };
   }
