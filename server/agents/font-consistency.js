@@ -4,6 +4,7 @@ import { makeFinding } from './lib/findings.js';
 import { effortForGenerator } from './lib/page-content.js';
 import { captureFontSamples } from './lib/font-consistency-capture.js';
 import { findFontSizeOutliers, hasInlineFontSizeOverride } from './lib/font-consistency-analysis.js';
+import { makeVerification, VERDICT } from './lib/verdict.js';
 import { callLLM } from '../llm.js';
 import { checkBrowserAvailable } from './lib/browser-preflight.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
@@ -23,12 +24,12 @@ import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js
 // regressions ship in a single deploy, and a monthly agent that fails looks
 // exactly like a monthly agent that isn't due.
 //
-// Outliers are checked against their OWN page-type/template's real majority
-// first, falling back to the sitewide majority only when that template has
-// too few sampled pages of its own to have an opinion (see
-// findFontSizeOutliers) — so a site that legitimately runs a bigger heading
-// on its landing-style templates than on interior pages never gets flagged
-// for that, on any site, without any per-tenant configuration.
+// Only the SAME component (tag + page landmark + non-size classes) is ever
+// compared, and only against its OWN page-type/template's real majority — no
+// sitewide fallback, so thin evidence abstains (see findFontSizeOutliers). A
+// site that legitimately runs a bigger heading on its landing-style
+// templates, or a footer h4 unlike a card h4, never gets flagged for that, on
+// any site, without any per-tenant configuration.
 //
 // Two outlier shapes have a safe automatic fix:
 //   - an element whose font-size differs because IT SPECIFICALLY carries an
@@ -50,6 +51,7 @@ export const meta = {
   name: 'Font Consistency Agent',
   description: 'Checks whether headings and body text render at the same real (computed) font-size across a sample of the site\'s own live pages, comparing each page-type/template against its own real majority first — flags genuine outliers and auto-fixes the ones caused by a one-element inline font-size override or a resolvable CSS-class drift.',
   category: 'content',
+  requiresCapabilities: ['public-web'],
   version: 1,
   dataSources: [
     { id: 'live-browser-capture', status: 'connected', description: 'Playwright headless capture of the site\'s own real rendered pages (window.getComputedStyle) — same plumbing as the Design Agent\'s live-site capture.' },
@@ -109,7 +111,7 @@ export async function run({
   // server/lib/errors.js exists to prevent (see its own header comment).
   // Browser-launch failure specifically is handled by the preflight above,
   // which is a diagnosable state rather than an exception.
-  const pages = await capture(homepageUrl, { extraUrls: batch });
+  const pages = await capture(homepageUrl, { extraUrls: batch, propertyType: site.property_type });
   if (!pages?.length) {
     return {
       meta, status: 'insufficient-data', facts: null, narrative: null,
@@ -206,8 +208,11 @@ export async function run({
       page: fluidOutlier ? fluidOutlier.url : outliers[0].url,
       whyBlocked: fluidOutlier
         ? `This page's own heading style is confirmed scoped to only this one page (no other page uses "${fluidOutlier.scopedSelector?.ancestorClass || fluidOutlier.sample.ancestorClass}"), so a fix here can't affect any other element — but its real font-size is a responsive expression ("${fluidOutlier.scopedButFluid}"), not a plain size. Correcting it would mean inventing new responsive bounds that haven't been observed anywhere on this site, so someone needs to pick the right fluid value.`
-        : 'This font-size comes from a shared CSS class with no resolvable single-element replacement (either this template has too few sampled pages of its own to have a confirmed convention, or the class is already correct and a stylesheet rule is the real cause) — changing it blind could move every other element on the site that shares the class. Someone needs to decide which size is the correct one.',
+        : 'This font-size comes from a shared CSS class with no resolvable single-element replacement (either no safe class swap exists — the element is responsive, a hero, or already carries the convention classes — or the class is already correct and a stylesheet rule is the real cause) — changing it blind could move every other element on the site that shares the class. Someone needs to decide which size is the correct one.',
     },
+    // Every surviving outlier is the same component (tag + landmark + non-size
+    // classes) at a different computed size than its own template's majority.
+    verification: makeVerification(VERDICT.CONFIRMED, 'computed-style-same-component', 'computed font-size differs from the same component\'s own page-type majority'),
     expectedImpact: { label: outliers.length >= 3 ? 'High' : 'Medium', basis: 'computed', value: outliers.length },
   }) : null;
 

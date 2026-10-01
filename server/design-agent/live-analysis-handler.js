@@ -57,7 +57,7 @@ export function createLiveDesignAnalysisHandler({
       .map((path) => { try { return new URL(path, pageUrl).href; } catch { return null; } })
       .filter(Boolean);
 
-    const capture = await captureSiteFn(pageUrl, { knownUrls }).catch((err) => {
+    const capture = await captureSiteFn(pageUrl, { knownUrls, propertyType: site?.property_type }).catch((err) => {
       const { message } = safeMessage('live-analysis-handler.capture', err, 'Could not load the live site to analyze its design');
       throw taggedError(message, 'live_capture');
     });

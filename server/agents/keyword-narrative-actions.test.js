@@ -14,13 +14,16 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 let keywordGaps;
 let contentClusters;
 let queryPageMetrics;
+const saves = [];
+let connectedSites = [];
+let runnerOutput = {};
 
 mock.module(resolve('../store/data-analyst.js'), {
   namedExports: {
     getKeywordGaps: async () => keywordGaps,
     getKeywordClusters: async () => contentClusters,
     getSiteProfile: async () => ({ business_type: 'services' }),
-    saveKeywordNarrative: async () => ({}),
+    saveKeywordNarrative: async (...args) => { saves.push(args); return {}; },
   },
 });
 mock.module(resolve('../store/agent-runs.js'), {
@@ -37,16 +40,16 @@ mock.module(resolve('../store/read.js'), {
   },
 });
 mock.module(resolve('../job.js'), {
-  namedExports: { listConnectedSites: async () => [] },
+  namedExports: { listConnectedSites: async () => connectedSites },
 });
 mock.module(resolve('./runner.js'), {
-  namedExports: { runAgent: async () => ({}) },
+  namedExports: { runAgent: async () => runnerOutput },
 });
 mock.module(resolve('../llm.js'), {
   namedExports: { callLLM: async () => 'narrative' },
 });
 
-const { run } = await import('./keyword-narrative.js');
+const { run, runKeywordNarrativeForAllSites, keywordMatchesQuery } = await import('./keyword-narrative.js');
 
 const findingsFor = async () => {
   const result = await run({ siteId: 1, start: '2026-08-01', end: '2026-08-28' });
@@ -155,5 +158,51 @@ describe('keyword-cluster-gap — page-aware routing, no editorial dead end', ()
     assert.equal(finding.recommendedAction.generatorId, 'internal-links');
     assert.equal(finding.recommendedAction.params.mustLinkTo, '/pricing/'); // stronger real evidence wins
     assert.equal(finding.recommendedAction.params.page, '/venues/pricing-guide/');
+  });
+});
+
+
+describe('keyword-narrative persistence + matching', () => {
+  test('run() itself never writes the dashboard narrative (it cannot know persist)', async () => {
+    saves.length = 0;
+    keywordGaps = [{ topic: 'x topic', reason: 'r', priority: 'high' }];
+    contentClusters = [];
+    queryPageMetrics = [];
+    const result = await run({ siteId: 1 });
+    assert.equal(result.status, 'ok');
+    assert.ok(result.narrative);
+    assert.equal(saves.length, 0);
+  });
+
+  test('the persist:true cron path writes it, once, only for an ok run with a narrative', async () => {
+    saves.length = 0;
+    connectedSites = [{ id: 7, name: 'A' }, { id: 8, name: 'B' }];
+    runnerOutput = { status: 'ok', narrative: 'hello' };
+    await runKeywordNarrativeForAllSites();
+    assert.deepEqual(saves, [[7, 'hello'], [8, 'hello']]);
+
+    saves.length = 0;
+    runnerOutput = { status: 'insufficient-data', narrative: null };
+    await runKeywordNarrativeForAllSites();
+    assert.equal(saves.length, 0);
+    connectedSites = [];
+  });
+
+  test('keyword matching is token-based: reorderings, plurals and extended variants match; single-word keywords stay strict', () => {
+    assert.equal(keywordMatchesQuery('study in uk', 'uk study in'), true);
+    assert.equal(keywordMatchesQuery('student visa', 'student visas'), true);
+    assert.equal(keywordMatchesQuery('student visa', 'student visa requirements uk'), true);
+    assert.equal(keywordMatchesQuery('visa', 'student visa uk'), false);
+    assert.equal(keywordMatchesQuery('visa', 'visa'), true);
+    assert.equal(keywordMatchesQuery('uk visa', 'ukraine visa'), false);
+  });
+
+  test('a cluster whose traffic lands on a real page via a variant query is NOT reported as a missing topic', async () => {
+    keywordGaps = [];
+    contentClusters = [{ cluster_name: 'uk study', cluster_type: 'topic', gap_score: 5, avg_position: 20, avg_impressions: 100, keywords_json: [{ keyword: 'study in uk' }] }];
+    queryPageMetrics = [{ query: 'uk study in', page: 'https://example.com/uk', clicks: 3, impressions: 50, avgPosition: 12 }];
+    const findings = await findingsFor();
+    const f = findings.find((x) => x.id.startsWith('keyword-narrative:cluster:'));
+    assert.equal(f.recommendedAction.generatorId, 'expand-content');
   });
 });

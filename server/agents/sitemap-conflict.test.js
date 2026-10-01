@@ -62,6 +62,13 @@ describe('sitemap-conflict agent', () => {
     assert.equal(result.status, 'insufficient-data');
   });
 
+  test('insufficient-data (not a clean ok) when signal rows exist but none carries a GSC index_status', async () => {
+    sitemapEntries = [{ loc: 'https://example.com/a/' }];
+    signalsByPage.set('https://example.com/a/', { page: 'https://example.com/a/', index_status: null });
+    const result = await run({ siteId: 1 });
+    assert.equal(result.status, 'insufficient-data');
+  });
+
   test('skips a sitemap URL with no index_status yet, rather than guessing', async () => {
     sitemapEntries = [{ loc: 'https://example.com/a/' }, { loc: 'https://example.com/b/' }];
     signalsByPage.set('https://example.com/a/', { page: 'https://example.com/a/', index_status: null });

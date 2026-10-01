@@ -5,6 +5,10 @@ process.env.DATABASE_URL ||= 'postgres://test:test@localhost:5432/test';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
+let inventoryRows = [];
+let probeByUrl = new Map(); // url -> probe result; default live
+let hashWrites = 0;
+let classifierCalls = 0;
 let knownHashes; // what past runs already recorded for this site
 // Per-page traffic override for the confidence-gated evidence tests below —
 // any page NOT in this map falls back to the flat impressions:100 every
@@ -23,8 +27,9 @@ mock.module(resolve('../store/read.js'), {
 });
 mock.module(resolve('../store/page-inventory.js'), {
   namedExports: {
-    updatePageContentHashBatch: async () => {},
+    updatePageContentHashBatch: async () => { hashWrites++; },
     listContentHashesForSite: async () => knownHashes,
+    listPageInventory: async () => inventoryRows,
   },
 });
 mock.module(resolve('./lib/candidate-pages.js'), {
@@ -41,9 +46,16 @@ let contentTypeByPage = null;
 mock.module(resolve('./lib/page-content-classifier.js'), {
   namedExports: {
     getOrClassifyPageContentType: async (siteId, page) => {
+      classifierCalls++;
       const type = typeof contentTypeByPage === 'function' ? contentTypeByPage(page) : contentTypeByPage;
       return type ? { contentType: type, confidence: 0.9, classifiedBy: 'path' } : null;
     },
+  },
+});
+
+mock.module(resolve('./lib/live-probe.js'), {
+  namedExports: {
+    createVariantProber: () => async (pages) => new Map(pages.map((p) => [p, probeByUrl.get(p) || { url: p, verdict: 'live', status: 200, canonical: null }])),
   },
 });
 
@@ -57,7 +69,7 @@ const pageCache = async (page) => ({
 
 const runOn = (pages) => run({ siteId: 1, start: '2026-08-01', end: '2026-08-28', pageCache, params: { pages } });
 
-beforeEach(() => { knownHashes = []; perfRowsByPage = new Map(); queryRows = []; contentTypeByPage = null; });
+beforeEach(() => { inventoryRows = []; probeByUrl = new Map(); hashWrites = 0; classifierCalls = 0; knownHashes = []; perfRowsByPage = new Map(); queryRows = []; contentTypeByPage = null; });
 
 describe('duplicate-content finding ids', () => {
   // The bug: the id was keyed on the alphabetically-first page in the group,
@@ -284,5 +296,49 @@ describe('duplicate-content — groups already resolved via an existing canonica
       params: { pages: ['https://example.com/resources/?type=a', 'https://example.com/resources/?type=b'] },
     });
     assert.equal(result.facts.findings.length, 1);
+  });
+});
+
+describe('duplicate-content stale/alias exclusion', () => {
+  test('a URL that redirects (its probe says so) is never hashed into a duplicate group', async () => {
+    probeByUrl.set('https://example.com/alias', { url: 'https://example.com/alias', verdict: 'redirect', status: 301 });
+    const result = await runOn(['https://example.com/real', 'https://example.com/alias']);
+    assert.equal(result.facts.findings.length, 0);
+  });
+
+  test('a page analyzePageUrl flagged wasRedirected is skipped', async () => {
+    const redirecting = async (page) => ({ ok: true, analysis: { wordCount: 900, bodyText: DUPLICATE_BODY, wasRedirected: page.endsWith('/alias') } });
+    const result = await run({ siteId: 1, start: '2026-08-01', end: '2026-08-28', pageCache: redirecting, params: { pages: ['https://example.com/real', 'https://example.com/alias'] } });
+    assert.equal(result.facts.findings.length, 0);
+  });
+
+  test('an orphaned inventory row with a stored hash is excluded from grouping', async () => {
+    const first = await runOn(['https://example.com/b', 'https://example.com/c']);
+    const hash = first.facts.findings[0].evidence.contentHash;
+    knownHashes = [{ page: 'https://example.com/old-orphan', content_hash: hash }];
+    inventoryRows = [{ page: 'https://example.com/old-orphan', orphaned: true }];
+    const result = await runOn(['https://example.com/b']);
+    assert.equal(result.facts.findings.length, 0);
+  });
+
+  test('a stored-hash member that now redirects is dropped; one that is live and still matches counts', async () => {
+    const first = await runOn(['https://example.com/b', 'https://example.com/c']);
+    const hash = first.facts.findings[0].evidence.contentHash;
+    knownHashes = [{ page: 'https://example.com/gone', content_hash: hash }];
+    probeByUrl.set('https://example.com/gone', { url: 'https://example.com/gone', verdict: 'redirect', status: 301 });
+    const dropped = await runOn(['https://example.com/b']);
+    assert.equal(dropped.facts.findings.length, 0);
+    probeByUrl = new Map();
+    const kept = await runOn(['https://example.com/b']);
+    assert.equal(kept.facts.findings.length, 1);
+    assert.equal(kept.facts.findings[0].verification.verdict, 'confirmed');
+  });
+
+  test('dryRun writes no content hashes and never calls the classifier', async () => {
+    await run({ siteId: 1, start: '2026-08-01', end: '2026-08-28', pageCache, params: { pages: ['https://example.com/b', 'https://example.com/c'] }, dryRun: true });
+    assert.equal(hashWrites, 0);
+    assert.equal(classifierCalls, 0);
+    await runOn(['https://example.com/b', 'https://example.com/c']);
+    assert.equal(hashWrites, 1);
   });
 });

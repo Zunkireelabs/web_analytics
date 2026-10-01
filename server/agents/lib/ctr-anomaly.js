@@ -48,3 +48,70 @@ export function flagLowCtr(rows, opts) {
     volumeField: 'impressions', minVolume: MIN_IMPRESSIONS_FOR_CTR, ...opts,
   });
 }
+
+// Two-proportion z-test on clicks/impressions: is `a`'s CTR genuinely
+// different from `b`'s, or is the gap what 2 extra clicks would do? Returns 0
+// when there is nothing to test (no impressions on a side, or a pooled CTR of
+// exactly 0 or 1).
+export function twoProportionZ(clicksA, impressionsA, clicksB, impressionsB) {
+  if (!(impressionsA > 0) || !(impressionsB > 0)) return 0;
+  const pooled = (clicksA + clicksB) / (impressionsA + impressionsB);
+  if (pooled <= 0 || pooled >= 1) return 0;
+  const se = Math.sqrt(pooled * (1 - pooled) * (1 / impressionsA + 1 / impressionsB));
+  return se === 0 ? 0 : (clicksA / impressionsA - clicksB / impressionsB) / se;
+}
+
+// |z| a CTR gap must reach before it is called a deficit (~95% two-sided).
+export const MIN_CTR_Z = 2;
+// A CTR gap between rows ranking this many places apart is confounded by
+// position — CTR falls steeply with rank, so "mobile CTR is low" can just be
+// "mobile ranks lower". Site 8862 was called a 'confirmed defect' with mobile
+// at position 28.9 vs 11.2 on desktop.
+export const MAX_COMPARABLE_POSITION_GAP = 5;
+
+/**
+ * Significance- and position-aware replacement for flagLowCtr, for rows that
+ * carry real `clicks` + `impressions` (+ optional `avgPosition`). Each row is
+ * compared with the impression-weighted CTR of ALL THE OTHER rows (never an
+ * unweighted mean of rows, which gives a 40-impression row the same say as a
+ * 40,000-impression one), and is flagged only when
+ *   - it is thresholdPct+ below that pooled baseline,
+ *   - the gap clears a two-proportion z-test (|z| >= MIN_CTR_Z), and
+ *   - the row ranks no more than MAX_COMPARABLE_POSITION_GAP places worse than the baseline
+ *     (impression-weighted position of the others) — otherwise the deficit is
+ *     confounded by ranking and the row is ABSTAINED on, returned in
+ *     `confounded` so the caller can say so instead of asserting a defect.
+ * Returns { flagged, confounded }; `flagged` rows keep the same
+ * ctrDeviationPct shape flagLowCtr produced.
+ */
+export function flagLowCtrSignificant(rows, { thresholdPct = 20, minImpressions = MIN_IMPRESSIONS_FOR_CTR, minZ = MIN_CTR_Z, maxPositionGap = MAX_COMPARABLE_POSITION_GAP } = {}) {
+  const usable = rows.filter((r) => Number(r.impressions || 0) >= minImpressions && r.clicks != null);
+  const flagged = [];
+  const confounded = [];
+  if (usable.length < 2) return { flagged, confounded };
+  for (const row of usable) {
+    const others = usable.filter((o) => o !== row);
+    const oClicks = others.reduce((s, o) => s + Number(o.clicks), 0);
+    const oImpr = others.reduce((s, o) => s + Number(o.impressions), 0);
+    if (oImpr <= 0 || oClicks <= 0) continue;
+    const baseline = oClicks / oImpr;
+    const ctr = Number(row.clicks) / Number(row.impressions);
+    const deviationPct = Math.round(((ctr - baseline) / baseline) * 1000) / 10;
+    if (deviationPct > -thresholdPct) continue;
+    const z = twoProportionZ(Number(row.clicks), Number(row.impressions), oClicks, oImpr);
+    if (Math.abs(z) < minZ) continue;
+    const out = { ...row, ctr, ctrDeviationPct: deviationPct, ctrZ: Math.round(z * 100) / 100, baselineCtr: baseline };
+    const posRows = others.filter((o) => o.avgPosition != null);
+    const posImpr = posRows.reduce((s, o) => s + Number(o.impressions), 0);
+    if (row.avgPosition != null && posImpr > 0) {
+      const baselinePosition = posRows.reduce((s, o) => s + Number(o.avgPosition) * Number(o.impressions), 0) / posImpr;
+      out.baselinePosition = Math.round(baselinePosition * 10) / 10;
+      // Only a WORSE rank explains a lower CTR; a row ranking better yet
+      // converting worse is not confounded by position.
+      if (Number(row.avgPosition) - baselinePosition > maxPositionGap) { confounded.push(out); continue; }
+    }
+    flagged.push(out);
+  }
+  flagged.sort((a, b) => a.ctrDeviationPct - b.ctrDeviationPct);
+  return { flagged, confounded };
+}

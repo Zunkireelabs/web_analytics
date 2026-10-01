@@ -8,6 +8,7 @@ import { recommendationPageKey } from './recommendation-coordinator.js';
 import { createRecommendationGates } from './recommendation-gates.js';
 import { listActiveGoals } from '../../store/site-goals.js';
 import { pickBestGoalAlignment } from './goal-alignment.js';
+import { isAssertable } from './verdict.js';
 import { isDefaultBucketClassification, buildDefaultBucketSituation, applyDefaultBucketDecisions } from './default-bucket-decision.js';
 
 // Real top query for a page, looked up on demand and cached per call — only
@@ -140,6 +141,7 @@ export async function buildRecommendations(siteId) {
   // things that reach nobody" is visible in the run itself rather than only
   // discoverable by reading every agent's source.
   const evidenceOnlyFindings = [];
+  const unassertedFindings = [];
   const DROP_REASONS = {
     'soft-404': 'This page returns the site\'s soft-404 fallback — it does not exist.',
     'file-missing': 'The file this page was mapped to no longer exists in the repository.',
@@ -158,6 +160,15 @@ export async function buildRecommendations(siteId) {
       for (const page of run.linkCrawlCheckedPages) linkCrawlCheckedKeys.add(page);
     }
     for (const f of run.findings) {
+      // The one place every detector's claim is held to the same bar: a
+      // finding that declares itself refuted or unverifiable (verdict.js)
+      // never becomes a recommendation, whatever generator it names. Not added
+      // to detectedKeys, so an already-open row for it closes on the next sync
+      // like any other no-longer-detected finding.
+      if (!isAssertable(f)) {
+        unassertedFindings.push({ agentId: run.agentId, findingId: f.id, verdict: f.verification.verdict, reason: f.verification.reason });
+        continue;
+      }
       const action = f.recommendedAction;
       if (!action?.generatorId) {
         // A finding with no generator is usually evidence, not a defect
@@ -267,6 +278,9 @@ export async function buildRecommendations(siteId) {
       }
     }
   }
+  if (unassertedFindings.length) {
+    console.info(`[recommendations] site ${siteId}: ${unassertedFindings.length} findings withheld — detector could not prove the defect (refuted/unverifiable)`);
+  }
   if (evidenceOnlyFindings.length) {
     const byAgent = evidenceOnlyFindings.reduce((acc, e) => { acc[e.agentId] = (acc[e.agentId] || 0) + 1; return acc; }, {});
     console.info(`[recommendations] site ${siteId}: ${evidenceOnlyFindings.length} evidence-only findings not surfaced as recommendations —`,
@@ -277,5 +291,5 @@ export async function buildRecommendations(siteId) {
   // default-bucket-decision.js. With the flag off this returns `items`
   // unchanged, same array reference, zero decide() calls.
   const finalItems = await applyDefaultBucketDecisions(siteId, items, defaultBucketCandidates, { site: loadedSite });
-  return { items: finalItems, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, droppedRecommendations, evidenceOnlyFindings };
+  return { items: finalItems, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, droppedRecommendations, evidenceOnlyFindings, unassertedFindings };
 }

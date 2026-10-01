@@ -9,6 +9,7 @@ export const meta = {
   name: 'Accessibility Agent',
   description: 'Checks real, statically-verifiable accessibility issues — missing form labels, unlabeled interactive elements, duplicate IDs, heading-structure skips, and a missing page-language attribute.',
   category: 'accessibility',
+  requiresCapabilities: ['public-web'],
   version: 1,
   dataSources: [
     // Real, honest gap, not a fabricated pass: color contrast and computed

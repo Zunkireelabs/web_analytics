@@ -29,7 +29,7 @@ mock.module(resolve('../../store/recommendations.js'), {
     closeRecommendation: async () => {},
   },
 });
-mock.module(resolve('./risk-tiers.js'), { namedExports: { riskTierForGenerator: () => 'safe' } });
+mock.module(resolve('./risk-tiers.js'), { namedExports: { riskTierForGenerator: () => 'safe', requiresHumanReview: () => false } });
 mock.module(resolve('../../store/admin/audit-log.js'), { namedExports: { recordAuditEvent: async () => {} } });
 // The rest of recommendation-coordinator.js's top-level imports, mocked
 // purely to keep module load light — syncFromGrounded itself never calls

@@ -976,7 +976,9 @@ function ProductGrowthTab({ client }) {
 const GOAL_TYPES = [
   'generate_leads', 'increase_organic_traffic', 'increase_conversions',
   'reduce_bounce_rate', 'increase_organic_visibility', 'increase_qualified_traffic',
-  'grow_bookings', 'grow_sales', 'custom',
+  'grow_bookings', 'grow_sales',
+  'book_demos', 'grow_signups', 'activate_users',
+  'custom',
 ];
 
 const EMPTY_GOAL_FORM = {
@@ -1135,6 +1137,91 @@ function GoalForm({ clientId, initial, onCancel, onSubmit, submitLabel }) {
   );
 }
 
+// Progress for a PRODUCT site's goals — read from the CRM/prospect pipeline and
+// trial signups (server/store/product-funnel.js). Shown only for a 'product'
+// property; a website client has no product funnel, so nothing is rendered for
+// it. Counts are real rows only; website-side GA4 events are NOT included yet.
+const PROGRESS_WINDOWS = [7, 30, 90];
+
+function ProductGoalProgress({ clientId }) {
+  const [days, setDays] = useState(30);
+  const [state, setState] = useState({ loading: true, funnel: null, error: null });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ loading: true, funnel: null, error: null });
+    api.clients.goals.progress(clientId, days)
+      .then((r) => { if (!cancelled) setState({ loading: false, funnel: r.funnel, error: null }); })
+      .catch((e) => { if (!cancelled) setState({ loading: false, funnel: null, error: e.message || 'Could not load goal progress.' }); });
+    return () => { cancelled = true; };
+  }, [clientId, days]);
+
+  const { loading, funnel, error } = state;
+  const stats = funnel ? [
+    { label: 'Demos booked', value: funnel.counts.demosBooked },
+    { label: 'Trial signups', value: funnel.counts.trialSignups },
+    { label: 'Converted', value: funnel.counts.converted },
+  ] : [];
+
+  return (
+    <div className="border border-slate-100 rounded-xl p-3.5 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[9.5px] font-black uppercase tracking-wider text-slate-500">Goal progress</span>
+        <div className="flex items-center gap-1">
+          {PROGRESS_WINDOWS.map((d) => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => setDays(d)}
+              className={`text-[9.5px] font-black uppercase tracking-wider px-2 py-1 rounded-lg transition ${days === d ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-50 text-slate-400 hover:bg-slate-100'}`}
+            >
+              {d}d
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {loading && <p className="text-xs text-slate-400 font-semibold">Loading…</p>}
+      {error && <p className="text-xs font-semibold text-rose-700">{error}</p>}
+
+      {funnel && (
+        <>
+          {funnel.headline ? (
+            <div>
+              <p className="text-2xl font-black text-slate-800 leading-none">{funnel.headline.value}</p>
+              <p className="text-[10.5px] font-semibold text-slate-400 mt-1">
+                {funnel.headline.label} · last {funnel.windowDays} days · conversion event: {funnel.conversionEvent}
+              </p>
+            </div>
+          ) : (
+            <p className="text-[10.5px] font-semibold text-slate-400">
+              {funnel.conversionEvent
+                ? `"${funnel.conversionEvent}" doesn't match a tracked funnel stage, so no single headline is shown.`
+                : 'Set a conversion event in the Product Growth tab to see a headline number.'}
+            </p>
+          )}
+          <div className="grid grid-cols-3 gap-2">
+            {stats.map((st) => (
+              <div key={st.label} className="rounded-lg bg-slate-50 px-3 py-2">
+                <p className="text-sm font-black text-slate-700">{st.value}</p>
+                <p className="text-[9.5px] font-semibold text-slate-400">{st.label}</p>
+              </div>
+            ))}
+          </div>
+          {funnel.counts.competitorSuspectSignups > 0 && (
+            <p className="text-[10px] font-semibold text-slate-400">
+              {funnel.counts.competitorSuspectSignups} signup{funnel.counts.competitorSuspectSignups === 1 ? '' : 's'} flagged as likely competitors — not counted above.
+            </p>
+          )}
+          <p className="text-[9.5px] font-semibold text-slate-300">
+            From the CRM pipeline and trial signups. Website-side events (visits, form views) are not included yet.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function GoalsTab({ client }) {
   const [goals, setGoals] = useState(null); // null = loading
   const [adding, setAdding] = useState(false);
@@ -1164,6 +1251,8 @@ function GoalsTab({ client }) {
         now, instead of treating every recommendation as equally important. A goal only affects prioritization — it
         never blocks or forces a decision on its own.
       </p>
+
+      {client.propertyType === 'product' && <ProductGoalProgress clientId={client.id} />}
 
       {error && <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>}
 

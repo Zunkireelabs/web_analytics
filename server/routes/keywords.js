@@ -7,6 +7,7 @@ import {
   getLatestLayoutSuggestion, saveLayoutSuggestion, createUserKeywordGap,
   getProductCapabilities, createProductCapability, updateProductCapabilityStatus,
 } from '../store/data-analyst.js';
+import { PRODUCT_KNOWLEDGE_KINDS } from '../lib/product-knowledge-kinds.js';
 import { createActionCenterRecommendationForGap, buildProductTopicMap, opportunityDraftEligibility } from '../agents/lib/analyst-seo-mapping.js';
 import { buildGrowthOpportunities } from '../agents/lib/growth-opportunities.js';
 import { generateDraft } from './action-center.js';
@@ -179,22 +180,33 @@ router.get('/internal/keywords/:siteId/profile', async (req, res, next) => {
 // yet that lets an agent propose one, so nothing here is ever invented.
 router.get('/internal/keywords/:siteId/capabilities', async (req, res, next) => {
   try {
-    const { status } = req.query;
-    res.json(await getProductCapabilities(req.params.siteId, status));
+    const { status, kind } = req.query;
+    // Defaults to 'capability' so the Analyst page's existing list is exactly
+    // what it was before migration 176; `kind=all` returns every kind of
+    // product knowledge, or pass one specific kind.
+    if (kind !== undefined && kind !== 'all' && !PRODUCT_KNOWLEDGE_KINDS.includes(kind)) {
+      return res.status(400).json({ error: `kind must be 'all' or one of ${PRODUCT_KNOWLEDGE_KINDS.join(', ')}.` });
+    }
+    res.json(await getProductCapabilities(req.params.siteId, status, { kind: kind === 'all' ? null : (kind || 'capability') }));
   } catch (e) { next(e); }
 });
 
 router.post('/internal/keywords/:siteId/capabilities', async (req, res, next) => {
   try {
-    const { name, category, description, industries } = req.body || {};
+    const { name, category, description, industries, kind, details } = req.body || {};
     if (!name || !String(name).trim()) {
       return res.status(400).json({ error: 'name is required.' });
+    }
+    if (kind !== undefined && !PRODUCT_KNOWLEDGE_KINDS.includes(kind)) {
+      return res.status(400).json({ error: `kind must be one of ${PRODUCT_KNOWLEDGE_KINDS.join(', ')}.` });
     }
     const capability = await createProductCapability(req.params.siteId, {
       name: String(name).trim(),
       category: category || null,
       description: description || null,
       industries: Array.isArray(industries) ? industries : [],
+      kind: kind || 'capability',
+      details: details && typeof details === 'object' && !Array.isArray(details) ? details : {},
     });
     res.status(201).json(capability);
   } catch (e) { next(e); }

@@ -20,6 +20,7 @@ import { listPendingSignupRequests, getSignupRequestById, markSignupRequestRevie
 import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { getProductGrowthConfig, saveProductGrowthConfig, setProspectDiscoveryEnabled, ensureCrmWebhookToken } from '../store/product-growth-config.js';
 import { GOAL_TYPES, createGoal, listGoals, getGoal, updateGoal, setGoalStatus } from '../store/site-goals.js';
+import { getProductFunnel } from '../store/product-funnel.js';
 import { callLLMForJson } from '../llm.js';
 import { setOnboardingBaseline } from '../store/upsert.js';
 import { safeMessage } from '../lib/errors.js';
@@ -722,6 +723,23 @@ router.get('/internal/clients/:id/goals', async (req, res, next) => {
     if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
 
     res.json(await listGoals(siteId));
+  } catch (e) { next(e); }
+});
+
+// Progress for a PRODUCT site's goals: the funnel counts (demos booked,
+// trial signups, converted) read from prospects / trial_signups, with the
+// headline picked from product_growth_config.conversion_event. 404 for a
+// website tenant — it has no product funnel, and this must never invent one.
+router.get('/internal/clients/:id/goals/progress', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+    if (existing.property_type !== 'product') {
+      return res.status(404).json({ error: 'Goal progress from the product funnel is only available for product sites.' });
+    }
+    const funnel = await getProductFunnel(siteId, { days: req.query.days });
+    res.json({ goals: await listGoals(siteId), funnel });
   } catch (e) { next(e); }
 });
 

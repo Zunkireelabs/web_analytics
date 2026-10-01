@@ -27,15 +27,31 @@ let contentTypeByPage = null;
 mock.module(resolve('./lib/page-content-classifier.js'), {
   namedExports: {
     getOrClassifyPageContentType: async (siteId, page) => {
+      classifierCalls++;
       const type = typeof contentTypeByPage === 'function' ? contentTypeByPage(page) : contentTypeByPage;
       return type ? { contentType: type, confidence: 0.9, classifiedBy: 'path' } : null;
     },
   },
 });
 
+// Live probe: default every variant to a live, self-canonical 200 so the
+// pre-existing grouping/evidence tests are unchanged; individual tests
+// override probeByUrl to model redirects/404s/canonicals.
+let probeByUrl = new Map();
+let classifierCalls = 0;
+mock.module(resolve('./lib/live-probe.js'), {
+  namedExports: {
+    createVariantProber: () => async (pages) => new Map(pages.map((p) => [p, probeByUrl.get(p) || { url: p, verdict: 'live', status: 200, canonical: null }])),
+    isSelfCanonical: (p) => !p.canonical || p.canonical === p.url,
+    normalizeUrlForCompare: (u) => String(u),
+  },
+});
+
 const { run } = await import('./query-param-duplicates.js');
 
 beforeEach(() => {
+  probeByUrl = new Map();
+  classifierCalls = 0;
   site = { id: 1, timezone: 'UTC' };
   inventory = [];
   perfRowsByPage = new Map();
@@ -205,6 +221,47 @@ describe('query-param-duplicates agent', () => {
       assert.equal(finding.recommendedAction, null);
       assert.equal(finding.reportOnly.decided, true);
       assert.match(finding.reportOnly.whyBlocked, /different page purposes/);
+    });
+  });
+
+  describe('live verification', () => {
+    const inv = () => {
+      inventory = [
+        { page: 'https://example.com/resources/', orphaned: false },
+        { page: 'https://example.com/resources/?type=ebook', orphaned: false },
+        { page: 'https://example.com/resources/?type=case-study', orphaned: false },
+      ];
+    };
+
+    test('query variants that 301 to the base are already consolidated -> no finding', async () => {
+      inv();
+      for (const p of ['https://example.com/resources/?type=ebook', 'https://example.com/resources/?type=case-study']) {
+        probeByUrl.set(p, { url: p, verdict: 'redirect', status: 301, redirectsTo: 'https://example.com/resources/' });
+      }
+      const result = await run({ siteId: 1 });
+      assert.deepEqual(result.facts.findings, []);
+    });
+
+    test('a variant already canonical to the base is skipped as the action target; the other one is targeted', async () => {
+      inv();
+      probeByUrl.set('https://example.com/resources/?type=case-study', { url: 'https://example.com/resources/?type=case-study', verdict: 'live', status: 200, canonical: 'https://example.com/resources/' });
+      const result = await run({ siteId: 1 });
+      assert.equal(result.facts.findings[0].recommendedAction.params.page, 'https://example.com/resources/?type=ebook');
+    });
+
+    test('every loser already canonical to the base -> nothing to do', async () => {
+      inv();
+      for (const p of ['https://example.com/resources/?type=ebook', 'https://example.com/resources/?type=case-study']) {
+        probeByUrl.set(p, { url: p, verdict: 'live', status: 200, canonical: 'https://example.com/resources/' });
+      }
+      const result = await run({ siteId: 1 });
+      assert.deepEqual(result.facts.findings, []);
+    });
+
+    test('dryRun never touches the classifier', async () => {
+      inv();
+      await run({ siteId: 1, dryRun: true });
+      assert.equal(classifierCalls, 0);
     });
   });
 });

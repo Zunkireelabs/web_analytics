@@ -3,7 +3,9 @@ import { getSearchPerformanceForPages, getSiteById } from '../store/read.js';
 import { priorityByRank, impactFromPriority, makeFinding, effortFromDifficulty } from './lib/findings.js';
 import { analyzePageUrl } from './lib/page-content.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
-import { updatePageContentHashBatch, listContentHashesForSite } from '../store/page-inventory.js';
+import { updatePageContentHashBatch, listContentHashesForSite, listPageInventory } from '../store/page-inventory.js';
+import { createVariantProber } from './lib/live-probe.js';
+import { makeVerification, VERDICT } from './lib/verdict.js';
 import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS, isLikelyFunctionalQueryParam } from './lib/duplicate-evidence.js';
 import { getOrClassifyPageContentType } from './lib/page-content-classifier.js';
 import { callLLM } from '../llm.js';
@@ -13,6 +15,7 @@ export const meta = {
   name: 'Duplicate Content Agent',
   description: 'Finds pages whose full body content is byte-identical to another page on the site — the same content reachable at two different URLs, a real, common crawl-budget and ranking-dilution problem.',
   category: 'seo',
+  requiresCapabilities: ['public-web'],
   version: 1,
 };
 
@@ -35,7 +38,7 @@ function hashContent(bodyText) {
   return createHash('sha256').update(bodyText).digest('hex');
 }
 
-export async function run({ siteId, start, end, pageCache, params }) {
+export async function run({ siteId, start, end, pageCache, params, dryRun = false }) {
   const { batch, impressionsByPage } = params?.pages?.length
     ? await getSearchPerformanceForPages(siteId, start, end, params.pages).then((rows) => ({
       batch: params.pages,
@@ -58,20 +61,39 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // Only pages with real, substantial content get hashed — thin pages are
   // excluded from the comparison pool entirely (never recorded with a hash
   // that could coincidentally match another thin page).
+  //
+  // A page whose request REDIRECTED is never hashed: fetch() follows the
+  // redirect silently, so an alias (www/http/trailing-slash/old path) would
+  // hash identically to its destination and be reported as "duplicate
+  // content" — the redirect is the fix, not the defect. Judged two ways:
+  // analyzePageUrl's own wasRedirected flag, and a manual-redirect probe
+  // (which, unlike that flag, also catches a www -> apex hop).
+  const probeVariants = createVariantProber({ checkCanonical: false });
+  const hashable = fetched.filter(({ result }) => result.ok && result.analysis.wordCount >= MIN_WORDS_FOR_HASH && !result.analysis.wasRedirected);
+  const hashProbes = await probeVariants(hashable.map((f) => f.page));
+  const rejectedPages = new Set(); // pages whose stored hash must not be trusted this run
   const hashByPage = new Map();
   for (const { page, result } of fetched) {
-    if (!result.ok || result.analysis.wordCount < MIN_WORDS_FOR_HASH) continue;
+    if (!result.ok) { rejectedPages.add(page); continue; }
+    if (result.analysis.wordCount < MIN_WORDS_FOR_HASH) continue;
+    if (result.analysis.wasRedirected || hashProbes.get(page)?.verdict !== 'live') { rejectedPages.add(page); continue; }
     hashByPage.set(page, hashContent(result.analysis.bodyText));
   }
-  if (hashByPage.size) await updatePageContentHashBatch(siteId, hashByPage);
+  // dryRun (preview/audit) must not write content hashes.
+  if (hashByPage.size && !dryRun) await updatePageContentHashBatch(siteId, hashByPage);
 
   // Compares against the site's own real accumulated coverage (every page
   // ever hashed by a past run, not just today's rotation batch) — same
   // "merge today's fresh data with everything already known" pattern
   // technical-seo.js's detectDuplicateTitles already uses for titles.
-  const known = await listContentHashesForSite(siteId);
+  // Stale rows are excluded: orphaned inventory rows, and any page this run
+  // just observed redirecting/failing (its stored hash predates that).
+  const inventoryRows = await listPageInventory(siteId, { limit: 2000 }).catch(() => []);
+  const orphanedPages = new Set(inventoryRows.filter((r) => r.orphaned).map((r) => r.page));
+  const known = (await listContentHashesForSite(siteId)).filter((r) => !orphanedPages.has(r.page) && !rejectedPages.has(r.page));
   const byHash = new Map();
   for (const { page, content_hash: hash } of known) {
+    if (hashByPage.has(page)) continue; // this run's fresh hash supersedes the stored one
     if (!byHash.has(hash)) byHash.set(hash, new Set());
     byHash.get(hash).add(page);
   }
@@ -80,9 +102,32 @@ export async function run({ siteId, start, end, pageCache, params }) {
     byHash.get(hash).add(page);
   }
 
-  const duplicateGroups = [...byHash.entries()]
+  const candidateGroups = [...byHash.entries()]
     .filter(([, pages]) => pages.size >= 2)
     .map(([hash, pages]) => ({ hash, pages: [...pages] }));
+
+  // A member that came from an EARLIER run's stored hash is re-verified live
+  // before it can anchor a finding: it must still answer 200 at its own
+  // address (no redirect/404) and still hash to the group's value. Members
+  // fetched this run already passed both checks above.
+  const analysisByPage = new Map(fetched.filter((f) => f.result.ok).map((f) => [f.page, f.result.analysis]));
+  const duplicateGroups = [];
+  let staleMembersDropped = 0;
+  for (const group of candidateGroups) {
+    const stored = group.pages.filter((p) => !hashByPage.has(p));
+    const probes = stored.length ? await probeVariants(stored) : new Map();
+    const keep = group.pages.filter((p) => hashByPage.has(p));
+    for (const p of stored) {
+      let ok = probes.get(p)?.verdict === 'live';
+      if (ok) {
+        const result = await fetchPage(p);
+        ok = Boolean(result.ok && !result.analysis.wasRedirected && result.analysis.bodyText != null && hashContent(result.analysis.bodyText) === group.hash);
+        if (ok) analysisByPage.set(p, result.analysis);
+      }
+      if (ok) keep.push(p); else staleMembersDropped++;
+    }
+    if (keep.length >= 2) duplicateGroups.push({ hash: group.hash, pages: keep });
+  }
 
   // A duplicate-content group is not a live problem if every member already
   // carries a <link rel="canonical"> pointing at ONE consistent target —
@@ -101,7 +146,6 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // available; a group member outside today's rotation batch gets one extra
   // live fetch, since canonical resolution isn't derivable from the stored
   // content_hash alone.
-  const analysisByPage = new Map(fetched.filter((f) => f.result.ok).map((f) => [f.page, f.result.analysis]));
   async function groupAlreadyCanonicalized(pages) {
     const targets = new Set();
     for (const page of pages) {
@@ -168,7 +212,9 @@ export async function run({ siteId, start, end, pageCache, params }) {
       if (analysis?.hasCanonical && analysis.canonicalUrl) canonicalByPage.set(page, analysis.canonicalUrl);
       if (typeof analysis?.internalLinkCount === 'number') internalLinkCountByPage.set(page, analysis.internalLinkCount);
       if (isLikelyFunctionalQueryParam(page)) functionalParamPages.add(page);
-      const purpose = await getOrClassifyPageContentType(siteId, page).catch(() => null);
+      // dryRun runs must be side-effect free (classifier cache upsert +
+      // LLM call).
+      const purpose = dryRun ? null : await getOrClassifyPageContentType(siteId, page).catch(() => null);
       if (purpose?.contentType) pagePurposeByPage.set(page, purpose.contentType);
     }
     decisionByHash.set(g.hash, await decideWinner(traffic, {
@@ -179,6 +225,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
 
   const findings = rankedGroups.map((g, i) => {
     const decision = decisionByHash.get(g.hash);
+    const verification = makeVerification(VERDICT.CONFIRMED, 'content-hash', `${g.pages.length} pages each answered 200 at their own address (no redirect) with an identical body hash`);
     if (decision.winner) {
       const losers = g.pages.filter((p) => p !== decision.winner.page);
       return makeFinding({
@@ -188,6 +235,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
           ? `${g.pages.length} pages have byte-identical body content at different URLs — ${decision.winner.page} earns more real clicks (${decision.winner.clicks}) than the other(s), and their real search queries overlap substantially, confirming they compete for the same search intent. Confident enough to consolidate automatically.`
           : `${g.pages.length} pages have byte-identical body content at different URLs — ${decision.winner.page} has all ${decision.winner.clicks} real click(s)/${decision.winner.impressions} impression(s) across the last ${EVIDENCE_LOOKBACK_DAYS} days, and the other page(s) have none. Confident enough to consolidate automatically: the losing page(s) get a canonical tag pointing at the real one.`,
         priority: priorities[i],
+        verification,
         // Same safe canonical generator every self-referential canonical
         // fix already uses — one loser per recommendation (mirrors
         // url-variant-duplicates.js), since each is its own separate
@@ -223,6 +271,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       evidence: { pages: [...g.pages].sort(), pageCount: g.pages.length, contentHash: g.hash, traffic: decision.withTraffic, confidence: decision.confidence, queryOverlap: decision.queryOverlap },
       whyItMatters: `${g.pages.length} pages have byte-identical body content — the same content is reachable at ${g.pages.length} different URLs, which splits ranking signals and wastes crawl budget instead of consolidating them onto one real page.`,
       priority: priorities[i],
+      verification,
       recommendedAction: null, // no evidenced winner yet — see decideWinner's HIGH-confidence bar above
       // Deliberately NOT auto-canonicalized when the evidence doesn't clear
       // decideWinner's HIGH bar (exactly one page with real traffic, or
@@ -267,6 +316,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     rangeStart: start, rangeEnd: end,
     batchSize: batch.length,
     pagesHashedThisRun: hashByPage.size,
+    staleMembersDropped,
     totalPagesTracked: known.length + hashByPage.size, // approximate — known already excludes this run's fresh hashes until persisted, so this is real coverage right after this run's writes land
     findings,
   };

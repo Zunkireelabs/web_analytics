@@ -15,6 +15,7 @@ export const meta = {
   // 'performance' is kept reserved for a future Core-Web-Vitals-focused
   // agent so the two categories don't overlap in meaning.
   category: 'seo',
+  requiresCapabilities: ['public-web'],
   version: 2,
   dataSources: [
     // Same honest gap as accessibility.js: tap-target sizing and legible

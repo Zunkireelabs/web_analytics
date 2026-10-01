@@ -1,7 +1,7 @@
 import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
 import { getSiteById } from '../store/read.js';
 import { callLLMForJson } from '../llm.js';
-import { groundingProviderConfigured, searchGroundedSources } from '../ingest/search-grounding-providers/index.js';
+import { groundingProviderConfigured, searchGroundedSources, queryTokens } from '../ingest/search-grounding-providers/index.js';
 import { safeMessage } from '../lib/errors.js';
 import { filterCompetitorCandidates } from '../agents/lib/competitor-policy.js';
 import { attributionNote } from '../agents/lib/zunkireelabs-growth-policy.js';
@@ -133,6 +133,57 @@ const SYSTEM_CITATIONS_GROUNDED = 'You are a content strategist. Given a page\'s
   'Respond with ONLY a JSON array containing EXACTLY ONE object, its "body" a markdown bullet list ("- " per line) ' +
   'with one bullet per cited source: [{"heading": "References", "body": "- [Source Title](URL): one-sentence note\\n- ..."}]';
 
+// Default path for external-citations: the references list is assembled
+// directly from the verified search results — no model call. The model's only
+// job on this path was to turn a list it was told to copy ("cite ONLY from
+// this list, exact URLs") into bullets, and 29 pages of that is 29 paid calls
+// for formatting. Relevance and trust are decided by rules instead: a result
+// must share a meaningful word with the page's query/title, and is ranked
+// ahead when it comes from an institutional or reference domain. Set
+// CITATION_SECTION_MODE=llm to restore the written-notes version.
+const CITATION_SECTION_MODE = process.env.CITATION_SECTION_MODE || 'deterministic';
+const MIN_SOURCE_SCORE = 0.4;
+// Company-directory / traffic-estimate / lead-database pages rank for almost
+// any "X companies" query and are never a source worth citing (confirmed in a
+// live sample: a RocketReach "competitors of <some training company>" page
+// matched an "IT companies in Nepal" query on the words "IT" and "Nepal").
+const LOW_VALUE_HOST_RE = /(^|\.)(rocketreach\.co|zoominfo\.com|similarweb\.com|owler\.com|craft\.co|apollo\.io|lusha\.com|cbinsights\.com|growjo\.com|tracxn\.com|pinterest\.[a-z.]+|quora\.com|reddit\.com)$/i;
+const TRUSTED_HOST_RE = /(\.gov(\.[a-z]{2})?|\.edu(\.[a-z]{2})?|\.ac\.[a-z]{2}|\.org|wikipedia\.org|nature\.com|mckinsey\.com|gartner\.com|forrester\.com|oecd\.int|worldbank\.org)$/i;
+
+export function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
+}
+
+// A source is relevant when it shares at least one meaningful word with the
+// page topic (query + title) in its own title or excerpt, and — when the
+// provider supplies a relevance score — clears a floor. Both are conservative:
+// dropping a good source costs one fewer bullet, keeping a bad one is a wrong
+// citation on a live page.
+export function isRelevantSource(source, topicTokens) {
+  if (typeof source.score === 'number' && source.score < MIN_SOURCE_SCORE) return false;
+  if (LOW_VALUE_HOST_RE.test(hostOf(source.url))) return false;
+  const hay = queryTokens(`${source.title || ''} ${source.content || ''}`);
+  // At least two topic words (or all of them for a one/two-word topic), so a
+  // result matching only a generic word like "IT" or the country name is out.
+  let hits = 0;
+  for (const t of topicTokens) if (hay.has(t)) hits++;
+  return hits >= Math.min(2, topicTokens.size) && hits > 0;
+}
+
+export function buildReferencesSections(sources, topicTokens, count = CITATION_COUNT) {
+  const seenHosts = new Set();
+  const picked = (sources || [])
+    .filter((s) => s?.title && s?.url && /^https?:\/\//i.test(s.url) && isRelevantSource(s, topicTokens))
+    .map((s) => ({ s, trusted: TRUSTED_HOST_RE.test(hostOf(s.url)) }))
+    .sort((a, b) => Number(b.trusted) - Number(a.trusted))
+    .map((x) => x.s)
+    .filter((s) => { const h = hostOf(s.url); if (seenHosts.has(h)) return false; seenHosts.add(h); return true; })
+    .slice(0, count);
+  if (!picked.length) return [];
+  const bullet = (s) => `- [${String(s.title).replace(/[\[\]\n]/g, ' ').replace(/\s+/g, ' ').trim()}](${s.url}) — ${hostOf(s.url)}`;
+  return [{ heading: 'References', body: picked.map(bullet).join('\n') }];
+}
+
 const FOCUS_SYSTEMS = {
   'comparison-content': SYSTEM_COMPARISON,
 };
@@ -226,6 +277,7 @@ export async function generate({ siteId, params }) {
   // behavior) isn't a safe placeholder like schema.js's [NEEDS INPUT]
   // marker, it's indistinguishable published body text, and it shipped
   // straight to a live page. Fail honestly instead of drafting filler.
+  let sourcesForSection = [];
   if (focus === 'external-citations') {
     if (!CITATION_SEARCH_ENABLED || !groundingProviderConfigured()) {
       throw Object.assign(new Error('External citations require real search grounding (ENABLE_CONTENT_CITATION_SEARCH + TAVILY_API_KEY) — refusing to draft an ungrounded citations section.'), { status: 400, userFacing: true, refusal: true, reason: 'citation-grounding-not-configured' });
@@ -246,6 +298,7 @@ export async function generate({ siteId, params }) {
         console.warn(`[expand-content] filtered ${removed.length} competitor source(s) from citation candidates for site ${siteId}: ${removed.map((s) => s.url).join(', ')}`);
       }
       sources = allowed.slice(0, CITATION_COUNT);
+      sourcesForSection = allowed; // the no-LLM path filters for relevance itself, so it needs the wider competitor-free list
     } catch (err) {
       // Honest failure, not a system fault: Tavily being unavailable/out of
       // quota is an external-dependency state, not a bug in this code, so
@@ -277,7 +330,15 @@ export async function generate({ siteId, params }) {
   }
 
   let sections;
-  try {
+  if (focus === 'external-citations' && CITATION_SECTION_MODE !== 'llm') {
+    // No model call: see buildReferencesSections. An empty result (nothing
+    // relevant survived) falls through to the same honest refusal below.
+    const topic = queryTokens(`${query || ''} ${fetched.analysis.title || ''}`);
+    sections = buildReferencesSections(sourcesForSection, topic);
+    if (!sections.length) {
+      throw Object.assign(new Error('None of the real search results was relevant enough to cite for this page — refusing to draft a references section.'), { status: 400, userFacing: true, refusal: true, reason: 'citation-grounding-no-relevant-sources' });
+    }
+  } else try {
     sections = await callLLMForJson(system, user, {
       maxTokens: 1200, generatorId: meta.id, siteId, validate: Array.isArray,
     });

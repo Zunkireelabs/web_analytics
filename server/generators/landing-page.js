@@ -1,6 +1,7 @@
 import { callLLMForJson } from '../llm.js';
 import { getSiteById } from '../store/read.js';
 import { pageStructureGuidance } from './lib/design-aware-composer.js';
+import { loadProductFactsFor } from './lib/product-facts.js';
 import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
 import { usedPhotoIds } from './lib/blog-image-usage.js';
 import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
@@ -44,11 +45,19 @@ export async function generate({ siteId, params }) {
     site = null;
   }
   const guidance = pageStructureGuidance(site, 'landing', { fallbackPageTypes: ['service', 'homepage'] });
+  // Verified product knowledge (product sites only; '' for every website
+  // tenant, whose prompt is unchanged). Gives the model the product's real
+  // features / flow / pricing / proof to write from, so it has nothing to invent.
+  const productFacts = await loadProductFactsFor(site);
   // designCorrections is appended last so it is the most recent instruction
   // the model reads — a previous attempt at THIS draft was checked against
   // the site's own design and something didn't match. See
   // generators/lib/design-repair-feedback.js and generateDraft's repair loop.
-  const user = `Target: ${target}${context ? `\nSupporting data: ${context}` : ''}${guidance ? `\n\n${guidance}` : ''}`
+  const user = `Target: ${target}${context ? `\nSupporting data: ${context}` : ''}`
+    + (productFacts
+      ? `\n\nVERIFIED PRODUCT FACTS — describe the product ONLY with these; never invent a feature, step, price, or proof point not listed:\n${productFacts}`
+      : '')
+    + `${guidance ? `\n\n${guidance}` : ''}`
     + (designCorrections ? `\n\n${designCorrections}` : '');
   let parsed;
   try {
@@ -86,7 +95,7 @@ export async function generate({ siteId, params }) {
     // claim-grounding-guard.js (quality-gate.js) can check "is this claim
     // actually backed by something real" without re-deriving or guessing
     // at what the model was given.
-    groundingContext: context || '',
+    groundingContext: [context, productFacts].filter(Boolean).join('\n\n'),
   };
   return { content, summary: `Landing page draft for "${target}"` };
 }

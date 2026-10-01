@@ -13,7 +13,8 @@
 // follows), so a site still in Phase 1 setup never gets a spurious failure
 // here.
 import { callLLMForJson } from '../../llm.js';
-import { getProductCapabilities } from '../../store/data-analyst.js';
+import { getProductKnowledge } from '../../store/data-analyst.js';
+import { formatKnowledgeLine } from './product-facts.js';
 
 const POSITIONING_SYSTEM = 'You review a drafted landing page against a company\'s REAL, verified product ' +
   'capabilities — never invent or assume a capability not in the given list. Respond with ONLY a JSON object: ' +
@@ -32,12 +33,13 @@ function pageSummary(content) {
 export async function checkPositioning(content, siteId) {
   if (!content || typeof content !== 'object') return [];
 
-  const capabilities = await getProductCapabilities(siteId, 'verified').catch(() => []);
+  // All verified kinds (migration 176): a draft's pricing / how-it-works /
+  // proof claims are checked against the real facts too, not only its feature
+  // claims. A site with only capability rows produces the same list as before.
+  const capabilities = await getProductKnowledge(siteId, 'verified').catch(() => []);
   if (!capabilities.length) return [];
 
-  const capabilityList = capabilities
-    .map((c) => `- ${c.name}${c.category ? ` (${c.category})` : ''}${c.description ? `: ${c.description}` : ''}`)
-    .join('\n');
+  const capabilityList = capabilities.map(formatKnowledgeLine).join('\n');
   const user = `Drafted landing page:\n${pageSummary(content)}\n\nVerified capabilities:\n${capabilityList}`;
 
   try {

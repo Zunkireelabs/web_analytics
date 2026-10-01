@@ -136,7 +136,7 @@ const DEEPER_SAMPLE_TYPES = Object.freeze([
 // already knows a site's real page list (this platform's onboarding already
 // records one) can hand it in here instead of leaving those pages
 // permanently undiscoverable.
-export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAULT_MAX_PAGES, knownUrls = [] } = {}) {
+export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAULT_MAX_PAGES, knownUrls = [], propertyType } = {}) {
   await browserPage.goto(homepageUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   const rawLinks = await browserPage.evaluate(collectLinksInPage);
 
@@ -151,7 +151,7 @@ export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAU
     if (!sameOrigin(abs, homepageUrl) || seen.has(abs)) return true;
     if (/\.(pdf|jpg|jpeg|png|svg|gif|zip|css|js|xml)$/i.test(abs)) return true;
 
-    const type = classifyPageType(abs);
+    const type = classifyPageType(abs, { propertyType });
     const limit = type === 'other' ? Infinity : 1;
     const existing = byType.get(type) || [];
     if (existing.length >= limit) return true;
@@ -212,7 +212,7 @@ export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAU
       if (!sameOrigin(abs, homepageUrl) || seen.has(abs)) continue;
       if (/\.(pdf|jpg|jpeg|png|svg|gif|zip|css|js|xml)$/i.test(abs)) continue;
       seen.add(abs);
-      if (classifyPageType(abs) !== articleType) continue;
+      if (classifyPageType(abs, { propertyType }) !== articleType) continue;
       byType.set(articleType, [abs]);
       total++;
       break;
@@ -244,6 +244,7 @@ export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAU
 export async function discoverCardHeavyPages(browserPage, homepageUrl, excludeUrls, {
   scanBudget = DEFAULT_CARD_SCAN_BUDGET,
   maxFound = DEFAULT_EXTRA_CARD_PAGES,
+  propertyType,
 } = {}) {
   await browserPage.goto(homepageUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   const rawLinks = await browserPage.evaluate(collectLinksInPage);
@@ -270,7 +271,7 @@ export async function discoverCardHeavyPages(browserPage, homepageUrl, excludeUr
     // applies to the segmented sections this raw block count becomes — one
     // incidental card (a testimonial, a pricing callout) doesn't make a page
     // "card-heavy" the way a portfolio/case-study grid is.
-    if (cardBlockCount >= 2) found.push({ ...captured, pageType: classifyPageType(abs) });
+    if (cardBlockCount >= 2) found.push({ ...captured, pageType: classifyPageType(abs, { propertyType }) });
   }
   return found;
 }
@@ -749,6 +750,9 @@ export async function captureSite(homepageUrl, {
   // chayceproperties.com's /faq/ and /news/ — still gets a chance to be
   // captured instead of staying permanently invisible to this analysis.
   knownUrls = [],
+  // sites.property_type — 'product' sites get product page types (pricing/
+  // features/how-it-works/demo/case-study); omitted/'website' is unchanged.
+  propertyType,
 } = {}) {
   const browser = await launchBrowserFn();
   try {
@@ -756,7 +760,7 @@ export async function captureSite(homepageUrl, {
       viewport: { width: DESKTOP_VIEWPORT.width, height: DESKTOP_VIEWPORT.height },
     });
     const page = await context.newPage();
-    const targets = await discoverPages(page, homepageUrl, { maxPages, knownUrls });
+    const targets = await discoverPages(page, homepageUrl, { maxPages, knownUrls, propertyType });
 
     const pages = [];
     for (const { url, pageType } of targets) {
@@ -773,7 +777,7 @@ export async function captureSite(homepageUrl, {
     // its 'other' slot above. extraCardPages: 0 opts out entirely (tests,
     // and any caller that wants the old exact page set).
     if (extraCardPages > 0) {
-      const cardPages = await discoverCardHeavyPages(page, homepageUrl, pages.map((p) => p.url), { maxFound: extraCardPages });
+      const cardPages = await discoverCardHeavyPages(page, homepageUrl, pages.map((p) => p.url), { maxFound: extraCardPages, propertyType });
       for (const captured of cardPages) pages.push(captured);
     }
 
