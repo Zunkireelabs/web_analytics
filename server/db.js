@@ -62,7 +62,13 @@ if (process.env.NODE_TEST_CONTEXT) {
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: Number(process.env.DB_POOL_MAX || 10),
-  idleTimeoutMillis: 10_000,
+  // Was a fixed 10s. pg_stat_statements (2026-08-21..10-01) showed
+  // pgbouncer.get_auth executed 220,664 times — roughly one fresh TLS+auth
+  // handshake per burst of work, because a pool that idles out after 10s has
+  // nothing left to reuse between cron ticks and UI requests. 30s keeps the
+  // connection warm across those gaps; the pool's own `max` is unchanged, so
+  // this never raises the connection ceiling, only how long an idle one lives.
+  idleTimeoutMillis: Number(process.env.DB_POOL_IDLE_MS || 30_000),
   connectionTimeoutMillis: 10_000,
   ssl: { rejectUnauthorized: false },
 });

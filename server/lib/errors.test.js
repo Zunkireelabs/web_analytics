@@ -21,7 +21,7 @@ mock.module(resolve('../db.js'), {
   },
 });
 
-const { UserFacingError, sanitizeForCustomer, sanitizeDeep, safeMessage, logInternal, describeFetchFailure, describeHttpFailure } = await import('./errors.js');
+const { UserFacingError, sanitizeForCustomer, sanitizeDeep, safeMessage, logInternal, __resetInternalErrorDedupe, describeFetchFailure, describeHttpFailure } = await import('./errors.js');
 
 describe('UserFacingError', () => {
   test('is a real Error with userFacing marker', () => {
@@ -168,6 +168,100 @@ describe('safeMessage / logInternal', () => {
     } finally {
       console.error = original;
     }
+  });
+
+  // Real incident: one token-permission 403 from getCheckRunsForRef wrote
+  // 44,121 identical rows (45MB of a 57MB table) in six days. Only a STORM is
+  // capped — ordinary failures must keep distinct, individually resolvable refs
+  // (github-ops.test.js depends on that).
+  describe('storm suppression', () => {
+    const quiet = async (fn) => {
+      const original = console.error;
+      console.error = () => {};
+      try { return await fn(); } finally { console.error = original; }
+    };
+    // Same call site every time: a real storm repeats from one place. (A loop
+    // inside one test body has one stack, exactly like a polling loop does.)
+    const boom = (msg = '403 Resource not accessible') => new Error(msg);
+    const raise = (ctx, mk) => logInternal(ctx, mk());
+
+    test('ordinary repeats are each recorded with their own distinct ref', async () => {
+      __resetInternalErrorDedupe();
+      insertedErrors.length = 0;
+      const ids = await quiet(async () => {
+        const out = [raise('ctx-o', () => boom('x')), raise('ctx-o', () => boom('x')), raise('ctx-o', () => boom('x'))];
+        await new Promise((r) => setImmediate(r));
+        return out;
+      });
+      assert.equal(insertedErrors.length, 3);
+      assert.equal(new Set(ids).size, 3, 'three failures, three distinct refs');
+    });
+
+    test('a storm is capped: beyond 3 per window it reuses the latest recorded ref and writes nothing', async () => {
+      __resetInternalErrorDedupe();
+      insertedErrors.length = 0;
+      const ids = await quiet(async () => {
+        const out = [];
+        for (let i = 0; i < 50; i++) out.push(raise('github.getCheckRunsForRef', () => boom()));
+        await new Promise((r) => setImmediate(r));
+        return out;
+      });
+      assert.equal(insertedErrors.length, 3, 'fifty identical failures must write three rows');
+      assert.equal(new Set(ids).size, 3);
+      assert.equal(ids[49], ids[2], 'every suppressed repeat hands back the last recorded ref');
+      assert.equal(insertedErrors.at(-1).id, ids[49], 'and that ref is a row that was actually persisted');
+    });
+
+    test('a different message, context, or underlying cause is never merged into a storm', async () => {
+      __resetInternalErrorDedupe();
+      insertedErrors.length = 0;
+      await quiet(async () => {
+        for (let i = 0; i < 5; i++) raise('ctx-a', () => boom('boom'));          // storm of one error
+        raise('ctx-b', () => boom('boom'));                                      // other context
+        raise('ctx-a', () => boom('different'));                                 // other message
+        for (let i = 0; i < 4; i++) {
+          logInternal('ctx-a', new UserFacingError('Generic.', { cause: new Error('docker down') }));
+        }
+        logInternal('ctx-a', new UserFacingError('Generic.', { cause: new Error('llm auth failed') }));
+        await new Promise((r) => setImmediate(r));
+      });
+      // 3 (storm capped) + 1 + 1 + 3 (docker storm capped) + 1 (distinct cause) = 9
+      assert.equal(insertedErrors.length, 9);
+      assert.ok(insertedErrors.some((e) => e.causeMessage === 'llm auth failed'), 'the distinct underlying cause was recorded');
+    });
+
+    test('after the window it records again, so a still-broken integration stays visible', async () => {
+      __resetInternalErrorDedupe();
+      insertedErrors.length = 0;
+      const realNow = Date.now;
+      let t = 1_000_000;
+      Date.now = () => t;
+      try {
+        await quiet(async () => {
+          for (let i = 0; i < 6; i++) raise('ctx-w', () => boom('still failing')); // capped at 3
+          t += 11 * 60 * 1000;
+          raise('ctx-w', () => boom('still failing'));                           // new window: recorded
+          await new Promise((r) => setImmediate(r));
+        });
+      } finally {
+        Date.now = realNow;
+      }
+      assert.equal(insertedErrors.length, 4);
+    });
+
+    test('suppressed repeats still reach the console, marked as a storm', () => {
+      __resetInternalErrorDedupe();
+      const original = console.error;
+      const logged = [];
+      console.error = (...args) => { logged.push(args.join(' ')); };
+      try {
+        for (let i = 0; i < 5; i++) raise('ctx-c', () => boom('flaky'));
+        assert.equal(logged.length, 5);
+        assert.match(logged[4], /repeat storm, not re-recorded/);
+      } finally {
+        console.error = original;
+      }
+    });
   });
 
   test('logInternal does not throw or print an extra line when there is no cause', () => {

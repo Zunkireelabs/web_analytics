@@ -11,10 +11,19 @@ let insertDraftErrorConstraint = 'drafts_site_finding_id_unique';
 let activeBoardRows = [];
 let implementedBoardRows = [];
 let lifecycleCountRows = [];
+let draftsColumnRows = null; // null => the information_schema lookup throws (exercises the d.* fallback)
+let geoAuditScoreRows = [];
 
 function fakeQuery(text, params = []) {
   const sql = text.replace(/\s+/g, ' ').trim();
   issued.push({ sql, params });
+  if (sql.includes('FROM information_schema.columns')) {
+    if (!draftsColumnRows) throw new Error('simulated information_schema failure');
+    return { rows: draftsColumnRows };
+  }
+  if (sql.startsWith("SELECT content #> '{score,overall}' AS overall FROM drafts")) {
+    return { rows: geoAuditScoreRows };
+  }
   if (sql.startsWith("UPDATE drafts SET status = 'branch_pushed'")) {
     return { rows: [{ id: params[1], status: 'branch_pushed' }] };
   }
@@ -74,7 +83,7 @@ const {
   markDraftBranchPushed, getImplementedFindingIds,
   countVisibleFaqDrafts, distinctVisibleFaqDraftPages, hasImplementedVisibleFaqForPage,
   createDraft, getPendingDraftFilePaths,
-  listDrafts, listDraftsForBoard, countDraftsByLifecycle,
+  listDrafts, listDraftsForBoard, countDraftsByLifecycle, getLatestGeoAuditScore,
 } = await import('./drafts.js');
 
 beforeEach(() => {
@@ -405,6 +414,65 @@ describe('listDraftsForBoard', () => {
     implementedBoardRows = [{ id: 2, status: 'implemented' }];
     const result = await listDraftsForBoard(1);
     assert.deepEqual(result.map((r) => r.id), [1, 2]);
+  });
+});
+
+// Egress fix (2026-10-01): the board used to SELECT d.* — every column, incl.
+// original_content (a second full copy of `content`) — on every load. Order
+// matters in this describe: the column list is cached per process after the
+// first SUCCESSFUL lookup, so the failure/fallback test must run first.
+describe('listDraftsForBoard — slim column list', () => {
+  test('if the column lookup fails it falls back to d.* (bigger, never wrong) and does not cache the failure', async () => {
+    draftsColumnRows = null;
+    activeBoardRows = []; implementedBoardRows = [];
+    await listDraftsForBoard(1);
+    const boardCall = issued.find((i) => i.sql.includes("d.status NOT IN ('implemented', 'abandoned')"));
+    assert.match(boardCall.sql, /^SELECT d\.\*, \(/);
+  });
+
+  test('once the lookup succeeds, the omitted heavy columns are gone, everything else (incl. future columns) stays', async () => {
+    draftsColumnRows = [
+      'id', 'site_id', 'status', 'content', 'original_content', 'revision_history', 'rendered_body',
+      'agent_review_detail', 'target_provenance', 'rollback_snapshot', 'validation_status', 'some_future_column',
+    ].map((column_name) => ({ column_name }));
+    activeBoardRows = []; implementedBoardRows = [];
+    await listDraftsForBoard(1);
+    const boardCall = issued.filter((i) => i.sql.includes("d.status NOT IN ('implemented', 'abandoned')")).pop();
+    for (const heavy of ['original_content', 'revision_history', 'rendered_body', 'agent_review_detail', 'target_provenance']) {
+      assert.doesNotMatch(boardCall.sql, new RegExp(`"${heavy}"`), `${heavy} must not be selected for the board`);
+    }
+    // columns DraftModal reads from the list row, plus an unlisted future column, must survive
+    for (const kept of ['content', 'rollback_snapshot', 'validation_status', 'some_future_column']) {
+      assert.match(boardCall.sql, new RegExp(`d\\."${kept}"`), `${kept} must still be selected`);
+    }
+    assert.doesNotMatch(boardCall.sql, /d\.\*/);
+    assert.match(boardCall.sql, /AS sibling_count/);
+  });
+
+  test('the implemented-drafts query is slimmed too and keeps its LIMIT param', async () => {
+    activeBoardRows = []; implementedBoardRows = [];
+    await listDraftsForBoard(1, { implementedLimit: 7 });
+    const call = issued.filter((i) => i.sql.includes("d.status = 'implemented' ORDER BY d.created_at DESC LIMIT")).pop();
+    assert.doesNotMatch(call.sql, /original_content/);
+    assert.deepEqual(call.params, [1, 7]);
+  });
+});
+
+describe('getLatestGeoAuditScore', () => {
+  test('returns the newest geo-audit score and asks the DB for one row, not every draft', async () => {
+    geoAuditScoreRows = [{ overall: 73 }];
+    assert.equal(await getLatestGeoAuditScore(5), 73);
+    const call = issued.find((i) => i.sql.startsWith("SELECT content #> '{score,overall}'"));
+    assert.match(call.sql, /action_type = 'geo-audit'/);
+    assert.match(call.sql, /ORDER BY created_at DESC LIMIT 1/);
+    assert.deepEqual(call.params, [5]);
+  });
+
+  test('null when there is no geo-audit draft, or it has no score', async () => {
+    geoAuditScoreRows = [];
+    assert.equal(await getLatestGeoAuditScore(5), null);
+    geoAuditScoreRows = [{ overall: null }];
+    assert.equal(await getLatestGeoAuditScore(5), null);
   });
 });
 

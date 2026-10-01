@@ -71,6 +71,25 @@ export async function listDrafts(siteId, { actionType, status, limit } = {}) {
   return rows;
 }
 
+// The newest geo-audit report's overall score, and nothing else. The agent
+// status list used to call listDrafts(siteId, { actionType: 'geo-audit' }) —
+// EVERY geo-audit draft, all columns (content, original_content,
+// rollback_snapshot, ...) plus the sibling-count subquery per row — only to
+// read `[0].content.score.overall`. Same ordering listDrafts uses
+// (created_at DESC), so it picks the same row; returns null when there is no
+// draft or no numeric score, exactly as the old `?.` chain did.
+export async function getLatestGeoAuditScore(siteId) {
+  const { rows } = await query(
+    `SELECT content #> '{score,overall}' AS overall
+       FROM drafts
+      WHERE site_id = $1 AND action_type = 'geo-audit'
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [siteId]
+  );
+  return rows[0]?.overall ?? null;
+}
+
 // The Action Center's unfiltered "whole board" load — what listDrafts
 // itself used to be called with directly, and what grew without bound as
 // autonomous shipping accumulated history (site 1: 1,631 draft rows, ~7MB
@@ -96,17 +115,54 @@ export async function listDrafts(siteId, { actionType, status, limit } = {}) {
 // Tab badge counts must NOT be derived from this capped result — see
 // countDraftsByLifecycle below, which is exact regardless of any cap here.
 export async function listDraftsForBoard(siteId, { implementedLimit = 150 } = {}) {
+  const select = await boardSiblingCountSelect();
   const [active, implemented] = await Promise.all([
     query(
-      `SELECT ${SIBLING_COUNT_SELECT} FROM drafts d WHERE d.site_id = $1 AND d.status NOT IN ('implemented', 'abandoned') ORDER BY d.created_at DESC`,
+      `SELECT ${select} FROM drafts d WHERE d.site_id = $1 AND d.status NOT IN ('implemented', 'abandoned') ORDER BY d.created_at DESC`,
       [siteId]
     ),
     query(
-      `SELECT ${SIBLING_COUNT_SELECT} FROM drafts d WHERE d.site_id = $1 AND d.status = 'implemented' ORDER BY d.created_at DESC LIMIT $2`,
+      `SELECT ${select} FROM drafts d WHERE d.site_id = $1 AND d.status = 'implemented' ORDER BY d.created_at DESC LIMIT $2`,
       [siteId, implementedLimit]
     ),
   ]);
   return [...active.rows, ...implemented.rows];
+}
+
+// Columns the Action Center BOARD never reads. web/src has zero references to
+// any of them (grep-verified 2026-10-01), yet SELECT d.* shipped all five on
+// every board load — original_content alone is a second full copy of
+// `content`, which is why the board was ~7MB per call at ~1,600 drafts. The
+// full row is still served per-draft by getDraft (GET /action-center/drafts/:id)
+// and listDrafts; only this one list endpoint is slimmed. DraftModal opens from
+// the list row, so the columns IT reads (rollback_snapshot, render_mode_confirm,
+// validation_status, gsc_notification) deliberately stay.
+const BOARD_OMITTED_COLUMNS = new Set([
+  'original_content', 'revision_history', 'rendered_body', 'agent_review_detail', 'target_provenance',
+]);
+
+// Postgres has no SELECT * EXCEPT, and a hardcoded column list would silently
+// hide every column a later migration adds. So read the live column list once
+// per process and subtract the omitted set. On any failure fall back to d.*
+// (the old behavior: bigger, never wrong) and do NOT cache the failure.
+let boardColumnsPromise = null;
+async function loadBoardColumns() {
+  try {
+    const { rows } = await query(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'drafts' ORDER BY ordinal_position`
+    );
+    const cols = rows.map((r) => r.column_name).filter((c) => !BOARD_OMITTED_COLUMNS.has(c));
+    return cols.length ? cols.map((c) => `d."${c.replace(/"/g, '""')}"`).join(', ') : null;
+  } catch {
+    return null;
+  }
+}
+async function boardSiblingCountSelect() {
+  boardColumnsPromise ??= loadBoardColumns();
+  const cols = await boardColumnsPromise;
+  if (!cols) { boardColumnsPromise = null; return SIBLING_COUNT_SELECT; }
+  return SIBLING_COUNT_SELECT.replace('d.*', cols);
 }
 
 // Cheap, always-accurate counts for the Action Center's tab badges — a

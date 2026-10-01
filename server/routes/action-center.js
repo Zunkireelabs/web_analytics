@@ -20,7 +20,7 @@ import { query as pgQuery } from '../db.js';
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
 import { scheduleImpactMeasurement } from '../store/fix-impact.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
-import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
+import { getLatestAgentRunSummaries } from '../agents/lib/fresh-runs.js';
 import { saveAgentRun } from '../store/agent-runs.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
@@ -205,7 +205,7 @@ router.get('/action-center/recommendations', async (req, res, next) => {
 export async function buildStalenessContext(siteId) {
   const [meta, runs] = await Promise.all([
     listAgentMeta(),
-    getLatestAgentRuns(siteId, RECOMMENDATION_AGENT_IDS),
+    getLatestAgentRunSummaries(siteId, RECOMMENDATION_AGENT_IDS),
   ]);
   const nameById = new Map(meta.map((m) => [m.id, m]));
   const byId = new Map(runs.map((r) => [r.agent_id, r]));
