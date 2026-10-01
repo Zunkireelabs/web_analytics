@@ -76,12 +76,27 @@ async function classifyFromLlm(pageUrl, { siteId } = {}) {
 // FIRST evaluation as a learned-repair candidate (see learned-repair.js /
 // fix-verification.js — both only call this for items that already cleared
 // the cheaper gates).
+// store/page-content-classification.js's two functions both return raw DB
+// rows (content_type, classified_by — snake_case columns), but this
+// function's own contract (and every caller's, e.g. templated-duplicates.js
+// reading `.contentType`) is the camelCase shape `result` already uses
+// above. Without normalizing here, a cache hit or a freshly-persisted write
+// silently hands back `.content_type` instead of `.contentType`, so every
+// caller reads `undefined` — the EXCLUDED_CONTENT_TYPES check in
+// templated-duplicates.js (and any other consumer) then never matches,
+// even for a real 'blog'/'product' page.
+const toCamel = (row) => (row ? {
+  contentType: row.contentType ?? row.content_type,
+  confidence: row.confidence,
+  classifiedBy: row.classifiedBy ?? row.classified_by,
+} : null);
+
 export async function getOrClassifyPageContentType(siteId, pageUrl) {
   if (!siteId || !pageUrl) return null;
 
   try {
     const cached = await getPageContentType(siteId, pageUrl);
-    if (cached && cached.confidence >= MIN_CONFIDENCE) return cached;
+    if (cached && cached.confidence >= MIN_CONFIDENCE) return toCamel(cached);
   } catch (err) {
     console.error(`[page-content-classifier] site ${siteId} cache read failed for ${pageUrl}:`, err.message);
     // Fall through and try to classify live — a broken cache read must not
@@ -98,7 +113,7 @@ export async function getOrClassifyPageContentType(siteId, pageUrl) {
   if (!result || result.confidence < MIN_CONFIDENCE) return null;
 
   try {
-    return await upsertPageContentType({ siteId, page: pageUrl, ...result });
+    return toCamel(await upsertPageContentType({ siteId, page: pageUrl, ...result }));
   } catch (err) {
     // Still usable for THIS decision even if the write failed — it just
     // won't be cached, so the next candidate on this page re-classifies.
