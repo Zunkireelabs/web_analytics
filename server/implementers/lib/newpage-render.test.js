@@ -159,6 +159,13 @@ describe('permalink front matter on net-new pages', () => {
     assert.match(renderTranslationBody({ translatedTitle: 'Servicios' }, site, { permalink: '/es/servicios/' }), /^permalink: "\/es\/servicios\/"$/m);
   });
 
+  test('writes a front-matter category only when the draft carries one (trend insight posts)', () => {
+    const withCat = renderBlogOutlineBody({ title: 'Superintelligence', category: 'Insights', sections: [] }, site, {});
+    assert.match(withCat, /^category: "Insights"$/m);
+    const without = renderBlogOutlineBody({ title: 'Boilers', sections: [] }, site, {});
+    assert.doesNotMatch(without, /^category:/m);
+  });
+
   test('no permalink resolved -> the key is omitted entirely, not written empty', () => {
     for (const [render, content] of [
       [renderLandingPageBody, { headline: 'Leeds' }],

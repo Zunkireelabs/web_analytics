@@ -259,6 +259,11 @@ export function riskTierForGenerator(generatorId) {
 // Per-finding, deliberately not a change to any generator's tier above.
 export function requiresHumanReview(item) {
   if (item?.source === 'geo-signals') return true;
+  // Trend insight posts make claims about current events. blog-outline is a
+  // safe-tier generator (it may open a PR unattended for a configured site),
+  // which is right for evergreen posts but not for these: a person reviews
+  // the draft before it is generated into a PR, every time.
+  if (item?.source === 'trend-radar') return true;
   const fixType = item?.params?.fixType;
   return typeof fixType === 'string' && fixType.startsWith('typography-drift');
 }

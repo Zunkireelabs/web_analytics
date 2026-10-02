@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites, runTrendRadarIfDueForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -577,6 +577,26 @@ export function startCron() {
       }
     }, { timezone: tz });
     console.log(`[cron] proactive design-agent queue scheduled "${designAgentQueue}" (${tz})`);
+  }
+
+  // Trend Radar — monthly. Fires on the 3rd at 06:30 and retries on the 4th-9th
+  // ONLY if the 3rd produced no successful run (runTrendRadarIfDue skips any
+  // site that already has this calendar month's ok run), so a transient feed
+  // outage on the 3rd doesn't cost a whole month. Override with
+  // TREND_RADAR_CRON_SCHEDULE.
+  const trendRadarSchedule = process.env.TREND_RADAR_CRON_SCHEDULE || '30 6 3-9 * *';
+  if (!cron.validate(trendRadarSchedule)) {
+    console.error(`[cron] invalid TREND_RADAR_CRON_SCHEDULE "${trendRadarSchedule}" — trend radar NOT scheduled.`);
+  } else {
+    cron.schedule(trendRadarSchedule, async () => {
+      try {
+        const results = (await runTrendRadarIfDueForAllSites()).filter(Boolean);
+        console.log(`[cron] trend radar finished — ${results.length} site(s) analyzed`);
+      } catch (err) {
+        console.error('[cron] trend radar error:', err.message);
+      }
+    }, { timezone: tz });
+    console.log(`[cron] trend radar scheduled "${trendRadarSchedule}" (${tz})`);
   }
 
   // Weekly Design Context refresh — a live-site analysis is a durable asset

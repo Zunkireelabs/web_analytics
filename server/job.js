@@ -17,6 +17,7 @@ import { isGoogleAuthError } from './integrations/google-oauth.js';
 import { daysAgoInTz, dateRange, previousWeek, previousMonth, monthBounds, todayInTz } from './util/dates.js';
 import { runOrchestration } from './agents/orchestrator.js';
 import { runAgent } from './agents/runner.js';
+import { trendRadarDue } from './agents/lib/trend-cadence.js';
 import { saveAgentRun, getLatestAgentRuns } from './store/agent-runs.js';
 import { meta as execReportMeta, orchestrationStatus } from './agents/executive-report.js';
 import { computeHealthScore } from './agents/lib/health-score.js';
@@ -86,7 +87,7 @@ import { createDesignProfileJob, getQueuedComponentTemplateJob, getLatestDesignA
 // that moment. Both are daily now, and the real per-run cost is bounded
 // where it belongs — in each agent's own page batch size — rather than by
 // starving the agent of runs.
-const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation']);
+const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation', 'trend-radar']);
 const WEEKLY_ONLY_AGENT_IDS = new Set(['content-gap', 'growth-queries']);
 const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !THROTTLED_AGENT_IDS.has(id) && !WEEKLY_ONLY_AGENT_IDS.has(id));
 
@@ -572,6 +573,41 @@ export const runCompetitorIntelligenceIfDueForAllSites = () => runAgentIfDueForA
 // Backlinks API cost negligible.
 export const runAuthorityIfDue = (site) => runAgentIfDue(site, 'authority');
 export const runAuthorityIfDueForAllSites = () => runAgentIfDueForAllSites('authority');
+
+// Trend Radar — once per calendar month (agents/lib/trend-cadence.js), on its
+// own cron entry rather than the weekly trigger, so a run on Oct 2 is next due
+// on Nov 3's cron and never in between. Not in RECOMMENDATION_AGENT_IDS (so
+// never in the daily pass) and excluded from orchestrator.js's default
+// fan-out — every run costs an LLM call plus feed fetches.
+// First month the scheduled run is allowed. Rolled out for November 2026: the
+// cron fires on the 3rd-9th, and without this a deploy on Oct 2 would run it
+// for every client on Oct 3 (no October run exists yet). Override with
+// TREND_RADAR_ENABLED_FROM=YYYY-MM to move it.
+const TREND_RADAR_ENABLED_FROM = process.env.TREND_RADAR_ENABLED_FROM || '2026-11';
+
+export async function runTrendRadarIfDue(site) {
+  const [lastRun] = await getLatestAgentRuns(site.id, ['trend-radar']);
+  if (!trendRadarDue(lastRun, { timeZone: site.timezone || 'UTC', enabledFrom: TREND_RADAR_ENABLED_FROM })) {
+    console.log(`[trend-radar] site ${site.id} not due (already has this month's run, or not enabled yet) — skipping.`);
+    return null;
+  }
+  const output = await runAgent('trend-radar', { siteId: site.id }, { persist: true });
+  console.log(`[trend-radar] site ${site.id}: monthly run complete (status: ${output.status}).`);
+  return { status: output.status, findingsCount: output.facts?.findings?.length || 0 };
+}
+
+export async function runTrendRadarIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runTrendRadarIfDue(site));
+    } catch (err) {
+      console.error(`[job] trend-radar run failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return results;
+}
 
 // font-consistency and visual-quality had their own runAgentIfDue wrappers
 // here (monthly and weekly). Both are ordinary DAILY_AGENT_IDS members as of

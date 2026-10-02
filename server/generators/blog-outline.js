@@ -5,6 +5,7 @@ import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/pag
 import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
 import { usedPhotoIds } from './lib/blog-image-usage.js';
 import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
+import { featuredImageWanted } from './lib/blog-image-policy.js';
 import { pageStructureGuidance } from './lib/design-aware-composer.js';
 import { getSeoPolicy } from '../store/site-seo-policy.js';
 import { getSiteProfile } from '../store/data-analyst.js';
@@ -138,6 +139,11 @@ async function expandSections(sections, topic) {
 // params: { topic: string, context?: string, start?: string, end?: string }
 export async function generate({ siteId, params }) {
   const { topic, context, designCorrections } = params;
+  // Optional blog category the post is filed under (e.g. 'Insights' for trend
+  // explainers from trend-radar). A short plain label only — it is written into
+  // front matter by newpage-render.js, so anything else is dropped.
+  const category = typeof params.category === 'string' && /^[A-Za-z0-9 &-]{1,40}$/.test(params.category.trim())
+    ? params.category.trim() : null;
   if (!topic) throw Object.assign(new Error('topic is required'), { status: 400 });
   const { start, end } = params.start && params.end ? params : defaultRange();
 
@@ -304,10 +310,16 @@ export async function generate({ siteId, params }) {
   const excludePhotoIds = imagesConfigured() ? await usedPhotoIds(site) : undefined;
   const { fallback } = await imageQueryContextFor(site);
   const sectionHeadings = sections.map((s) => s.heading).filter(Boolean);
-  const featuredImage = await searchImage(
-    [...buildImageQueries({ title: parsed.title, topic }), ...sectionHeadings, fallback].filter(Boolean),
-    { excludePhotoIds, perPage: IMAGE_CANDIDATE_POOL },
-  );
+  // A site may restrict Pexels images to Insights posts (see
+  // lib/blog-image-policy.js) so its regular posts keep the blog's own
+  // image-less gradient card; no setting means every post gets one as before.
+  const blogTarget = site?.url_file_map?.newContentTargets?.['blog-outline'];
+  const featuredImage = featuredImageWanted(blogTarget, { category })
+    ? await searchImage(
+      [...buildImageQueries({ title: parsed.title, topic }), ...sectionHeadings, fallback].filter(Boolean),
+      { excludePhotoIds, perPage: IMAGE_CANDIDATE_POOL },
+    )
+    : null;
 
   const content = {
     topic,
@@ -317,6 +329,7 @@ export async function generate({ siteId, params }) {
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
     categories,
+    ...(category ? { category } : {}),
     ...(featuredImage ? { featuredImage } : {}),
     // The real supporting text this draft was grounded in — same
     // convention as landing-page.js's content.groundingContext, for

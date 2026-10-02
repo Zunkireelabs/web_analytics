@@ -10,6 +10,12 @@ import { safeMessage } from '../lib/errors.js';
 // differently-configured callers of this — none of them re-implements its
 // own fan-out + synthesis loop. See agents/types.js OrchestratorInput/Output.
 
+// Agents the default "run everything" fan-out must skip: executive-report is
+// the caller itself, and trend-radar has its own monthly cadence (job.js's
+// runTrendRadarIfDue) — running it here would add feed fetches and an LLM call
+// to every executive report / refresh.
+const EXCLUDED_FROM_DEFAULT_FANOUT = new Set(['executive-report', 'trend-radar']);
+
 export const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 
 const BRIEFING_SYSTEM = 'You are a senior growth consultant writing a short daily briefing for a business owner ' +
@@ -137,7 +143,7 @@ export async function runOrchestration({
 } = {}) {
   const ids = agentIds?.length
     ? agentIds
-    : (await listAgentMeta()).map((m) => m.id).filter((id) => id !== 'executive-report');
+    : (await listAgentMeta()).map((m) => m.id).filter((id) => !EXCLUDED_FROM_DEFAULT_FANOUT.has(id));
 
   // One fetch cache shared by every agent in this run — see lib/fetch-cache.js
   // for why this needs no special handling to stay out of persisted history.

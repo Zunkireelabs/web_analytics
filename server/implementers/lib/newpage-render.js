@@ -121,6 +121,11 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
     ['title', content.title || content.topic],
     ['description', content.metaDescription],
     ['date', new Date().toISOString().slice(0, 10)],
+    // Optional single-label category (e.g. 'Insights' for trend posts) —
+    // only when the draft carries one, via blog-outline.js's params.category.
+    // The Eleventy blog already reads front-matter `category` for the card
+    // label and the /blog/insights/ filter.
+    ['category', content.category],
     // Optional — only present when blog-outline.js's Pexels search
     // (generators/lib/pexels-client.js) found a match; omitted otherwise via
     // frontMatter()'s existing null/empty skip, same as every other field

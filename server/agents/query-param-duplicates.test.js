@@ -224,6 +224,28 @@ describe('query-param-duplicates agent', () => {
     });
   });
 
+  test('no finding when every query variant already canonicalizes to the same clean URL (no bare URL, no winner)', async () => {
+    inventory = [
+      { page: 'https://example.com/apply/?position=DevOps', orphaned: false },
+      { page: 'https://example.com/apply/?position=Designer', orphaned: false },
+    ];
+    for (const p of inventory.map((i) => i.page)) {
+      probeByUrl.set(p, { url: p, verdict: 'live', status: 200, canonical: 'https://example.com/apply/' });
+    }
+    const result = await run({ siteId: 1 });
+    assert.deepEqual(result.facts.findings, []);
+  });
+
+  test('still reports when the same no-winner group has a variant with no canonical', async () => {
+    inventory = [
+      { page: 'https://example.com/apply/?position=DevOps', orphaned: false },
+      { page: 'https://example.com/apply/?position=Designer', orphaned: false },
+    ];
+    probeByUrl.set(inventory[0].page, { url: inventory[0].page, verdict: 'live', status: 200, canonical: 'https://example.com/apply/' });
+    const result = await run({ siteId: 1 });
+    assert.equal(result.facts.findings.length, 1);
+  });
+
   describe('live verification', () => {
     const inv = () => {
       inventory = [
