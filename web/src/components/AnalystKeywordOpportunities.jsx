@@ -9,6 +9,7 @@ const SOURCE_LABEL = {
   user_request: 'You asked for this',
   claude_research: 'Keyword research',
   internal_analysis: 'Gap analysis',
+  dataforseo_demand: 'Market demand',
 };
 
 // product_relevance/search_intent are classified within a week of a gap
@@ -18,19 +19,33 @@ const SOURCE_LABEL = {
 const RELEVANCE_CHIP = { direct: 'an-chip-emerald', supporting: 'an-chip-amber', unrelated: 'an-chip-slate' };
 const RELEVANCE_LABEL = { direct: 'Product match', supporting: 'Supports product', unrelated: 'Not product-related' };
 
-// Informational only — mirrors gapDraftEligibility's own commercial-intent +
-// direct-relevance rule (server/agents/lib/analyst-seo-mapping.js) just
-// closely enough to tell a reviewer what clicking "Send to Action Center"
-// is actually approving. The backend is the sole authority on what actually
-// ships: this never gates the button, and analyst-seo-mapping.js's
-// qualifyAndShipContentGaps refuses to auto-approve a "Landing page" gap
-// through the unattended biweekly cycle regardless of this label — a human
-// clicking here is the ask that generator was held back for.
-function predictedShape(gap) {
-  if (!gap.product_relevance) return null;
-  const commercial = gap.search_intent === 'commercial' || gap.search_intent === 'transactional';
-  if (commercial && gap.product_relevance === 'direct') return 'Would create: Landing page';
-  return 'Would create: Blog post';
+// Coverage verdicts (server/agents/lib/keyword-coverage.js). SAME TOPIC DOES NOT
+// MEAN SAME SEO TARGET, so a keyword another page covers only in a different
+// language, country or intent is shown as an expansion, never hidden as covered.
+const COVERAGE_CHIP = {
+  opportunity: 'an-chip-emerald', market_gap: 'an-chip-violet', language_gap: 'an-chip-violet',
+  intent_gap: 'an-chip-amber', covered: 'an-chip-slate', duplicate: 'an-chip-slate', uncertain: 'an-chip-rose',
+};
+const COVERAGE_LABEL = {
+  opportunity: 'New opportunity', market_gap: 'Market gap', language_gap: 'Language gap', intent_gap: 'Intent gap',
+  covered: 'Already covered', duplicate: 'Already targeted', uncertain: 'Uncertain',
+};
+// Order is the order sections appear. A gap with no verdict yet is a new opportunity.
+const COVERAGE_GROUPS = [
+  { id: 'opportunity', title: 'New opportunities', hint: 'No existing page covers these', match: (g) => !g.coverage_status || g.coverage_status === 'opportunity' },
+  { id: 'market_gap', title: 'International expansion', hint: 'Covered for another country, not this one', match: (g) => g.coverage_status === 'market_gap' },
+  { id: 'language_gap', title: 'Language expansion', hint: 'Covered in another language', match: (g) => g.coverage_status === 'language_gap' },
+  { id: 'intent_gap', title: 'Intent expansion', hint: 'Covered, but for a different search intent', match: (g) => g.coverage_status === 'intent_gap' },
+  { id: 'covered', title: 'Already covered', hint: 'An existing page already satisfies these', match: (g) => g.coverage_status === 'covered' || g.coverage_status === 'duplicate' },
+  { id: 'uncertain', title: 'Uncertain', hint: 'Not enough evidence to decide', match: (g) => g.coverage_status === 'uncertain' },
+];
+
+// What will really happen if this gap is sent to Action Center — computed by the
+// backend from the same rules that decide whether a draft is created, so this
+// can never promise "Blog post" for a gap the server will not draft.
+function recommendedAction(gap) {
+  const a = gap.recommended_action;
+  return a?.label ? { label: a.label, reason: a.reason || null, kind: a.kind } : null;
 }
 
 // Read-only mirror of hasStableOrGrowingDemand's own two-most-recent-
@@ -141,11 +156,6 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
     const seen = new Set();
     const deduped = (gaps || [])
       .filter((g) => g.status === 'pending_review' || gapAction[g.id])
-      // An existing page already satisfies this keyword (server-side coverage
-      // check — topic, intent, language AND market, not mere similarity), so
-      // there is nothing to grow. 'partially_covered' stays: a page overlaps
-      // but does not answer this query, which is the opportunity.
-      .filter((g) => g.coverage_decision !== 'covered' || gapAction[g.id])
       .filter((g) => {
         const key = (g.topic || '').trim().toLowerCase();
         if (!key || seen.has(key)) return false;
@@ -190,10 +200,6 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
           blockedReason: updated.actionCenter?.blockedReason ?? null,
           requiresFutureInfrastructure: updated.actionCenter?.requiresFutureInfrastructure ?? false,
           rejected: status === 'rejected',
-          // eligible:false means the server declined to create anything (e.g.
-          // an existing page covers it, or the gates dropped it) — the row
-          // must not claim it was queued.
-          notQueued: status === 'approved' && updated.actionCenter?.eligible === false,
         },
       }));
     } catch (e) {
@@ -333,8 +339,18 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                 will show up here, ready to send to Action Center.
               </p>
             ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5 max-h-[34rem] overflow-y-auto custom-scrollbar pr-1 -mr-1">
-                {visibleGaps.map((gap) => {
+              <div className="max-h-[34rem] overflow-y-auto custom-scrollbar pr-1 -mr-1 space-y-4">
+              {COVERAGE_GROUPS.map((group) => {
+                const items = visibleGaps.filter(group.match);
+                if (!items.length) return null;
+                return (
+                  <div key={group.id} className="space-y-2">
+                    <div className="flex items-baseline gap-2">
+                      <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-600">{group.title}</h3>
+                      <span className="text-[10px] font-semibold text-slate-400">{items.length} · {group.hint}</span>
+                    </div>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
+                {items.map((gap) => {
                   const state = gapAction[gap.id];
                   const sending = state === 'sending';
                   const done = state && state !== 'sending';
@@ -358,8 +374,15 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                               {RELEVANCE_LABEL[gap.product_relevance] || gap.product_relevance}
                             </span>
                           )}
-                          {predictedShape(gap) && (
-                            <span className="an-chip an-chip-slate">{predictedShape(gap)}</span>
+                          {gap.coverage_status && (
+                            <span className={`an-chip ${COVERAGE_CHIP[gap.coverage_status] || 'an-chip-slate'}`} title={gap.coverage_reason || undefined}>
+                              {COVERAGE_LABEL[gap.coverage_status] || gap.coverage_status}
+                            </span>
+                          )}
+                          {recommendedAction(gap) && (
+                            <span className="an-chip an-chip-slate" title={recommendedAction(gap).reason || undefined}>
+                              {recommendedAction(gap).label}
+                            </span>
                           )}
                           <span className={`an-chip ${TREND_CHIP[evidenceTrend(gap)]}`} title="Based on the two most recent weekly demand snapshots">
                             {TREND_LABEL[evidenceTrend(gap)]}
@@ -368,10 +391,8 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                         {gap.reason && (
                           <p className="text-[11px] font-medium text-slate-500 mt-1 line-clamp-2">{gap.reason}</p>
                         )}
-                        {gap.coverage_decision === 'partially_covered' && gap.coverage_detail?.reasons?.[0] && (
-                          <p className="text-[11px] font-semibold text-indigo-700 mt-1">
-                            Overlaps{gap.coverage_detail.page ? ` ${gap.coverage_detail.page.replace(/^https?:\/\/[^/]+/, '')}` : ' an existing page'}, but not covered: {gap.coverage_detail.reasons[0]}
-                          </p>
+                        {gap.coverage_status && gap.coverage_status !== 'opportunity' && gap.coverage_reason && (
+                          <p className="text-[11px] font-medium text-indigo-700/80 mt-1 line-clamp-2">{gap.coverage_reason}</p>
                         )}
                         <p className="text-[10px] font-medium text-slate-400 mt-1">
                           Seen {gap.observation_count || 1}x
@@ -410,12 +431,7 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                             </span>
                           </p>
                         )}
-                        {done && state.notQueued && (
-                          <p className="text-[11px] font-semibold text-slate-500 mt-2">
-                            Not queued — nothing new to add for this keyword (already covered, or filtered out by the safety checks).
-                          </p>
-                        )}
-                        {done && !state.notQueued && !state.draftId && !state.draftError && !state.rejected && !state.requiresFutureInfrastructure && (
+                        {done && !state.draftId && !state.draftError && !state.rejected && !state.requiresFutureInfrastructure && (
                           <p className="text-[11px] font-semibold text-slate-500 mt-2">
                             Queued in Action Center — no draft was generated for this one.
                           </p>
@@ -448,6 +464,10 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                     </div>
                   );
                 })}
+                    </div>
+                  </div>
+                );
+              })}
               </div>
             )}
         </div>

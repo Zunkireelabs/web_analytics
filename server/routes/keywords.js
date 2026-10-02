@@ -5,10 +5,10 @@ import {
   getKeywordClusters, getKeywordGaps, updateKeywordGapStatus, getSiteProfile,
   getLatestKeywordNarrative, getAnomalyAlerts, getLatestForecastStatuses,
   getLatestLayoutSuggestion, saveLayoutSuggestion, createUserKeywordGap,
-  getProductCapabilities, createProductCapability, updateProductCapabilityStatus, getUncheckedPendingGaps,
+  getProductCapabilities, createProductCapability, updateProductCapabilityStatus,
 } from '../store/data-analyst.js';
 import { PRODUCT_KNOWLEDGE_KINDS } from '../lib/product-knowledge-kinds.js';
-import { createActionCenterRecommendationForGap, buildProductTopicMap, opportunityDraftEligibility, checkAndRecordGapCoverage } from '../agents/lib/analyst-seo-mapping.js';
+import { createActionCenterRecommendationForGap, buildProductTopicMap, opportunityDraftEligibility, recommendedActionForGap } from '../agents/lib/analyst-seo-mapping.js';
 import { buildGrowthOpportunities } from '../agents/lib/growth-opportunities.js';
 import { translateKeywords } from '../agents/lib/keyword-translation.js';
 import { generateDraft } from './action-center.js';
@@ -78,31 +78,11 @@ router.get('/internal/keywords/:siteId/gaps', async (req, res, next) => {
   try {
     const { status } = req.query;
     const gaps = await getKeywordGaps(req.params.siteId, status);
-    res.json(gaps);
-    // After responding, never before: judging a gap fetches pages and may call
-    // an LLM, which must not delay the list. Results show up on the next load.
-    sweepUncheckedGaps(req.params.siteId);
+    // recommended_action comes from the SAME rules that decide whether a draft is
+    // created, so the UI shows what will really happen — not a fixed "Blog post".
+    res.json(gaps.map((g) => ({ ...g, recommended_action: recommendedActionForGap(g) })));
   } catch (e) { next(e); }
 });
-
-// Background coverage sweep for pending keywords nobody has judged yet (gaps
-// the discovery job inserted, which never pass through the POST below). A
-// small batch per call, one sweep per site at a time, and failures are
-// swallowed — an unjudged keyword just stays visible and is retried.
-const sweepingSites = new Set();
-async function sweepUncheckedGaps(siteId) {
-  if (sweepingSites.has(siteId)) return;
-  sweepingSites.add(siteId);
-  try {
-    for (const gap of await getUncheckedPendingGaps(siteId, 6)) {
-      await checkAndRecordGapCoverage(siteId, gap).catch((e) => console.warn(`[keywords] coverage check failed for gap ${gap.id}: ${e.message}`));
-    }
-  } catch (e) {
-    console.warn(`[keywords] coverage sweep failed for site ${siteId}: ${e.message}`);
-  } finally {
-    sweepingSites.delete(siteId);
-  }
-}
 
 // A keyword the user typed on the Analyst page as a growth target. It enters
 // the review queue as a normal pending gap (source 'user_request') rather than
@@ -127,19 +107,7 @@ router.post('/internal/keywords/:siteId/gaps', async (req, res, next) => {
       topic,
       'Requested on the Analyst page as a growth target.'
     );
-    // Judge coverage right away so a keyword an existing page already covers
-    // is reported as such instead of sitting in the review queue. Fail-open.
-    let coverage = null;
-    if (!gap.alreadyQueued) {
-      coverage = await checkAndRecordGapCoverage(req.params.siteId, gap).catch(() => null);
-    }
-    res.status(gap.alreadyQueued ? 200 : 201).json({
-      ...gap,
-      ...(coverage?.checked ? {
-        coverage_decision: coverage.decision,
-        coverage: { decision: coverage.decision, page: coverage.coveredBy || coverage.relatedPage || null, reasons: coverage.reasons },
-      } : {}),
-    });
+    res.status(gap.alreadyQueued ? 200 : 201).json(gap);
   } catch (e) { next(e); }
 });
 

@@ -1,358 +1,358 @@
-// Decides whether a keyword is ALREADY COVERED by an existing page of the site.
+// Keyword -> existing-page coverage verdicts.
 //
-// "Similar to an existing page" is not "covered by it". A generic
-// /services/web-development/ page covers "web development" but not
-// "Webentwicklung Schweiz": same core topic, different language AND market,
-// so it is a legitimate SEO opportunity. Treating topical similarity as
-// coverage would hide exactly the keywords worth acting on.
+// SAME TOPIC DOES NOT MEAN SAME SEO TARGET. A page can share a topic with a
+// keyword and still not satisfy it, because the language, the country, the
+// audience or the search intent differs. This module decides which of those
+// cases a gap is, from evidence, in the cheapest order that works:
 //
-// Multi-stage, cheapest first, and only the first two stages are free:
+//   1. deterministic signals (Unicode-aware tokens, language, market, intent,
+//      pages already ranking for the keyword)         -> most gaps end here
+//   2. one small LLM call, only when the deterministic overlap is ambiguous
+//   3. cached on the gap row, so re-checking costs nothing unless the
+//      evidence changed
 //
-//   1. shortlistCandidates — deterministic. Normalizes the keyword and picks a
-//      handful of LIKELY pages from their URL slugs. Never decides coverage.
-//   2. assessCandidate     — deterministic. For each fetched candidate compares
-//      core topic (slug/title/H1/meta/body), market, language and intent.
-//      Returns covered / not_covered when the signals are unambiguous, and
-//      'ambiguous' otherwise.
-//   3. LLM                 — only when stage 2 left candidates ambiguous and none
-//      confidently covered. Gets the structured signals, not just raw text.
+// It extends analyst-seo-mapping.js's findExistingPageMatch (same candidate
+// source, same domain scoping) instead of replacing it with a second system.
 //
-// Decision values: 'covered' (hide the keyword), 'partially_covered' (an
-// existing page overlaps but does not satisfy this query — keep the keyword),
-// 'not_covered' (keep the keyword). Only 'covered' ever suppresses anything.
-//
-// Fetching and the LLM are injected so this module imports nothing heavy and
-// is testable without network.
+// Verdicts (COVERAGE_STATUSES):
+//   duplicate    the exact keyword is already this page's target, same language/market/intent
+//   covered      a page already satisfies the topic for this language, market and intent
+//   opportunity  nothing on the site meaningfully covers it
+//   market_gap   topic is covered, but not for this country/market
+//   language_gap topic is covered, but not in this language
+//   intent_gap   topic is covered, but by a page serving a different intent
+//   uncertain    not enough evidence to say; never silently dropped
 
-export const COVERAGE = Object.freeze({
-  COVERED: 'covered',
-  PARTIAL: 'partially_covered',
-  NOT_COVERED: 'not_covered',
-});
+export const COVERAGE_STATUSES = ['duplicate', 'covered', 'opportunity', 'market_gap', 'language_gap', 'intent_gap', 'uncertain'];
 
-const STOPWORDS = new Set(['the', 'a', 'an', 'for', 'and', 'or', 'to', 'of', 'in', 'on', 'is', 'are', 'how', 'what', 'why', 'does', 'do', 'with', 'near', 'me']);
-
-// Words that describe the KIND of search, not the subject. Excluded from the
-// core-topic comparison so "custom AI development services" is judged on
-// "ai development", while still feeding intent detection below.
-const GENERIC_WORDS = new Set([
-  'service', 'services', 'company', 'companies', 'agency', 'agencies', 'solution', 'solutions', 'provider', 'providers',
-  'best', 'top', 'custom', 'cheap', 'affordable', 'hire', 'outsourcing', 'consulting', 'consultant', 'consultants', 'firm', 'firms',
-  'guide', 'tutorial', 'examples', 'example', 'tips', 'cost', 'costs', 'pricing', 'price', 'prices',
-]);
-
-const COMMERCIAL_WORDS = new Set([
-  'service', 'services', 'company', 'companies', 'agency', 'agencies', 'solution', 'solutions', 'provider', 'providers',
-  'hire', 'cost', 'costs', 'pricing', 'price', 'prices', 'buy', 'best', 'top', 'cheap', 'affordable', 'consultant',
-  'consultants', 'consulting', 'firm', 'firms', 'outsourcing', 'vendor', 'quote',
-  // non-English commercial markers
-  'agentur', 'unternehmen', 'kosten', 'preise', 'anbieter', 'entreprise', 'prix', 'empresa', 'precio', 'azienda', 'prezzo',
-]);
-const INFORMATIONAL_WORDS = new Set(['what', 'how', 'why', 'guide', 'tutorial', 'tutorials', 'examples', 'example', 'tips', 'meaning', 'definition', 'vs', 'versus', 'explained', 'learn']);
-
-// canonical market -> aliases (country names, native spellings, major cities).
-// Not exhaustive on purpose: an unknown market simply isn't detected, which
-// degrades to the LLM stage rather than to a wrong deterministic answer.
-const MARKETS = {
-  india: ['india', 'indian', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 'hyderabad', 'pune', 'chennai'],
-  nepal: ['nepal', 'nepali', 'kathmandu', 'pokhara'],
-  switzerland: ['switzerland', 'swiss', 'schweiz', 'suisse', 'svizzera', 'zurich', 'zuerich', 'geneva', 'basel'],
-  germany: ['germany', 'german', 'deutschland', 'berlin', 'munich', 'muenchen', 'hamburg'],
-  austria: ['austria', 'osterreich', 'oesterreich', 'vienna', 'wien'],
-  france: ['france', 'french', 'paris'],
-  spain: ['spain', 'espana', 'madrid', 'barcelona'],
-  italy: ['italy', 'italia', 'italian', 'rome', 'milan', 'milano'],
-  netherlands: ['netherlands', 'nederland', 'dutch', 'amsterdam'],
-  uk: ['uk', 'united kingdom', 'britain', 'british', 'england', 'london'],
-  usa: ['usa', 'united states', 'america', 'american', 'new york', 'california'],
-  canada: ['canada', 'canadian', 'toronto', 'vancouver'],
-  australia: ['australia', 'australian', 'sydney', 'melbourne'],
-  uae: ['uae', 'dubai', 'emirates', 'abu dhabi'],
-  singapore: ['singapore'],
-  japan: ['japan', 'tokyo'],
-  bangladesh: ['bangladesh', 'dhaka'],
+// DataForSEO location code -> ISO market. Matches sites.target_markets (migration 162).
+export const LOCATION_CODE_TO_MARKET = {
+  2840: 'US', 2356: 'IN', 2826: 'GB', 2036: 'AU', 2124: 'CA', 2524: 'NP', 2756: 'CH', 2528: 'NL', 2276: 'DE',
 };
 
-// Distinctive (not shared with English) function words / domain words per
-// language. A hit count, not a classifier: used only to notice that a keyword
-// is plainly not English.
-const LANGUAGE_MARKERS = {
-  de: ['der', 'die', 'das', 'und', 'fur', 'mit', 'von', 'entwicklung', 'agentur', 'unternehmen', 'kosten', 'preise', 'anbieter', 'schweiz', 'deutschland', 'ki', 'webentwicklung', 'erstellen', 'lassen'],
-  fr: ['le', 'les', 'des', 'pour', 'et', 'developpement', 'entreprise', 'prix', 'suisse', 'creation', 'agence', 'sur'],
-  es: ['los', 'las', 'para', 'desarrollo', 'empresa', 'precio', 'espana', 'creacion', 'agencia'],
-  it: ['il', 'gli', 'per', 'sviluppo', 'azienda', 'prezzo', 'italia', 'creazione', 'agenzia'],
-  pt: ['para', 'desenvolvimento', 'empresa', 'preco', 'criacao', 'agencia'],
-  nl: ['het', 'een', 'voor', 'ontwikkeling', 'bedrijf', 'prijs', 'nederland', 'maken'],
-};
+// ---- text ------------------------------------------------------------------
 
-function fold(text) {
-  return (text || '')
+// Fold for COMPARISON only (never for display or storage): NFKC, lowercase,
+// sharp s -> ss (so Swiss "ss" and German "ß" spellings match), strip
+// combining marks. Letters in any script survive, which is the point — the old
+// [^a-z0-9] split turned "KI-Entwicklung" or Devanagari into an empty token set.
+export function foldText(text) {
+  return String(text || '')
+    .normalize('NFKC')
     .toLowerCase()
-    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
-    .normalize('NFKD').replace(/[̀-ͯ]/g, '');
+    .replace(/ß/g, 'ss')
+    .normalize('NFD')
+    .replace(/\p{M}+/gu, '');
 }
 
-function words(text) {
-  return fold(text).split(/[^a-z0-9]+/).filter(Boolean);
+const STOPWORDS = new Set([
+  // en
+  'the', 'a', 'an', 'for', 'and', 'or', 'to', 'of', 'in', 'on', 'is', 'are', 'how', 'what', 'why', 'does', 'do', 'with', 'your', 'you',
+  // de
+  'und', 'der', 'die', 'das', 'den', 'dem', 'ein', 'eine', 'fur', 'mit', 'von', 'zu', 'im', 'ist', 'wie', 'was', 'bei', 'auf',
+  // nl
+  'het', 'een', 'voor', 'van', 'met', 'en', 'de', 'in', 'op', 'is', 'hoe', 'wat', 'bij',
+]);
+
+// Words that describe the kind of result, not the topic. "web development
+// company" and "web development" are the same topic.
+const GENERIC = new Set([
+  'company', 'companies', 'service', 'services', 'solution', 'solutions', 'provider', 'providers', 'agency', 'agencies',
+  'firm', 'firms', 'best', 'top', 'leading', 'near', 'guide', 'complete', 'comprehensive', 'overview',
+  'dienstleistungen', 'dienstleister', 'anbieter', 'unternehmen', 'losungen', 'bedrijf', 'bedrijven', 'diensten', 'oplossingen',
+]);
+
+const YEAR = /^(?:19|20)\d{2}$/;
+
+// Geo modifiers: market signals, not topic words. Compared folded.
+const GEO_TERMS = {
+  NP: ['nepal', 'nepali', 'nepalese', 'kathmandu', 'pokhara', 'lalitpur', 'bhaktapur'],
+  CH: ['schweiz', 'suisse', 'svizzera', 'switzerland', 'swiss', 'zurich', 'bern', 'basel', 'genf', 'geneva'],
+  DE: ['deutschland', 'germany', 'german', 'berlin', 'munchen', 'munich', 'hamburg'],
+  NL: ['nederland', 'netherlands', 'dutch', 'holland', 'amsterdam', 'rotterdam'],
+  GB: ['uk', 'britain', 'british', 'england', 'london', 'manchester'],
+  CA: ['canada', 'canadian', 'toronto', 'vancouver', 'montreal'],
+  AU: ['australia', 'australian', 'sydney', 'melbourne', 'brisbane'],
+  IN: ['india', 'indian', 'delhi', 'mumbai', 'bangalore'],
+  US: ['usa', 'america', 'american'],
+};
+const GEO_TO_MARKET = new Map(Object.entries(GEO_TERMS).flatMap(([m, terms]) => terms.map((t) => [t, m])));
+
+function rawTokens(text) {
+  return foldText(text).match(/[\p{L}\p{N}]+/gu) || [];
 }
 
-// Plural/derivation folding good enough to match "development"/"developments"
-// and "service"/"services" without pretending to be a real stemmer.
-function stem(w) {
-  if (w.length > 4 && w.endsWith('ies')) return `${w.slice(0, -3)}y`;
-  if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss')) return w.slice(0, -1);
-  return w;
+// Topic tokens: stopwords, generic result-type words, geo modifiers and years
+// are removed, because none of them changes WHAT the topic is.
+export function topicTokens(text) {
+  return [...new Set(rawTokens(text).filter((t) => (
+    t.length >= 2 && !STOPWORDS.has(t) && !GENERIC.has(t) && !GEO_TO_MARKET.has(t) && !YEAR.test(t)
+  )))];
 }
 
-function containsPhrase(haystackWords, phrase) {
-  const p = words(phrase);
-  if (!p.length) return false;
-  for (let i = 0; i + p.length <= haystackWords.length; i += 1) {
-    if (p.every((w, j) => haystackWords[i + j] === w)) return true;
-  }
-  return false;
+// Order-insensitive, year-insensitive identity of a topic.
+export function topicKey(text) {
+  return topicTokens(text).sort().join(' ');
 }
 
-function detectMarket(tokenList) {
-  for (const [market, aliases] of Object.entries(MARKETS)) {
-    if (aliases.some((a) => containsPhrase(tokenList, a))) return market;
-  }
-  return null;
+export function detectMarkets(text) {
+  return [...new Set(rawTokens(text).map((t) => GEO_TO_MARKET.get(t)).filter(Boolean))];
 }
 
-function marketTokenSet(market) {
-  return new Set(market ? MARKETS[market].flatMap((a) => words(a)) : []);
+export function extractYears(text) {
+  return (String(text || '').match(/\b(?:19|20)\d{2}\b/g) || []).map(Number);
 }
 
-function detectLanguage(tokenList) {
-  let best = { lang: 'en', hits: 0 };
-  for (const [lang, markers] of Object.entries(LANGUAGE_MARKERS)) {
-    const hits = tokenList.filter((w) => markers.includes(w)).length;
-    if (hits > best.hits) best = { lang, hits };
-  }
-  // One marker is enough for a distinctive compound ("webentwicklung"), but
-  // a single short function word ("per", "para") is too weak to call a
-  // language, so those need a second hit.
-  const strong = best.hits >= 2 || tokenList.some((w) => w.length >= 9 && (LANGUAGE_MARKERS[best.lang] || []).includes(w));
-  return strong ? { lang: best.lang, confident: true } : { lang: 'en', confident: false };
+// ---- language --------------------------------------------------------------
+
+const LANG_MARKERS = {
+  de: new Set(['und', 'der', 'die', 'das', 'fur', 'mit', 'ist', 'nicht', 'ki', 'schweiz', 'entwicklung', 'unternehmen', 'losungen', 'webentwicklung', 'kunstliche', 'intelligenz', 'wie', 'zukunft', 'beste', 'dienstleistungen', 'anbieter', 'preise', 'kosten']),
+  nl: new Set(['het', 'een', 'voor', 'van', 'met', 'niet', 'ontwikkeling', 'oplossingen', 'bedrijf', 'bedrijven', 'diensten', 'toekomst', 'hoe', 'wat', 'beste', 'kosten', 'nederland']),
+  en: new Set(['the', 'and', 'for', 'how', 'what', 'best', 'top', 'services', 'company', 'development', 'software', 'with', 'is', 'of', 'in', 'to', 'why', 'near', 'cost']),
+};
+
+// Cheap, deterministic. Returns { lang, confidence } where lang is a base ISO
+// code or 'unknown'. A script match (Devanagari) is certain; Latin-script
+// languages are scored on marker words and need a clear winner. When unsure it
+// says so — the caller can consult the query_translations cache, never guess.
+export function detectLanguage(text) {
+  const raw = String(text || '');
+  if (/[ऀ-ॿ]/.test(raw)) return { lang: 'ne', confidence: 'high' };
+  if (/[؀-ۿ]/.test(raw)) return { lang: 'ar', confidence: 'high' };
+  if (/[一-鿿]/.test(raw)) return { lang: 'zh', confidence: 'high' };
+  const tokens = rawTokens(raw);
+  if (!tokens.length) return { lang: 'unknown', confidence: 'none' };
+  const score = Object.fromEntries(Object.entries(LANG_MARKERS).map(([l, set]) => [l, tokens.filter((t) => set.has(t)).length]));
+  // Umlauts / eszett are weak but real German evidence on raw text.
+  if (/[äöüß]/i.test(raw)) score.de += 1;
+  const ranked = Object.entries(score).sort((a, b) => b[1] - a[1]);
+  const [best, second] = ranked;
+  if (best[1] === 0) return { lang: 'unknown', confidence: 'none' };
+  if (best[1] === second[1]) return { lang: 'unknown', confidence: 'low' };
+  return { lang: best[0], confidence: best[1] - second[1] >= 2 ? 'high' : 'medium' };
 }
 
-function detectIntent(tokenList) {
-  const commercial = tokenList.some((w) => COMMERCIAL_WORDS.has(w));
-  const informational = tokenList.some((w) => INFORMATIONAL_WORDS.has(w));
-  if (commercial && !informational) return 'commercial';
-  if (informational && !commercial) return 'informational';
-  return 'unknown';
+const LANGUAGE_NAME_TO_CODE = {
+  english: 'en', german: 'de', dutch: 'nl', nepali: 'ne', hindi: 'hi', french: 'fr', spanish: 'es', italian: 'it',
+  arabic: 'ar', chinese: 'zh', portuguese: 'pt',
+};
+// query_translations stores the model's language NAME ("German"); normalize to a code.
+export function languageNameToCode(name) {
+  const n = foldText(name).trim();
+  if (!n || n === 'unknown') return 'unknown';
+  if (/^[a-z]{2}(-[a-z]{2})?$/.test(n)) return n.slice(0, 2);
+  return LANGUAGE_NAME_TO_CODE[n] || 'unknown';
 }
 
-export function keywordSignals(topic) {
-  const tokenList = words(topic);
-  const market = detectMarket(tokenList);
-  const marketTokens = marketTokenSet(market);
-  // length >= 2 on purpose: "ai", "ml", "ki", "ux" ARE the subject. Dropping them
-  // made "custom AI development" look identical to "web development".
-  const significant = tokenList.filter((w) => w.length >= 2 && !STOPWORDS.has(w));
-  const core = significant.filter((w) => !marketTokens.has(w) && !GENERIC_WORDS.has(w)).map(stem);
-  return {
-    topic,
-    tokens: tokenList,
-    // Falls back to everything significant when the keyword is ONLY generic /
-    // market words, so a core set is never empty for a real keyword.
-    core: core.length ? [...new Set(core)] : [...new Set(significant.map(stem))],
-    market,
-    ...detectLanguage(tokenList),
-    intent: detectIntent(tokenList),
-  };
-}
+export const baseLang = (l) => String(l || '').toLowerCase().split('-')[0];
+
+// ---- intent ----------------------------------------------------------------
+
+const COMMERCIAL_SEGMENTS = new Set(['services', 'service', 'products', 'product', 'solutions', 'locations', 'pricing', 'industries', 'platform', 'agentic-as-a-service']);
+const INFORMATIONAL_SEGMENTS = new Set(['blog', 'resources', 'glossary', 'guides', 'learn', 'news', 'insights', 'compare']);
 
 function pathOf(url) {
-  return (url || '').replace(/^https?:\/\/[^/]+/, '');
+  try { return new URL(url).pathname; } catch { return String(url || '').replace(/^https?:\/\/[^/]+/, ''); }
 }
 
-function pageIntentFromUrl(url) {
-  const p = fold(pathOf(url));
-  if (/\/(blog|news|article|articles|guide|guides|learn|resources|insights|post|posts|faq|help|docs)(\/|$)/.test(p)) return 'informational';
-  if (/\/(services?|solutions?|products?|pricing|hire|industries|offerings?)(\/|$)/.test(p)) return 'commercial';
+// What a page is FOR, from its URL. 'unknown' is a real answer: it never
+// produces an intent mismatch on its own.
+export function pageIntent(url) {
+  const segs = pathOf(url).split('/').filter(Boolean);
+  const first = segs.find((s) => !/^(de|nl|de-ch|fr|it)$/i.test(s));
+  if (!first) return 'unknown';
+  if (INFORMATIONAL_SEGMENTS.has(first)) return 'informational';
+  if (COMMERCIAL_SEGMENTS.has(first)) return 'commercial';
   return 'unknown';
 }
 
-function pageLanguage(url, htmlLang) {
-  const fromAttr = (htmlLang || '').split(/[-_]/)[0].toLowerCase();
-  if (/^[a-z]{2}$/.test(fromAttr)) return fromAttr;
-  const seg = pathOf(url).split('/').filter(Boolean)[0] || '';
-  const m = seg.match(/^([a-z]{2})(?:-[a-z]{2})?$/i);
-  return m ? m[1].toLowerCase() : null;
+function gapIntentClass(searchIntent) {
+  if (searchIntent === 'commercial' || searchIntent === 'transactional') return 'commercial';
+  if (searchIntent === 'informational') return 'informational';
+  return 'unknown';
 }
 
-// Stage 1 — URL slugs only. Deliberately generous (a page that merely shares
-// a word is still a candidate); stages 2 and 3 are what decide.
-export const MAX_CANDIDATES = 5;
-export function shortlistCandidates(signals, pages) {
-  const coreSet = new Set(signals.core);
-  return pages
-    .map((p) => {
-      const slugWords = words(pathOf(p.page)).filter((w) => w.length >= 2 && !STOPWORDS.has(w)).map(stem);
-      return { page: p.page, overlap: slugWords.filter((w) => coreSet.has(w)).length };
-    })
-    .filter((p) => p.overlap > 0)
-    .sort((a, b) => b.overlap - a.overlap)
-    .slice(0, MAX_CANDIDATES);
-}
+// ---- page signals ----------------------------------------------------------
 
-function fraction(coreTokens, haystackWords) {
-  if (!coreTokens.length) return 0;
-  const set = new Set(haystackWords.map(stem));
-  return coreTokens.filter((t) => set.has(t)).length / coreTokens.length;
-}
+const LOCALE_PREFIX = { 'de-ch': { lang: 'de', market: 'CH' }, de: { lang: 'de', market: 'DE' }, nl: { lang: 'nl', market: 'NL' } };
 
-// Stage 2 — returns { verdict: 'covered'|'not_covered'|'ambiguous', reasons, dimensions }.
-export function assessCandidate(signals, page) {
-  const { url, title, h1, metaDescription, bodyText, htmlLang } = page;
-  const headlineWords = words(`${pathOf(url)} ${title || ''} ${h1 || ''}`);
-  const supportWords = words(`${metaDescription || ''} ${(bodyText || '').slice(0, 3000)}`);
-
-  const headline = fraction(signals.core, headlineWords);
-  const anywhere = fraction(signals.core, [...headlineWords, ...supportWords]);
-
-  let market = 'n/a';
-  if (signals.market) {
-    if (containsPhrase(headlineWords, signals.market) || MARKETS[signals.market].some((a) => containsPhrase(headlineWords, a))) market = 'match';
-    else if (MARKETS[signals.market].some((a) => containsPhrase([...headlineWords, ...supportWords], a))) market = 'body-only';
-    else market = 'missing';
-  }
-
-  const pageLang = pageLanguage(url, htmlLang);
-  let language = 'unknown';
-  if (pageLang && signals.confident) language = pageLang === signals.lang ? 'same' : 'different';
-  else if (pageLang && !signals.confident) language = pageLang === 'en' ? 'same' : 'unknown';
-
-  const pageIntent = pageIntentFromUrl(url);
-  let intent = 'unknown';
-  if (signals.intent !== 'unknown' && pageIntent !== 'unknown') intent = signals.intent === pageIntent ? 'same' : 'different';
-
-  const dimensions = {
-    coreInHeadline: Number(headline.toFixed(2)),
-    coreAnywhere: Number(anywhere.toFixed(2)),
-    market, language, intent,
-    keywordMarket: signals.market, keywordLanguage: signals.confident ? signals.lang : null, pageLanguage: pageLang,
-    keywordIntent: signals.intent, pageIntent,
+// Language and market a page serves, from its URL (locale prefix, geo slug) and
+// optionally what was read from its content. Un-prefixed pages are the site's
+// default language and have no market of their own unless the URL names one.
+export function pageSignals(url, { siteLanguage = 'en', htmlLang = null, text = '' } = {}) {
+  const segs = pathOf(url).split('/').filter(Boolean);
+  const prefix = LOCALE_PREFIX[String(segs[0] || '').toLowerCase()];
+  const slugMarkets = detectMarkets(segs.join(' ').replace(/-/g, ' '));
+  const textMarkets = text ? detectMarkets(text) : [];
+  const markets = [...new Set([...(prefix ? [prefix.market] : []), ...slugMarkets, ...textMarkets])];
+  // An un-prefixed page is the site default language UNLESS its own text says
+  // otherwise with certainty (e.g. a German post living under /blog/).
+  const fromText = !prefix && !htmlLang && text ? detectLanguage(text) : null;
+  const textLang = fromText && fromText.confidence === 'high' ? fromText.lang : null;
+  return {
+    lang: prefix?.lang || baseLang(htmlLang) || textLang || baseLang(siteLanguage) || 'en',
+    langSource: prefix ? 'url-prefix' : htmlLang ? 'html-lang' : textLang ? 'content' : 'site-default',
+    markets,
+    explicitMarkets: [...new Set([...(prefix ? [prefix.market] : []), ...slugMarkets])],
+    intent: pageIntent(url),
   };
-
-  // The keyword names a market the page never mentions at all: same topic in
-  // a different market, which is its own search. Checked before the topic
-  // comparison because it holds whatever the topic overlap is.
-  if (market === 'missing') {
-    return { verdict: 'not_covered', reasons: [`The page never mentions the ${signals.market} market this keyword targets.`], dimensions };
-  }
-  // Different language: core terms cannot be compared word-for-word ("KI" vs
-  // "AI"), so a token mismatch proves nothing. Only a semantic judgment can
-  // say whether the page would satisfy this query.
-  if (language === 'different') {
-    return { verdict: 'ambiguous', reasons: ['The keyword is in a different language than the page.'], dimensions };
-  }
-  if (headline < 0.5 && anywhere < 0.7) {
-    return { verdict: 'not_covered', reasons: ['The page does not address the keyword\'s core topic.'], dimensions };
-  }
-  if (headline >= 0.99 && market !== 'body-only' && language !== 'different' && intent !== 'different') {
-    return { verdict: 'covered', reasons: ['The page\'s URL/title/H1 address every core term, with no market, language or intent difference.'], dimensions };
-  }
-  return { verdict: 'ambiguous', reasons: ['Signals do not settle whether the page satisfies this query.'], dimensions };
 }
 
-const COVERAGE_SYSTEM = 'You judge whether an existing page ALREADY satisfies a target search query, so that a new page ' +
-  'for it would be redundant. Mentioning the topic is NOT enough. Compare core topic, search intent, language, ' +
-  'country/market, audience, and whether the page actually answers the query. A page on the generic topic does NOT cover ' +
-  'a query that adds a different language, country/market, or intent. Respond with ONLY a JSON object: ' +
-  '{"decision": "covered"|"partially_covered"|"not_covered", "covered_by": "<exact URL from the list>"|null, "reason": "<one short sentence>"}. ' +
-  '"covered" only when one listed page fully satisfies the query; never pick a URL not in the list.';
+// ---- scoring ---------------------------------------------------------------
 
-function describe(c, i) {
-  const d = c.assessment.dimensions;
-  return `${i + 1}. ${c.url}\n   title: ${c.title || '—'} | h1: ${c.h1 || '—'}\n` +
-    `   signals: coreInHeadline=${d.coreInHeadline}, market=${d.market}, language=${d.language}, intent=${d.intent}\n` +
-    `   excerpt: ${(c.bodyText || '').slice(0, 600)}`;
+// Words that appear on a large share of THIS site's pages say almost nothing
+// about which page covers a topic ("ai" on an AI company's site). They still
+// count, but weigh less, so one shared word can't make a page look like a match.
+// Computed from the site's own URLs, so it adapts to each tenant.
+export function buildTokenWeights(urls, { commonShare = 0.25, minPages = 12, commonWeight = 0.3 } = {}) {
+  const pages = (urls || []).map((u) => new Set(topicTokens(pathOf(u).replace(/[-_/]+/g, ' '))));
+  const weights = new Map();
+  if (pages.length < minPages) return weights;
+  const df = new Map();
+  for (const set of pages) for (const t of set) df.set(t, (df.get(t) || 0) + 1);
+  for (const [t, n] of df) if (n / pages.length >= commonShare) weights.set(t, commonWeight);
+  return weights;
 }
 
-/**
- * @param {object} args
- * @param {string} args.topic
- * @param {{page:string}[]} args.pages           this site's own-domain inventory
- * @param {(url:string)=>Promise<null|{title,h1,metaDescription,bodyText,htmlLang}>} args.fetchPage  null when unfetchable / too thin
- * @param {(system:string,user:string)=>Promise<object>} args.llm
- * @param {(signals,pages)=>Promise<{page:string}[]>} [args.shortlistForeign]  optional: cross-language shortlist when slugs share no word with the keyword
- * @returns {Promise<{decision, coveredBy, stage, checked, reasons, dimensions, candidates}>}
- */
-export async function assessKeywordCoverage({ topic, pages, fetchPage, llm, shortlistForeign }) {
-  const signals = keywordSignals(topic);
-  if (!signals.core.length) {
-    return { decision: COVERAGE.NOT_COVERED, coveredBy: null, stage: 'deterministic', checked: true, reasons: ['No meaningful terms in the keyword.'], dimensions: null, candidates: [] };
+// Weighted share of the gap's topic tokens that the evidence contains (0..1).
+function containment(gapSet, evidenceText, weights) {
+  if (!gapSet.size) return 0;
+  const ev = new Set(topicTokens(evidenceText));
+  const w = (t) => (weights && weights.get(t)) ?? 1;
+  let hit = 0; let total = 0;
+  for (const t of gapSet) { total += w(t); if (ev.has(t)) hit += w(t); }
+  return total ? hit / total : 0;
+}
+
+export const STRONG_OVERLAP = 0.75;
+export const AMBIGUOUS_OVERLAP = 0.4;
+
+// candidate: { url, queries?: [{query, impressions, clicks, position}], title?, excerpt? }
+// Evidence order: a query that already ranks this page, then the URL slug, then
+// the title. Body text is only used to confirm a market, never to score topic —
+// a passing mention is not coverage.
+// A page only counts as already RANKING for a keyword when it really does:
+// near enough to the results and with enough impressions to be more than noise.
+export const MIN_RANKING_IMPRESSIONS = 3;
+export const MAX_RANKING_POSITION = 40;
+// The homepage ranks for everything a little. That is not coverage; cap it so a
+// homepage match is always sent for judgment instead of being accepted.
+export const HOMEPAGE_STRENGTH_CAP = 0.7;
+
+const isRealRanking = (q) => (q.impressions == null || q.impressions >= MIN_RANKING_IMPRESSIONS)
+  && (q.position == null || q.position <= MAX_RANKING_POSITION);
+
+export function scoreCandidate(gapTokenList, candidate, weights) {
+  const gapSet = new Set(gapTokenList);
+  const slug = pathOf(candidate.url).replace(/[-_/]+/g, ' ');
+  const gapKey = [...gapSet].sort().join(' ');
+  let best = { strength: 0, source: null, exact: false };
+  const consider = (strength, source, text) => {
+    // `exact` = a page BUILT AROUND this keyword (slug/title). A page that merely
+    // already ranks for it is covered, not a duplicate target.
+    if (strength > best.strength) best = { strength, source, exact: source !== 'ranking-query' && topicKey(text) === gapKey && gapKey !== '' };
+  };
+  for (const q of candidate.queries || []) if (isRealRanking(q)) consider(containment(gapSet, q.query, weights), 'ranking-query', q.query);
+  consider(containment(gapSet, slug, weights), 'url-slug', slug);
+  if (candidate.title) consider(containment(gapSet, candidate.title, weights), 'title', candidate.title);
+  if (pathOf(candidate.url).replace(/\/+$/, '') === '' && best.strength > HOMEPAGE_STRENGTH_CAP) best = { ...best, strength: HOMEPAGE_STRENGTH_CAP, exact: false };
+  return best;
+}
+
+// ---- verdict ---------------------------------------------------------------
+
+function intentMismatch(gapIntent, pageIntentClass) {
+  return gapIntent !== 'unknown' && pageIntentClass !== 'unknown' && gapIntent !== pageIntentClass;
+}
+
+// Does this page actually serve every explicit market the gap names? A page
+// with no market of its own is "global": it does NOT satisfy a gap that names a
+// country, but it does satisfy one that names none.
+function marketUnserved(gapMarkets, page) {
+  if (!gapMarkets.length) return false;
+  return !gapMarkets.every((m) => page.markets.includes(m));
+}
+
+// Pure and synchronous: everything it needs is passed in, so it is cheap to run
+// over every gap and easy to test.
+//   gap:        { topic, search_intent, location_code }
+//   gapSignals: { lang, markets (explicit modifiers), englishTopic? }
+//   candidates: [{ url, queries?, title?, excerpt?, htmlLang? }]
+export function decideCoverage({ gap, gapSignals, candidates, siteLanguage = 'en', now = new Date(), tokenWeights = null }) {
+  const topic = gap?.topic || '';
+  // Cross-language: score on the topic's English reading too, so a German
+  // keyword can find the English page that already covers the subject.
+  const tokenSets = [topicTokens(topic)];
+  if (gapSignals?.englishTopic && foldText(gapSignals.englishTopic) !== foldText(topic)) tokenSets.push(topicTokens(gapSignals.englishTopic));
+  const gapTokens = [...new Set(tokenSets.flat())];
+  if (!gapTokens.length) {
+    return { status: 'uncertain', reason: 'No usable topic words after normalization.', url: null, method: 'deterministic', evidence: { gapTokens: [] } };
   }
 
-  let shortlist = shortlistCandidates(signals, pages);
-  if (!shortlist.length && signals.confident && shortlistForeign) {
-    shortlist = (await shortlistForeign(signals, pages).catch(() => [])).slice(0, MAX_CANDIDATES);
-  }
-  if (!shortlist.length) {
-    return { decision: COVERAGE.NOT_COVERED, coveredBy: null, stage: 'deterministic', checked: true, reasons: ['No existing page looks related to this keyword.'], dimensions: null, candidates: [] };
+  const gapIntent = gapIntentClass(gap?.search_intent);
+  const gapLang = gapSignals?.lang && gapSignals.lang !== 'unknown' ? baseLang(gapSignals.lang) : null;
+  const gapMarkets = gapSignals?.markets || [];
+
+  const scored = (candidates || []).map((c) => {
+    const sig = pageSignals(c.url, { siteLanguage, htmlLang: c.htmlLang, text: [c.title, c.excerpt].filter(Boolean).join(' ') });
+    // Score against each reading of the topic and keep the best.
+    const best = tokenSets.map((ts) => scoreCandidate(ts, c, tokenWeights)).sort((a, b) => b.strength - a.strength)[0];
+    return { url: c.url, sig, ...best };
+  }).filter((c) => c.strength >= AMBIGUOUS_OVERLAP)
+    .sort((a, b) => b.strength - a.strength);
+
+  const evidenceBase = { gapTokens, gapLang, gapMarkets, gapIntent };
+  if (!scored.length) {
+    return { status: 'opportunity', reason: 'No existing page meaningfully overlaps this topic.', url: null, method: 'deterministic', evidence: evidenceBase };
   }
 
-  const fetched = await Promise.all(shortlist.map(async ({ page }) => {
-    const content = await fetchPage(page).catch(() => null);
-    return content ? { url: page, ...content } : null;
-  }));
-  const candidates = fetched.filter(Boolean).map((c) => ({ ...c, assessment: assessCandidate(signals, c) }));
-  if (!candidates.length) {
-    return { decision: COVERAGE.NOT_COVERED, coveredBy: null, stage: 'deterministic', checked: true, reasons: ['Related pages could not be read.'], dimensions: null, candidates: [] };
+  // Prefer the strongest page; among near-equals prefer the one that already
+  // serves this language and market.
+  const top = scored[0].strength;
+  const near = scored.filter((c) => top - c.strength < 0.1);
+  const fits = (c) => (!gapLang || baseLang(c.sig.lang) === gapLang) && !marketUnserved(gapMarkets, c.sig);
+  const best = near.find(fits) || scored[0];
+
+  const out = (status, reason, extra = {}) => ({
+    status, reason, url: best.url, method: 'deterministic',
+    evidence: { ...evidenceBase, nearestUrl: best.url, strength: Number(best.strength.toFixed(2)), matchedOn: best.source, pageLang: best.sig.lang, pageMarkets: best.sig.markets, pageIntent: best.sig.intent, ...extra },
+  });
+
+  // Ambiguous overlap: ask for judgment rather than guess either way.
+  if (best.strength < STRONG_OVERLAP) {
+    return { ...out('uncertain', `Partial overlap (${best.strength.toFixed(2)}) with ${best.url}; needs judgment.`), needsLLM: true };
   }
 
-  const summary = candidates.map((c) => ({ url: c.url, verdict: c.assessment.verdict, dimensions: c.assessment.dimensions }));
-
-  const covered = candidates.find((c) => c.assessment.verdict === 'covered');
-  if (covered) {
-    return { decision: COVERAGE.COVERED, coveredBy: covered.url, stage: 'deterministic', checked: true, reasons: covered.assessment.reasons, dimensions: covered.assessment.dimensions, candidates: summary };
+  const stale = staleYearSignal(best.url, topic, now);
+  const langMiss = gapLang && baseLang(best.sig.lang) !== gapLang;
+  if (langMiss) {
+    return out('language_gap', `${best.url} covers the topic in ${best.sig.lang}, not ${gapLang}.`, { needsRefresh: stale.stale });
   }
-
-  const ambiguous = candidates.filter((c) => c.assessment.verdict === 'ambiguous').slice(0, 3);
-  if (!ambiguous.length) {
-    // Every candidate was ruled out on a concrete difference. If one of them
-    // shares the core topic and differs only in market/language/intent it is
-    // "partially covered" — useful to show, and never suppresses the keyword.
-    const sameTopic = candidates.find((c) => c.assessment.dimensions.coreInHeadline >= 0.5);
-    return {
-      decision: sameTopic ? COVERAGE.PARTIAL : COVERAGE.NOT_COVERED,
-      coveredBy: null, stage: 'deterministic', checked: true,
-      reasons: (sameTopic || candidates[0]).assessment.reasons,
-      dimensions: (sameTopic || candidates[0]).assessment.dimensions,
-      relatedPage: sameTopic?.url ?? null,
-      candidates: summary,
-    };
+  if (marketUnserved(gapMarkets, best.sig)) {
+    return out('market_gap', `${best.url} covers the topic but not for ${gapMarkets.join('/')}.`, { needsRefresh: stale.stale });
   }
-
-  const user = `Target query: "${topic}"\n` +
-    `Detected: language=${signals.confident ? signals.lang : 'unclear'}, market=${signals.market || 'none'}, intent=${signals.intent}\n\n` +
-    `Candidate pages:\n${ambiguous.map(describe).join('\n\n')}`;
-  try {
-    const parsed = await llm(COVERAGE_SYSTEM, user);
-    const url = typeof parsed?.covered_by === 'string' ? parsed.covered_by : null;
-    const valid = url && ambiguous.some((c) => c.url === url);
-    // A bare {covered_by} (the pre-pipeline response shape) means covered.
-    const raw = parsed?.decision ?? (url ? COVERAGE.COVERED : COVERAGE.NOT_COVERED);
-    const decision = Object.values(COVERAGE).includes(raw) ? raw : COVERAGE.NOT_COVERED;
-    // Never trust a URL the model was not shown; "covered" without one cannot
-    // suppress anything, so it degrades to partial.
-    const final = decision === COVERAGE.COVERED && !valid ? COVERAGE.PARTIAL : decision;
-    return {
-      decision: final,
-      coveredBy: final === COVERAGE.COVERED ? url : null,
-      stage: 'llm', checked: true,
-      reasons: [typeof parsed?.reason === 'string' && parsed.reason ? parsed.reason : 'Judged by comparing topic, intent, language and market.'],
-      dimensions: ambiguous[0].assessment.dimensions,
-      relatedPage: final === COVERAGE.PARTIAL ? (valid ? url : ambiguous[0].url) : null,
-      candidates: summary,
-    };
-  } catch (e) {
-    // Unknown, not "not covered": checked:false lets the caller retry later
-    // instead of recording a verdict nothing actually reached.
-    return { decision: COVERAGE.NOT_COVERED, coveredBy: null, stage: 'llm', checked: false, reasons: [`LLM unavailable: ${e.message}`], dimensions: ambiguous[0].assessment.dimensions, candidates: summary };
+  if (intentMismatch(gapIntent, best.sig.intent)) {
+    return out('intent_gap', `${best.url} is a ${best.sig.intent} page; this keyword is ${gapIntent}.`, { needsRefresh: stale.stale });
   }
+  if (best.exact) {
+    return out('duplicate', `${best.url} already targets this exact keyword.`, { needsRefresh: stale.stale, staleReason: stale.reason });
+  }
+  return out('covered', `${best.url} already covers this topic for the same language, market and intent.`, { needsRefresh: stale.stale, staleReason: stale.reason });
+}
+
+// ---- dated content ---------------------------------------------------------
+
+// A page whose slug/title carries an older year than the keyword asks for needs
+// REFRESHING, with real research. It must never be satisfied by swapping the
+// year in the title: that is how last year's facts get republished as this year's.
+export function staleYearSignal(pageUrl, topic, now = new Date()) {
+  const gapYears = extractYears(topic);
+  const pageYears = extractYears(pathOf(pageUrl));
+  const current = now.getFullYear();
+  const wanted = gapYears.length ? Math.max(...gapYears) : null;
+  const have = pageYears.length ? Math.max(...pageYears) : null;
+  if (have != null && have < current - 0 && (wanted == null || wanted > have)) {
+    return { stale: true, reason: `Page is dated ${have}; ${wanted ?? current} is current. Refresh with verified sources — do not just change the year.` };
+  }
+  return { stale: false, reason: null };
 }

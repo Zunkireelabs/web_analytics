@@ -204,8 +204,8 @@ const GAP_STATUS_FROM_DB = { pending_review: 'pending_review', accepted: 'approv
 export async function getKeywordGaps(siteId, status) {
   const { rows } = await query(
     `SELECT id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match,
-            topic_cluster, cluster_role, search_volume,
-            coverage_checked_at, coverage_decision, coverage_detail,
+            topic_cluster, cluster_role, search_volume, location_code,
+            coverage_status, coverage_reason, coverage_checked_at, coverage_evidence, language_code,
             first_seen_at, last_seen_at, observation_count, evidence_snapshots, created_at,
             -- ::text deliberately. node-postgres parses a DATE into a JS Date at
             -- LOCAL midnight, so in any positive-offset timezone (this app runs
@@ -246,11 +246,64 @@ export async function updateKeywordGapStatus(siteId, gapId, status) {
   const { rows } = await query(
     `UPDATE keyword_gaps SET status = $3
       WHERE site_id = $1 AND id = $2
-      RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, coverage_checked_at, created_at`,
+      RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, created_at`,
     [siteId, gapId, GAP_STATUS_TO_DB[status]]
   );
   if (!rows[0]) return null;
   return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status] };
+}
+
+// Coverage verdict for one gap (keyword-coverage.js). Unlike setGapClassification
+// this OVERWRITES: a verdict is re-judged when its evidence changes, and a page
+// that stopped covering a topic must be able to clear existing_page_match.
+// existing_page_match keeps its old meaning — set only when an existing page
+// genuinely covers the gap (duplicate/covered) — so gapDraftEligibility's
+// established behaviour is unchanged for those rows.
+export async function setGapCoverage(siteId, gapId, { status, reason, evidence, languageCode, existingPageMatch }) {
+  const { rows } = await query(
+    `UPDATE keyword_gaps SET
+            coverage_status = $3,
+            coverage_reason = $4,
+            coverage_checked_at = now(),
+            coverage_evidence = $5::jsonb,
+            language_code = COALESCE($6, language_code),
+            existing_page_match = $7
+      WHERE site_id = $1 AND id = $2
+      RETURNING id, topic, status, coverage_status, coverage_reason, coverage_checked_at, coverage_evidence, language_code, existing_page_match`,
+    [siteId, gapId, status, reason ?? null, JSON.stringify(evidence ?? {}), languageCode ?? null, existingPageMatch ?? null]
+  );
+  return rows[0] || null;
+}
+
+// Pages that ALREADY rank for queries containing the gap's words. This is the
+// strongest "is it covered" evidence there is — and it finds a page whose slug
+// shares no words with the keyword (synonyms, translations), which the old
+// URL-word pre-filter could never do. Tokens are matched as lowercase substrings
+// (GSC stores queries as typed, with diacritics), all of them required, so a
+// two-word topic does not match every page that mentions one of the words.
+export async function getPagesRankingForTokens(siteId, tokens, days = 90, limit = 200) {
+  const words = [...new Set((tokens || []).map((t) => String(t).toLowerCase()).filter((t) => t.length > 2))]
+    .sort((a, b) => b.length - a.length).slice(0, 3);
+  if (!words.length) return [];
+  const { rows } = await query(
+    `SELECT page, query,
+            SUM(clicks)      AS clicks,
+            SUM(impressions) AS impressions,
+            CASE WHEN SUM(impressions) = 0 THEN NULL
+                 ELSE ROUND(SUM(position * impressions) / SUM(impressions), 2) END AS position
+       FROM gsc_query_page
+      WHERE site_id = $1
+        AND date >= (CURRENT_DATE - ($2::int))
+        AND LOWER(query) LIKE ALL($3::text[])
+      GROUP BY page, query
+      ORDER BY SUM(impressions) DESC
+      LIMIT $4`,
+    [siteId, days, words.map((w) => `%${w}%`), limit]
+  );
+  return rows.map((r) => ({
+    page: r.page, query: r.query, clicks: Number(r.clicks) || 0, impressions: Number(r.impressions) || 0,
+    position: r.position == null ? null : Number(r.position),
+  }));
 }
 
 // Written once by classifyGapRelevance/findExistingPageMatch (analyst-seo-
@@ -270,39 +323,11 @@ export async function setGapClassification(siteId, gapId, { searchIntent, produc
             priority = COALESCE($5, priority),
             existing_page_match = COALESCE($6, existing_page_match)
       WHERE site_id = $1 AND id = $2
-      RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, coverage_checked_at, created_at`,
+      RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, created_at`,
     [siteId, gapId, searchIntent, productRelevance, priority ?? null, existingPageMatch ?? null]
   );
   if (!rows[0]) return null;
   return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status] };
-}
-
-// Records the keyword-coverage verdict (agents/lib/keyword-coverage.js).
-// existing_page_match is only ever written for a 'covered' verdict, so the
-// approval path's "already covered -> nothing to draft" reading is unchanged.
-export async function setGapCoverage(siteId, gapId, { decision, existingPageMatch, detail }) {
-  const { rows } = await query(
-    `UPDATE keyword_gaps SET
-            coverage_checked_at = now(),
-            coverage_decision = $3,
-            coverage_detail = $4::jsonb,
-            existing_page_match = COALESCE($5, existing_page_match)
-      WHERE site_id = $1 AND id = $2
-      RETURNING id`,
-    [siteId, gapId, decision, JSON.stringify(detail || {}), existingPageMatch ?? null]
-  );
-  return rows[0] || null;
-}
-
-// Pending gaps nobody has judged yet, newest first — the background sweep's work list.
-export async function getUncheckedPendingGaps(siteId, limit = 6) {
-  const { rows } = await query(
-    `SELECT id, topic, reason, priority FROM keyword_gaps
-      WHERE site_id = $1 AND status = 'pending_review' AND coverage_checked_at IS NULL AND existing_page_match IS NULL
-      ORDER BY created_at DESC LIMIT $2`,
-    [siteId, limit]
-  );
-  return rows;
 }
 
 // Product Understanding Layer (migration 111). 'verified' rows are the only
@@ -413,7 +438,7 @@ export async function createUserKeywordGap(siteId, topic, reason) {
   const { rows } = await query(
     `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source)
      VALUES ($1, $2, $3, 'medium', 'pending_review', 'user_request')
-     RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, coverage_checked_at, created_at`,
+     RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, created_at`,
     [siteId, topic, reason || null]
   );
   return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status], alreadyQueued: false };

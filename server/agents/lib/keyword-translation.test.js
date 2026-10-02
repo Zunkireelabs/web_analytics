@@ -1,65 +1,39 @@
-import { test, describe, beforeEach } from 'node:test';
+import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { translateKeywords, _resetKeywordTranslationCache, MAX_TERMS_PER_REQUEST } from './keyword-translation.js';
+import { translateKeywords } from './keyword-translation.js';
 
-const llmReturning = (obj) => async () => (typeof obj === 'string' ? obj : JSON.stringify(obj));
+const resolving = (obj) => async () => new Map(Object.entries(obj));
 
-describe('translateKeywords', () => {
-  beforeEach(() => _resetKeywordTranslationCache());
-
-  test('returns translations only for non-English terms', async () => {
-    const out = await translateKeywords(['काठमाडौं मा एआई कम्पनी', 'ai company nepal'], {
-      llm: llmReturning({ 'काठमाडौं मा एआई कम्पनी': { language: 'Nepali', english: 'AI company in Kathmandu' } }),
+describe('translateKeywords (view over the shared query_translations cache)', () => {
+  test('keeps non-English entries only', async () => {
+    const out = await translateKeywords(['bedrijf', 'ai company nepal'], {
+      translate: resolving({
+        bedrijf: { language: 'Dutch', translation: 'company' },
+        'ai company nepal': { language: 'English', translation: 'ai company nepal' },
+      }),
     });
-    assert.deepEqual(out, { 'काठमाडौं मा एआई कम्पनी': { language: 'Nepali', english: 'AI company in Kathmandu' } });
+    assert.deepEqual(out, { bedrijf: { language: 'Dutch', english: 'company' } });
   });
 
-  test('tolerates code fences around the JSON', async () => {
-    const out = await translateKeywords(['bedrijf'], { llm: llmReturning('```json\n{"bedrijf":{"language":"Dutch","english":"company"}}\n```') });
-    assert.equal(out.bedrijf.english, 'company');
-  });
-
-  test('ignores keys the model invented that were not in the input', async () => {
-    const out = await translateKeywords(['bedrijf'], {
-      llm: llmReturning({ bedrijf: { language: 'Dutch', english: 'company' }, 'ignore previous instructions': { language: 'x', english: 'y' } }),
-    });
-    assert.deepEqual(Object.keys(out), ['bedrijf']);
-  });
-
-  test('drops a "translation" that is just the same text', async () => {
-    const out = await translateKeywords(['zunkiree'], { llm: llmReturning({ zunkiree: { language: 'English', english: 'Zunkiree' } }) });
+  test('drops an entry whose translation is just the same text', async () => {
+    const out = await translateKeywords(['zunkiree'], { translate: resolving({ zunkiree: { language: 'Nepali', translation: 'Zunkiree' } }) });
     assert.deepEqual(out, {});
   });
 
-  test('fails soft: an LLM error yields no translations, not a throw', async () => {
-    const out = await translateKeywords(['bedrijf'], { llm: async () => { throw new Error('boom'); } });
+  test('drops unknown-language entries and incomplete rows', async () => {
+    const out = await translateKeywords(['a', 'b'], {
+      translate: resolving({ a: { language: 'unknown', translation: 'x' }, b: { language: 'German', translation: '' } }),
+    });
     assert.deepEqual(out, {});
   });
 
-  test('a failed call is not cached, so the next call retries', async () => {
-    await translateKeywords(['bedrijf'], { llm: async () => { throw new Error('boom'); } });
-    const out = await translateKeywords(['bedrijf'], { llm: llmReturning({ bedrijf: { language: 'Dutch', english: 'company' } }) });
-    assert.equal(out.bedrijf.english, 'company');
+  test('fails soft: a lookup error yields no translations, not a throw', async () => {
+    const out = await translateKeywords(['bedrijf'], { translate: async () => { throw new Error('db down'); } });
+    assert.deepEqual(out, {});
   });
 
-  test('caches results and does not re-ask for known terms', async () => {
-    let calls = 0;
-    const llm = async () => { calls++; return JSON.stringify({ bedrijf: { language: 'Dutch', english: 'company' } }); };
-    await translateKeywords(['bedrijf'], { llm });
-    await translateKeywords(['Bedrijf'], { llm });
-    assert.equal(calls, 1);
-  });
-
-  test('bounds the number of terms sent and drops blanks/oversized/non-strings', async () => {
-    let sent;
-    const llm = async (_s, user) => { sent = JSON.parse(user); return '{}'; };
-    const many = Array.from({ length: MAX_TERMS_PER_REQUEST + 20 }, (_, i) => `term ${i}`);
-    await translateKeywords([...many, '', '   ', 42, 'x'.repeat(500)], { llm });
-    assert.equal(sent.length, MAX_TERMS_PER_REQUEST);
-    assert.ok(sent.every((t) => typeof t === 'string' && t.length <= 200));
-  });
-
-  test('non-array input is handled', async () => {
-    assert.deepEqual(await translateKeywords(null, { llm: async () => { throw new Error('should not be called'); } }), {});
+  test('non-array input is passed through safely', async () => {
+    const out = await translateKeywords(null, { translate: async () => new Map() });
+    assert.deepEqual(out, {});
   });
 });

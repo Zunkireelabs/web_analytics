@@ -3,6 +3,7 @@ import { deriveNewContentContract, deriveContractFromSourceFile } from './lib/ne
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderBlogOutlineBodyTsx, renderTranslationBody, renderTranslationBodyTsx, renderDirectAnswerBody, renderDirectAnswerBodyTsx, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
+import { buildGradientCover } from '../generators/lib/gradient-cover.js';
 import { siteHasUsableDesignProfile, checkDesignIntegrityGate } from './lib/design-drift.js';
 import { findRootArrayBounds, spliceMarkedArray, assertValidContent } from './adapters/lib/js-data-splice.js';
 
@@ -118,11 +119,16 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     // readable siblings. See newcontent-contract.js for why.
     const contract = await deriveNewContentContract(site, targetConfig, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'blog-outline') : contract.layout;
+    // Opt-in generated gradient cover: an SVG committed next to the post in the
+    // same atomic commit, referenced from its front matter. A site that did not
+    // opt in gets null here and keeps whatever image the generator found.
+    const cover = buildGradientCover(site, { slug: filePath.split('/').pop().replace(/\.[^.]+$/, '') });
     return {
       ok: true,
       filePath,
-      body: renderBlogOutlineBody(content, site, { permalink, layout, fieldNames: contract.fieldNames }),
+      body: renderBlogOutlineBody(cover ? { ...content, featuredImage: cover.featuredImage } : content, site, { permalink, layout, fieldNames: contract.fieldNames }),
       contentFormat: 'markdown',
+      ...(cover ? { extraFiles: [cover.file] } : {}),
     };
   }
 
@@ -355,6 +361,7 @@ export async function apply(site, draft) {
     path: resolved.filePath, content: resolved.body,
     contentFormat: resolved.contentFormat, actionType: draft.action_type,
   }];
+  for (const f of resolved.extraFiles || []) files.push({ ...f, actionType: draft.action_type });
 
   // blog-outline + filename-mode (App Router directory-per-post) is the
   // only combination with a manifest to update — see

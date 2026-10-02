@@ -1,13 +1,13 @@
-import { knownDomain, hostnameOf, filterOwnDomainPages } from './site-domain.js';
+import { knownDomain, hostnameOf } from './site-domain.js';
 import {
   getRelatedQueriesForTopic, getProductCapabilities, setGapClassification, getKeywordClusters, getKeywordGaps,
   recordCapabilityVisibilitySnapshot, getRecentCapabilityVisibilitySnapshots,
-  appendKeywordGapEvidenceSnapshot, updateKeywordGapStatus, getKeywordGapsInCluster, setGapCoverage,
+  appendKeywordGapEvidenceSnapshot, updateKeywordGapStatus, getKeywordGapsInCluster,
 } from '../../store/data-analyst.js';
 import { getLearnedGapConfidence, temperPriorityBoost } from './gap-learning.js';
-import { listPageInventory } from '../../store/page-inventory.js';
+import { classifyGapCoverage, isCoverageFresh } from './keyword-coverage-service.js';
+import { foldText, baseLang, LOCATION_CODE_TO_MARKET } from './keyword-coverage.js';
 import { buildGrowthOpportunities } from './growth-opportunities.js';
-import { analyzePageUrl, hasSufficientGroundingContent } from './page-content.js';
 import { findOpenRecommendation, insertRecommendation, refreshRecommendationBlockState } from '../../store/recommendations.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
 import { riskTierForGenerator } from './risk-tiers.js';
@@ -26,7 +26,6 @@ import { PACED_GENERATORS } from './ship-pacing.js';
 // would have actually called it. Loaded lazily in decisionEngineAnnotation
 // below instead, so "the flag is off" means zero import cost too, not just
 // zero call cost.
-import { assessKeywordCoverage, COVERAGE } from './keyword-coverage.js';
 // generateDraft is the exact same shared Generate -> Quality-Gate-Validate
 // -> auto-fix -> Validate-again pipeline every other Action Center entry
 // point already uses (manual "Generate" click, the MCP tool, seoDraftEligibility
@@ -132,98 +131,21 @@ export async function classifyGapRelevance(siteId, gap) {
 // topic).
 const STOPWORDS = new Set(['the', 'a', 'an', 'for', 'and', 'or', 'to', 'of', 'in', 'on', 'is', 'are', 'how', 'what', 'why', 'does', 'do']);
 function significantWords(text) {
-  return (text || '')
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
+  // Unicode-aware: the old [^a-z0-9] split turned "KI-Entwicklung" or Devanagari
+  // into an empty word set, so those keywords were never matched to anything.
+  return (foldText(text).match(/[\p{L}\p{N}]+/gu) || [])
     .filter((w) => w.length > 2 && !STOPWORDS.has(w));
 }
 
-const MAX_SIMILARITY_CANDIDATES = 5;
-const EXISTING_PAGE_SYSTEM = 'You check whether a candidate existing page already substantially covers a target search ' +
-  'topic — not just mentions it in passing. Respond with ONLY a JSON object: {"covered_by": "<the exact URL from the ' +
-  'list that covers it>"} if one does, or {"covered_by": null} if none of the given pages substantially cover the topic. ' +
-  'Never pick a URL not in the given list.';
-
-// Cross-language shortlist for stage 1 of the coverage pipeline: a German
-// keyword shares no word with an English slug, so slug overlap finds nothing.
-// One cheap LLM call over URL paths ONLY (no fetches) picks the likely pages.
-const FOREIGN_SHORTLIST_SYSTEM = 'You match a non-English search keyword to the URL paths of a website\'s existing pages. ' +
-  'Respond with ONLY a JSON object: {"pages": ["<exact path from the list>", ...]} naming up to 3 paths whose topic ' +
-  'matches the keyword\'s core subject (ignore country/language words). Use [] when none plausibly match. Never invent a path.';
-
-async function shortlistForeignPages(siteId, topic, pages) {
-  const byPath = new Map(pages.slice(0, 200).map((p) => [p.page.replace(/^https?:\/\/[^/]+/, '') || '/', p.page]));
-  const parsed = await callLLMForJson(
-    FOREIGN_SHORTLIST_SYSTEM,
-    `Keyword: "${topic}"\n\nPaths:\n${[...byPath.keys()].join('\n')}`,
-    { maxTokens: 150, generatorId: 'gap-existing-page-shortlist', siteId }
-  );
-  return (Array.isArray(parsed?.pages) ? parsed.pages : []).filter((x) => byPath.has(x)).map((x) => ({ page: byPath.get(x) }));
-}
-
-// Full coverage verdict (see keyword-coverage.js) — covered / partially_covered /
-// not_covered plus why. findExistingPageMatch below is the narrow view of it
-// that the approval path uses.
-export async function assessGapCoverage(siteId, gap) {
-  const rawPages = await listPageInventory(siteId, { limit: 500 }).catch(() => []);
-  // page_inventory is crawl/sitemap-discovered and carries no domain
-  // filtering of its own — knownDomain (primary domain only), same scoping
-  // as every other finding-generating agent (candidate-pages.js's own
-  // comment). Without this, a topic could get "covered_by" a real page on a
-  // registered-but-separate additional_own_domain (edgex./zenly.zunkireelabs.com)
-  // or a foreign one entirely — gap confirmed 2026-08-24.
-  const site = await getSiteById(siteId).catch(() => null);
-  const domain = site ? knownDomain(site) : null;
-  const pages = domain ? filterOwnDomainPages(rawPages, domain, (r) => r.page) : rawPages;
-
-  return assessKeywordCoverage({
-    topic: gap.topic,
-    pages,
-    fetchPage: async (page) => {
-      const result = await analyzePageUrl(page).catch(() => ({ ok: false }));
-      if (!result.ok || !hasSufficientGroundingContent(result.analysis)) return null;
-      const a = result.analysis;
-      return {
-        title: a.title || '',
-        h1: (a.headingOutline || []).find((h) => h.level === 1)?.text || '',
-        metaDescription: a.metaDescription || '',
-        bodyText: a.bodyText || '',
-        htmlLang: a.htmlLang || null,
-      };
-    },
-    llm: (system, user) => callLLMForJson(system, user, { maxTokens: 200, generatorId: 'gap-existing-page-check', siteId }),
-    shortlistForeign: (signals, list) => shortlistForeignPages(siteId, gap.topic, list),
-  });
-}
-
-// Only a COVERED verdict returns a URL. A page that overlaps but differs in
-// market, language or intent is NOT a match — the keyword is still a real gap.
+// The URL of an existing page that already covers (or is already built around)
+// this gap's topic, or null. Kept for callers that only need that one answer; it
+// holds NO matching logic of its own anymore — the verdict comes from
+// keyword-coverage-service.js, which also separates "covered" from a topic that
+// is only covered in another language, country or intent. persist:false so a
+// lookup never writes a verdict; force so it is never served from a stale cache.
 export async function findExistingPageMatch(siteId, gap) {
-  try {
-    const result = await assessGapCoverage(siteId, gap);
-    return result.decision === COVERAGE.COVERED ? result.coveredBy : null;
-  } catch (e) {
-    console.warn(`[analyst-seo-mapping] existing-page check failed for gap ${gap.id}: ${e.message}`);
-    return null;
-  }
-}
-
-// Runs the coverage check once for a gap and records it, so the keyword list
-// can hide COVERED keywords up front instead of the verdict only appearing
-// after someone clicks send. Fail-open: an unreachable LLM/page records
-// nothing (checked:false) and the keyword simply stays visible to retry.
-export async function checkAndRecordGapCoverage(siteId, gap) {
-  const result = await assessGapCoverage(siteId, gap);
-  if (!result.checked) return result;
-  await setGapCoverage(siteId, gap.id, {
-    decision: result.decision,
-    existingPageMatch: result.decision === COVERAGE.COVERED ? result.coveredBy : null,
-    detail: {
-      stage: result.stage, reasons: result.reasons, dimensions: result.dimensions,
-      page: result.coveredBy || result.relatedPage || null,
-    },
-  });
-  return result;
+  const r = await classifyGapCoverage(siteId, gap, { persist: false, force: true });
+  return ['duplicate', 'covered'].includes(r.status) ? r.url : null;
 }
 
 // Cheap, deterministic (no LLM) phrasing detection — this is a SHAPE signal,
@@ -281,6 +203,22 @@ export function gapDraftEligibility(gap) {
   const findingId = `keyword-gap:${gap.id}`;
   const shape = detectContentShape(gap.topic);
 
+  // Coverage verdict (keyword-coverage.js). SAME TOPIC IS NOT SAME TARGET, so
+  // only the verdicts that really mean "nothing new to write" stop a draft:
+  //   duplicate  -> a page is already built around this exact keyword
+  //   uncertain  -> not enough evidence; shown to a human, never auto-drafted
+  // covered falls through to the existing_page_match rule below (FAQ or nothing).
+  // market_gap / intent_gap / opportunity are real opportunities and fall through
+  // to normal generator selection — with market grounding added where it applies.
+  if (gap.coverage_status === 'duplicate' || gap.coverage_status === 'uncertain') return null;
+
+  // A keyword in another language must not be drafted into the site's default-
+  // language collection. That is exactly how German and Dutch posts ended up
+  // under /blog/ with lang="en" and no alternates. Until a locale-aware content
+  // target exists for the language, the right outcome is a visible
+  // "localize" opportunity (see recommendedActionForGap), not an English-route draft.
+  if (gap.language_code && baseLang(gap.language_code) !== 'en') return null;
+
   // Already covered by a real existing page — the strongest possible
   // "nothing to draft" signal, checked first regardless of shape/value. The
   // one exception: a question-shaped topic against that same page is a real
@@ -319,11 +257,56 @@ export function gapDraftEligibility(gap) {
     // NOT the comparison case: an article/page that happens to answer a
     // question well is a correct fulfillment of that topic, not a stand-in
     // for missing infrastructure the way a comparison topic is.
-    shapeHint: shape === 'question'
-      ? 'This is a QUESTION-phrased query. Lead with a direct, concise answer to the literal question before any ' +
-        'supporting detail — do not bury the answer under a generic introduction.'
-      : null,
+    shapeHint: [
+      shape === 'question'
+        ? 'This is a QUESTION-phrased query. Lead with a direct, concise answer to the literal question before any ' +
+          'supporting detail — do not bury the answer under a generic introduction.'
+        : null,
+      groundingNote(gap),
+    ].filter(Boolean).join(' ') || null,
   };
+}
+
+const MARKET_NAMES = { US: 'United States', IN: 'India', GB: 'United Kingdom', AU: 'Australia', CA: 'Canada', NP: 'Nepal', CH: 'Switzerland', NL: 'Netherlands', DE: 'Germany' };
+
+// What a market-specific or dated draft must NOT do. These are the failure modes
+// seen in a real batch: one template with the country name swapped, Nepali firms
+// listed as competitors in the UK and Canada, and last year's year in the title.
+export function groundingNote(gap, now = new Date()) {
+  const parts = [`Current year: ${now.getFullYear()}. Never put an older year in the title or body, and do not state events, dates or statistics you were not given.`];
+  const ev = gap?.coverage_evidence || {};
+  const market = (ev.gapMarkets && ev.gapMarkets[0]) || (gap?.coverage_status === 'market_gap' ? LOCATION_CODE_TO_MARKET[gap?.location_code] : null);
+  if (market && MARKET_NAMES[market]) {
+    parts.push(
+      `Target market: ${MARKET_NAMES[market]}. Write for that market's audience. Only state market-specific facts (regulations, institutions, ` +
+      'named companies, prices) that appear in the provided grounding; if none do, stay general instead of inventing them. ' +
+      'Do not present companies from other countries as competitors or examples for this market, and do not reuse a client result as a general claim.'
+    );
+  }
+  return parts.join(' ');
+}
+
+// The action a human should expect for a gap, derived from the SAME rules that
+// decide whether a draft is created — so the UI can never promise "Would create:
+// Blog post" for something the backend will not draft. kind is one of:
+// 'none' | 'faq' | 'landing-page' | 'blog-post' | 'localize' | 'refresh' | 'review' | 'comparison-page'.
+export function recommendedActionForGap(gap) {
+  if (!gap?.topic) return { kind: 'none', label: 'No action', reason: 'Missing topic.' };
+  const cov = gap.coverage_status || null;
+  const ev = gap.coverage_evidence || {};
+  const near = ev.nearestUrl || gap.existing_page_match || null;
+  if (cov === 'language_gap' || (gap.language_code && baseLang(gap.language_code) !== 'en')) {
+    return { kind: 'localize', label: `Localize (${gap.language_code || 'other language'})`, reason: gap.coverage_reason || 'Needs a localized page under its own language URL; not auto-drafted into the English blog.' };
+  }
+  if (cov === 'uncertain') return { kind: 'review', label: 'Review: not enough evidence', reason: gap.coverage_reason || 'Coverage could not be established.' };
+  if (cov === 'duplicate') return { kind: 'none', label: 'No action: already targeted', reason: gap.coverage_reason || (near ? `Already targeted by ${near}.` : 'Already targeted.') };
+  if ((cov === 'covered' || cov === 'duplicate') && ev.needsRefresh) return { kind: 'refresh', label: 'Refresh the existing page', reason: ev.staleReason || gap.coverage_reason };
+  const e = gapDraftEligibility(gap);
+  if (!e) return { kind: 'none', label: 'No action', reason: gap.coverage_reason || 'Nothing new to add.' };
+  if (e.requiresFutureInfrastructure) return { kind: 'comparison-page', label: 'Comparison page (not supported yet)', reason: e.note };
+  if (e.generatorId === 'faq') return { kind: 'faq', label: 'Add an FAQ to the existing page', reason: gap.coverage_reason || null, page: e.existingPage };
+  if (e.generatorId === 'landing-page') return { kind: 'landing-page', label: 'Create a landing page', reason: gap.coverage_reason || null };
+  return { kind: 'blog-post', label: 'Create a blog post', reason: gap.coverage_reason || null };
 }
 
 // The eligibility gapDraftEligibility above would compute, overridden for one
@@ -410,20 +393,21 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
   // dismissed draft reuses what's already known rather than re-judging
   // against a possibly-changed capability set or page inventory).
   const needsClassification = gap.search_intent == null || gap.product_relevance == null;
-  const needsPageCheck = gap.existing_page_match == null && !gap.coverage_checked_at;
+  // Coverage is cached on the gap (coverage_checked_at), so a re-approval inside
+  // the TTL costs nothing; only an unchecked or expired verdict is re-judged.
+  const needsPageCheck = !isCoverageFresh(gap);
   if (needsClassification || needsPageCheck) {
-    const [classification, existingPageMatch] = await Promise.all([
-      needsClassification ? classifyGapRelevance(siteId, gap).catch(() => null) : null,
-      needsPageCheck ? findExistingPageMatch(siteId, gap).catch(() => null) : null,
-    ]);
-    if (classification || existingPageMatch) {
+    // Classification first: the coverage engine needs the keyword's search
+    // intent to tell an intent gap from a covered topic.
+    const classification = needsClassification ? await classifyGapRelevance(siteId, gap).catch(() => null) : null;
+    if (classification) {
       // A direct product match with commercial/transactional intent outranks
       // whatever difficulty-based priority the clustering agent originally
       // guessed — commercial demand for something Zunkiree actually sells
       // matters more than raw keyword volume (product-visibility growth
       // objective, "commercial intent must matter"). Anything else keeps its
       // existing priority untouched (setGapClassification's COALESCE).
-      const isCommercialIntent = classification && (classification.searchIntent === 'commercial' || classification.searchIntent === 'transactional');
+      const isCommercialIntent = classification.searchIntent === 'commercial' || classification.searchIntent === 'transactional';
       const naiveBoost = isCommercialIntent && classification.productRelevance === 'direct' ? 'high' : undefined;
       // Real learning loop, not just a static rule: THIS site's own measured
       // GSC impact from past commercial+direct gaps can withhold a boost the
@@ -433,13 +417,22 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
         ? temperPriorityBoost(learnedGapMap, classification.searchIntent, classification.productRelevance, naiveBoost)
         : undefined;
       const updated = await setGapClassification(siteId, gap.id, {
-        searchIntent: classification?.searchIntent, productRelevance: classification?.productRelevance,
-        priority: boostedPriority, existingPageMatch,
+        searchIntent: classification.searchIntent, productRelevance: classification.productRelevance, priority: boostedPriority,
       }).catch(() => null);
       if (updated) {
+        gap = { ...gap, search_intent: updated.search_intent, product_relevance: updated.product_relevance, priority: updated.priority };
+      }
+    }
+    if (needsPageCheck) {
+      const coverage = await classifyGapCoverage(siteId, gap).catch((e) => {
+        console.warn(`[analyst-seo-mapping] coverage check failed for gap ${gap.id}: ${e.message}`);
+        return null;
+      });
+      if (coverage) {
         gap = {
-          ...gap, search_intent: updated.search_intent, product_relevance: updated.product_relevance,
-          priority: updated.priority, existing_page_match: updated.existing_page_match,
+          ...gap, coverage_status: coverage.status, coverage_reason: coverage.reason, coverage_evidence: coverage.evidence,
+          language_code: coverage.languageCode ?? gap.language_code,
+          existing_page_match: ['duplicate', 'covered'].includes(coverage.status) ? coverage.url : null,
         };
       }
     }
@@ -868,7 +861,8 @@ export async function refreshPendingKeywordGapObservations(siteId) {
   let observed = 0;
   let classified = 0;
 
-  for (const gap of gaps) {
+  for (const listed of gaps) {
+    let gap = listed; // reassigned below once classification lands
     try {
       const relatedQueries = await getRelatedQueriesForTopic(siteId, gap.topic);
       const impressions = relatedQueries.reduce((sum, q) => sum + (Number(q.impressions) || 0), 0);
@@ -884,19 +878,19 @@ export async function refreshPendingKeywordGapObservations(siteId) {
       console.warn(`[analyst-seo-mapping] weekly evidence snapshot failed for gap ${gap.id}: ${e.message}`);
     }
 
-    const needsClassification = gap.search_intent == null || gap.product_relevance == null || gap.existing_page_match == null;
-    if (!needsClassification) continue;
+    const needsClassification = gap.search_intent == null || gap.product_relevance == null;
+    const needsCoverage = !isCoverageFresh(gap);
+    if (!needsClassification && !needsCoverage) continue;
     try {
-      const [classification, existingPageMatch] = await Promise.all([
-        gap.search_intent == null || gap.product_relevance == null ? classifyGapRelevance(siteId, gap).catch(() => null) : null,
-        gap.existing_page_match == null ? findExistingPageMatch(siteId, gap).catch(() => null) : null,
-      ]);
-      if (classification || existingPageMatch) {
-        await setGapClassification(siteId, gap.id, {
-          searchIntent: classification?.searchIntent, productRelevance: classification?.productRelevance, existingPageMatch,
-        });
-        classified++;
+      const classification = needsClassification ? await classifyGapRelevance(siteId, gap).catch(() => null) : null;
+      if (classification) {
+        await setGapClassification(siteId, gap.id, { searchIntent: classification.searchIntent, productRelevance: classification.productRelevance });
+        gap = { ...gap, search_intent: classification.searchIntent, product_relevance: classification.productRelevance };
       }
+      // Cached verdicts are skipped above; a checked "no match" is now a real,
+      // cacheable answer, so unmatched gaps are no longer re-fetched every week.
+      if (needsCoverage) await classifyGapCoverage(siteId, gap);
+      classified++;
     } catch (e) {
       console.warn(`[analyst-seo-mapping] weekly classification refresh failed for gap ${gap.id}: ${e.message}`);
     }
