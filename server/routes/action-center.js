@@ -13,7 +13,7 @@ import { draftShipState, SHIP_STATE } from '../lib/draft-ship-state.js';
 import { recordOutcome } from '../agents/lib/generator-learning.js';
 import { getProtectedPageSet } from '../store/protected-pages.js';
 import { isProtectedChange } from '../agents/lib/protected-pages.js';
-import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState, reopenRecommendation, blockRecommendation, getRecommendationByFindingId } from '../store/recommendations.js';
+import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState, reopenRecommendation, blockRecommendation, closeRecommendation, getRecommendationByFindingId } from '../store/recommendations.js';
 import { recordAttempt } from '../store/recommendation-attempts.js';
 import { classifyAbandonReason, RETRY_POLICY } from '../lib/attempt-classification.js';
 import { query as pgQuery } from '../db.js';
@@ -1402,6 +1402,14 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false,
       outcome: 'failed',
       reason: message,
     }).catch((err) => console.error(`[action-center] could not record attempt for rec ${rec.id}:`, err.message));
+    // A generator that proves the recommendation's premise is already false
+    // (schema.js/canonical.js: the page already has what was being added)
+    // marks its refusal `stale`. auto-remediation.js closes the row on that
+    // signal; this path didn't, so the same recommendation stayed open and
+    // failed again on every Ship.
+    if (e?.stale === true) {
+      await closeRecommendation(rec.id).catch((err) => console.error(`[action-center] could not close stale rec ${rec.id}:`, err.message));
+    }
     // Same block-on-NEEDS_HUMAN decision action-center-reconciler.js's
     // classifyUnrecordedFailures makes for a failure it discovers — but that
     // pass only ever looks at drafts with NO recommendation_attempts row yet,

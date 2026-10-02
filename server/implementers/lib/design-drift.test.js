@@ -1957,6 +1957,26 @@ describe('bodySlotLooksLikeLabel', () => {
     assert.equal(reason, null);
   });
 
+  test('a class that is only an ANCESTOR in a small-text rule is not a label (chayce .container false positive)', () => {
+    const css = [
+      '.container{max-width:1140px;margin:0 auto}',
+      '.navbar .container .upper-side .phone-email small{font-size:9px}',
+      '.slider .container .social-media ul li a{font-size:12px}',
+    ].join('\n');
+    const reason = bodySlotLooksLikeLabel('content-wrapper', {
+      wrapper: '<div class="container">\n{{BODY}}\n</div>',
+    }, css);
+    assert.equal(reason, null);
+  });
+
+  test('a class that IS the subject of a descendant small-text rule is still a label', () => {
+    const css = '.footer .fine-print{font-size:11px}';
+    const reason = bodySlotLooksLikeLabel('content-wrapper', {
+      wrapper: '<div class="fine-print">\n{{BODY}}\n</div>',
+    }, css);
+    assert.ok(reason);
+  });
+
   test('no CSS and no classes both mean "cannot tell", never "failed"', () => {
     const template = { wrapper: '<dl>\n{{ROWS}}\n</dl>', row: '<dt>{{QUESTION}}</dt><dd>{{ANSWER}}</dd>' };
     assert.equal(bodySlotLooksLikeLabel('faq', template, ''), null);

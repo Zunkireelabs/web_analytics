@@ -116,8 +116,15 @@ const GEO_SIGNAL_RULES = [
   },
   {
     // A visible FAQ (any shape: accordion, h2-h4/<strong> questions, FAQ
-    // section) already supplies the Q&A content this rule asks for.
-    test: (analysis) => analysis.questionHeadingCount === 0 && !analysis.hasVisibleFaqContent,
+    // section) already supplies the Q&A content this rule asks for. Never a
+    // legal/policy page (terms, privacy, cookies): page-content.js already
+    // exempts those from the "Missing FAQ" gap, and generated Q&A spliced
+    // into a legal document is wrong on its face. Same for a
+    // section index (isListingPage): no prose of its own, and FAQ schema there
+    // matches nothing visible. Confirmed on chayceproperties.com, which got
+    // qa-content recommendations — and shipped drafts — for its Terms,
+    // Privacy and Cookie pages and its /blog/ index.
+    test: (analysis) => analysis.questionHeadingCount === 0 && !analysis.hasVisibleFaqContent && !analysis.isLegalPage && !analysis.isListingPage,
     label: 'Add question-style headings (e.g. "What is...?", "How does...?") with grounded answers — improves featured-snippet and AI-citation eligibility.',
     generatorId: 'qa-content',
     params: (page, query, schemaTypes) => ({ page, query }),

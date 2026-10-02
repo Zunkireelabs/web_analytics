@@ -196,6 +196,25 @@ export function isLegalPath(pagePath = '') {
   return LEGAL_PATH_RE.test(pagePath || '');
 }
 
+// A section index (a blog or resources listing): a non-root page whose own
+// links fan out to several distinct pages nested UNDER its own path. Judged
+// from real link structure rather than a path-name list, so it holds on any
+// language or site naming ("/blog/", "/ratgeber/", "/journal/"). The listing
+// has no prose of its own to turn into Q&A, and FAQ schema there would not
+// match anything visible on the page.
+const LISTING_MIN_CHILD_PAGES = 5;
+export function isListingPage(pagePath, internalLinks = []) {
+  if (!pagePath || pagePath === '/') return false;
+  const base = pagePath.endsWith('/') ? pagePath : `${pagePath}/`;
+  const children = new Set();
+  for (const href of internalLinks) {
+    let path;
+    try { path = new URL(href, 'https://x.invalid').pathname; } catch { continue; }
+    if (path.length > base.length && path.startsWith(base)) children.add(path);
+  }
+  return children.size >= LISTING_MIN_CHILD_PAGES;
+}
+
 // Visible text of a FAQ question trigger with decorative children (icon
 // glyphs, "+"/"−" toggles, chevrons) removed — `<summary>Q?<span>+</span>`
 // reads "Q?+" as raw text, which a plain endsWith('?') check rejected.
@@ -935,6 +954,7 @@ export function analyzePage(html, pageUrl) {
     pagePath, // this page's own URL path — see isArticleLikePage/isLegalPath gates in contentGapChecks
     isArticlePage: isArticleLikePage({ schemaTypes: [...schemaTypes], openGraphType: ($('meta[property="og:type"]').first().attr('content') || '').trim(), pagePath }), // author/freshness/review/citation signals only apply to article-like pages
     isLegalPage: isLegalPath(pagePath),
+    isListingPage: isListingPage(pagePath, internalLinks), // section index (blog/resources listing) — see isListingPage
     // Strict accordion questions OR any looser FAQ-shaped visible content —
     // the signal other agents use to avoid asserting "no FAQ" / "no question headings".
     hasVisibleFaqContent: faqVisibleQuestionCount > 0 || hasLooseVisibleFaq($, headingText, hasFaqMarkup),
@@ -1444,6 +1464,11 @@ const PATH_SCHEMA_HINTS = [
 export function inferSchemaType(pageUrl, schemaTypes = [], analysis = null) {
   const existing = (schemaTypes || []).find((t) => t && !BOILERPLATE_SCHEMA_TYPES.has(t));
   if (existing) return existing;
+
+  // A section index is a CollectionPage, whatever its path says: "/blog/"
+  // matches the Article path hint below, but an index page has no article to
+  // describe (chayceproperties.com/blog/ was asked for Article schema).
+  if (analysis?.isListingPage) return 'CollectionPage';
 
   const ogType = (analysis?.openGraphType || '').trim().toLowerCase();
   if (OG_TYPE_SCHEMA[ogType]) return OG_TYPE_SCHEMA[ogType];

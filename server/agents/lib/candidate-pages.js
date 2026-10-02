@@ -68,18 +68,25 @@ export function dedupeQueryVariants(urls, impressionsByPage = null) {
   for (const url of urls) {
     let key = url;
     let hasQuery = false;
+    let isHttps = false;
     try {
       const parsed = new URL(url);
-      key = parsed.origin + parsed.pathname;
+      // Scheme is deliberately NOT part of the key: http://host/ and
+      // https://host/ are the same page, and GSC/inventory can carry both
+      // (chayceproperties.com's homepage did), which doubled every
+      // page-level finding for it. Host is kept, so www vs apex stays
+      // separate — that is a different decision this does not make.
+      key = parsed.host + parsed.pathname;
       hasQuery = Boolean(parsed.search);
+      isHttps = parsed.protocol === 'https:';
     } catch { /* unparsable URL: treat as its own singleton group below */ }
     if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push({ url, hasQuery });
+    groups.get(key).push({ url, hasQuery, isHttps });
   }
 
   const kept = [];
   for (const variants of groups.values()) {
-    const bare = variants.find((v) => !v.hasQuery);
+    const bare = variants.find((v) => !v.hasQuery && v.isHttps) || variants.find((v) => !v.hasQuery);
     if (!bare || variants.length === 1) {
       kept.push(...variants.map((v) => v.url));
       continue;

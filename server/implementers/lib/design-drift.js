@@ -591,6 +591,23 @@ function classesOnSlotElement(markup, placeholder) {
   return match ? match[1].trim().split(/\s+/).filter(Boolean) : [];
 }
 
+// True when `cls` is the element a selector actually styles (the last compound
+// of at least one selector in the rule's list), not merely an ancestor in a
+// descendant selector. `.navbar .container .phone small{font-size:9px}` styles
+// the <small>, not `.container` — treating it as a rule for `.container` made
+// every wrapper class that appears inside a footer/nav rule look like a label.
+// Also rejects a match inside a comment, where "selector" is just prose.
+function classIsSubjectOfSelector(cls, css, idx, open) {
+  const ruleStart = css.lastIndexOf('}', idx) + 1;
+  const selectorText = css.slice(ruleStart, open).replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const needle = `.${escapeForCssSelector(cls)}`;
+  return selectorText.split(',').some((sel) => {
+    const subject = sel.trim().split(/[\s>+~]+/).filter(Boolean).pop() || '';
+    const at = subject.indexOf(needle);
+    return at !== -1 && !IDENT_CONTINUATION.test(subject[at + needle.length] ?? ' ');
+  });
+}
+
 // True when the CSS defines `cls` with a rule that makes text read as a label
 // rather than prose. Scoped to the single rule block following the selector so
 // an unrelated later `text-transform` in the sheet can't produce a false
@@ -603,7 +620,7 @@ function classIsLabelStyle(cls, css) {
     if (after !== undefined && !IDENT_CONTINUATION.test(after)) {
       const open = css.indexOf('{', idx);
       const close = open === -1 ? -1 : css.indexOf('}', open);
-      if (open !== -1 && close !== -1) {
+      if (open !== -1 && close !== -1 && classIsSubjectOfSelector(cls, css, idx, open)) {
         const body = css.slice(open + 1, close);
         if (/text-transform\s*:\s*uppercase/i.test(body)) return true;
         const size = /font-size\s*:\s*([\d.]+)(rem|px|em)/i.exec(body);
