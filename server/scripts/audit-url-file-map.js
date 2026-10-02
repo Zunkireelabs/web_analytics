@@ -8,11 +8,12 @@ import { hasMarker, classifyMarkerGap, isHeadScopedField } from '../implementers
 import { hasHashMarker } from '../implementers/lib/hash-marker-merge.js';
 import { detectInsertionPoint, detectHeadRegion } from '../implementers/lib/structural-detect.js';
 import { resolveCapability, extensionOf } from '../implementers/lib/rendering-gate.js';
-import { ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
+import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { getFileContent, getDefaultBranchSha } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { findRelevantMemory } from '../agent-memory.js';
 import { fetchHtml } from '../agents/lib/page-content.js';
+import { probeMany } from '../agents/lib/live-probe.js';
 
 // Read-only config-completeness audit for a site's url_file_map — surfaces
 // exactly the class of gap that let the homepage-FAQ and /compare/-FAQ
@@ -141,6 +142,11 @@ function defaultRange() {
 // same "never guess" discipline as every other check in this script.
 const OG_LIVE_CHECK_CONCURRENCY = 4;
 
+// /blog/page/2/ etc. are generated listing pages of one paginated template,
+// never a draft target: mapping one to the index file would let a draft
+// rewrite the title/description of every page in the series.
+const PAGINATION_PATH_RE = /\/page\/\d+\/?$/;
+
 function extractMetaContent(html, property) {
   const re = new RegExp(`<meta[^>]+property=["']${property}["'][^>]*>`, 'i');
   const tag = re.exec(html)?.[0];
@@ -175,17 +181,41 @@ async function verifyLiveOpenGraph(pageUrl, fetch = fetchHtml) {
   return { ok: true, title, description };
 }
 
+// Same idea for canonical: a shared layout that renders
+// <link rel="canonical" href="{{ page.url }}"> on every page makes a
+// per-page canonical draft redundant. Only counts as verified when the live
+// canonical is present AND self-referencing (same path as the page), so a
+// canonical pointing at another URL is never waved through as "fine".
+function extractCanonicalHref(html) {
+  const tag = /<link[^>]+rel=["']canonical["'][^>]*>/i.exec(html)?.[0];
+  return tag ? (/href=["']([^"']*)["']/i.exec(tag)?.[1] || '').trim() || null : null;
+}
+
+function normalizePath(u) {
+  try { return new URL(u).pathname.replace(/\/+$/, '') || '/'; } catch { return null; }
+}
+
+async function verifyLiveCanonical(pageUrl, fetch = fetchHtml) {
+  const fetched = await fetch(pageUrl);
+  if (!fetched.ok) return { ok: false, reason: fetched.error };
+  const href = extractCanonicalHref(fetched.html);
+  if (!href) return { ok: false, reason: 'live page has no canonical link' };
+  const same = normalizePath(href) !== null && normalizePath(href) === normalizePath(pageUrl);
+  if (!same) return { ok: false, reason: `live canonical points elsewhere (${href})` };
+  return { ok: true, href };
+}
+
 // Batches with bounded concurrency rather than Promise.all on the whole
 // list — this can run against 100+ pages on a large site, and courtesy to
 // the live target (and this script's own runtime) matters more than
 // shaving a few seconds off an on-demand audit.
-async function verifyLiveOpenGraphBatch(entries) {
+async function verifyLiveBatch(entries, verify = verifyLiveOpenGraph) {
   const results = new Map();
   let i = 0;
   async function worker() {
     while (i < entries.length) {
       const entry = entries[i++];
-      results.set(entry.page, await verifyLiveOpenGraph(entry.page));
+      results.set(entry.page, await verify(entry.page));
     }
   }
   await Promise.all(Array.from({ length: Math.min(OG_LIVE_CHECK_CONCURRENCY, entries.length) }, worker));
@@ -260,15 +290,32 @@ export async function auditSite(siteId) {
   // selectCandidatePages/ai-recommendation.js already do, so this audit's
   // "real candidate pages" pool matches what the actual recommendation
   // agents use, not raw unfiltered GSC data.
-  const pages = filterOwnDomainPages(rawPages, ownDomains(site));
-  const pageUrls = pages.map((p) => p.dim_value);
+  // knownDomain (primary), not ownDomains: candidate-pages.js scans the primary
+  // domain only, because a registered additional_own_domain (edgex./zenly.)
+  // is a separate product with its own repo and no recommendations here.
+  // Auditing it against THIS repo only reported gaps nothing would act on.
+  const pages = filterOwnDomainPages(rawPages, knownDomain(site)).filter((p) => !PAGINATION_PATH_RE.test(new URL(p.dim_value).pathname));
+  // GSC keeps listing URLs that now 301 elsewhere (renamed/consolidated
+  // pages) or 404. Auditing them yields "file not found" / "no file mapping"
+  // for pages that no longer exist as pages, so only live (or unverifiable —
+  // never assume) URLs are audited. zunkireelabs.com: all 11 "file not found"
+  // rows were 301s to a replacement page.
+  const gscUrls = pages.map((p) => p.dim_value);
+  const { results: probes, skipped: probeSkipped } = await probeMany(gscUrls, { maxProbes: gscUrls.length, concurrency: 4 });
+  const goneUrls = probes.filter((r) => r.verdict === 'redirect' || r.verdict === 'dead');
+  const goneSet = new Set(goneUrls.map((r) => r.url));
+  const pageUrls = gscUrls.filter((u) => !goneSet.has(u));
+  if (goneUrls.length) {
+    console.log(`(skipped ${goneUrls.length} URL(s) that redirect or 404 — not auditable as pages:)`);
+    for (const r of goneUrls) console.log(`  ${r.verdict === 'redirect' ? `${r.status} -> ${r.redirectsTo}` : r.status}  ${r.url}`);
+  }
   if (rawPages.length !== pages.length) {
     console.log(`(filtered ${rawPages.length - pages.length} page(s) from other subdomains — own domains: ${(ownDomains(site) || []).join(', ') || '(none configured)'})`);
   }
 
   console.log(`\n=== Site #${siteId} "${site.name}" (${site.repo_owner}/${site.repo_name}) — ${pageUrls.length} real candidate pages, ${ACTION_TYPES.length} action types ===`);
 
-  const noFileMapping = []; // { page, actionType }
+  let noFileMapping = []; // { page, actionType }
   const noMarkers = Object.fromEntries(ACTION_TYPES.map((t) => [t, []])); // actionType -> [page]
   const adapterRouted = []; // { page, actionType, adapterId }
   const fileCache = new Map(); // filePath -> { content } | false | 'error'
@@ -339,7 +386,7 @@ export async function auditSite(siteId) {
   const ogLiveVerifiedOk = [];
   if (ogFatalCandidates.length) {
     const uniquePages = [...new Map(ogFatalCandidates.map((m) => [m.page, m])).values()];
-    const liveResults = await verifyLiveOpenGraphBatch(uniquePages);
+    const liveResults = await verifyLiveBatch(uniquePages, verifyLiveOpenGraph);
     markersFatal = markersFatal.filter((m) => {
       if (!(m.markerField === 'openGraph' && m.gap === 'fatal-no-head-region')) return true;
       const result = liveResults.get(m.page);
@@ -348,8 +395,30 @@ export async function auditSite(siteId) {
     });
   }
 
+  // An unmapped page is only a real gap if the live page is actually
+  // missing the tag. canonical/open-graph are routinely rendered by the
+  // shared layout for every page (zunkireelabs.com: all of /locations,
+  // /glossary, /compare), so "no file mapping" there is noise, not a defect.
+  // Same fail-closed rule as the OG check above: any fetch error or missing
+  // tag keeps the entry reported.
+  const unmappedLiveVerified = [];
+  const liveCheckers = { 'open-graph': verifyLiveOpenGraph, canonical: verifyLiveCanonical };
+  for (const [actionType, verify] of Object.entries(liveCheckers)) {
+    const entries = noFileMapping.filter((e) => e.actionType === actionType);
+    if (!entries.length) continue;
+    const results = await verifyLiveBatch([...new Map(entries.map((e) => [e.page, e])).values()], verify);
+    noFileMapping = noFileMapping.filter((e) => {
+      if (e.actionType !== actionType) return true;
+      if (results.get(e.page)?.ok) { unmappedLiveVerified.push(e); return false; }
+      return true;
+    });
+  }
+
   console.log(`\n-- NO FILE MAPPING (${noFileMapping.length}) --`);
   for (const { page, actionType } of noFileMapping) console.log(`  [${actionType}] ${page}`);
+
+  console.log(`\n-- UNMAPPED BUT LIVE-VERIFIED OK, not a gap (${unmappedLiveVerified.length}) -- (no file mapping, but the live page already renders a correct canonical / og:title+og:description — shared layout handles it)`);
+  for (const { page, actionType } of unmappedLiveVerified) console.log(`  [${actionType}] ${page}`);
 
   for (const actionType of ACTION_TYPES) {
     console.log(`\n-- NO MARKERS CONFIGURED (${actionType}) (${noMarkers[actionType].length}) --`);
@@ -611,4 +680,4 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   });
 }
 
-export const __testables = { looksLikeOgPlaceholder, verifyLiveOpenGraph, extractMetaContent };
+export const __testables = { looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent };

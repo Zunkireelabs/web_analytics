@@ -263,6 +263,10 @@ export const api = {
       req(`/internal/keywords/${siteId}/clusters${clusterType ? `?cluster_type=${clusterType}` : ''}`),
     gaps: (siteId, status) =>
       req(`/internal/keywords/${siteId}/gaps${status ? `?status=${status}` : ''}`),
+    // { translations: { [term]: { language, english } } } for the non-English
+    // terms only — see server/agents/lib/keyword-translation.js.
+    translate: (siteId, terms) =>
+      req(`/internal/keywords/${siteId}/translate`, { method: 'POST', body: JSON.stringify({ terms }) }),
     // A keyword the user typed on the Analyst page as a growth target — queued
     // as a normal pending gap, then approved through updateGapStatus like any
     // machine-found one.
