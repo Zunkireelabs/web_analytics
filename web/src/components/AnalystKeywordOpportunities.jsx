@@ -141,6 +141,11 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
     const seen = new Set();
     const deduped = (gaps || [])
       .filter((g) => g.status === 'pending_review' || gapAction[g.id])
+      // An existing page already satisfies this keyword (server-side coverage
+      // check — topic, intent, language AND market, not mere similarity), so
+      // there is nothing to grow. 'partially_covered' stays: a page overlaps
+      // but does not answer this query, which is the opportunity.
+      .filter((g) => g.coverage_decision !== 'covered' || gapAction[g.id])
       .filter((g) => {
         const key = (g.topic || '').trim().toLowerCase();
         if (!key || seen.has(key)) return false;
@@ -185,6 +190,10 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
           blockedReason: updated.actionCenter?.blockedReason ?? null,
           requiresFutureInfrastructure: updated.actionCenter?.requiresFutureInfrastructure ?? false,
           rejected: status === 'rejected',
+          // eligible:false means the server declined to create anything (e.g.
+          // an existing page covers it, or the gates dropped it) — the row
+          // must not claim it was queued.
+          notQueued: status === 'approved' && updated.actionCenter?.eligible === false,
         },
       }));
     } catch (e) {
@@ -359,6 +368,11 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                         {gap.reason && (
                           <p className="text-[11px] font-medium text-slate-500 mt-1 line-clamp-2">{gap.reason}</p>
                         )}
+                        {gap.coverage_decision === 'partially_covered' && gap.coverage_detail?.reasons?.[0] && (
+                          <p className="text-[11px] font-semibold text-indigo-700 mt-1">
+                            Overlaps{gap.coverage_detail.page ? ` ${gap.coverage_detail.page.replace(/^https?:\/\/[^/]+/, '')}` : ' an existing page'}, but not covered: {gap.coverage_detail.reasons[0]}
+                          </p>
+                        )}
                         <p className="text-[10px] font-medium text-slate-400 mt-1">
                           Seen {gap.observation_count || 1}x
                           {formatSeenDate(gap.first_seen_at) && ` · first ${formatSeenDate(gap.first_seen_at)}`}
@@ -396,7 +410,12 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                             </span>
                           </p>
                         )}
-                        {done && !state.draftId && !state.draftError && !state.rejected && !state.requiresFutureInfrastructure && (
+                        {done && state.notQueued && (
+                          <p className="text-[11px] font-semibold text-slate-500 mt-2">
+                            Not queued — nothing new to add for this keyword (already covered, or filtered out by the safety checks).
+                          </p>
+                        )}
+                        {done && !state.notQueued && !state.draftId && !state.draftError && !state.rejected && !state.requiresFutureInfrastructure && (
                           <p className="text-[11px] font-semibold text-slate-500 mt-2">
                             Queued in Action Center — no draft was generated for this one.
                           </p>

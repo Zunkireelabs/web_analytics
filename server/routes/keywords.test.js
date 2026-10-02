@@ -29,6 +29,7 @@ mock.module(resolve('../agents/lib/analyst-seo-mapping.js'), {
     },
     buildProductTopicMap: async () => ({ capabilities: [], unmapped: { clusters: [], gaps: [] } }),
     opportunityDraftEligibility: (site, opportunity) => opportunityAction,
+    checkAndRecordGapCoverage: async () => ({ checked: false }),
   },
 });
 
@@ -64,6 +65,7 @@ mock.module(resolve('../store/data-analyst.js'), {
     getLatestLayoutSuggestion: async () => null,
     saveLayoutSuggestion: async () => ({ generated_at: null }),
     createUserKeywordGap: async () => ({}),
+    getUncheckedPendingGaps: async () => [],
     getProductCapabilities: async () => [],
     createProductCapability: async () => ({}),
     updateProductCapabilityStatus: async () => ({}),

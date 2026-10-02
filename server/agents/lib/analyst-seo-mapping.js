@@ -2,7 +2,7 @@ import { knownDomain, hostnameOf, filterOwnDomainPages } from './site-domain.js'
 import {
   getRelatedQueriesForTopic, getProductCapabilities, setGapClassification, getKeywordClusters, getKeywordGaps,
   recordCapabilityVisibilitySnapshot, getRecentCapabilityVisibilitySnapshots,
-  appendKeywordGapEvidenceSnapshot, updateKeywordGapStatus, getKeywordGapsInCluster,
+  appendKeywordGapEvidenceSnapshot, updateKeywordGapStatus, getKeywordGapsInCluster, setGapCoverage,
 } from '../../store/data-analyst.js';
 import { getLearnedGapConfidence, temperPriorityBoost } from './gap-learning.js';
 import { listPageInventory } from '../../store/page-inventory.js';
@@ -26,6 +26,7 @@ import { PACED_GENERATORS } from './ship-pacing.js';
 // would have actually called it. Loaded lazily in decisionEngineAnnotation
 // below instead, so "the flag is off" means zero import cost too, not just
 // zero call cost.
+import { assessKeywordCoverage, COVERAGE } from './keyword-coverage.js';
 // generateDraft is the exact same shared Generate -> Quality-Gate-Validate
 // -> auto-fix -> Validate-again pipeline every other Action Center entry
 // point already uses (manual "Generate" click, the MCP tool, seoDraftEligibility
@@ -143,10 +144,27 @@ const EXISTING_PAGE_SYSTEM = 'You check whether a candidate existing page alread
   'list that covers it>"} if one does, or {"covered_by": null} if none of the given pages substantially cover the topic. ' +
   'Never pick a URL not in the given list.';
 
-export async function findExistingPageMatch(siteId, gap) {
-  const topicWords = new Set(significantWords(gap.topic));
-  if (!topicWords.size) return null;
+// Cross-language shortlist for stage 1 of the coverage pipeline: a German
+// keyword shares no word with an English slug, so slug overlap finds nothing.
+// One cheap LLM call over URL paths ONLY (no fetches) picks the likely pages.
+const FOREIGN_SHORTLIST_SYSTEM = 'You match a non-English search keyword to the URL paths of a website\'s existing pages. ' +
+  'Respond with ONLY a JSON object: {"pages": ["<exact path from the list>", ...]} naming up to 3 paths whose topic ' +
+  'matches the keyword\'s core subject (ignore country/language words). Use [] when none plausibly match. Never invent a path.';
 
+async function shortlistForeignPages(siteId, topic, pages) {
+  const byPath = new Map(pages.slice(0, 200).map((p) => [p.page.replace(/^https?:\/\/[^/]+/, '') || '/', p.page]));
+  const parsed = await callLLMForJson(
+    FOREIGN_SHORTLIST_SYSTEM,
+    `Keyword: "${topic}"\n\nPaths:\n${[...byPath.keys()].join('\n')}`,
+    { maxTokens: 150, generatorId: 'gap-existing-page-shortlist', siteId }
+  );
+  return (Array.isArray(parsed?.pages) ? parsed.pages : []).filter((x) => byPath.has(x)).map((x) => ({ page: byPath.get(x) }));
+}
+
+// Full coverage verdict (see keyword-coverage.js) — covered / partially_covered /
+// not_covered plus why. findExistingPageMatch below is the narrow view of it
+// that the approval path uses.
+export async function assessGapCoverage(siteId, gap) {
   const rawPages = await listPageInventory(siteId, { limit: 500 }).catch(() => []);
   // page_inventory is crawl/sitemap-discovered and carries no domain
   // filtering of its own — knownDomain (primary domain only), same scoping
@@ -157,39 +175,55 @@ export async function findExistingPageMatch(siteId, gap) {
   const site = await getSiteById(siteId).catch(() => null);
   const domain = site ? knownDomain(site) : null;
   const pages = domain ? filterOwnDomainPages(rawPages, domain, (r) => r.page) : rawPages;
-  const scored = pages
-    .map((p) => {
-      const urlWords = significantWords(p.page.replace(/^https?:\/\/[^/]+/, ''));
-      const overlap = urlWords.filter((w) => topicWords.has(w)).length;
-      return { page: p.page, overlap };
-    })
-    .filter((p) => p.overlap > 0)
-    .sort((a, b) => b.overlap - a.overlap)
-    .slice(0, MAX_SIMILARITY_CANDIDATES);
-  if (!scored.length) return null;
 
-  const fetched = await Promise.all(scored.map(async ({ page }) => {
-    const result = await analyzePageUrl(page).catch(() => ({ ok: false }));
-    if (!result.ok || !hasSufficientGroundingContent(result.analysis)) return null;
-    return { page, excerpt: result.analysis.bodyText.slice(0, 800) };
-  }));
-  const candidates = fetched.filter(Boolean);
-  if (!candidates.length) return null;
+  return assessKeywordCoverage({
+    topic: gap.topic,
+    pages,
+    fetchPage: async (page) => {
+      const result = await analyzePageUrl(page).catch(() => ({ ok: false }));
+      if (!result.ok || !hasSufficientGroundingContent(result.analysis)) return null;
+      const a = result.analysis;
+      return {
+        title: a.title || '',
+        h1: (a.headingOutline || []).find((h) => h.level === 1)?.text || '',
+        metaDescription: a.metaDescription || '',
+        bodyText: a.bodyText || '',
+        htmlLang: a.htmlLang || null,
+      };
+    },
+    llm: (system, user) => callLLMForJson(system, user, { maxTokens: 200, generatorId: 'gap-existing-page-check', siteId }),
+    shortlistForeign: (signals, list) => shortlistForeignPages(siteId, gap.topic, list),
+  });
+}
 
-  const user = `Target topic: "${gap.topic}"\n\nCandidate pages:\n${candidates
-    .map((c, i) => `${i + 1}. ${c.page}\n${c.excerpt}`)
-    .join('\n\n')}`;
-
+// Only a COVERED verdict returns a URL. A page that overlaps but differs in
+// market, language or intent is NOT a match — the keyword is still a real gap.
+export async function findExistingPageMatch(siteId, gap) {
   try {
-    const parsed = await callLLMForJson(EXISTING_PAGE_SYSTEM, user, { maxTokens: 100, generatorId: 'gap-existing-page-check', siteId });
-    const coveredBy = typeof parsed?.covered_by === 'string' ? parsed.covered_by : null;
-    // Never trust a URL the model didn't actually see — same "grounded only
-    // in what's given" discipline the generators use.
-    return coveredBy && candidates.some((c) => c.page === coveredBy) ? coveredBy : null;
+    const result = await assessGapCoverage(siteId, gap);
+    return result.decision === COVERAGE.COVERED ? result.coveredBy : null;
   } catch (e) {
     console.warn(`[analyst-seo-mapping] existing-page check failed for gap ${gap.id}: ${e.message}`);
     return null;
   }
+}
+
+// Runs the coverage check once for a gap and records it, so the keyword list
+// can hide COVERED keywords up front instead of the verdict only appearing
+// after someone clicks send. Fail-open: an unreachable LLM/page records
+// nothing (checked:false) and the keyword simply stays visible to retry.
+export async function checkAndRecordGapCoverage(siteId, gap) {
+  const result = await assessGapCoverage(siteId, gap);
+  if (!result.checked) return result;
+  await setGapCoverage(siteId, gap.id, {
+    decision: result.decision,
+    existingPageMatch: result.decision === COVERAGE.COVERED ? result.coveredBy : null,
+    detail: {
+      stage: result.stage, reasons: result.reasons, dimensions: result.dimensions,
+      page: result.coveredBy || result.relatedPage || null,
+    },
+  });
+  return result;
 }
 
 // Cheap, deterministic (no LLM) phrasing detection — this is a SHAPE signal,
@@ -376,7 +410,7 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
   // dismissed draft reuses what's already known rather than re-judging
   // against a possibly-changed capability set or page inventory).
   const needsClassification = gap.search_intent == null || gap.product_relevance == null;
-  const needsPageCheck = gap.existing_page_match == null;
+  const needsPageCheck = gap.existing_page_match == null && !gap.coverage_checked_at;
   if (needsClassification || needsPageCheck) {
     const [classification, existingPageMatch] = await Promise.all([
       needsClassification ? classifyGapRelevance(siteId, gap).catch(() => null) : null,

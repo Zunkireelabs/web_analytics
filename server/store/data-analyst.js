@@ -205,6 +205,7 @@ export async function getKeywordGaps(siteId, status) {
   const { rows } = await query(
     `SELECT id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match,
             topic_cluster, cluster_role, search_volume,
+            coverage_checked_at, coverage_decision, coverage_detail,
             first_seen_at, last_seen_at, observation_count, evidence_snapshots, created_at,
             -- ::text deliberately. node-postgres parses a DATE into a JS Date at
             -- LOCAL midnight, so in any positive-offset timezone (this app runs
@@ -245,7 +246,7 @@ export async function updateKeywordGapStatus(siteId, gapId, status) {
   const { rows } = await query(
     `UPDATE keyword_gaps SET status = $3
       WHERE site_id = $1 AND id = $2
-      RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, created_at`,
+      RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, coverage_checked_at, created_at`,
     [siteId, gapId, GAP_STATUS_TO_DB[status]]
   );
   if (!rows[0]) return null;
@@ -269,11 +270,39 @@ export async function setGapClassification(siteId, gapId, { searchIntent, produc
             priority = COALESCE($5, priority),
             existing_page_match = COALESCE($6, existing_page_match)
       WHERE site_id = $1 AND id = $2
-      RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, created_at`,
+      RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, coverage_checked_at, created_at`,
     [siteId, gapId, searchIntent, productRelevance, priority ?? null, existingPageMatch ?? null]
   );
   if (!rows[0]) return null;
   return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status] };
+}
+
+// Records the keyword-coverage verdict (agents/lib/keyword-coverage.js).
+// existing_page_match is only ever written for a 'covered' verdict, so the
+// approval path's "already covered -> nothing to draft" reading is unchanged.
+export async function setGapCoverage(siteId, gapId, { decision, existingPageMatch, detail }) {
+  const { rows } = await query(
+    `UPDATE keyword_gaps SET
+            coverage_checked_at = now(),
+            coverage_decision = $3,
+            coverage_detail = $4::jsonb,
+            existing_page_match = COALESCE($5, existing_page_match)
+      WHERE site_id = $1 AND id = $2
+      RETURNING id`,
+    [siteId, gapId, decision, JSON.stringify(detail || {}), existingPageMatch ?? null]
+  );
+  return rows[0] || null;
+}
+
+// Pending gaps nobody has judged yet, newest first — the background sweep's work list.
+export async function getUncheckedPendingGaps(siteId, limit = 6) {
+  const { rows } = await query(
+    `SELECT id, topic, reason, priority FROM keyword_gaps
+      WHERE site_id = $1 AND status = 'pending_review' AND coverage_checked_at IS NULL AND existing_page_match IS NULL
+      ORDER BY created_at DESC LIMIT $2`,
+    [siteId, limit]
+  );
+  return rows;
 }
 
 // Product Understanding Layer (migration 111). 'verified' rows are the only
@@ -384,7 +413,7 @@ export async function createUserKeywordGap(siteId, topic, reason) {
   const { rows } = await query(
     `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source)
      VALUES ($1, $2, $3, 'medium', 'pending_review', 'user_request')
-     RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, created_at`,
+     RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, coverage_checked_at, created_at`,
     [siteId, topic, reason || null]
   );
   return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status], alreadyQueued: false };
