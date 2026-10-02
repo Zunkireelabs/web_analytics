@@ -468,7 +468,20 @@ function wrapInSiteProse(body, site, permalink = null) {
   if (permalink) {
     try { inline = isInlineContentPage(new URL(permalink, 'https://placeholder.invalid').href); } catch { /* inline stays false */ }
   }
-  const proseProjected = projectMarkdownProseInBody(tableProjected, site?.url_file_map?.siteRoot?.designProfile, { inline });
+  // Per-site opt-out for article pages: `siteRoot.inlineProse: 'layout'` means
+  // this site's blog/legal LAYOUT already styles article prose (site 1's
+  // blog-post.njk wraps the body in Tailwind Typography's `.prose`, which is
+  // why its human-written posts are bare markdown). Projecting the design
+  // profile's page-builder classes onto an article's headings and paragraphs
+  // then OVERRIDES that layout: confirmed live on site 1 (2026-10-02), generated
+  // posts rendered at 30-48px headings and 20px body next to the 28px/18px of
+  // every hand-written post, because `typography.body` is the landing-page body
+  // class (`text-lg md:text-xl max-w-2xl`) and `heading.item` carries
+  // `md:text-3xl`. Opt-in only, so every other tenant's output is unchanged.
+  const layoutStylesProse = inline && site?.url_file_map?.siteRoot?.inlineProse === 'layout';
+  const proseProjected = layoutStylesProse
+    ? tableProjected
+    : projectMarkdownProseInBody(tableProjected, site?.url_file_map?.siteRoot?.designProfile, { inline });
 
   // Configured template first, then a projection from the site's design
   // profile, then bare markdown. That middle step is the change: net-new

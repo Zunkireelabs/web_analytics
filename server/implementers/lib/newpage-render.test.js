@@ -582,3 +582,34 @@ describe('renderDirectAnswerBodyTsx / renderTranslationBodyTsx — Next.js App R
     assert.match(out, /description: "Who we are\."/);
   });
 });
+
+describe('renderBlogOutlineBody — siteRoot.inlineProse: "layout" (blog layout styles article prose)', () => {
+  const designProfile = {
+    typography: {
+      heading: { section: 'text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900', item: 'text-2xl md:text-3xl font-normal text-gray-900' },
+      body: 'text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl',
+      link: 'text-zunkiree-600 hover:underline',
+    },
+  };
+  const wrapper = { wrapper: '<div class="container-custom py-12 md:py-20">\n{{BODY}}\n</div>' };
+  const content = { title: 'Boilers', sections: [{ heading: 'Bleeding radiators', body: 'Turn the **valve** and see [the guide](/guide/).' }] };
+  const mk = (extra = {}) => ({ url_file_map: { siteRoot: { designProfile, componentTemplates: { contentWrapper: wrapper }, ...extra } } });
+
+  test('opted in: a blog post body stays plain markdown so the layout styles it', () => {
+    const body = renderBlogOutlineBody(content, mk({ inlineProse: 'layout' }), { permalink: '/blog/boilers/' });
+    assert.match(body, /^## Bleeding radiators$/m);
+    assert.doesNotMatch(body, /text-lg md:text-xl|text-3xl|max-w-2xl|<h2|<p /);
+    assert.match(body, /container-custom py-12 md:py-20/);
+  });
+
+  test('default (not opted in): unchanged, the profile classes are still projected', () => {
+    const body = renderBlogOutlineBody(content, mk(), { permalink: '/blog/boilers/' });
+    assert.match(body, /<h2 class="text-2xl md:text-3xl font-normal text-gray-900">Bleeding radiators<\/h2>/);
+    assert.match(body, /<p class="text-lg md:text-xl/);
+  });
+
+  test('opted in but NOT an article page (a landing page permalink): still projected', () => {
+    const body = renderBlogOutlineBody(content, mk({ inlineProse: 'layout' }), { permalink: '/services/boilers/' });
+    assert.match(body, /<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">/);
+  });
+});
