@@ -1,5 +1,6 @@
 import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { coverConfigFor } from './lib/gradient-cover.js';
+import { stockPhotoWanted } from './lib/blog-image-policy.js';
 import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLMForJson } from '../llm.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
@@ -139,6 +140,11 @@ async function expandSections(sections, topic) {
 // params: { topic: string, context?: string, start?: string, end?: string }
 export async function generate({ siteId, params }) {
   const { topic, context, designCorrections } = params;
+  // Optional blog category the post is filed under (e.g. 'Insights' for trend
+  // explainers from trend-radar). A short plain label only — it is written into
+  // front matter by newpage-render.js, so anything else is dropped.
+  const category = typeof params.category === 'string' && /^[A-Za-z0-9 &-]{1,40}$/.test(params.category.trim())
+    ? params.category.trim() : null;
   if (!topic) throw Object.assign(new Error('topic is required'), { status: 400 });
   const { start, end } = params.start && params.end ? params : defaultRange();
 
@@ -306,14 +312,16 @@ export async function generate({ siteId, params }) {
   const { fallback } = await imageQueryContextFor(site);
   const sectionHeadings = sections.map((s) => s.heading).filter(Boolean);
   // A site that opted into generated gradient covers (lib/gradient-cover.js)
-  // gets no stock photo at all: the cover is built at apply time from the
-  // post's slug, so there is nothing to search for here.
-  const featuredImage = coverConfigFor(site)
-    ? null
-    : await searchImage(
+  // gets no stock photo: the cover is built at apply time from the post's slug.
+  // The exception is `featuredImage: 'insights-only'`, where Insights posts keep
+  // a Pexels photo and every other post gets the gradient (see stockPhotoWanted).
+  const blogTarget = site?.url_file_map?.newContentTargets?.['blog-outline'];
+  const featuredImage = stockPhotoWanted(blogTarget, { category, hasCover: Boolean(coverConfigFor(site)) })
+    ? await searchImage(
       [...buildImageQueries({ title: parsed.title, topic }), ...sectionHeadings, fallback].filter(Boolean),
       { excludePhotoIds, perPage: IMAGE_CANDIDATE_POOL },
-    );
+    )
+    : null;
 
   const content = {
     topic,
@@ -323,6 +331,7 @@ export async function generate({ siteId, params }) {
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
     categories,
+    ...(category ? { category } : {}),
     ...(featuredImage ? { featuredImage } : {}),
     // The real supporting text this draft was grounded in — same
     // convention as landing-page.js's content.groundingContext, for

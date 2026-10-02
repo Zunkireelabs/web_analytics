@@ -121,8 +121,10 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     const layout = contract.unknown ? resolveNewContentLayout(site, 'blog-outline') : contract.layout;
     // Opt-in generated gradient cover: an SVG committed next to the post in the
     // same atomic commit, referenced from its front matter. A site that did not
-    // opt in gets null here and keeps whatever image the generator found.
-    const cover = buildGradientCover(site, { slug: filePath.split('/').pop().replace(/\.[^.]+$/, '') });
+    // opt in gets null here and keeps whatever image the generator found. A
+    // draft that already carries an image (an Insights post's Pexels photo under
+    // `featuredImage: 'insights-only'`) keeps it: the cover is for posts without one.
+    const cover = content.featuredImage ? null : buildGradientCover(site, { slug: filePath.split('/').pop().replace(/\.[^.]+$/, '') });
     return {
       ok: true,
       filePath,

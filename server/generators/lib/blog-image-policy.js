@@ -17,6 +17,18 @@ export function featuredImageWanted(target, { category } = {}) {
   return true;
 }
 
+// Whether blog-outline should search for a stock (Pexels) photo for this post.
+//
+// A site with generated gradient covers (lib/gradient-cover.js) builds a cover
+// for every post at apply time, so by default it wants NO stock photo. The one
+// exception is a site that ALSO set `featuredImage: 'insights-only'`: its
+// Insights posts keep a Pexels photo and every other post gets the gradient.
+// A site without covers keeps the long-standing rule (featuredImageWanted).
+export function stockPhotoWanted(target, { category, hasCover = false } = {}) {
+  if (hasCover) return target?.featuredImage === 'insights-only' && category === INSIGHT_CATEGORY;
+  return featuredImageWanted(target, { category });
+}
+
 // Reads the front-matter `category:` of an existing post (quoted or bare);
 // null when absent.
 export function extractCategory(raw) {
