@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { __testables } from './audit-url-file-map.js';
 
-const { looksLikeOgPlaceholder, verifyLiveOpenGraph, extractMetaContent } = __testables;
+const { looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent } = __testables;
 
 describe('extractMetaContent', () => {
   test('reads a real og:title content value', () => {
@@ -61,5 +61,27 @@ describe('verifyLiveOpenGraph', () => {
     const result = await verifyLiveOpenGraph('https://example.com/', async () => ({ ok: false, error: 'HTTP 404' }));
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'HTTP 404');
+  });
+});
+
+describe('verifyLiveCanonical', () => {
+  const page = 'https://example.com/glossary/x/';
+  const run = (html) => verifyLiveCanonical(page, async () => ({ ok: true, html }));
+
+  test('passes a self-referencing canonical (trailing slash differences ignored)', async () => {
+    const r = await run('<link rel="canonical" href="https://example.com/glossary/x">');
+    assert.equal(r.ok, true);
+  });
+  test('fails when no canonical is rendered', async () => {
+    assert.equal((await run('<head></head>')).ok, false);
+  });
+  test('fails when the canonical points at a different page', async () => {
+    const r = await run('<link rel="canonical" href="https://example.com/other/">');
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /points elsewhere/);
+  });
+  test('fails closed on fetch error', async () => {
+    const r = await verifyLiveCanonical(page, async () => ({ ok: false, error: 'HTTP 500' }));
+    assert.deepEqual(r, { ok: false, reason: 'HTTP 500' });
   });
 });

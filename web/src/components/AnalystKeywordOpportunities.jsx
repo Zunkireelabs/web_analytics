@@ -56,12 +56,27 @@ function formatSeenDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+// "English: …" under (or beside) a keyword that isn't English. Renders nothing
+// for English terms and while translations are still loading.
+function Gloss({ translation, inline = false }) {
+  if (!translation) return null;
+  return (
+    <span className={`${inline ? '' : 'block mt-0.5 '}text-[10px] font-medium text-slate-500`}>
+      <span className="an-chip an-chip-slate mr-1">{translation.language}</span>
+      {translation.english}
+    </span>
+  );
+}
+
 export default function AnalystKeywordOpportunities({ clientId, refreshToken }) {
   const [opportunities, setOpportunities] = useState(null);
   const [gaps, setGaps] = useState(null);
   const [error, setError] = useState(null);
   // Per-gap action state, keyed by gap id: 'sending' | { draftId, draftError }.
   const [gapAction, setGapAction] = useState({});
+  // English glosses for non-English keywords, keyed by the exact term. Loaded
+  // after the table renders and never blocks it; a failure just shows no gloss.
+  const [translations, setTranslations] = useState({});
 
   // Guards against a slower earlier request overwriting a newer client's data
   // when the selector is changed quickly — only the latest request may commit.
@@ -73,6 +88,7 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
     setGaps(null);
     setError(null);
     setGapAction({});
+    setTranslations({});
 
     // Close to Page 1 used to read keyword_clusters.keywords_json — a
     // 14-day-cadence, append-only snapshot with no clicks/CTR/page column at
@@ -87,6 +103,15 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
         if (requestRef.current !== requestId) return;
         setOpportunities(oppRows?.opportunities || []);
         setGaps(gapRows || []);
+
+        const terms = [
+          ...(oppRows?.opportunities || []).filter((o) => o.type === 'page1-opportunity').map((o) => o.query),
+          ...(gapRows || []).filter((g) => g.status === 'pending_review').map((g) => g.topic),
+        ].filter(Boolean);
+        if (terms.length === 0) return;
+        api.keywords.translate(clientId, terms)
+          .then((res) => { if (requestRef.current === requestId) setTranslations(res?.translations || {}); })
+          .catch(() => {}); // decorative — the keywords are already on screen
       })
       .catch((e) => {
         if (requestRef.current !== requestId) return;
@@ -232,6 +257,7 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                         <tr key={`${k.query}-${i}`} className="border-b border-slate-100 last:border-0">
                           <td className="py-2.5 pr-3">
                             <div className="text-xs font-bold text-slate-800">{k.query}</div>
+                            <Gloss translation={translations[k.query]} />
                           </td>
                           <td className="py-2.5 px-3">
                             <span className={`an-chip ${PRIORITY_CHIP[k.severity] || 'an-chip-slate'}`}>
@@ -311,6 +337,7 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-xs font-black text-slate-800">{gap.topic}</span>
+                          <Gloss translation={translations[gap.topic]} inline />
                           <span className={`an-chip ${PRIORITY_CHIP[gap.priority] || 'an-chip-slate'}`}>
                             {gap.priority}
                           </span>
