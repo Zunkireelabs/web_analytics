@@ -1,3 +1,4 @@
+import { safeMessage } from '../../lib/errors.js';
 import { configured as credentialsPresent, fetchSearchVolume } from '../../ingest/dataforseo-keywords.js';
 
 // The first real SearchDemandProvider — see ./provider.js for the contract
@@ -149,7 +150,11 @@ export const dataForSeoSearchDemandProvider = {
         // The one thing this must never do is let a caller treat a failed
         // lookup as zero demand, which would silently deprioritise every
         // topic in the batch.
-        const note = `DataForSEO search-demand lookup failed: ${err.message}`;
+        const { message: note } = safeMessage(
+          'search-demand-dataforseo',
+          err,
+          'Search-demand lookup is temporarily unavailable.',
+        );
         for (const topic of chunk) out.set(topic, unavailable(note));
         continue;
       }

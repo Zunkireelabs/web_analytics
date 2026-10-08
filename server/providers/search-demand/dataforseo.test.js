@@ -106,13 +106,14 @@ describe('fetchDemandBulk', () => {
     assert.match(signal.note, /no measurable search volume/);
   });
 
-  test('a failed lookup marks the whole chunk unavailable with the reason, not zero', async () => {
+  test('a failed lookup marks the whole chunk unavailable with a safe reason, not zero', async () => {
     volumeError = new Error('HTTP 402');
     const out = await provider.fetchDemandBulk(['a', 'b']);
 
     for (const topic of ['a', 'b']) {
       assert.equal(out.get(topic).available, false);
-      assert.match(out.get(topic).note, /HTTP 402/);
+      assert.match(out.get(topic).note, /temporarily unavailable/);
+      assert.doesNotMatch(out.get(topic).note, /402|HTTP/);
     }
   });
 
