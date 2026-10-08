@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Design Agent worker — polls execution_jobs for kind='design_generate' and
 # runs each one (server/design-agent/worker.js). Distinct from the root
 # Dockerfile (plain node:20-alpine) only because this one also needs a real
@@ -29,7 +30,20 @@ WORKDIR /app
 # Node deps first (better layer caching — same convention as the root
 # Dockerfile).
 COPY package*.json ./
-RUN npm ci --omit=dev
+# LOCK_HASH is the sha256 of package-lock.json, passed by the deploy script.
+# Declaring it as an ARG and echoing it in the RUN makes this layer (and the
+# Chromium download below it) rebuild exactly when the lockfile changes —
+# and be reused from cache otherwise. This replaces `--no-cache` on every
+# deploy: a 2026-08-26 stale-cache hit on `COPY package*.json` made a forced
+# rebuild necessary, but rebuilding from scratch each time re-downloads
+# Chromium + every npm package and leaves a multi-GB superseded image behind,
+# which is what kept filling the VPS disk. The hash gives a guaranteed bust
+# on a real lockfile change without paying that cost on every deploy.
+ARG LOCK_HASH=none
+# --mount=type=cache keeps npm's download cache out of the image layer and
+# reuses it when the lockfile does change.
+RUN --mount=type=cache,target=/root/.npm \
+    echo "lockfile: ${LOCK_HASH}" && npm ci --omit=dev
 
 # `playwright` (package.json dependency) only installs the npm driver —
 # the actual Chromium binary AND the system shared libraries it needs to

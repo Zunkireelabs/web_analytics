@@ -83,6 +83,8 @@ services:
     build:
       context: .
       dockerfile: server/design-agent/Dockerfile
+      args:
+        LOCK_HASH: ${LOCK_HASH:-none}
     networks:
       - hosting
     restart: unless-stopped

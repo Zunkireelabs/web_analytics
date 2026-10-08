@@ -420,7 +420,7 @@ jobs:
             # device" while pip unpacked torch/sentence-transformers — three
             # retries can't help when the disk is full, and it burned the whole
             # cold-build budget before failing. The BuildKit pip cache mount,
-            # superseded images and --no-cache design-agent-worker rebuilds all
+            # superseded images and design-agent-worker rebuilds all
             # accumulate on this VPS. The ML install needs several GB of
             # headroom, so check BEFORE building: if free space on Docker's
             # filesystem is under the threshold, drop dangling images and
@@ -445,21 +445,17 @@ jobs:
               exit 1
             fi
 
-            # design-agent-worker gets --no-cache: a real deploy on 2026-08-26
-            # showed its `COPY package*.json ./` / `RUN npm ci --omit=dev`
-            # layers reported CACHED across multiple independent deploy
-            # attempts spanning 30+ minutes, even though package-lock.json's
-            # content had genuinely changed on disk (git-level verified —
-            # the VPS's checkout was confirmed at the exact commit carrying
-            # the fix). BuildKit's COPY caching is supposed to be content-
-            # hashed, so a stale hit like that shouldn't be possible; rather
-            # than chase a persisted daemon-cache bug on this host with no
-            # SSH access to inspect it live, force this one image to always
-            # rebuild the dependency-install layer from scratch. The other
-            # two images don't have this problem (nothing in their build
-            # fails from a stale npm ci) and keep normal caching so most
-            # deploys stay fast.
-            docker compose -f docker-compose.dev.yml build --no-cache design-agent-worker
+            # design-agent-worker used to be built with --no-cache (a real
+            # deploy on 2026-08-26 hit a stale `COPY package*.json` cache hit
+            # after package-lock.json genuinely changed). That re-downloaded
+            # Chromium and every npm package on every deploy and left a
+            # multi-GB superseded image behind each time — a major cause of
+            # this VPS running out of disk. Instead, pass the lockfile's hash
+            # as a build ARG (see server/design-agent/Dockerfile): the
+            # dependency layers are reused from cache until the lockfile
+            # really changes, and a changed lockfile always busts them.
+            export LOCK_HASH="$(sha256sum package-lock.json | cut -d' ' -f1)"
+            docker compose -f docker-compose.dev.yml build design-agent-worker
             docker compose -f docker-compose.dev.yml build analytics analytics-mcp
             docker compose -f data-analyst-agent/docker-compose.dev.yml build
 
@@ -468,6 +464,13 @@ jobs:
 
             docker compose -f docker-compose.dev.yml up -d
             docker compose -f data-analyst-agent/docker-compose.dev.yml up -d
+
+            # Reclaim what this deploy just superseded so the disk doesn't
+            # creep back up between deploys: dangling (replaced) images and
+            # build cache untouched for 72h. Recent cache is kept so the next
+            # build stays warm.
+            docker image prune -f
+            docker builder prune -f --filter until=72h
 
             echo "Waiting for containers to be healthy..."
             sleep 10
