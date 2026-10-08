@@ -16,7 +16,7 @@ RUN npm run build:web
 # CMD below), and two of that cron's detection agents — font-consistency and
 # visual-quality — launch a real Playwright Chromium. Alpine's musl libc
 # cannot run Playwright's Chromium build at all, which is the same reason
-# server/design-agent/Dockerfile already uses this base.
+# the Design Agent worker (same image, see docker-compose.yml) needs this base too.
 #
 # That mismatch is not theoretical. Both agents errored on 100% of their runs
 # against the only real site — chromium.launch() failing instantly on a
@@ -45,7 +45,7 @@ RUN npm ci --omit=dev
 # libatk, libasound2, ...) are a separate download. Scoped to chromium alone
 # (the one browser capture.js launches) rather than the default all-browsers
 # install, to keep this image's growth as small as this can be: the VPS has
-# run out of disk mid-build before (see server/design-agent/Dockerfile).
+# run out of disk mid-build before (the Design Agent image this one replaced).
 #
 # Invoked as `node node_modules/playwright/cli.js` rather than `npx
 # playwright` for the reason documented at length in that same file: both
@@ -80,6 +80,7 @@ RUN npm ci --omit=dev
 # failure mode that made this line necessary in the first place.
 USER root
 RUN node node_modules/playwright/cli.js install --with-deps chromium \
+  && apt-get install -y --no-install-recommends procps \
   && rm -rf /ms-playwright/chromium-[0-9]* \
   && chmod -R a+rX /ms-playwright \
   && rm -rf /var/lib/apt/lists/*

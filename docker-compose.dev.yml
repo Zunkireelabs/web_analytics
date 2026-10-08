@@ -1,6 +1,10 @@
 services:
   analytics:
     container_name: analytics-app-stage
+    # The ONE image for every Node service in this file: the MCP server and the
+    # Design Agent worker run from this same build with a different command,
+    # instead of building their own copies (own node_modules + Chromium each).
+    image: analytics-app:stage
     build:
       context: .
       dockerfile: Dockerfile
@@ -41,9 +45,7 @@ services:
   # service for the full explanation.
   analytics-mcp:
     container_name: analytics-mcp-stage
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: analytics-app:stage
     command: ["node", "mcp-server/index.js"]
     networks:
       - hosting
@@ -80,11 +82,8 @@ services:
   # deployment's own .env, no Docker socket needed as of 2026-08-27).
   design-agent-worker:
     container_name: design-agent-worker-stage
-    build:
-      context: .
-      dockerfile: server/design-agent/Dockerfile
-      args:
-        LOCK_HASH: ${LOCK_HASH:-none}
+    image: analytics-app:stage
+    command: ["node", "server/design-agent/worker.js"]
     networks:
       - hosting
     restart: unless-stopped
