@@ -51,7 +51,7 @@ import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js'
 import { getSearchPerformanceRange } from './store/read.js';
 import { ownDomains, filterOwnDomainPages } from './agents/lib/site-domain.js';
 import { isForeignPlatformSpamUrl } from './agents/lib/index-bloat.js';
-import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages } from './store/page-inventory.js';
+import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages, pruneStaleInventory } from './store/page-inventory.js';
 import { runDueVerifications } from './agents/lib/fix-verification.js';
 import { siteHasUsableDesignProfile, sitePageUrl, getDesignProfile } from './implementers/lib/design-drift.js';
 import { createDesignProfileJob, getQueuedComponentTemplateJob, getLatestDesignAgentJob, DESIGN_PROFILE_JOB_KEY, createConsistencyScanJob, CONSISTENCY_SCAN_JOB_KEY } from './store/execution-jobs.js';
@@ -747,8 +747,20 @@ export async function runSiteDiscoveryIfDue(site, {
   const orphanedUrls = sitemapUrls.filter((u) => !crawledSet.has(normalize(u)));
   await markOrphanedPagesFn(site.id, orphanedUrls);
 
+  // Self-clean the ledger: drop rows that are provably not this site's real
+  // pages (see store/page-inventory.js). Best-effort — a failure here must
+  // never fail discovery itself.
+  let prunedCount = 0;
+  try {
+    const { pruned } = await pruneStaleInventory(site.id, sitemapUrls);
+    prunedCount = pruned.length;
+    if (prunedCount) console.log(`[site-discovery] site ${site.id}: pruned ${prunedCount} stale inventory row(s): ${pruned.slice(0, 5).join(', ')}${prunedCount > 5 ? ' …' : ''}`);
+  } catch (err) {
+    console.error(`[site-discovery] site ${site.id} inventory prune failed:`, err.message);
+  }
+
   console.log(`[site-discovery] site ${site.id}: ${sitemapUrls.length} sitemap URL(s), ${crawledUrls.length} crawled URL(s), ${gscPages.length} GSC page(s), ${orphanedUrls.length} orphaned.`);
-  return { sitemapCount: sitemapUrls.length, crawlCount: crawledUrls.length, gscCount: gscPages.length, orphanedCount: orphanedUrls.length };
+  return { sitemapCount: sitemapUrls.length, crawlCount: crawledUrls.length, gscCount: gscPages.length, orphanedCount: orphanedUrls.length, prunedCount };
 }
 
 // `force` bypasses only the weekly staleness gate (every other precondition

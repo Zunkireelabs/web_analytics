@@ -30,6 +30,40 @@ export function isCitationGapWidened(gapDelta) {
 // Recent Changes section already shows — detection never invents a change
 // that didn't actually happen. `trendWeek` (health score delta) is passed
 // in by the caller since it's already computed as part of the daily run.
+// An alert that doesn't say which page it is about is useless to a client —
+// prefix each finding with its page path (and "+N more" when keyed to several).
+function describeFinding(c) {
+  if (!c.page) return c.text;
+  let path = c.page;
+  try { path = new URL(c.page, 'https://x').pathname; } catch { /* keep raw */ }
+  return `${path}: ${c.text}${c.extraCount ? ` (+${c.extraCount} more pages)` : ''}`;
+}
+
+// Collapses a run's critical findings into one readable line per page, so an
+// email says "3 issues on /services/" rather than three near-identical
+// sentences with a count that overstates how many pages are affected.
+// Findings with no page (domain-level) are listed once, by their own text.
+// Pure and exported so it is unit-tested without a DB.
+export function summarizeCriticalFindings(findings, { maxItems = 5 } = {}) {
+  const byPage = new Map();
+  const noPage = [];
+  for (const c of findings) {
+    if (!c.page) { noPage.push(c.text); continue; }
+    let path = c.page;
+    try { path = new URL(c.page, 'https://x').pathname; } catch { /* keep raw */ }
+    const entry = byPage.get(path) || { count: 0, text: c.text };
+    entry.count += 1;
+    byPage.set(path, entry);
+  }
+  const lines = [
+    ...[...byPage.entries()].map(([path, e]) => (e.count > 1 ? `${path}: ${e.count} issues` : `${path}: ${e.text}`)),
+    ...new Set(noPage),
+  ];
+  const shown = lines.slice(0, maxItems);
+  const more = lines.length - shown.length;
+  return { pageCount: byPage.size, issueCount: findings.length, body: shown.join(' • ') + (more > 0 ? ` • +${more} more — open the dashboard for the full list.` : '') };
+}
+
 export async function detectNotificationEvents(siteId, { trendWeek } = {}) {
   const changes = await getFindingsDiff(siteId, RECOMMENDATION_AGENT_IDS, 200); // wide window — detection, not display
   const newFindings = changes.filter((c) => c.type === 'new');
@@ -48,17 +82,19 @@ export async function detectNotificationEvents(siteId, { trendWeek } = {}) {
   const events = [];
 
   if (newHighPriority.length >= GROUP_THRESHOLD) {
+    const { pageCount, issueCount, body } = summarizeCriticalFindings(newHighPriority);
+    const scope = pageCount > 0 ? ` on ${pageCount} page${pageCount === 1 ? '' : 's'}` : '';
     events.push({
       type: 'critical-issues-group', severity: 'high',
-      title: `${newHighPriority.length} new critical issues found`,
-      body: newHighPriority.slice(0, 3).map((c) => c.text).join(' '),
+      title: `${issueCount} new critical issue${issueCount === 1 ? '' : 's'}${scope}`,
+      body,
       findingIds: newHighPriority.map((c) => c.findingId),
     });
   } else {
     // Below GROUP_THRESHOLD means at most 2 items here, so every one of
     // them gets its own notification — no separate cap needed under 3.
     for (const c of newHighPriority) {
-      events.push({ type: 'critical-issue', severity: 'high', title: 'New critical issue detected', body: c.text, findingIds: [c.findingId] });
+      events.push({ type: 'critical-issue', severity: 'high', title: 'New critical issue detected', body: describeFinding(c), findingIds: [c.findingId] });
     }
   }
 

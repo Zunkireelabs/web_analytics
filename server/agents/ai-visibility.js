@@ -231,7 +231,11 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const priorities = priorityByRank(prioritized);
   const findings = prioritized.flatMap((p, i) => {
     if (!p.recommendations?.length) return [];
-    const priority = priorities[i];
+    // Rank alone makes the worst third of pages 'high' on every site, so a
+    // brand-new site with zero traffic got "critical" alerts. With no
+    // impressions there is nothing at stake yet — cap at 'low' so it never
+    // triggers a critical-issues notification.
+    const priority = p.impressions > 0 ? priorities[i] : 'low';
     const expectedImpact = { label: impactFromPriority(priority), basis: 'computed', value: p.impressions };
     return p.recommendations.map((rec) => makeFinding({
       id: `ai-visibility:${rec.key}:${p.page}`,

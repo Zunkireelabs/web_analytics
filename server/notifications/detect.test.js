@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { isVisibilityDrop, isCitationGapWidened, AI_VISIBILITY_DROP_THRESHOLD, CITATION_GAP_WIDEN_THRESHOLD } from './detect.js';
+import { isVisibilityDrop, isCitationGapWidened, summarizeCriticalFindings, AI_VISIBILITY_DROP_THRESHOLD, CITATION_GAP_WIDEN_THRESHOLD } from './detect.js';
 
 // Pure threshold-check unit tests — the cooldown itself (hasRecentNotification)
 // is a real DB query and intentionally not unit-tested here, same as the
@@ -58,5 +58,31 @@ describe('isCitationGapWidened', () => {
 
   test('false (not thrown) for null — pre-Phase-3 historical run with no real gap to compare', () => {
     assert.equal(isCitationGapWidened(null), false);
+  });
+});
+
+describe('summarizeCriticalFindings', () => {
+  test('names each page and counts distinct pages, not raw findings', () => {
+    const r = summarizeCriticalFindings([
+      { page: 'https://a.com/services/', text: 'Missing schema.' },
+      { page: 'https://a.com/services/', text: 'Thin content.' },
+      { page: 'https://a.com/about/', text: 'No FAQ.' },
+    ]);
+    assert.equal(r.pageCount, 2);
+    assert.equal(r.issueCount, 3);
+    assert.match(r.body, /\/services\/: 2 issues/);
+    assert.match(r.body, /\/about\/: No FAQ\./);
+  });
+
+  test('caps the list and says how many more there are', () => {
+    const f = Array.from({ length: 8 }, (_, i) => ({ page: `https://a.com/p${i}/`, text: 'x' }));
+    const r = summarizeCriticalFindings(f);
+    assert.match(r.body, /\+3 more/);
+  });
+
+  test('domain-level findings (no page) are listed by their own text', () => {
+    const r = summarizeCriticalFindings([{ page: null, text: 'robots.txt blocks Googlebot.' }]);
+    assert.equal(r.pageCount, 0);
+    assert.match(r.body, /robots\.txt blocks Googlebot\./);
   });
 });

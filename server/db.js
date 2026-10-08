@@ -1,5 +1,6 @@
 import pg from 'pg';
 import 'dotenv/config';
+import { findSiteIdentityConflict, siteIdentityConflictMessage } from './lib/site-identity.js';
 
 // Neon serverless Postgres: DATABASE_URL must be the POOLED (PgBouncer,
 // "-pooler" hostname) connection string, never the direct one — the direct
@@ -87,6 +88,25 @@ export async function getOrCreateSite() {
     [gsc, ga4]
   );
   if (found.rows.length) return found.rows[0];
+
+  // Lookup missed — but "no row for this exact pair" is not the same as "this
+  // site doesn't exist yet". Editing either identifier in `.env` also misses,
+  // and falling through to the INSERT below would fork the site: a second row
+  // for the same real website, with a new id and none of the history. See
+  // lib/site-identity.js for why that fails silently and why
+  // updateSiteConnection() is the right tool for an intended change.
+  const candidates = await query(
+    'SELECT * FROM sites WHERE gsc_property = $1 OR ga4_property_id = $2',
+    [gsc, ga4]
+  );
+  const conflict = findSiteIdentityConflict({
+    gscProperty: gsc,
+    ga4PropertyId: ga4,
+    rows: candidates.rows,
+  });
+  if (conflict) {
+    throw new Error(siteIdentityConflictMessage(conflict, { gscProperty: gsc, ga4PropertyId: ga4 }));
+  }
 
   const inserted = await query(
     `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, client_number)
