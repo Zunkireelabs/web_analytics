@@ -66,7 +66,14 @@ RUN --mount=type=cache,target=/root/.npm \
 # "playwright: not found" (confirmed by reproducing `npm ci --omit=dev`
 # outside Docker with this repo's real lockfile). Calling the package's own
 # cli.js file directly sidesteps bin-symlink resolution entirely.
-RUN node node_modules/playwright/cli.js install --with-deps chromium
+#
+# --only-shell installs just `chromium-headless-shell`, the stripped-down
+# build Playwright (>=1.49) uses automatically for `headless: true` launches,
+# instead of also downloading the full headed Chromium. capture.js only ever
+# launches with `headless: true` (live-analysis/capture.js), so the headed
+# build was dead weight in the image — hundreds of MB per build.
+RUN node node_modules/playwright/cli.js install --with-deps --only-shell chromium \
+  && rm -rf /var/lib/apt/lists/* /tmp/*
 
 # Whole server/ tree, same as the root Dockerfile's own COPY — worker.js's
 # real import graph (execution-jobs.js, read.js, db.js, lib/errors.js, and
