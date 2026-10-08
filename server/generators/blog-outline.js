@@ -1,4 +1,6 @@
 import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
+import { coverConfigFor } from './lib/gradient-cover.js';
+import { stockPhotoWanted } from './lib/blog-image-policy.js';
 import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLMForJson } from '../llm.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
@@ -9,6 +11,7 @@ import { pageStructureGuidance } from './lib/design-aware-composer.js';
 import { getSeoPolicy } from '../store/site-seo-policy.js';
 import { getSiteProfile } from '../store/data-analyst.js';
 import { tenantIndustries } from '../agents/lib/seo-tenant-context.js';
+import { tenantContextTextFor } from '../lib/tenant-context.js';
 import { attributionNote, globalGrowthNote, agencyCreditLine } from '../agents/lib/zunkireelabs-growth-policy.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
@@ -138,6 +141,11 @@ async function expandSections(sections, topic) {
 // params: { topic: string, context?: string, start?: string, end?: string }
 export async function generate({ siteId, params }) {
   const { topic, context, designCorrections } = params;
+  // Optional blog category the post is filed under (e.g. 'Insights' for trend
+  // explainers from trend-radar). A short plain label only — it is written into
+  // front matter by newpage-render.js, so anything else is dropped.
+  const category = typeof params.category === 'string' && /^[A-Za-z0-9 &-]{1,40}$/.test(params.category.trim())
+    ? params.category.trim() : null;
   if (!topic) throw Object.assign(new Error('topic is required'), { status: 400 });
   const { start, end } = params.start && params.end ? params : defaultRange();
 
@@ -216,8 +224,18 @@ export async function generate({ siteId, params }) {
   // guides section shape/count for a post about a topic the site has never
   // covered, instead of every generated post reinventing its own shape.
   const structureGuidance = pageStructureGuidance(site, 'blog-article', { fallbackPageTypes: ['blog-listing'] });
+  // WHO this business is and what it is trying to achieve. The industry line
+  // in `system` above is the only tenant fact this prompt carried before, so
+  // a post for a product tenant was written with no idea what the product
+  // does or which goal the post is meant to serve — while a separate
+  // positioning guard then checked the finished draft against exactly those
+  // facts. 'business' is omitted because industryFocus already states it.
+  // Empty string for every tenant with nothing recorded, and until
+  // TENANT_CONTEXT_ENABLED is set, so the prompt is byte-identical by default.
+  const tenantContext = await tenantContextTextFor(site, { sections: ['goals', 'product', 'audience'] });
   const user = `Topic: ${topic}${context ? `\nContext: ${context}` : ''}` +
     (groundingExcerpt ? `\n\nReal site content (from ${homepage}):\n${groundingExcerpt}` : '') +
+    (tenantContext ? `\n\n${tenantContext}` : '') +
     `\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}` +
     (structureGuidance ? `\n\n${structureGuidance}` : '')
     // A previous attempt at THIS draft was generated and checked against the
@@ -304,10 +322,17 @@ export async function generate({ siteId, params }) {
   const excludePhotoIds = imagesConfigured() ? await usedPhotoIds(site) : undefined;
   const { fallback } = await imageQueryContextFor(site);
   const sectionHeadings = sections.map((s) => s.heading).filter(Boolean);
-  const featuredImage = await searchImage(
-    [...buildImageQueries({ title: parsed.title, topic }), ...sectionHeadings, fallback].filter(Boolean),
-    { excludePhotoIds, perPage: IMAGE_CANDIDATE_POOL },
-  );
+  // A site that opted into generated gradient covers (lib/gradient-cover.js)
+  // gets no stock photo: the cover is built at apply time from the post's slug.
+  // The exception is `featuredImage: 'insights-only'`, where Insights posts keep
+  // a Pexels photo and every other post gets the gradient (see stockPhotoWanted).
+  const blogTarget = site?.url_file_map?.newContentTargets?.['blog-outline'];
+  const featuredImage = stockPhotoWanted(blogTarget, { category, hasCover: Boolean(coverConfigFor(site)) })
+    ? await searchImage(
+      [...buildImageQueries({ title: parsed.title, topic }), ...sectionHeadings, fallback].filter(Boolean),
+      { excludePhotoIds, perPage: IMAGE_CANDIDATE_POOL },
+    )
+    : null;
 
   const content = {
     topic,
@@ -317,6 +342,7 @@ export async function generate({ siteId, params }) {
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
     categories,
+    ...(category ? { category } : {}),
     ...(featuredImage ? { featuredImage } : {}),
     // The real supporting text this draft was grounded in — same
     // convention as landing-page.js's content.groundingContext, for

@@ -51,7 +51,8 @@ export async function getAnomalyAlerts(siteId, limit = 20) {
 
 export async function getSiteProfile(siteId) {
   const { rows } = await query(
-    `SELECT industry, main_topics_json AS main_topics, site_type, profiled_at
+    `SELECT industry, main_topics_json AS main_topics, site_type, profiled_at,
+            industry_source, industry_confidence
        FROM site_profiles
       WHERE site_id = $1`,
     [siteId]
@@ -64,16 +65,37 @@ export async function getSiteProfile(siteId) {
 // lives in data-analyst-agent/app/collectors/keyword_clustering.py, reached
 // only via the 'save_site_profile' MCP tool, never a direct DB write from
 // Python — see app/mcp_client/client.py's own "ONLY interface" rule).
-export async function saveSiteProfile(siteId, { industry, mainTopics, siteType }) {
+// `industrySource` / `industryConfidence` (183) are optional and every
+// existing caller — including the Python collector's save_site_profile MCP
+// tool — passes neither, which keeps their behaviour byte-identical.
+//
+// The CASE is the one real change: a HUMAN-asserted industry is never
+// overwritten by an inference. Without it, writing a staff-set industry
+// here would work exactly once, until the next clustering run for a tenant
+// that does have Search Console upserted over it. A human write (source
+// 'human') always wins, including over an earlier human write.
+export async function saveSiteProfile(siteId, { industry, mainTopics, siteType, industrySource = null, industryConfidence = null }) {
   await query(
-    `INSERT INTO site_profiles (site_id, industry, main_topics_json, site_type, profiled_at)
-     VALUES ($1, $2, $3, $4, now())
+    `INSERT INTO site_profiles (site_id, industry, main_topics_json, site_type, profiled_at,
+                                industry_source, industry_confidence)
+     VALUES ($1, $2, $3, $4, now(), $5, $6)
      ON CONFLICT (site_id) DO UPDATE SET
-       industry = EXCLUDED.industry,
+       industry = CASE
+         WHEN site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human'
+           THEN site_profiles.industry
+         ELSE EXCLUDED.industry END,
+       industry_source = CASE
+         WHEN site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human'
+           THEN site_profiles.industry_source
+         ELSE EXCLUDED.industry_source END,
+       industry_confidence = CASE
+         WHEN site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human'
+           THEN site_profiles.industry_confidence
+         ELSE EXCLUDED.industry_confidence END,
        main_topics_json = EXCLUDED.main_topics_json,
        site_type = EXCLUDED.site_type,
        profiled_at = EXCLUDED.profiled_at`,
-    [siteId, industry, JSON.stringify(mainTopics || []), siteType || null]
+    [siteId, industry, JSON.stringify(mainTopics || []), siteType || null, industrySource, industryConfidence]
   );
 }
 
@@ -204,7 +226,8 @@ const GAP_STATUS_FROM_DB = { pending_review: 'pending_review', accepted: 'approv
 export async function getKeywordGaps(siteId, status) {
   const { rows } = await query(
     `SELECT id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match,
-            topic_cluster, cluster_role, search_volume,
+            topic_cluster, cluster_role, search_volume, location_code,
+            coverage_status, coverage_reason, coverage_checked_at, coverage_evidence, language_code,
             first_seen_at, last_seen_at, observation_count, evidence_snapshots, created_at,
             -- ::text deliberately. node-postgres parses a DATE into a JS Date at
             -- LOCAL midnight, so in any positive-offset timezone (this app runs
@@ -250,6 +273,59 @@ export async function updateKeywordGapStatus(siteId, gapId, status) {
   );
   if (!rows[0]) return null;
   return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status] };
+}
+
+// Coverage verdict for one gap (keyword-coverage.js). Unlike setGapClassification
+// this OVERWRITES: a verdict is re-judged when its evidence changes, and a page
+// that stopped covering a topic must be able to clear existing_page_match.
+// existing_page_match keeps its old meaning — set only when an existing page
+// genuinely covers the gap (duplicate/covered) — so gapDraftEligibility's
+// established behaviour is unchanged for those rows.
+export async function setGapCoverage(siteId, gapId, { status, reason, evidence, languageCode, existingPageMatch }) {
+  const { rows } = await query(
+    `UPDATE keyword_gaps SET
+            coverage_status = $3,
+            coverage_reason = $4,
+            coverage_checked_at = now(),
+            coverage_evidence = $5::jsonb,
+            language_code = COALESCE($6, language_code),
+            existing_page_match = $7
+      WHERE site_id = $1 AND id = $2
+      RETURNING id, topic, status, coverage_status, coverage_reason, coverage_checked_at, coverage_evidence, language_code, existing_page_match`,
+    [siteId, gapId, status, reason ?? null, JSON.stringify(evidence ?? {}), languageCode ?? null, existingPageMatch ?? null]
+  );
+  return rows[0] || null;
+}
+
+// Pages that ALREADY rank for queries containing the gap's words. This is the
+// strongest "is it covered" evidence there is — and it finds a page whose slug
+// shares no words with the keyword (synonyms, translations), which the old
+// URL-word pre-filter could never do. Tokens are matched as lowercase substrings
+// (GSC stores queries as typed, with diacritics), all of them required, so a
+// two-word topic does not match every page that mentions one of the words.
+export async function getPagesRankingForTokens(siteId, tokens, days = 90, limit = 200) {
+  const words = [...new Set((tokens || []).map((t) => String(t).toLowerCase()).filter((t) => t.length > 2))]
+    .sort((a, b) => b.length - a.length).slice(0, 3);
+  if (!words.length) return [];
+  const { rows } = await query(
+    `SELECT page, query,
+            SUM(clicks)      AS clicks,
+            SUM(impressions) AS impressions,
+            CASE WHEN SUM(impressions) = 0 THEN NULL
+                 ELSE ROUND(SUM(position * impressions) / SUM(impressions), 2) END AS position
+       FROM gsc_query_page
+      WHERE site_id = $1
+        AND date >= (CURRENT_DATE - ($2::int))
+        AND LOWER(query) LIKE ALL($3::text[])
+      GROUP BY page, query
+      ORDER BY SUM(impressions) DESC
+      LIMIT $4`,
+    [siteId, days, words.map((w) => `%${w}%`), limit]
+  );
+  return rows.map((r) => ({
+    page: r.page, query: r.query, clicks: Number(r.clicks) || 0, impressions: Number(r.impressions) || 0,
+    position: r.position == null ? null : Number(r.position),
+  }));
 }
 
 // Written once by classifyGapRelevance/findExistingPageMatch (analyst-seo-
@@ -304,10 +380,10 @@ export async function getProductKnowledge(siteId, status = 'verified') {
 }
 
 // Added through the Analyst page's own form, so 'human' + 'verified' is the
-// only path this function writes — an agent proposing a capability is a
-// separate, not-yet-built entry point that would insert source='agent_proposed',
-// status='proposed' instead. No such writer exists yet, so every row today
-// is human-asserted ground truth, per the "do not invent capabilities" rule.
+// only path this function writes. The agent-proposed path is
+// proposeProductCapability below — deliberately a separate function rather
+// than a status parameter on this one, so no caller can write a 'verified'
+// row by passing an argument.
 export async function createProductCapability(siteId, { name, category, description, industries, kind = 'capability', details }) {
   const { rows } = await query(
     `INSERT INTO product_capabilities (site_id, name, category, description, industries_json, kind, details_json, status, source)
@@ -318,6 +394,35 @@ export async function createProductCapability(siteId, { name, category, descript
       JSON.stringify(details && typeof details === 'object' ? details : {})]
   );
   return rows[0];
+}
+
+// Migration 176's `status='proposed'` gate finally gets its first writer.
+// Anything an agent extracted — from a homepage at onboarding, say — lands
+// here as 'proposed' + 'agent_proposed', which getProductKnowledge's
+// 'verified' default makes INVISIBLE to every generator until a human
+// confirms it on the Analyst page. That is the whole point: it unblocks the
+// tenant whose admin never filled in the capabilities form, without ever
+// stating a machine guess to a model as a verified fact.
+//
+// Idempotent on (site_id, lower(name), kind) so re-running onboarding, or a
+// second extraction pass, does not accumulate near-duplicate rows. A row a
+// human has already VERIFIED or REJECTED is left completely alone — a
+// re-extraction must never undo a human decision.
+export async function proposeProductCapability(siteId, { name, category, description, industries, kind = 'capability', details }) {
+  if (!name || !String(name).trim()) return null;
+  const { rows } = await query(
+    `INSERT INTO product_capabilities (site_id, name, category, description, industries_json, kind, details_json, status, source)
+     SELECT $1, $2, $3, $4, $5, $6, $7, 'proposed', 'agent_proposed'
+      WHERE NOT EXISTS (
+        SELECT 1 FROM product_capabilities
+         WHERE site_id = $1 AND kind = $6 AND lower(name) = lower($2)
+      )
+     RETURNING id, site_id, name, category, description, industries_json AS industries, kind, details_json AS details,
+               status, source, created_at, updated_at`,
+    [siteId, String(name).trim(), category || null, description || null, JSON.stringify(industries || []), kind,
+      JSON.stringify(details && typeof details === 'object' ? details : {})]
+  );
+  return rows[0] || null;
 }
 
 export async function updateProductCapabilityStatus(siteId, id, status) {

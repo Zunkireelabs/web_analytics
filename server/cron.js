@@ -1,11 +1,12 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites, runTrendRadarIfDueForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
 import { reapStaleAuditRuns } from './store/audit-runs.js';
 import { reconcileAllSites } from './lib/action-center-reconciler.js';
 import { withJobLock, jobKeyFor } from './lib/job-lock.js';
+import { expireStaleClaims } from './agents/lib/work-claims.js';
 
 // Schedule the daily job. The container's TZ env var makes "07:00" local to the
 // site timezone, so it runs after GSC/GA4 have settled for the target dates.
@@ -457,22 +458,38 @@ export function startCron() {
   // Action Center reconciliation — returns recommendations whose attempt
   // stopped moving to the board, on the row they already had.
   //
-  // Runs at :35, deliberately AFTER the :20 PR poll above. That poll is what
-  // resolves every draft whose PR actually reached a verdict, so by the time
-  // this runs the only drafts left without a PR are ones that genuinely have
-  // none. The other order would have the reconciler judging drafts as stalled
-  // in the same hour the poll was about to mark them merged.
-  cron.schedule('35 * * * *', async () => {
+  // Runs AFTER the :20 PR poll above. That poll is what resolves every draft
+  // whose PR actually reached a verdict, so by the time this runs the only
+  // drafts left without a PR are ones that genuinely have none. The other
+  // order would have the reconciler judging drafts as stalled in the same
+  // hour the poll was about to mark them merged.
+  //
+  // Moved from :35 to :45 because the auto-remediation ship catch-up also
+  // fires at :35: the reconciler judges an attempt stalled and reclaims it
+  // while that same attempt may be mid-ship in another process, on the same
+  // rows. The lock below is the real guard (two hosts would collide whatever
+  // minute each is scheduled for); the minute change just stops the two
+  // lanes from contending every hour on a single host.
+  cron.schedule('45 * * * *', async () => {
     try {
-      const { totals } = await reconcileAllSites();
-      if (totals.reclaimed || totals.classified || totals.capabilityGapsDetected) {
-        console.log(`[cron] action-center reconcile: reclaimed ${totals.reclaimed}, reopened ${totals.reopened}, classified ${totals.classified}, blocked ${totals.blocked}, resolved ${totals.resolved}, capabilityGaps ${totals.capabilityGapsDetected}`);
-      }
+      const { ran } = await withJobLock(jobKeyFor('action-center-reconcile', 'all-sites'), async () => {
+        const { totals } = await reconcileAllSites();
+        if (totals.reclaimed || totals.classified || totals.capabilityGapsDetected) {
+          console.log(`[cron] action-center reconcile: reclaimed ${totals.reclaimed}, reopened ${totals.reopened}, classified ${totals.classified}, blocked ${totals.blocked}, resolved ${totals.resolved}, capabilityGaps ${totals.capabilityGapsDetected}`);
+        }
+        // Same lane, same lease, same 24h window: a work claim and the
+        // attempt it guards are two halves of one thing, and reclaiming one
+        // without the other would leave a page owned by a producer whose
+        // attempt had already been handed back to the board.
+        const expired = await expireStaleClaims();
+        if (expired) console.log(`[cron] work-claims: expired ${expired} abandoned claim(s)`);
+      });
+      if (!ran) console.log('[cron] action-center reconcile skipped — another process holds the lock');
     } catch (err) {
       console.error('[cron] action-center reconcile error:', err.message);
     }
   }, { timezone: tz });
-  console.log('[cron] action-center reconcile scheduled (fires at :35 each hour)');
+  console.log('[cron] action-center reconcile scheduled (fires at :45 each hour)');
 
   // Analyst -> Action Center sync. Ordering is the whole point of the hour
   // chosen here, and it is easy to get wrong because the two halves of this
@@ -501,13 +518,23 @@ export function startCron() {
       // freshness-gated conclusions. See job.js's runAnalystFusionForAllSites
       // doc comment for why the older sync below still runs after it rather
       // than being replaced.
+      //
+      // Both halves take their OWN lease rather than sharing one. These are
+      // the UTC-scheduled producers, and until now they took no lock at all:
+      // a laptop dev server and the VPS both reach 00:00 UTC and both run
+      // them against the same database, which is exactly the failure
+      // job_locks (147) was built for after the 07:00 run doubled its API
+      // calls on 2026-09-08. Separate lanes so a slow fusion cannot starve
+      // the sync behind it.
       try {
-        await runAnalystFusionForAllSites();
+        const { ran } = await withJobLock(jobKeyFor('analyst-fusion', 'all-sites'), () => runAnalystFusionForAllSites());
+        if (!ran) console.log('[cron] analyst fusion skipped — another process holds the lock');
       } catch (err) {
         console.error('[cron] analyst fusion error:', err.message);
       }
       try {
-        await runAnalystSyncForAllSites();
+        const { ran } = await withJobLock(jobKeyFor('analyst-sync', 'all-sites'), () => runAnalystSyncForAllSites());
+        if (!ran) console.log('[cron] analyst sync skipped — another process holds the lock');
       } catch (err) {
         console.error('[cron] analyst sync error:', err.message);
       }
@@ -528,8 +555,11 @@ export function startCron() {
     console.error(`[cron] invalid GROWTH_OPPORTUNITIES_SYNC_CRON_SCHEDULE "${growthOppsSync}" — growth opportunities sync NOT scheduled.`);
   } else {
     cron.schedule(growthOppsSync, async () => {
+      // Same reasoning as the analyst lanes above: UTC-scheduled, previously
+      // unlocked, and therefore double-run by any second host.
       try {
-        await runGrowthOpportunitiesSyncForAllSites();
+        const { ran } = await withJobLock(jobKeyFor('growth-opps-sync', 'all-sites'), () => runGrowthOpportunitiesSyncForAllSites());
+        if (!ran) console.log('[cron] growth opportunities sync skipped — another process holds the lock');
       } catch (err) {
         console.error('[cron] growth opportunities sync error:', err.message);
       }
@@ -540,12 +570,16 @@ export function startCron() {
       // runKeywordGapShipCycleForAllSites's own comment for why
       // shipping is no longer gated by a per-site 14-day cooldown).
       try {
-        await runKeywordGapDiscoveryRefreshForAllSites();
+        const { ran } = await withJobLock(jobKeyFor('keyword-gap-refresh', 'all-sites'), () => runKeywordGapDiscoveryRefreshForAllSites());
+        if (!ran) console.log('[cron] keyword-gap discovery refresh skipped — another process holds the lock');
       } catch (err) {
         console.error('[cron] keyword-gap discovery refresh error:', err.message);
       }
+      // The ship cycle writes real drafts and PRs, so a double-run here costs
+      // duplicated content, not just duplicated reads.
       try {
-        await runKeywordGapShipCycleForAllSites();
+        const { ran } = await withJobLock(jobKeyFor('keyword-gap-ship', 'all-sites'), () => runKeywordGapShipCycleForAllSites());
+        if (!ran) console.log('[cron] keyword-gap ship cycle skipped — another process holds the lock');
       } catch (err) {
         console.error('[cron] keyword-gap ship cycle error:', err.message);
       }
@@ -577,6 +611,29 @@ export function startCron() {
       }
     }, { timezone: tz });
     console.log(`[cron] proactive design-agent queue scheduled "${designAgentQueue}" (${tz})`);
+  }
+
+  // Trend Radar — every two weeks. The cron fires EVERY MORNING at 06:30 and
+  // runTrendRadarIfDue decides per site whether a fortnight has passed since
+  // its last successful run (agents/lib/trend-cadence.js, judged in the site's
+  // own timezone). Daily rather than a fixed day pair, so a run that fails on
+  // its day (feed outage, no industry yet) is retried the next morning instead
+  // of costing a fortnight, and a site onboarded mid-cycle is picked up
+  // without waiting for a particular date. A not-due site costs one indexed
+  // query. Override with TREND_RADAR_CRON_SCHEDULE.
+  const trendRadarSchedule = process.env.TREND_RADAR_CRON_SCHEDULE || '30 6 * * *';
+  if (!cron.validate(trendRadarSchedule)) {
+    console.error(`[cron] invalid TREND_RADAR_CRON_SCHEDULE "${trendRadarSchedule}" — trend radar NOT scheduled.`);
+  } else {
+    cron.schedule(trendRadarSchedule, async () => {
+      try {
+        const results = (await runTrendRadarIfDueForAllSites()).filter(Boolean);
+        console.log(`[cron] trend radar finished — ${results.length} site(s) analyzed`);
+      } catch (err) {
+        console.error('[cron] trend radar error:', err.message);
+      }
+    }, { timezone: tz });
+    console.log(`[cron] trend radar scheduled "${trendRadarSchedule}" (${tz})`);
   }
 
   // Weekly Design Context refresh — a live-site analysis is a durable asset

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { seoDraftEligibility, opportunityDraftEligibility, gapDraftEligibility, requestedBlogEligibility } from './analyst-seo-mapping.js';
+import { seoDraftEligibility, opportunityDraftEligibility, gapDraftEligibility, requestedBlogEligibility, recommendedActionForGap, groundingNote } from './analyst-seo-mapping.js';
 
 // Regression coverage for the audit finding this module had NO test file at
 // all — the one place a Node/Python drift in generator selection would
@@ -258,5 +258,74 @@ describe('requestedBlogEligibility', () => {
 
   test('the question shapeHint survives the override — it is good guidance for the article either way', () => {
     assert.match(requestedBlogEligibility(gap({ topic: 'how does crm software work' })).shapeHint, /QUESTION-phrased/);
+  });
+});
+
+describe('coverage verdicts drive eligibility and the action shown to a human', () => {
+  const gap = (over = {}) => ({ id: 5, topic: 'enterprise software development', priority: 'medium', search_intent: 'informational', product_relevance: 'supporting', ...over });
+
+  test('duplicate -> nothing to draft', () => {
+    assert.equal(gapDraftEligibility(gap({ coverage_status: 'duplicate' })), null);
+    assert.equal(recommendedActionForGap(gap({ coverage_status: 'duplicate' })).kind, 'none');
+  });
+
+  test('uncertain -> never auto-drafted, but visible as "review"', () => {
+    assert.equal(gapDraftEligibility(gap({ coverage_status: 'uncertain' })), null);
+    assert.equal(recommendedActionForGap(gap({ coverage_status: 'uncertain', coverage_reason: 'Partial overlap' })).kind, 'review');
+  });
+
+  test('a keyword in another language is never drafted into the default-language collection', () => {
+    assert.equal(gapDraftEligibility(gap({ language_code: 'de', coverage_status: 'opportunity' })), null);
+    assert.equal(recommendedActionForGap(gap({ language_code: 'de', coverage_status: 'opportunity' })).kind, 'localize');
+  });
+
+  test('language_gap -> a visible "localize" action, not a blog draft', () => {
+    const a = recommendedActionForGap(gap({ coverage_status: 'language_gap', language_code: 'de' }));
+    assert.equal(a.kind, 'localize');
+    assert.match(a.label, /Localize/);
+  });
+
+  test('market_gap is a REAL opportunity: drafted, with market grounding that forbids the country-swap failure', () => {
+    const e = gapDraftEligibility(gap({ coverage_status: 'market_gap', coverage_evidence: { gapMarkets: ['GB'] } }));
+    assert.equal(e.eligible, true);
+    assert.equal(e.generatorId, 'blog-outline');
+    assert.match(e.shapeHint, /Target market: United Kingdom/);
+    assert.match(e.shapeHint, /Do not present companies from other countries as competitors/);
+  });
+
+  test('intent_gap is a real opportunity and follows the keyword intent (commercial + direct -> landing page)', () => {
+    const e = gapDraftEligibility(gap({ coverage_status: 'intent_gap', search_intent: 'commercial', product_relevance: 'direct' }));
+    assert.equal(e.generatorId, 'landing-page');
+  });
+
+  test('covered: a question gets an FAQ on the covering page, anything else gets nothing', () => {
+    const covered = { coverage_status: 'covered', existing_page_match: 'https://example.com/services/x/' };
+    assert.equal(gapDraftEligibility(gap({ ...covered, topic: 'what is x' })).generatorId, 'faq');
+    assert.equal(gapDraftEligibility(gap({ ...covered, topic: 'x services' })), null);
+  });
+
+  test('the action label reflects what will really happen, not always "blog post"', () => {
+    assert.equal(recommendedActionForGap(gap({ coverage_status: 'opportunity' })).kind, 'blog-post');
+    assert.equal(recommendedActionForGap(gap({ coverage_status: 'opportunity', search_intent: 'commercial', product_relevance: 'direct' })).kind, 'landing-page');
+    const faq = recommendedActionForGap(gap({ topic: 'what is x', coverage_status: 'covered', existing_page_match: 'https://example.com/a/' }));
+    assert.equal(faq.kind, 'faq');
+    assert.equal(faq.page, 'https://example.com/a/');
+    assert.equal(recommendedActionForGap(gap({ coverage_status: 'covered', existing_page_match: 'https://example.com/a/' })).kind, 'none');
+  });
+
+  test('a covered/duplicate page flagged stale is a REFRESH, never a new year-swapped page', () => {
+    const a = recommendedActionForGap(gap({ coverage_status: 'covered', existing_page_match: 'https://example.com/b/', coverage_evidence: { needsRefresh: true, staleReason: 'Page is dated 2024.' } }));
+    assert.equal(a.kind, 'refresh');
+  });
+
+  test('every draft is told the current year and to state no unprovided facts', () => {
+    const note = groundingNote({}, new Date('2027-03-01'));
+    assert.match(note, /Current year: 2027/);
+    assert.match(note, /Never put an older year/);
+  });
+
+  test('legacy rows with no coverage verdict behave exactly as before', () => {
+    assert.equal(gapDraftEligibility(gap({ existing_page_match: 'https://example.com/a/' })), null);
+    assert.equal(gapDraftEligibility(gap({})).generatorId, 'blog-outline');
   });
 });

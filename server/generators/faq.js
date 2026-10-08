@@ -3,6 +3,7 @@ import { callLLMForJson } from '../llm.js';
 import { getSiteById } from '../store/read.js';
 import { findRealFaqDataSource } from './lib/faq-data-source.js';
 import { pageStructureGuidance } from './lib/design-aware-composer.js';
+import { tenantContextTextFor } from '../lib/tenant-context.js';
 
 export const meta = {
   id: 'faq',
@@ -48,18 +49,29 @@ export const PAGE_PURPOSE_GUIDANCE = {
 // `expectedCount`, when given, asks the model for that exact number of pairs
 // (a repair caller doing an exact 1:1 in-place text swap needs the count to
 // match; net-new drafting leaves it unset and keeps the original 4-6 range).
-export async function generateFaqItemsFromEvidence({ siteId, subject, bodyExcerpt, pageGuidance, structureGuidance, expectedCount } = {}) {
+//
+// `tenantContext` is the caller's already-loaded tenant facts (see
+// lib/tenant-context.js). It is passed in rather than loaded here so the
+// repair caller and this generator share one prompt, and so this function
+// stays free of a database read.
+export async function generateFaqItemsFromEvidence({ siteId, subject, bodyExcerpt, pageGuidance, structureGuidance, tenantContext = '', expectedCount } = {}) {
   const countInstruction = expectedCount
     ? `Write EXACTLY ${expectedCount} FAQ question/answer pairs — not more, not fewer. `
     : 'draft 4-6 FAQ question/answer pairs a reader would realistically ask. ';
   const system = 'You are a content strategist. Given a real target query/topic and (if available) the page\'s ' +
     `real body text, ${countInstruction}` +
-    'Ground every answer ONLY in the page content given — never invent a feature, price, policy, or fact not ' +
+    // The grounding rule has to name BOTH allowed sources explicitly. Saying
+    // "ONLY the page content" while handing the model a block of verified
+    // facts is a contradiction, and a model resolving a contradiction by
+    // itself is exactly how fabrication gets in.
+    `Ground every answer ONLY in the page content${tenantContext ? ' and the verified business facts' : ''} given ` +
+    '— never invent a feature, price, policy, or fact not ' +
     'present in the excerpt; if the page text doesn\'t support a specific answer, write a general, non-committal ' +
     'answer instead. If no page content is given, write general informational answers about the topic only. ' +
     (pageGuidance ? `${pageGuidance} ` : '') +
     'Respond with ONLY a JSON array: [{"question": "...", "answer": "..."}, ...]';
   const user = `Subject: ${subject}\n${bodyExcerpt ? `Page text: ${bodyExcerpt}` : 'No existing page — new content.'}` +
+    (tenantContext ? `\n\n${tenantContext}` : '') +
     (structureGuidance ? `\n\n${structureGuidance}` : '');
   let items;
   try {
@@ -130,8 +142,12 @@ export async function generate({ siteId, params }) {
   // MARKUP still comes from componentTemplates' projectFaq at render time —
   // this only shapes the CONTENT decision, not the styling.
   const structureGuidance = pageStructureGuidance(site, 'faq');
+  // 'product' only. An FAQ answer is the one place a verified feature,
+  // pricing or flow fact is directly useful; the goals and ICP sections
+  // would be prompt weight this generator cannot spend on anything.
+  const tenantContext = await tenantContextTextFor(site, { sections: ['product'] });
 
-  const items = await generateFaqItemsFromEvidence({ siteId, subject, bodyExcerpt, pageGuidance, structureGuidance });
+  const items = await generateFaqItemsFromEvidence({ siteId, subject, bodyExcerpt, pageGuidance, structureGuidance, tenantContext });
 
   // FAQPage JSON-LD is a deterministic transform of the items, not a
   // separate LLM call — nothing here can drift from what's shown above.

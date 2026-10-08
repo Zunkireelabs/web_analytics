@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding, llmsTxtHasValidStructure, titleKeywordConsistency, inferSchemaType, MAX_INLINE_STYLE_COUNT, MIN_GROUNDING_WORDS, hasSufficientGroundingContent, requireGroundedContent, rebuildFaqContainerText } from './page-content.js';
+import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding, llmsTxtHasValidStructure, titleKeywordConsistency, inferSchemaType, MAX_INLINE_STYLE_COUNT, MIN_GROUNDING_WORDS, hasSufficientGroundingContent, requireGroundedContent, rebuildFaqContainerText, isListingPage } from './page-content.js';
 
 // Regression coverage for a real false-positive found in production: a
 // robots.txt that correctly Allow's every real answer-engine crawler while
@@ -897,5 +897,32 @@ describe('contentGapsFor — false-positive gates', () => {
     assert.equal(analyzePage('<html><body></body></html>', 'https://example.com/blog/my-post').isArticlePage, true);
     assert.equal(analyzePage('<html><body></body></html>', 'https://example.com/services/web').isArticlePage, false);
     assert.equal(analyzePage('<html><body></body></html>', 'https://example.com/privacy').isLegalPage, true);
+  });
+});
+
+describe('isListingPage', () => {
+  const kids = (n, base = 'https://e.com/blog') => Array.from({ length: n }, (_, i) => `${base}/post-${i}/`);
+  test('true for a section index linking to 5+ distinct child pages', () => {
+    assert.equal(isListingPage('/blog/', kids(5)), true);
+  });
+  test('false below the threshold, for the root, and for unrelated links', () => {
+    assert.equal(isListingPage('/blog/', kids(4)), false);
+    assert.equal(isListingPage('/', kids(9, 'https://e.com')), false);
+    assert.equal(isListingPage('/blog/', kids(9, 'https://e.com/other')), false);
+  });
+  test('duplicate links to one child count once', () => {
+    assert.equal(isListingPage('/blog/', Array(9).fill('https://e.com/blog/one/')), false);
+  });
+});
+
+describe('inferSchemaType — listing pages', () => {
+  test('a section index is a CollectionPage, not Article, despite the /blog/ path hint', () => {
+    assert.equal(inferSchemaType('https://e.com/blog/', [], { isListingPage: true, openGraphType: 'website' }), 'CollectionPage');
+  });
+  test('a real page under /blog/ is still Article', () => {
+    assert.equal(inferSchemaType('https://e.com/blog/post/', [], { isListingPage: false }), 'Article');
+  });
+  test('an existing real type still wins over the listing inference', () => {
+    assert.equal(inferSchemaType('https://e.com/blog/', ['Blog'], { isListingPage: true }), 'Blog');
   });
 });

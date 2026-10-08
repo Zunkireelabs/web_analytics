@@ -138,3 +138,19 @@ describe('segmentSite / buildPageTypePatterns', () => {
     assert.deepEqual(patterns.homepage.exampleUrls, ['https://x.com/']);
   });
 });
+
+import { consensusSectionOrder } from './segment.js';
+describe('consensusSectionOrder — one page type, several captured pages', () => {
+  const page = (...roles) => ({ sections: roles.map((role) => ({ role })) });
+  test('the order most pages share wins, not the first page', () => {
+    const out = consensusSectionOrder([page('hero', 'cta'), page('hero', 'content', 'cta'), page('hero', 'content', 'cta')]);
+    assert.deepEqual(out, ['hero', 'content', 'cta']);
+  });
+  test('a tie goes to the most fully developed page', () => {
+    assert.deepEqual(consensusSectionOrder([page('hero'), page('hero', 'content', 'cta')]), ['hero', 'content', 'cta']);
+  });
+  test('one page is that page; none is empty', () => {
+    assert.deepEqual(consensusSectionOrder([page('hero', 'faq')]), ['hero', 'faq']);
+    assert.deepEqual(consensusSectionOrder([]), []);
+  });
+});

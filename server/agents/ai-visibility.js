@@ -245,7 +245,17 @@ export async function run({ siteId, start, end, pageCache, params }) {
       // only ever fail, on every run, forever. The finding itself is still
       // true and still reported; it just carries no action. Every other
       // generator here treats schemaType as optional and is unaffected.
-      recommendedAction: rec.generatorId === 'schema' && !p.schemaType
+      //
+      // Also abstains when the inferred type is one the page ALREADY carries.
+      // inferSchemaType returns a page's existing non-boilerplate type first,
+      // so a blog post with real Article schema (which is not an entity type,
+      // hence entities=0 and the entity-schema/add-schema rules firing) was
+      // handed schemaType:'Article' — and generators/schema.js refuses that as
+      // a duplicate, every run. Confirmed on chayceproperties.com: 20 such
+      // recommendations stayed open and failed repeatedly. Picking a different
+      // entity type for the page would be a guess, so the finding stays
+      // reported with no action.
+      recommendedAction: rec.generatorId === 'schema' && (!p.schemaType || p.schemaTypes?.includes(p.schemaType))
         ? null
         : {
           label: rec.label,

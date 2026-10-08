@@ -444,10 +444,11 @@ function compactPageForPrompt(page) {
 // Profile v2 object, NOT yet stamped/validated — design-drift.js's
 // persistDesignProfile does both, the same as the v1 pipeline always did.
 export async function extractDesignProfile(segmentedPages, {
-  siteId, generatorId = 'design-agent-live', responsiveMeasured = null,
+  siteId, generatorId = 'design-agent-live', responsiveMeasured = null, designKnowledge = '',
 } = {}) {
   const pages = (segmentedPages || []).map(compactPageForPrompt);
-  const userPrompt = `Here is the structural data extracted from ${pages.length} real page(s) of this site:\n\n${JSON.stringify(pages, null, 2)}`;
+  const userPrompt = `Here is the structural data extracted from ${pages.length} real page(s) of this site:\n\n${JSON.stringify(pages, null, 2)}`
+    + (designKnowledge ? `\n\n${designKnowledge}` : '');
 
   const extracted = await callLLMForJson(SYSTEM_PROMPT, userPrompt, {
     tier: 'monthly', maxTokens: 4000, generatorId, siteId,

@@ -14,6 +14,7 @@ import { runAgent } from '../runner.js';
 import { safeMessage } from '../../lib/errors.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { recordAuditEvent } from '../../store/admin/audit-log.js';
+import { claimForItem } from './work-claims.js';
 
 // A pseudo-req for audit writes made from background/cron code with no real
 // HTTP request behind them — same pattern design-drift.js/webhooks.js/
@@ -397,6 +398,21 @@ export async function syncFromGrounded(siteId, grounded) {
       // No existing row yet, so there is nothing ship-time could have
       // blocked — item.blockedReason (the gate system's own verdict, null
       // for broken-link-fix) is the whole story on first insert either way.
+      // Claim the page/topic before creating anything (migration 180). Only
+      // on the INSERT branch: merging into a row this producer already owns
+      // is not new work, and re-claiming every sync would churn the ledger
+      // for no benefit.
+      //
+      // Losing a claim is not an error — it means another of the nine
+      // producers is already working this page or topic, which is exactly
+      // the duplicate this table exists to prevent, so skipping is the
+      // correct outcome. A ledger that is unreachable returns ok, so this
+      // can only ever suppress a real duplicate, never real work.
+      const claim = await claimForItem(siteId, item, 'daily-roster');
+      if (!claim.ok) {
+        console.log(`[recommendations] skipping ${item.generatorId} on ${page || '(site)'} — ${claim.reason}, held by ${claim.heldBy?.producer ?? 'another producer'}`);
+        continue;
+      }
       const insertBlockedReason = item.blockedReason ?? null;
       const riskTier = blockedRiskTier(insertBlockedReason, item.generatorId, item, protectedPages);
       const created = await insertRecommendation(siteId, {

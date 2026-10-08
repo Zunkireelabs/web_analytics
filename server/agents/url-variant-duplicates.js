@@ -4,6 +4,7 @@ import { makeFinding, impactFromPriority, effortFromDifficulty } from './lib/fin
 import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS, isLikelyFunctionalQueryParam } from './lib/duplicate-evidence.js';
 import { getOrClassifyPageContentType } from './lib/page-content-classifier.js';
 import { createVariantProber, isSelfCanonical, normalizeUrlForCompare } from './lib/live-probe.js';
+import { allShareCanonical } from './lib/canonical-consolidation.js';
 import { makeVerification, VERDICT } from './lib/verdict.js';
 
 export const meta = {
@@ -97,6 +98,9 @@ export async function run({ siteId, dryRun = false }) {
   const findings = [];
   for (const [key, pagesSet] of [...dupGroups].sort((a, b) => a[0].localeCompare(b[0]))) {
     const pages = [...pagesSet].sort();
+    // Already consolidated: every variant declares the same canonical, so
+    // there is nothing to merge or to ask a person about.
+    if (allShareCanonical(pages, probeByPage, normalizeUrlForCompare)) continue;
     const traffic = pages.map((p) => trafficByPage.get(p) || { page: p, clicks: 0, impressions: 0 });
     // normalizeKey groups purely by hostname+pathname (trailing
     // slash/case/encoding stripped) and never looks at the query string, so

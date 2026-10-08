@@ -882,15 +882,22 @@ export async function countDraftsBySourceTodayAllSites(source) {
 //
 // Abandoned drafts don't count — an abandoned post was never published, so
 // it should not hold the window open against a real one.
-export async function hasRecentDraftOfType(siteId, actionType, days, timezone = 'UTC') {
+// `filter` splits one action type into lanes by the draft's own content
+// category (ship-pacing.js's trend lane): contentCategory counts ONLY drafts
+// in that category, excludeContentCategory counts everything EXCEPT it.
+// Omitted, the query is exactly what it always was.
+export async function hasRecentDraftOfType(siteId, actionType, days, timezone = 'UTC', filter = {}) {
   if (!days || days <= 0) return false;
+  const { contentCategory = null, excludeContentCategory = null } = filter || {};
   const { rows } = await query(
     `SELECT EXISTS (
        SELECT 1 FROM drafts
         WHERE site_id = $1 AND action_type = $2 AND status <> 'abandoned'
           AND (created_at AT TIME ZONE $4)::date > (now() AT TIME ZONE $4)::date - $3::int
+          AND ($5::text IS NULL OR content->>'category' = $5)
+          AND ($6::text IS NULL OR content->>'category' IS DISTINCT FROM $6)
      ) AS found`,
-    [siteId, actionType, days, timezone]
+    [siteId, actionType, days, timezone, contentCategory, excludeContentCategory]
   );
   return Boolean(rows[0]?.found);
 }

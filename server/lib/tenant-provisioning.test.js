@@ -109,3 +109,105 @@ describe('assessTenantReadiness', () => {
     await assert.rejects(() => assessTenantReadiness(null));
   });
 });
+
+describe('assessTenantReadiness — product tenants', () => {
+  // Product-mode fakes. `product` null means the whole product query set
+  // fails (missing schema), which must read as "could not be checked".
+  function makeProductQuery({
+    logins = 1, goals = 1, capabilities = 2, otherKnowledge = 1,
+    conversionEvent = 'trial_signup', industries = ['technology'], profileIndustry = null,
+    growthTableMissing = false,
+  } = {}) {
+    return async (sql) => {
+      const norm = sql.replace(/\s+/g, ' ').trim();
+      if (norm.startsWith('SELECT count(*)::int AS n FROM users')) return { rows: [{ n: logins }] };
+      if (norm.includes('FROM clients WHERE id')) return { rows: [{ has_token: true }] };
+      if (norm.includes('FROM site_goals')) return { rows: [{ n: goals }] };
+      if (norm.includes('FROM product_capabilities')) {
+        return { rows: [
+          ...(capabilities ? [{ kind: 'capability', n: capabilities }] : []),
+          ...(otherKnowledge ? [{ kind: 'pricing', n: otherKnowledge }] : []),
+        ] };
+      }
+      if (norm.includes('FROM product_growth_config')) {
+        if (growthTableMissing) { const e = new Error('no table'); e.code = '42P01'; throw e; }
+        return { rows: [{ conversion_event: conversionEvent, industries_json: JSON.stringify(industries), markets_json: '[]' }] };
+      }
+      if (norm.includes('FROM site_profiles')) return { rows: profileIndustry ? [{ industry: profileIndustry }] : [] };
+      throw new Error(`unhandled SQL: ${sql}`);
+    };
+  }
+
+  const productSite = (over = {}) => ({
+    id: 500, name: 'Some SaaS', property_type: 'product',
+    repo_owner: 'org', repo_name: 'repo', github_app_installation_id: 1,
+    auto_remediation_enabled: true, auto_remediation_daily_limit: 10,
+    url_file_map: {
+      pages: { '/': 'index.html' }, patterns: [],
+      renderCapabilities: { extensions: { '.md': { markdown: true } } },
+      newContentTargets: { 'blog-outline': { dir: 'src/posts', extension: '.md' } },
+      siteRoot: { designProfile: { derivedBy: 'design-agent' } },
+    },
+    ...over,
+  });
+
+  test('missing GSC/GA4 does not block a product tenant, and says why', async () => {
+    const readiness = await assessTenantReadiness(productSite(), { query: makeProductQuery() });
+    const analytics = readiness.items.find((i) => i.key === 'analytics');
+
+    assert.equal(analytics.ok, null);
+    assert.match(analytics.detail, /not applicable for a product tenant/);
+    assert.equal(readiness.blocking.some((i) => i.key === 'analytics'), false);
+  });
+
+  test('a product tenant that HAS GSC/GA4 is still reported as having them', async () => {
+    const site = productSite({ gsc_property: 'sc-domain:x.com', ga4_property_id: '9' });
+    const readiness = await assessTenantReadiness(site, { query: makeProductQuery() });
+
+    assert.equal(readiness.items.find((i) => i.key === 'analytics').ok, true);
+  });
+
+  test('a product tenant with no goal, no capability, no conversion event and no industry is NOT ready', async () => {
+    // The whole point of the product branch: relaxing the website checks
+    // alone would have declared this tenant fully provisioned while nothing
+    // could actually ship for it.
+    const readiness = await assessTenantReadiness(productSite(), {
+      query: makeProductQuery({ goals: 0, capabilities: 0, otherKnowledge: 0, conversionEvent: null, industries: [] }),
+    });
+
+    assert.equal(readiness.ready, false);
+    const keys = readiness.blocking.map((i) => i.key);
+    assert.deepEqual(keys.sort(), ['product-capabilities', 'product-conversion-event', 'product-goal', 'product-industry']);
+    for (const item of readiness.blocking) assert.ok(item.fix?.length, `${item.key} must carry a fix`);
+  });
+
+  test('a fully configured product tenant is ready', async () => {
+    const readiness = await assessTenantReadiness(productSite(), { query: makeProductQuery() });
+    assert.deepEqual(readiness.blocking, []);
+    assert.equal(readiness.ready, true);
+  });
+
+  test('the industry falls back to the growth config when no GSC-derived profile exists', async () => {
+    const readiness = await assessTenantReadiness(productSite(), { query: makeProductQuery({ profileIndustry: null, industries: ['education'] }) });
+    const industry = readiness.items.find((i) => i.key === 'product-industry');
+
+    assert.equal(industry.ok, true);
+    assert.match(industry.detail, /education \(from product growth config\)/);
+  });
+
+  test('an unmigrated product_growth_config reads as could-not-check, never as a missing requirement', async () => {
+    // A schema that has not been migrated is an environment fact. Reporting
+    // it as misconfiguration would send staff to fix the wrong thing.
+    const readiness = await assessTenantReadiness(productSite(), { query: makeProductQuery({ growthTableMissing: true, profileIndustry: 'technology' }) });
+
+    assert.equal(readiness.items.find((i) => i.key === 'product-conversion-event').ok, null);
+    assert.equal(readiness.blocking.some((i) => i.key.startsWith('product-')), false);
+  });
+
+  test('a website tenant gets no product items at all', async () => {
+    const site = productSite({ property_type: 'website', gsc_property: 'sc-domain:x.com', ga4_property_id: '9' });
+    const readiness = await assessTenantReadiness(site, { query: makeProductQuery() });
+
+    assert.equal(readiness.items.some((i) => i.key.startsWith('product-')), false);
+  });
+});

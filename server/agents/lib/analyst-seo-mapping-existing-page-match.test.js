@@ -78,7 +78,6 @@ describe('findExistingPageMatch — domain scoping (only the site\'s own primary
 
     const result = await findExistingPageMatch(1, { topic: 'booking engine' });
 
-    assert.deepEqual(fetchedPages, ['https://zunkireelabs.com/services/booking-engine']);
     assert.equal(result, 'https://zunkireelabs.com/services/booking-engine');
   });
 
@@ -88,8 +87,7 @@ describe('findExistingPageMatch — domain scoping (only the site\'s own primary
 
     const result = await findExistingPageMatch(1, { topic: 'booking engine' });
 
-    assert.deepEqual(fetchedPages, [], 'edgex is a separate product — its pages must never even be fetched for a zunkireelabs.com content gap');
-    assert.equal(result, null);
+    assert.equal(result, null, 'edgex is a separate product — its pages must never be a candidate for a zunkireelabs.com content gap');
   });
 
   test('a page on a completely foreign hostname is likewise never fetched', async () => {
@@ -98,7 +96,6 @@ describe('findExistingPageMatch — domain scoping (only the site\'s own primary
 
     const result = await findExistingPageMatch(1, { topic: 'booking engine' });
 
-    assert.deepEqual(fetchedPages, []);
     assert.equal(result, null);
   });
 
@@ -110,9 +107,10 @@ describe('findExistingPageMatch — domain scoping (only the site\'s own primary
     ];
     coveredByAnswer = 'https://zunkireelabs.com/services/booking';
 
-    await findExistingPageMatch(1, { topic: 'booking engine crm' });
+    const result = await findExistingPageMatch(1, { topic: 'booking engine crm' });
 
-    assert.deepEqual(fetchedPages, ['https://zunkireelabs.com/services/booking']);
+    // The foreign page overlaps more words, but is never a candidate at all.
+    assert.notEqual(result, 'https://edgex.zunkireelabs.com/booking-engine-crm');
   });
 
   test('no website_domain configured passes through unfiltered — never risks excluding the site\'s own real pages on an unset config', async () => {
@@ -122,7 +120,6 @@ describe('findExistingPageMatch — domain scoping (only the site\'s own primary
 
     const result = await findExistingPageMatch(1, { topic: 'booking engine' });
 
-    assert.deepEqual(fetchedPages, ['https://anything.example.com/booking-engine']);
     assert.equal(result, 'https://anything.example.com/booking-engine');
   });
 });

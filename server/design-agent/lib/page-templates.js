@@ -53,6 +53,11 @@ export const PAGE_TEMPLATE_TYPES_FOR_GENERATOR = Object.freeze({
   'blog-outline': ['blog-article', 'blog-listing'],
   'direct-answer': ['faq', 'other'],
   translation: ['other'],
+  // A page the agent creates because a link points at nothing. It takes the
+  // shape of the closest real page type the site has, most specific first;
+  // product types come first so a product tenant's case-study / features /
+  // pricing pages are found rather than falling to the generic 'service'.
+  'missing-page-create': ['landing', 'service', 'features', 'case-study', 'pricing', 'how-it-works', 'demo', 'location', 'other', 'homepage'],
 });
 
 function firstMatchingPattern(patterns, candidateTypes) {

@@ -591,6 +591,23 @@ function classesOnSlotElement(markup, placeholder) {
   return match ? match[1].trim().split(/\s+/).filter(Boolean) : [];
 }
 
+// True when `cls` is the element a selector actually styles (the last compound
+// of at least one selector in the rule's list), not merely an ancestor in a
+// descendant selector. `.navbar .container .phone small{font-size:9px}` styles
+// the <small>, not `.container` — treating it as a rule for `.container` made
+// every wrapper class that appears inside a footer/nav rule look like a label.
+// Also rejects a match inside a comment, where "selector" is just prose.
+function classIsSubjectOfSelector(cls, css, idx, open) {
+  const ruleStart = css.lastIndexOf('}', idx) + 1;
+  const selectorText = css.slice(ruleStart, open).replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const needle = `.${escapeForCssSelector(cls)}`;
+  return selectorText.split(',').some((sel) => {
+    const subject = sel.trim().split(/[\s>+~]+/).filter(Boolean).pop() || '';
+    const at = subject.indexOf(needle);
+    return at !== -1 && !IDENT_CONTINUATION.test(subject[at + needle.length] ?? ' ');
+  });
+}
+
 // True when the CSS defines `cls` with a rule that makes text read as a label
 // rather than prose. Scoped to the single rule block following the selector so
 // an unrelated later `text-transform` in the sheet can't produce a false
@@ -603,7 +620,7 @@ function classIsLabelStyle(cls, css) {
     if (after !== undefined && !IDENT_CONTINUATION.test(after)) {
       const open = css.indexOf('{', idx);
       const close = open === -1 ? -1 : css.indexOf('}', open);
-      if (open !== -1 && close !== -1) {
+      if (open !== -1 && close !== -1 && classIsSubjectOfSelector(cls, css, idx, open)) {
         const body = css.slice(open + 1, close);
         if (/text-transform\s*:\s*uppercase/i.test(body)) return true;
         const size = /font-size\s*:\s*([\d.]+)(rem|px|em)/i.exec(body);
@@ -1644,7 +1661,19 @@ export async function resolvePageComponentTemplate(site, actionType, pageUrl, {
 // in this codebase requires — same shape action-center.js uses to record a
 // Quality Gate hit. Never lets a memory-write failure block the caller —
 // same fail-open discipline as everywhere else this table is touched.
-export function recordRejectedTemplateLesson({ siteId, actionType, error, recordFixOutcomeFn = recordFixOutcome }) {
+export function recordRejectedTemplateLesson({
+  siteId, actionType, error, recordFixOutcomeFn = recordFixOutcome,
+  // The retrievable twin: the row below is filed under a generator id no
+  // lookup ever asks for, so it was never read back. This one is keyed to the
+  // tenant's design knowledge, which the profile extractor does read.
+  recordDesignFailureFn = async (...a) => (await import('../../store/design-knowledge.js')).recordDesignFailure(...a),
+}) {
+  Promise.resolve(recordDesignFailureFn(siteId, {
+    patternId: 'template-missing-placeholder', component: 'component-template',
+    detail: `"${actionType}" template: ${error}`,
+    correction: `Keep every placeholder required for "${actionType}" verbatim in the derived template`,
+    validation: { passed: false, gate: 'template-placeholders' },
+  })).catch(() => {});
   return recordFixOutcomeFn({
     category: 'content', scope: 'client', siteId, generatorId: DESIGN_AGENT_GENERATOR_ID,
     validationRuleId: `missing-placeholders:${actionType}`, outcome: 'success', sourceType: 'runtime-auto',
@@ -1806,6 +1835,10 @@ export async function persistDesignProfile(site, rawProfile, {
   saveConfig = updateSiteRepoConfig,
   recordAudit = recordAuditEvent,
   persistTemplatesFn = persistDerivedComponentTemplates,
+  // Resolves siteRoot.inlineProse from the site's own human-written articles.
+  // null (the default) when INLINE_PROSE_AUTODETECT is off, so every existing
+  // caller and test is unchanged.
+  detectInlineProseFn = null,
 } = {}) {
   const profile = stampDesignProfile(rawProfile, {
     derivedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT,
@@ -1837,7 +1870,20 @@ export async function persistDesignProfile(site, rawProfile, {
   const projected = projectAllComponentTemplates(profile);
   const result = await persistTemplatesFn(siteWithProfile, projected, { jobId });
 
-  return { ok: true, profile, projected: result?.saved || {}, rejected: result?.rejected || [] };
+  // After the profile and templates are safely saved: the mode is a refinement
+  // and must never put them at risk. Lazy import — the detector pulls in the
+  // browser layer, which nothing else in this module needs.
+  let inlineProse = null;
+  const autodetect = detectInlineProseFn
+    || ((await import('../../design-agent/live-analysis/inline-prose-detect.js')).isInlineProseAutodetectEnabled()
+      ? (await import('../../design-agent/live-analysis/inline-prose-detect.js')).detectInlineProseMode
+      : null);
+  if (autodetect) {
+    const { applyInlineProseDetection } = await import('../../design-agent/live-analysis/inline-prose-detect.js');
+    inlineProse = await applyInlineProseDetection({ site: siteWithProfile, profile, saveConfig, detect: autodetect });
+  }
+
+  return { ok: true, profile, projected: result?.saved || {}, rejected: result?.rejected || [], ...(inlineProse ? { inlineProse } : {}) };
 }
 
 // The cheap sibling of persistDesignProfile above: the weekly rescan's fresh

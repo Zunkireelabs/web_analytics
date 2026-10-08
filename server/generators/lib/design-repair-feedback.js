@@ -57,10 +57,11 @@ function designContextRecap(site, canonicalTemplate) {
  * @param {object} [opts]
  * @param {object} [opts.site]
  * @param {object} [opts.canonicalTemplate]
+ * @param {string|null} [opts.knowledge] — the tenant's learned design knowledge, already formatted.
  * @returns {string|null} A correction block to append to the generator's
  *   prompt, or null when nothing actionable was found (caller re-rolls).
  */
-export function buildCorrectionFeedback(issues, { site = null, canonicalTemplate = null } = {}) {
+export function buildCorrectionFeedback(issues, { site = null, canonicalTemplate = null, knowledge = null } = {}) {
   const correctable = correctableIssues(issues);
   if (!correctable.length) return null;
 
@@ -75,6 +76,9 @@ export function buildCorrectionFeedback(issues, { site = null, canonicalTemplate
   if (recap.length) {
     lines.push('', 'For reference, this site\'s own design language:', ...recap);
   }
+  // What earlier validated work on this same tenant already established,
+  // including approaches that were tried and did not hold.
+  if (knowledge) lines.push('', knowledge);
   return lines.join('\n');
 }
 

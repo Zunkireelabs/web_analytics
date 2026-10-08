@@ -2,6 +2,8 @@ import { projectPageWrapper, projectCta, projectCard } from '../../design-agent/
 import { projectMarkdownTablesInBody } from '../../generators/lib/markdown-table-render.js';
 import { projectMarkdownProseInBody } from '../../generators/lib/markdown-prose-render.js';
 import { stripFixedHeightClass, isInlineContentPage } from './marker-merge.js';
+import { resolvePageRole, isInlineRole } from './page-role.js';
+import { classifyPageType } from '../../design-agent/live-analysis/schema.js';
 import { slugifyTitle } from './url-file-map.js';
 // Real body-generation for the three net-new-content types (landing-page,
 // blog-outline, translation). Unlike marker-merge.js's splice (which never
@@ -97,7 +99,7 @@ export function renderLandingPageBody(content, site, { permalink = null, layout 
   }
   const cta = renderCta(content.cta, site);
   if (cta) parts.push(cta);
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'landing-page' })}\n`;
 }
 
 export function renderBlogOutlineBody(content, site, { permalink = null, layout = null, fieldNames = {} } = {}) {
@@ -121,6 +123,11 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
     ['title', content.title || content.topic],
     ['description', content.metaDescription],
     ['date', new Date().toISOString().slice(0, 10)],
+    // Optional single-label category (e.g. 'Insights' for trend posts) —
+    // only when the draft carries one, via blog-outline.js's params.category.
+    // The Eleventy blog already reads front-matter `category` for the card
+    // label and the /blog/insights/ filter.
+    ['category', content.category],
     // Optional — only present when blog-outline.js's Pexels search
     // (generators/lib/pexels-client.js) found a match; omitted otherwise via
     // frontMatter()'s existing null/empty skip, same as every other field
@@ -159,7 +166,7 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
   // markdown rendered HERE, at apply time. Scaffolding introduced during
   // rendering is invisible to every guard by construction — so it has to not be
   // introduced.
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'blog-outline' })}\n`;
 }
 
 // Next.js App Router variant of renderBlogOutlineBody, for a
@@ -243,7 +250,7 @@ export function renderDirectAnswerBody(content, site, { permalink = null, layout
   // Same editorial-scaffolding removal as renderBlogOutlineBody above, for the
   // same reason — see the long comment there. Both fields remain on the draft;
   // they just never reach a reader.
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'direct-answer' })}\n`;
 }
 
 // Next.js App Router variant of renderDirectAnswerBody, for a
@@ -314,7 +321,7 @@ export function renderMissingPageBody(content, site, { permalink = null, layout 
   // justified creating this and which one it was modelled on) — same reason
   // renderBlogOutlineBody withholds its editorial fields, they must never
   // reach a reader.
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'missing-page' })}\n`;
 }
 
 // Deliberately NOT a structural clone of the source page (draft.content only
@@ -329,7 +336,7 @@ export function renderTranslationBody(content, site, { permalink = null, layout 
     ['title', content.translatedTitle || content.sourceTitle],
     ['description', content.translatedMetaDescription || content.sourceMetaDescription],
   ], site);
-  return `${front}\n${wrapInSiteProse(content.translatedContent || '', site, permalink)}\n`;
+  return `${front}\n${wrapInSiteProse(content.translatedContent || '', site, permalink, { actionType: 'translation' })}\n`;
 }
 
 // Next.js App Router variant of renderTranslationBody, for a
@@ -429,7 +436,7 @@ function fillContentWrapper(wrapper, body) {
 // real PR. Unchanged fallback: a site with no contentWrapper configured gets
 // the plain markdown body exactly as before, so nothing regresses for a site
 // that hasn't been through the Design Agent yet.
-function wrapInSiteProse(body, site, permalink = null) {
+function wrapInSiteProse(body, site, permalink = null, { actionType = null } = {}) {
   // Any real markdown table in the generated body goes through the same
   // projectTable() call content-integrity-repair.js already uses to rebuild
   // a broken/raw-text table on an EXISTING page — one table pipeline for
@@ -460,10 +467,44 @@ function wrapInSiteProse(body, site, permalink = null) {
   // read. Malformed/absent permalinks fall through to inline=false, same as
   // today's behavior for a caller with no permalink at all.
   let inline = false;
+  // Role is resolved from evidence first (action type, tenant config, the
+  // site's own captured pages) and only then from the URL regex, so a post
+  // under /recursos/ or /articulos/ — which classifyPageType calls 'other' —
+  // still gets article-scale headings. Resolved once here, the single place
+  // this path decides, so the splice path and this one cannot disagree.
+  let regexInline = false;
+  let regexKnown = false;
   if (permalink) {
-    try { inline = isInlineContentPage(new URL(permalink, 'https://placeholder.invalid').href); } catch { /* inline stays false */ }
+    try {
+      const href = new URL(permalink, 'https://placeholder.invalid').href;
+      regexInline = isInlineContentPage(href);
+      regexKnown = classifyPageType(href, { propertyType: site?.property_type }) !== 'other';
+    } catch { /* both stay false */ }
   }
-  const proseProjected = projectMarkdownProseInBody(tableProjected, site?.url_file_map?.siteRoot?.designProfile, { inline });
+  // Compatibility floor: with no permalink there is nothing to place, so
+  // behaviour is exactly what it was. And where the regex positively
+  // recognises the URL as a non-article page type (a service or landing
+  // path), the action type does not override it — the fix targets the
+  // case the regex is blind to ('other'), not the ones it already knows.
+  if (permalink) {
+    const role = resolvePageRole(site, { permalink, actionType });
+    const actionTypeOverRecognised = role.source === 'action-type' && regexKnown;
+    inline = role.role !== 'unknown' && !actionTypeOverRecognised ? isInlineRole(role.role) : regexInline;
+  }
+  // Per-site opt-out for article pages: `siteRoot.inlineProse: 'layout'` means
+  // this site's blog/legal LAYOUT already styles article prose (site 1's
+  // blog-post.njk wraps the body in Tailwind Typography's `.prose`, which is
+  // why its human-written posts are bare markdown). Projecting the design
+  // profile's page-builder classes onto an article's headings and paragraphs
+  // then OVERRIDES that layout: confirmed live on site 1 (2026-10-02), generated
+  // posts rendered at 30-48px headings and 20px body next to the 28px/18px of
+  // every hand-written post, because `typography.body` is the landing-page body
+  // class (`text-lg md:text-xl max-w-2xl`) and `heading.item` carries
+  // `md:text-3xl`. Opt-in only, so every other tenant's output is unchanged.
+  const layoutStylesProse = inline && site?.url_file_map?.siteRoot?.inlineProse === 'layout';
+  const proseProjected = layoutStylesProse
+    ? tableProjected
+    : projectMarkdownProseInBody(tableProjected, site?.url_file_map?.siteRoot?.designProfile, { inline });
 
   // Configured template first, then a projection from the site's design
   // profile, then bare markdown. That middle step is the change: net-new

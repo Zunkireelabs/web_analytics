@@ -17,6 +17,7 @@ import { isGoogleAuthError } from './integrations/google-oauth.js';
 import { daysAgoInTz, dateRange, previousWeek, previousMonth, monthBounds, todayInTz } from './util/dates.js';
 import { runOrchestration } from './agents/orchestrator.js';
 import { runAgent } from './agents/runner.js';
+import { trendRadarDue } from './agents/lib/trend-cadence.js';
 import { saveAgentRun, getLatestAgentRuns } from './store/agent-runs.js';
 import { meta as execReportMeta, orchestrationStatus } from './agents/executive-report.js';
 import { computeHealthScore } from './agents/lib/health-score.js';
@@ -28,6 +29,7 @@ import { buildRecommendations } from './agents/lib/recommendations.js';
 import { repairSiteTemplates } from './agents/lib/template-repair.js';
 import { syncFromGrounded, refreshBlockedRecommendations } from './agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.js';
+import { runWorkArbiter } from './agents/lib/work-arbiter.js';
 import { withJobLock, jobKeyFor } from './lib/job-lock.js';
 
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
@@ -86,7 +88,7 @@ import { createDesignProfileJob, getQueuedComponentTemplateJob, getLatestDesignA
 // that moment. Both are daily now, and the real per-run cost is bounded
 // where it belongs — in each agent's own page batch size — rather than by
 // starving the agent of runs.
-const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation']);
+const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation', 'trend-radar']);
 const WEEKLY_ONLY_AGENT_IDS = new Set(['content-gap', 'growth-queries']);
 const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !THROTTLED_AGENT_IDS.has(id) && !WEEKLY_ONLY_AGENT_IDS.has(id));
 
@@ -572,6 +574,40 @@ export const runCompetitorIntelligenceIfDueForAllSites = () => runAgentIfDueForA
 // Backlinks API cost negligible.
 export const runAuthorityIfDue = (site) => runAgentIfDue(site, 'authority');
 export const runAuthorityIfDueForAllSites = () => runAgentIfDueForAllSites('authority');
+
+// Trend Radar — once per fortnight (agents/lib/trend-cadence.js), on its own
+// daily cron entry that asks each site whether it is due. Not in RECOMMENDATION_AGENT_IDS (so
+// never in the daily pass) and excluded from orchestrator.js's default
+// fan-out — every run costs an LLM call plus feed fetches.
+// First month the scheduled run is allowed. Moved to October 2026 (owner's
+// call, 2026-10-07) so the fortnightly cycle starts on deploy instead of
+// waiting for November. Override with TREND_RADAR_ENABLED_FROM=YYYY-MM to
+// move it.
+const TREND_RADAR_ENABLED_FROM = process.env.TREND_RADAR_ENABLED_FROM || '2026-10';
+
+export async function runTrendRadarIfDue(site) {
+  const [lastRun] = await getLatestAgentRuns(site.id, ['trend-radar']);
+  if (!trendRadarDue(lastRun, { timeZone: site.timezone || 'UTC', enabledFrom: TREND_RADAR_ENABLED_FROM })) {
+    console.log(`[trend-radar] site ${site.id} not due (ran within the last fortnight, or not enabled yet) — skipping.`);
+    return null;
+  }
+  const output = await runAgent('trend-radar', { siteId: site.id }, { persist: true });
+  console.log(`[trend-radar] site ${site.id}: fortnightly run complete (status: ${output.status}).`);
+  return { status: output.status, findingsCount: output.facts?.findings?.length || 0 };
+}
+
+export async function runTrendRadarIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runTrendRadarIfDue(site));
+    } catch (err) {
+      console.error(`[job] trend-radar run failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return results;
+}
 
 // font-consistency and visual-quality had their own runAgentIfDue wrappers
 // here (monthly and weekly). Both are ordinary DAILY_AGENT_IDS members as of
@@ -1319,7 +1355,19 @@ async function shipSiteWithLocks(site, globalRemaining) {
     jobKeyFor(GITHUB_CREDENTIAL_LOCK_JOB_NAME, rateLimitKey(site)),
     () => withJobLock(
       jobKeyFor(SHIP_LOCK_JOB_NAME, site.id),
-      () => autoRemediateSafeRecommendations(site.id, { globalRemaining }),
+      async () => {
+        // Arbitration runs INSIDE the site's ship lock and immediately
+        // before shipping. That position is the only correct one: it has to
+        // see the whole set of proposals (so it cannot run while they are
+        // still being produced) and it has to settle them before any one is
+        // drafted (or the losing proposal has already cost a generation).
+        //
+        // Flag-gated and best-effort — a site whose contests could not be
+        // arbitrated ships exactly as it did before, by first-come.
+        await runWorkArbiter(site.id, { site }).catch((err) =>
+          console.warn(`[work-arbiter] site ${site.id}: ${err.message}`));
+        return autoRemediateSafeRecommendations(site.id, { globalRemaining });
+      },
     ),
   );
   if (!credRan) return { ran: false, reason: 'credential-locked' };

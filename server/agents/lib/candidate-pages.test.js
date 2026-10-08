@@ -178,3 +178,21 @@ describe('zeroTrafficSlotsFor — the whole site gets scanned, not just its top 
     assert.equal(zeroTrafficSlotsFor(20, 0, 50), 20);
   });
 });
+
+describe('dedupeQueryVariants — http/https duplicates of one page', () => {
+  test('keeps only the https URL and folds the http impressions into it', () => {
+    const impressions = new Map([['http://example.com/', 4], ['https://example.com/', 10]]);
+    const kept = dedupeQueryVariants(['http://example.com/', 'https://example.com/'], impressions);
+    assert.deepEqual(kept, ['https://example.com/']);
+    assert.equal(impressions.get('https://example.com/'), 14);
+  });
+
+  test('a lone http URL is left alone', () => {
+    assert.deepEqual(dedupeQueryVariants(['http://example.com/only']), ['http://example.com/only']);
+  });
+
+  test('www and apex stay separate', () => {
+    const kept = dedupeQueryVariants(['https://example.com/', 'https://www.example.com/']);
+    assert.equal(kept.length, 2);
+  });
+});

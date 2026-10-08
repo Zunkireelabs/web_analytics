@@ -3,6 +3,7 @@ import {
 } from '../../store/fix-impact.js';
 import { recordOutcome } from './generator-learning.js';
 import { getDeploymentById, deploymentGraceElapsed } from '../../store/deployments.js';
+import { suppressFix, isMaterialRegression } from '../../store/fix-suppressions.js';
 
 // Measures what a merged fix actually did to real Search Console numbers, which
 // is the one thing this system has never checked about its own work. Every
@@ -163,6 +164,19 @@ export async function measureOne(row) {
   const delta = computeDelta(before, after);
   const updated = await recordImpactOutcome(row.id, { status: 'measured', beforeWindow: before, afterWindow: after, delta });
 
+  // The design lessons that came from this draft get the page's real before
+  // and after: the lesson was recorded with the pre-fix baseline, and this is
+  // the measured result, so a design fix that helped is distinguishable from
+  // one that only validated. Never allowed to fail the measurement.
+  try {
+    const { attachImpactToLessons } = await import('../../store/design-knowledge.js');
+    await attachImpactToLessons(row.site_id, row.draft_id, {
+      before, after, delta, windowDays: IMPACT_WINDOW_DAYS, measuredAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.warn(`[fix-impact] design-lesson impact not attached for draft ${row.draft_id}: ${err.message}`);
+  }
+
   // Distinct from the technical shipped/failed/merged/rejected signal
   // (generator-learning.js keeps them in separate buckets) — this is
   // "did the fix move the metric", logged into the same existing
@@ -171,7 +185,63 @@ export async function measureOne(row) {
     draftId: row.draft_id, detail: `clicks ${delta.clicks >= 0 ? '+' : ''}${delta.clicks} over ${IMPACT_WINDOW_DAYS}d post-merge`,
   });
 
+  // recordOutcome above moves this generator's confidence for the whole
+  // SITE, which is the right granularity for "this generator is unreliable"
+  // and cannot express "this generator is fine, but it is wrong for THIS
+  // page". Until now a measurably harmful fix changed nothing on the page it
+  // harmed: the recommendation was re-detected, re-drafted and re-shipped,
+  // and no failure cap ever tripped because the fix did not fail — it applied
+  // cleanly and made things worse.
+  //
+  // Deliberately stricter than classifyImpact's own 'impact-negative', which
+  // fires on a single lost click. See isMaterialRegression for why.
+  //
+  // Never allowed to fail the measurement: the impact row is the valuable
+  // record here, and a suppression that could not be written is recoverable
+  // on the next measurement, while a lost measurement is not.
+  if (isMaterialRegression(delta, before)) {
+    await suppressFix(row.site_id, {
+      scope: 'page', scopeKey: row.page_url, generatorId: row.generator_id,
+      reason: 'measured-regression',
+      evidence: { draftId: row.draft_id, before, after, delta, windowDays: IMPACT_WINDOW_DAYS },
+    }).catch((err) => console.error(`[fix-impact] could not suppress ${row.generator_id} on ${row.page_url}:`, err.message));
+  }
+
+  // Close the Decision Engine's loop (166/184). THIS is the moment a
+  // decision's outcome is actually known: a real before/after Search Console
+  // comparison now exists, which is a far stronger statement than "it
+  // shipped".
+  //
+  // 'verified' and 'failed' here mean what the MEASUREMENT says, not whether
+  // the mechanics worked. A fix that applied cleanly and lost real traffic is
+  // a failed decision, and recording it as verified because the PR merged is
+  // exactly the self-congratulatory bookkeeping that would make the engine's
+  // own history worthless to learn from. The bar is isMaterialRegression —
+  // the same stricter threshold the suppression above uses, deliberately not
+  // classifyImpact's single-lost-click one.
+  //
+  // outcome_ref is the forward link migration 166's own comment promised and
+  // nothing ever wrote.
+  await recordDecisionOutcome(row, isMaterialRegression(delta, before))
+    .catch((err) => console.warn(`[fix-impact] could not record a decision outcome for draft ${row.draft_id}: ${err.message}`));
+
   return updated;
+}
+
+// Imported lazily and wrapped: a decision is an optional annotation on a
+// recommendation (only DEFAULT-bucket findings get one, migration 173), so
+// for almost every measurement this is one indexed lookup that finds
+// nothing. It must never be able to fail a measurement.
+async function recordDecisionOutcome(row, regressed) {
+  const [{ getDecisionIdForDraft }, { advanceDecision, outcomeRefForFixImpact }] = await Promise.all([
+    import('../../store/decisions.js'),
+    import('./decision-lifecycle.js'),
+  ]);
+  const decisionId = await getDecisionIdForDraft(row.site_id, row.draft_id);
+  if (!decisionId) return null;
+  return advanceDecision(decisionId, regressed ? 'failed' : 'verified', {
+    outcomeRef: outcomeRefForFixImpact(row.id),
+  });
 }
 
 // Due-driven sweep, mirroring fix-verification.js's runDueVerifications. One

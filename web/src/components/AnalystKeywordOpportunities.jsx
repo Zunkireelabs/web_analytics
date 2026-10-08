@@ -9,6 +9,7 @@ const SOURCE_LABEL = {
   user_request: 'You asked for this',
   claude_research: 'Keyword research',
   internal_analysis: 'Gap analysis',
+  dataforseo_demand: 'Market demand',
 };
 
 // product_relevance/search_intent are classified within a week of a gap
@@ -18,19 +19,33 @@ const SOURCE_LABEL = {
 const RELEVANCE_CHIP = { direct: 'an-chip-emerald', supporting: 'an-chip-amber', unrelated: 'an-chip-slate' };
 const RELEVANCE_LABEL = { direct: 'Product match', supporting: 'Supports product', unrelated: 'Not product-related' };
 
-// Informational only — mirrors gapDraftEligibility's own commercial-intent +
-// direct-relevance rule (server/agents/lib/analyst-seo-mapping.js) just
-// closely enough to tell a reviewer what clicking "Send to Action Center"
-// is actually approving. The backend is the sole authority on what actually
-// ships: this never gates the button, and analyst-seo-mapping.js's
-// qualifyAndShipContentGaps refuses to auto-approve a "Landing page" gap
-// through the unattended biweekly cycle regardless of this label — a human
-// clicking here is the ask that generator was held back for.
-function predictedShape(gap) {
-  if (!gap.product_relevance) return null;
-  const commercial = gap.search_intent === 'commercial' || gap.search_intent === 'transactional';
-  if (commercial && gap.product_relevance === 'direct') return 'Would create: Landing page';
-  return 'Would create: Blog post';
+// Coverage verdicts (server/agents/lib/keyword-coverage.js). SAME TOPIC DOES NOT
+// MEAN SAME SEO TARGET, so a keyword another page covers only in a different
+// language, country or intent is shown as an expansion, never hidden as covered.
+const COVERAGE_CHIP = {
+  opportunity: 'an-chip-emerald', market_gap: 'an-chip-violet', language_gap: 'an-chip-violet',
+  intent_gap: 'an-chip-amber', covered: 'an-chip-slate', duplicate: 'an-chip-slate', uncertain: 'an-chip-rose',
+};
+const COVERAGE_LABEL = {
+  opportunity: 'New opportunity', market_gap: 'Market gap', language_gap: 'Language gap', intent_gap: 'Intent gap',
+  covered: 'Already covered', duplicate: 'Already targeted', uncertain: 'Uncertain',
+};
+// Order is the order sections appear. A gap with no verdict yet is a new opportunity.
+const COVERAGE_GROUPS = [
+  { id: 'opportunity', title: 'New opportunities', hint: 'No existing page covers these', match: (g) => !g.coverage_status || g.coverage_status === 'opportunity' },
+  { id: 'market_gap', title: 'International expansion', hint: 'Covered for another country, not this one', match: (g) => g.coverage_status === 'market_gap' },
+  { id: 'language_gap', title: 'Language expansion', hint: 'Covered in another language', match: (g) => g.coverage_status === 'language_gap' },
+  { id: 'intent_gap', title: 'Intent expansion', hint: 'Covered, but for a different search intent', match: (g) => g.coverage_status === 'intent_gap' },
+  { id: 'covered', title: 'Already covered', hint: 'An existing page already satisfies these', match: (g) => g.coverage_status === 'covered' || g.coverage_status === 'duplicate' },
+  { id: 'uncertain', title: 'Uncertain', hint: 'Not enough evidence to decide', match: (g) => g.coverage_status === 'uncertain' },
+];
+
+// What will really happen if this gap is sent to Action Center — computed by the
+// backend from the same rules that decide whether a draft is created, so this
+// can never promise "Blog post" for a gap the server will not draft.
+function recommendedAction(gap) {
+  const a = gap.recommended_action;
+  return a?.label ? { label: a.label, reason: a.reason || null, kind: a.kind } : null;
 }
 
 // Read-only mirror of hasStableOrGrowingDemand's own two-most-recent-
@@ -56,12 +71,27 @@ function formatSeenDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+// "English: …" under (or beside) a keyword that isn't English. Renders nothing
+// for English terms and while translations are still loading.
+function Gloss({ translation, inline = false }) {
+  if (!translation) return null;
+  return (
+    <span className={`${inline ? '' : 'block mt-0.5 '}text-[10px] font-medium text-slate-500`}>
+      <span className="an-chip an-chip-slate mr-1">{translation.language}</span>
+      {translation.english}
+    </span>
+  );
+}
+
 export default function AnalystKeywordOpportunities({ clientId, refreshToken }) {
   const [opportunities, setOpportunities] = useState(null);
   const [gaps, setGaps] = useState(null);
   const [error, setError] = useState(null);
   // Per-gap action state, keyed by gap id: 'sending' | { draftId, draftError }.
   const [gapAction, setGapAction] = useState({});
+  // English glosses for non-English keywords, keyed by the exact term. Loaded
+  // after the table renders and never blocks it; a failure just shows no gloss.
+  const [translations, setTranslations] = useState({});
 
   // Guards against a slower earlier request overwriting a newer client's data
   // when the selector is changed quickly — only the latest request may commit.
@@ -73,6 +103,7 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
     setGaps(null);
     setError(null);
     setGapAction({});
+    setTranslations({});
 
     // Close to Page 1 used to read keyword_clusters.keywords_json — a
     // 14-day-cadence, append-only snapshot with no clicks/CTR/page column at
@@ -87,6 +118,15 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
         if (requestRef.current !== requestId) return;
         setOpportunities(oppRows?.opportunities || []);
         setGaps(gapRows || []);
+
+        const terms = [
+          ...(oppRows?.opportunities || []).filter((o) => o.type === 'page1-opportunity').map((o) => o.query),
+          ...(gapRows || []).filter((g) => g.status === 'pending_review').map((g) => g.topic),
+        ].filter(Boolean);
+        if (terms.length === 0) return;
+        api.keywords.translate(clientId, terms)
+          .then((res) => { if (requestRef.current === requestId) setTranslations(res?.translations || {}); })
+          .catch(() => {}); // decorative — the keywords are already on screen
       })
       .catch((e) => {
         if (requestRef.current !== requestId) return;
@@ -232,6 +272,7 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                         <tr key={`${k.query}-${i}`} className="border-b border-slate-100 last:border-0">
                           <td className="py-2.5 pr-3">
                             <div className="text-xs font-bold text-slate-800">{k.query}</div>
+                            <Gloss translation={translations[k.query]} />
                           </td>
                           <td className="py-2.5 px-3">
                             <span className={`an-chip ${PRIORITY_CHIP[k.severity] || 'an-chip-slate'}`}>
@@ -298,8 +339,18 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                 will show up here, ready to send to Action Center.
               </p>
             ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5 max-h-[34rem] overflow-y-auto custom-scrollbar pr-1 -mr-1">
-                {visibleGaps.map((gap) => {
+              <div className="max-h-[34rem] overflow-y-auto custom-scrollbar pr-1 -mr-1 space-y-4">
+              {COVERAGE_GROUPS.map((group) => {
+                const items = visibleGaps.filter(group.match);
+                if (!items.length) return null;
+                return (
+                  <div key={group.id} className="space-y-2">
+                    <div className="flex items-baseline gap-2">
+                      <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-600">{group.title}</h3>
+                      <span className="text-[10px] font-semibold text-slate-400">{items.length} · {group.hint}</span>
+                    </div>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
+                {items.map((gap) => {
                   const state = gapAction[gap.id];
                   const sending = state === 'sending';
                   const done = state && state !== 'sending';
@@ -311,6 +362,7 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-xs font-black text-slate-800">{gap.topic}</span>
+                          <Gloss translation={translations[gap.topic]} inline />
                           <span className={`an-chip ${PRIORITY_CHIP[gap.priority] || 'an-chip-slate'}`}>
                             {gap.priority}
                           </span>
@@ -322,8 +374,15 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                               {RELEVANCE_LABEL[gap.product_relevance] || gap.product_relevance}
                             </span>
                           )}
-                          {predictedShape(gap) && (
-                            <span className="an-chip an-chip-slate">{predictedShape(gap)}</span>
+                          {gap.coverage_status && (
+                            <span className={`an-chip ${COVERAGE_CHIP[gap.coverage_status] || 'an-chip-slate'}`} title={gap.coverage_reason || undefined}>
+                              {COVERAGE_LABEL[gap.coverage_status] || gap.coverage_status}
+                            </span>
+                          )}
+                          {recommendedAction(gap) && (
+                            <span className="an-chip an-chip-slate" title={recommendedAction(gap).reason || undefined}>
+                              {recommendedAction(gap).label}
+                            </span>
                           )}
                           <span className={`an-chip ${TREND_CHIP[evidenceTrend(gap)]}`} title="Based on the two most recent weekly demand snapshots">
                             {TREND_LABEL[evidenceTrend(gap)]}
@@ -331,6 +390,9 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                         </div>
                         {gap.reason && (
                           <p className="text-[11px] font-medium text-slate-500 mt-1 line-clamp-2">{gap.reason}</p>
+                        )}
+                        {gap.coverage_status && gap.coverage_status !== 'opportunity' && gap.coverage_reason && (
+                          <p className="text-[11px] font-medium text-indigo-700/80 mt-1 line-clamp-2">{gap.coverage_reason}</p>
                         )}
                         <p className="text-[10px] font-medium text-slate-400 mt-1">
                           Seen {gap.observation_count || 1}x
@@ -402,6 +464,10 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                     </div>
                   );
                 })}
+                    </div>
+                  </div>
+                );
+              })}
               </div>
             )}
         </div>

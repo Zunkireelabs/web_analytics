@@ -75,6 +75,16 @@ describe('geo-signals — applicability gates', () => {
     assert.equal(recs.length, 0);
   });
 
+  test('qa-content is never recommended for a legal/policy page', () => {
+    const recs = recommendationsFor(analysisWith({ questionHeadingCount: 0, isLegalPage: true }), '/privacy-policy/', '', []);
+    assert.equal(recs.filter((r) => r.generatorId === 'qa-content').length, 0);
+  });
+
+  test('qa-content is never recommended for a listing/index page', () => {
+    const recs = recommendationsFor(analysisWith({ questionHeadingCount: 0, isListingPage: true }), '/blog/', '', []);
+    assert.equal(recs.filter((r) => r.generatorId === 'qa-content').length, 0);
+  });
+
   test('qa-content is skipped when a visible FAQ exists, even with no h1-h3 question headings', () => {
     const recs = recommendationsFor(analysisWith({ questionHeadingCount: 0, hasVisibleFaqContent: true }), '/p', 'q', []);
     assert.equal(recs.length, 0);

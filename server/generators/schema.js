@@ -91,6 +91,29 @@ async function draftJsonLd(schemaType, title, bodyText, siteId) {
   }
 }
 
+// Pre-flight (see lib/verification-layer.js): a schema recommendation's whole
+// premise is "this page lacks <schemaType>". Re-check that against the live
+// page BEFORE the shared pipeline spends a generation attempt, so a
+// recommendation raised from an older audit (or one the detector got wrong)
+// is closed as already resolved instead of failing as a duplicate on every
+// run. Same live evidence generate()'s own duplicate guard uses — this just
+// asks it earlier and closes quietly. A fetch failure says nothing about the
+// recommendation, so it stays still_valid.
+export async function verifyCurrentState(rec) {
+  const page = rec.params?.page || rec.page;
+  const schemaType = rec.params?.schemaType;
+  if (!page || !schemaType) return { decision: 'still_valid', reason: 'missing-params', evidence: null };
+
+  const fetched = await analyzePageUrl(page);
+  if (!fetched.ok) return { decision: 'still_valid', reason: 'unreachable', evidence: { page, error: fetched.error } };
+
+  const existing = fetched.analysis.schemaTypes || [];
+  if (existing.includes(schemaType)) {
+    return { decision: 'already_resolved', reason: 'schema-type-already-present', evidence: { page, schemaType, existing } };
+  }
+  return { decision: 'still_valid', reason: 'schema-type-missing', evidence: { page, schemaType, existing } };
+}
+
 // params: { page: string, schemaType: string }
 export async function generate({ siteId, params }) {
   const { page, schemaType } = params;
@@ -120,6 +143,17 @@ export async function generate({ siteId, params }) {
     // auto-remediation.js's stale-refusal handling, which closes it instead.
     throw Object.assign(
       new Error(`This page already has real "${schemaType}" schema — drafting another would duplicate it, not fix a gap.`),
+      { status: 400, userFacing: true, refusal: true, stale: true },
+    );
+  }
+
+  // Article-like markup on a section index describes an article that is not
+  // there. A recommendation raised before the detector knew about listing
+  // pages (or from a path hint alone) is stale, not unfixable — refuse and
+  // close it; the detector re-raises it with the right type (CollectionPage).
+  if (fetched.analysis.isListingPage && ARTICLE_LIKE_TYPES.has(schemaType)) {
+    throw Object.assign(
+      new Error(`This page is a listing/index page, not an article — "${schemaType}" schema would describe content that is not on it.`),
       { status: 400, userFacing: true, refusal: true, stale: true },
     );
   }
