@@ -151,3 +151,57 @@ export async function getLastDiscoveryAt(siteId) {
   );
   return rows[0]?.last_seen_at || null;
 }
+
+// ---- Self-cleaning inventory ----------------------------------------------
+// page_inventory is a ledger of "every real page we know about". Pages found
+// via GSC or a crawl can stop being real (a prior owner's spam URLs, a page
+// since redirected or removed, ?param duplicates). Left in, every agent keeps
+// scoring them and raising alerts about pages that aren't the site's. This
+// prunes ONLY ledger rows — it never touches the site, its repo, or any
+// recommendation — and only on positive evidence, never on a guess.
+const GONE_STATUSES = new Set([301, 302, 307, 308, 404, 410]);
+export const MAX_PRUNE_PROBES = 100;
+
+// Pure decision. A row is pruned only when it is NOT in the live sitemap
+// (a sitemap page that is broken is a real problem to report, not to hide)
+// AND is provably not a canonical page: a parameter duplicate, a non-https
+// variant, or a URL that live-fetches as redirected/not-found/gone.
+// status === null (network error / timeout) or any 2xx/5xx keeps the row.
+export function shouldPruneInventoryRow({ page, inSitemap, status }) {
+  if (inSitemap) return false;
+  if (String(page).includes('?')) return true;
+  if (/^http:\/\//i.test(page)) return true;
+  return status != null && GONE_STATUSES.has(status);
+}
+
+async function defaultProbe(url) {
+  try {
+    const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(8000) });
+    return res.status;
+  } catch {
+    return null;
+  }
+}
+
+// `sitemapUrls` must be a real, non-empty fetch result — with no sitemap to
+// compare against, "not in the sitemap" means nothing, so prune nothing.
+export async function pruneStaleInventory(siteId, sitemapUrls, { probe = defaultProbe, maxProbes = MAX_PRUNE_PROBES } = {}) {
+  if (!sitemapUrls?.length) return { pruned: [], skipped: 'no-sitemap' };
+  const normalize = (u) => u.replace(/\/+$/, '');
+  const inSitemap = new Set(sitemapUrls.map(normalize));
+  const { rows } = await query('SELECT id, page FROM page_inventory WHERE site_id = $1', [siteId]);
+
+  const toDelete = [];
+  let probes = 0;
+  for (const row of rows) {
+    const listed = inSitemap.has(normalize(row.page));
+    let status = null;
+    const needsProbe = !listed && !String(row.page).includes('?') && !/^http:\/\//i.test(row.page);
+    if (needsProbe && probes < maxProbes) { probes += 1; status = await probe(row.page); }
+    if (shouldPruneInventoryRow({ page: row.page, inSitemap: listed, status })) toDelete.push(row);
+  }
+  if (toDelete.length) {
+    await query('DELETE FROM page_inventory WHERE site_id = $1 AND id = ANY($2::int[])', [siteId, toDelete.map((r) => r.id)]);
+  }
+  return { pruned: toDelete.map((r) => r.page) };
+}

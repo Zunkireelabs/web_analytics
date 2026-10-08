@@ -494,7 +494,13 @@ export async function run({ siteId, start, end, pageCache, params, dryRun = fals
   // dead-link-intent.js makes that call per link — see it for why sibling
   // structure is the sole signal and not a value/relevance score.
   const brokenIntents = await Promise.all(
-    brokenCandidates.map((c) => decideDeadLinkAction(siteId, { href: c.href, anchorTexts: c.anchorTexts || [] })),
+    brokenCandidates.map((c) => decideDeadLinkAction(siteId, {
+      href: c.href,
+      anchorTexts: c.anchorTexts || [],
+      // Without this, a deliberately retired page in a well-populated section
+      // is the ideal candidate for creation — see dead-link-intent.js.
+      tombstonedUrls: site?.seo_tombstoned_urls || [],
+    })),
   );
   const brokenFindings = brokenCandidates.map((c, i) => {
     const intent = brokenIntents[i];

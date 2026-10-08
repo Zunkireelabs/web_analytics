@@ -1,4 +1,13 @@
 import { listSiblingPages } from '../../store/page-inventory.js';
+import { normalizeUrlKey } from './gsc-url-audit.js';
+
+// Trailing-slash/www-insensitive, so '/x' and '/x/' are one recorded decision
+// rather than two a human has to remember to enter both of.
+function isTombstonedHref(href, tombstonedUrls) {
+  if (!tombstonedUrls?.length) return false;
+  const key = normalizeUrlKey(href);
+  return tombstonedUrls.some((t) => normalizeUrlKey(t) === key);
+}
 
 // Decides what to actually DO about a dead internal link: create the page it
 // points at, or strip the link.
@@ -71,7 +80,25 @@ export function titleForMissingPage(href, anchorTexts = []) {
 // Returns { action: 'create'|'remove', siblings, title, reason }.
 // Never throws — a store failure degrades to 'remove', which is the
 // already-safe behaviour this repo shipped before page creation existed.
-export async function decideDeadLinkAction(siteId, { href, anchorTexts = [] } = {}) {
+export async function decideDeadLinkAction(siteId, { href, anchorTexts = [], tombstonedUrls = [] } = {}) {
+  // Checked before anything else, including the sibling lookup: a page
+  // somebody deliberately deleted is the one case where a rich section
+  // structure argues for exactly the wrong outcome. A retired page sitting in
+  // a well-populated section has plenty of siblings to model on, so every
+  // signal below would say "create" — and recreating it would undo a
+  // deliberate decision, then undo it again on the next run after a human
+  // reverts the PR.
+  //
+  // From outside the site a retired page and an accidentally deleted one are
+  // indistinguishable (same 404, same inbound links), so the decision cannot
+  // be inferred. sites.seo_tombstoned_urls (migration 147) is where it gets
+  // recorded. The link is still stripped — a link pointing at a URL that is
+  // meant to stay dead is a real defect, just not one to fix by resurrecting
+  // the destination.
+  if (isTombstonedHref(href, tombstonedUrls)) {
+    return { action: 'remove', siblings: [], title: null, reason: 'destination is recorded as intentionally deleted — it must stay a 404' };
+  }
+
   const prefix = sectionPrefixFor(href);
   if (!prefix) {
     return { action: 'remove', siblings: [], title: null, reason: 'top-level path has no section prefix to draw a template from' };
