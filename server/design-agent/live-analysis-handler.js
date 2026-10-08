@@ -16,6 +16,7 @@
 // resynthesis when that fresh capture shows real drift from the stored
 // profile — outcome.skippedProfileDerivation tells worker.js to persist
 // only a refreshed lastCheckedAt instead of a full re-derivation.
+import { loadExpandStructurePrior } from './lib/expand-structure-loader.js';
 import { captureSite } from './live-analysis/capture.js';
 import { segmentSite } from './live-analysis/segment.js';
 import { extractDesignProfile } from './live-analysis/profile-extract.js';
@@ -37,6 +38,25 @@ export function createLiveDesignAnalysisHandler({
   extractProfileFn = extractDesignProfile,
   composeExpandLayoutFn = composeGeneratedExpandLayout,
   getSiteByIdFn = getSiteById,
+  // What earlier work on THIS tenant already taught us about its profile
+  // (role mismatches, templates that lost a placeholder, ...), shown to the
+  // extractor so a re-derivation does not repeat a known mistake. Lazy and
+  // tenant-only; '' for a tenant with no history.
+  loadDesignKnowledgeFn = async (siteId) => {
+    const { findDesignKnowledge } = await import('../store/design-knowledge.js');
+    const { formatDesignKnowledge } = await import('./lib/design-knowledge.js');
+    const rows = await findDesignKnowledge(siteId, { patternIds: ['design-role-mismatch', 'design-incomplete', 'template-missing-placeholder', 'design-integrity-failed'], component: 'design-profile' });
+    return formatDesignKnowledge(rows) || '';
+  },
+  // Opt-in structure reference for the expand layout (null unless the site set
+  // siteRoot.expandStructureRef). Read against the FRESHLY extracted profile,
+  // since that is the best evidence of what this tenant's own pages do.
+  loadStructurePriorFn = (site, freshProfile) => loadExpandStructurePrior(
+    freshProfile && site
+      ? { ...site, url_file_map: { ...site.url_file_map, siteRoot: { ...site.url_file_map?.siteRoot, designProfile: freshProfile } } }
+      : site,
+    { actionType: 'expand-content', pageType: 'service' },
+  ),
 } = {}) {
   return async function liveDesignAnalysisHandler(job) {
     const pageUrl = job.params?.pageUrl;
@@ -117,8 +137,10 @@ export function createLiveDesignAnalysisHandler({
       }
     }
 
+    const designKnowledge = await loadDesignKnowledgeFn(job.site_id).catch(() => '');
     const profile = await extractProfileFn(segmented, {
       siteId: job.site_id,
+      designKnowledge,
       responsiveMeasured: summarizeResponsive(capture.responsive),
     }).catch((err) => {
       const { message } = safeMessage('live-analysis-handler.extractProfile', err, 'Design profile extraction failed');
@@ -139,7 +161,11 @@ export function createLiveDesignAnalysisHandler({
       // composeGeneratedExpandLayout, and the plain projection above ships
       // exactly as it always has.
       if (requested.includes('expand-content')) {
-        const generated = await composeExpandLayoutFn(profile, { siteId: job.site_id }).catch((err) => {
+        // Opt-in structure reference (expand-content only). null for every
+        // tenant that has not asked for it, which leaves this call exactly as
+        // it was.
+        const structurePrior = await loadStructurePriorFn(site, profile).catch(() => null);
+        const generated = await composeExpandLayoutFn(profile, { siteId: job.site_id, structurePrior }).catch((err) => {
           console.warn(`[design-agent] site ${job.site_id}: expand-content layout generation threw — keeping the plain projected template (${err.message}).`);
           return null;
         });

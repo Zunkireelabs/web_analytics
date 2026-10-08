@@ -9,8 +9,11 @@ let pages;
 let llmResponse;
 let llmCalls;
 let feedXml; // feedUrl -> xml string | Error
+let site;
+let growthConfig;
 
-mock.module(resolve('../store/read.js'), { namedExports: { getSiteById: async () => ({ id: 1, name: 'Acme', domain: 'acme.test' }) } });
+mock.module(resolve('../store/read.js'), { namedExports: { getSiteById: async () => site } });
+mock.module(resolve('../store/product-growth-config.js'), { namedExports: { getProductGrowthConfig: async () => growthConfig } });
 mock.module(resolve('../store/site-seo-policy.js'), { namedExports: { getSeoPolicy: async () => policy } });
 mock.module(resolve('../store/data-analyst.js'), { namedExports: { getSiteProfile: async () => profile } });
 mock.module(resolve('../store/page-inventory.js'), { namedExports: { listPageInventory: async () => pages } });
@@ -34,6 +37,34 @@ function rss(items) {
     .map((i) => `<item><title>${i.title}</title><link>${i.link}</link><pubDate>${i.date}</pubDate><description>&lt;p&gt;${i.desc || ''}&lt;/p&gt;</description></item>`)
     .join('')}</channel></rss>`;
 }
+
+describe('multi-industry businesses (AI agents for healthcare, education, real estate)', () => {
+  const sellsTo = ['Education', 'Healthcare', 'Real Estate', 'Hospitality', 'Agencies'];
+  test('the field leads and EACH served industry contributes feeds — none is crowded out', () => {
+    const feeds = feedsForTenant({ industries: ['Artificial Intelligence and Technology Services'], topics: sellsTo });
+    const cats = new Set(feeds.map((f) => f.category));
+    for (const c of ['technology', 'education', 'healthcare', 'real-estate']) assert.ok(cats.has(c), c);
+    assert.equal(feeds.filter((f) => f.category === 'technology').length >= 5, true, 'the business\'s own field keeps its full set');
+    assert.ok(feeds.length <= 12);
+  });
+  test('served industries are capped per category, so they cannot swamp the field', () => {
+    const feeds = feedsForTenant({ industries: ['Artificial Intelligence and Technology Services'], topics: sellsTo });
+    for (const c of ['education', 'healthcare', 'real-estate']) assert.ok(feeds.filter((f) => f.category === c).length <= 2, c);
+  });
+});
+
+describe('feedsForTenant — real-estate-adjacent businesses', () => {
+  test('a senior relocation and downsizing company now resolves real-estate feeds (it matched none before)', () => {
+    const byIndustry = feedsForTenant({ industries: ['Senior relocation and downsizing services'] });
+    assert.ok(byIndustry.length > 0 && byIndustry.every((f) => f.category === 'real-estate'));
+    const byTopics = feedsForTenant({ industries: [], topics: ['senior move management', 'downsizing a family home'] });
+    assert.ok(byTopics.some((f) => f.category === 'real-estate'));
+  });
+  test('ordinary education and tech businesses are unaffected', () => {
+    assert.ok(feedsForTenant({ industries: ['Study abroad and overseas education consultancy'] }).every((f) => f.category === 'education'));
+    assert.ok(feedsForTenant({ industries: ['Artificial Intelligence and Technology Services'] }).some((f) => f.category === 'technology'));
+  });
+});
 
 describe('feedsForTenant', () => {
   test('maps industries onto catalog feeds without any site id', () => {
@@ -190,6 +221,8 @@ describe('run', () => {
   beforeEach(() => {
     policy = null;
     profile = { industry: 'IT services', main_topics: ['cloud'] };
+    site = { id: 1, name: 'Acme', domain: 'acme.test' };
+    growthConfig = null;
     pages = [];
     llmCalls = [];
     llmResponse = { topics: [] };
@@ -197,11 +230,134 @@ describe('run', () => {
     stubFetch();
   });
 
-  test('insufficient-data when the tenant has no known industry', async () => {
+  test('insufficient-data when the tenant has no known industry and none can be worked out', async () => {
     profile = null;
-    const out = await run({ siteId: 1 });
+    const out = await run({ siteId: 1, deps: { analyze: async () => ({ ok: false }) } });
     assert.equal(out.status, 'insufficient-data');
     assert.equal(llmCalls.length, 0);
+  });
+
+  test('NO industry recorded: it is worked out from the homepage, used this run, and recorded once', async () => {
+    // Before this, a tenant with no industry dead-ended here forever and
+    // nothing ever recorded one.
+    profile = null;
+    site = { ...site, website_domain: 'acme.test' };
+    const saved = [];
+    const items = Array.from({ length: 6 }, (_, i) => ({ title: `Headline ${i}`, link: `https://n.test/${i}`, date: iso(1) }));
+    feedXml['https://www.edsurge.com/articles_rss'] = rss(items);
+    const out = await run({ siteId: 1, deps: {
+      analyze: async () => ({ ok: true, analysis: { bodyText: 'We help students apply to universities abroad.' } }),
+      hasGrounding: () => true,
+      callJson: async () => ({ industry: 'education' }),
+      save: async (id, p) => { saved.push([id, p]); },
+    } });
+
+    assert.notEqual(out.status, 'insufficient-data');
+    assert.equal(out.facts.industryInferred, 'education');
+    assert.match(llmCalls[0].user, /Industry: education/);
+    assert.equal(saved[0][1].industry, 'education');
+    assert.equal(saved[0][1].industrySource, 'llm-classified');
+    assert.equal(saved[0][1].industryConfidence, 'low');
+  });
+
+  test('inference is only a fallback: a recorded industry never triggers a homepage fetch or a model call', async () => {
+    let fetched = 0;
+    profile = { industry: 'IT services', main_topics: [] };
+    await run({ siteId: 1, deps: { analyze: async () => { fetched++; return { ok: false }; } } });
+    assert.equal(fetched, 0);
+  });
+
+  test('a business outside the feed catalog is not forced into one: it stays a reported gap', async () => {
+    profile = null;
+    site = { ...site, website_domain: 'acme.test' };
+    const out = await run({ siteId: 1, deps: {
+      analyze: async () => ({ ok: true, analysis: { bodyText: 'We roast artisanal coffee.' } }),
+      hasGrounding: () => true,
+      callJson: async () => ({ industry: 'none' }),
+      save: async () => { throw new Error('must not save'); },
+    } });
+    assert.equal(out.status, 'insufficient-data');
+    assert.equal(out.facts.capabilityGap, 'industry-not-recorded');
+  });
+
+  test('a failed save does not lose the industry just worked out', async () => {
+    profile = null;
+    site = { ...site, website_domain: 'acme.test' };
+    const items = Array.from({ length: 6 }, (_, i) => ({ title: `H${i}`, link: `https://n.test/${i}`, date: iso(1) }));
+    feedXml['https://www.edsurge.com/articles_rss'] = rss(items);
+    const out = await run({ siteId: 1, deps: {
+      analyze: async () => ({ ok: true, analysis: { bodyText: 'University admissions help.' } }),
+      hasGrounding: () => true, callJson: async () => ({ industry: 'education' }),
+      save: async () => { throw new Error('db down'); },
+    } });
+    assert.equal(out.facts.industryInferred, 'education');
+  });
+
+  test('a product tenant gets its industry from the growth config, the only source it can have', async () => {
+    // Before this, a product tenant fell straight through to "No industry
+    // known" and got no trending topics at all, permanently: profile.industry
+    // is written by the Python clustering collector from Search Console
+    // queries a product tenant does not have.
+    profile = null;
+    site = { id: 1, name: 'Acme', domain: 'acme.test', property_type: 'product' };
+    growthConfig = { industries: ['education'], markets: [] };
+    const items = Array.from({ length: 6 }, (_, i) => ({ title: `Headline ${i}`, link: `https://n.test/${i}`, date: iso(1) }));
+    feedXml['https://www.edsurge.com/articles_rss'] = rss(items);
+
+    const out = await run({ siteId: 1 });
+
+    assert.notEqual(out.status, 'insufficient-data');
+    assert.match(llmCalls[0].user, /Industry: education/);
+  });
+
+  test("a website tenant's growth config is never consulted", async () => {
+    profile = null;
+    growthConfig = { industries: ['education'] };
+    const out = await run({ siteId: 1 });
+    assert.equal(out.status, 'insufficient-data');
+  });
+
+  test('an industry no feed is mapped to is distinguished from no industry at all, and names what the catalog covers', async () => {
+    // Said plainly because otherwise this reads as "nothing is trending in
+    // your industry", which is indistinguishable from the outside from a
+    // tenant that was never classified.
+    profile = { industry: 'artisanal coffee roasting', main_topics: [] };
+    const out = await run({ siteId: 1 });
+
+    assert.equal(out.status, 'insufficient-data');
+    assert.equal(out.facts.capabilityGap, 'industry-unmapped');
+    assert.match(out.message, /recorded but no news feeds are mapped/);
+    assert.match(out.message, /education/); // the catalog's real coverage, stated
+    assert.equal(llmCalls.length, 0);
+  });
+
+  test('served industries from the SEO policy are a SECONDARY lens: the prompt names them, the primary industry still leads', async () => {
+    profile = { industry: 'IT services', main_topics: ['cloud'] };
+    policy = { target_industries: ['Education', 'Healthcare', 'Real Estate'] };
+    const items = Array.from({ length: 6 }, (_, i) => ({ title: `Headline ${i}`, link: `https://n.test/${i}`, date: iso(1) }));
+    feedXml['https://hnrss.org/frontpage'] = rss(items);
+    const out = await run({ siteId: 1 });
+    assert.match(llmCalls[0].user, /Industry: IT services/);
+    assert.match(llmCalls[0].user, /Also serves these industries.*Education, Healthcare, Real Estate/);
+    assert.deepEqual(out.facts.alsoServes, ['Education', 'Healthcare', 'Real Estate']);
+    assert.ok(out.facts.feedsUsed.some((id) => ['edsurge', 'ihe', 'pie', 'icef'].includes(id)), 'an education feed was pulled in');
+  });
+
+  test('the policy list never REPLACES a missing primary industry with itself as a lens', async () => {
+    profile = null;
+    policy = { target_industries: ['Education'] };
+    const out = await run({ siteId: 1, deps: { analyze: async () => ({ ok: false }) } });
+    // policy is the PRIMARY here (trendIndustries' fallback), so there is no secondary lens
+    assert.equal(out.facts?.alsoServes, undefined);
+  });
+
+  test('no industry recorded is reported as its own capability gap, with the product-specific fix', async () => {
+    profile = null;
+    site = { id: 1, name: 'Acme', property_type: 'product' };
+    const out = await run({ siteId: 1 });
+
+    assert.equal(out.facts.capabilityGap, 'industry-not-recorded');
+    assert.match(out.message, /product growth config/);
   });
 
   test('insufficient-data (and no LLM call) when every feed fails', async () => {

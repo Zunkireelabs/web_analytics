@@ -1,6 +1,7 @@
 import { priorPeriod, daysAgoInTz } from '../../util/dates.js';
 import { getQueryPageMetrics } from '../../store/read.js';
 import { buildPageMetrics } from './growth-scoring.js';
+import { leadingIndicatorsFor } from './leading-indicators.js';
 
 // Finds the pages that are LOSING ground, so the shipping loop can fix them
 // this week instead of discovering the damage in next month's report.
@@ -64,6 +65,12 @@ export const CTR_DECAY_PCT = 0.30;
 export function detectDeclines(currentMetrics, priorMetrics) {
   const siteWide = siteWideChange(currentMetrics, priorMetrics);
   const declines = new Map();
+  // Pages NOT yet declining that show an early-warning pattern. Kept in its
+  // own map rather than mixed into `declines`, because the two carry
+  // different claims: a decline is measured loss, a leading indicator is a
+  // pattern that usually precedes one. Conflating them would let a warning
+  // be reported as damage.
+  const leading = new Map();
 
   for (const [page, prior] of priorMetrics) {
     if (prior.impressions < MIN_BASELINE_IMPRESSIONS) continue;
@@ -127,7 +134,31 @@ export function detectDeclines(currentMetrics, priorMetrics) {
       }
     }
 
-    if (!reasons.length) continue;
+    // A page with no decline reason is not yet declining — which is exactly
+    // where the leading indicators look. Both windows for this page are
+    // already in hand here, so early warning costs no second GSC fetch and
+    // introduces no second notion of what "the two periods" are.
+    //
+    // `declines` is untouched by this: a page lands in one map or the other,
+    // never both, so every existing consumer sees precisely what it saw
+    // before.
+    if (!reasons.length) {
+      const { families, signals } = leadingIndicatorsFor({ before: prior, after: current });
+      if (signals.length) {
+        leading.set(page, {
+          page, signals, families: [...families],
+          priorImpressions: prior.impressions,
+          currentImpressions: current.impressions,
+          // No realised loss, by definition — that is what makes this
+          // leading rather than measured. Exposure is what this page still
+          // earns and would stand to lose if the warning plays out.
+          impressionsLost: 0,
+          impressionsAtRisk: current.impressions,
+          reasons: signals.map((s) => s.detail),
+        });
+      }
+      continue;
+    }
 
     declines.set(page, {
       page,
@@ -143,7 +174,7 @@ export function detectDeclines(currentMetrics, priorMetrics) {
     });
   }
 
-  return { declines, siteWide };
+  return { declines, leading, siteWide };
 }
 
 // The whole site's period-over-period move, used as the baseline every page

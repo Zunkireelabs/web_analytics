@@ -80,7 +80,21 @@ export async function enqueue(siteId, {
      RETURNING *`,
     [siteId, source, lane, kind, generatorId, recommendationId, findingId, JSON.stringify(params || {}), score, dedupeKey, memoryRefId]
   );
-  if (rows[0]) return { row: rows[0], created: true };
+  if (rows[0]) {
+    // Entering this queue IS the start of execution, so it is the honest
+    // place to move the decision behind this recommendation out of
+    // 'decided' — migration 166 defined that transition and nothing ever
+    // performed it, which is why every decisions row sat at 'decided'
+    // forever. Only on a genuinely new row: a deduped re-enqueue is not a
+    // second execution. No-op for the overwhelming majority of items,
+    // whose recommendation has no decision_id (173). Never able to fail an
+    // enqueue — see decision-lifecycle.js.
+    if (recommendationId) {
+      const { advanceDecisionForRecommendation } = await import('../agents/lib/decision-lifecycle.js');
+      await advanceDecisionForRecommendation(recommendationId, 'executing');
+    }
+    return { row: rows[0], created: true };
+  }
 
   const { rows: existing } = await query(
     `SELECT * FROM shipping_queue
@@ -178,7 +192,24 @@ export async function markShipped(id) {
       WHERE id = $1 RETURNING *`,
     [id, QUEUE_STATES.SHIPPED]
   );
+  await advanceDecisionFor(rows[0], 'shipped');
   return rows[0] || null;
+}
+
+// The other half of the decision lifecycle (166/184): the enqueue above
+// moved it to 'executing', and these two record how the execution ended.
+// 'shipped' here means a PR was opened and merged by the ship run, which is
+// what this queue's own SHIPPED state means — 'verified' is a later, separate
+// judgement made at :40 once fix_impact has a real measurement.
+//
+// A retryable release is NOT a failure: a GitHub outage is not evidence
+// about the work, and the item returns to the queue to ship tomorrow with
+// its draft intact. Marking the decision failed for that would teach the
+// engine the wrong lesson from an infrastructure hiccup.
+async function advanceDecisionFor(row, status) {
+  if (!row?.recommendation_id) return;
+  const { advanceDecisionForRecommendation } = await import('../agents/lib/decision-lifecycle.js');
+  await advanceDecisionForRecommendation(row.recommendation_id, status);
 }
 
 /**
@@ -208,6 +239,9 @@ export async function releaseItem(id, { retryable, error = null }) {
       RETURNING *`,
     [id, Boolean(retryable), QUEUE_STATES.FAILED, QUEUE_STATES.QUEUED, QUEUE_STATES.PREPARED, error, QUEUE_STATES.SHIPPED]
   );
+  // Only a non-retryable release is a real failure of the work — see
+  // advanceDecisionFor.
+  if (rows[0] && rows[0].state === QUEUE_STATES.FAILED) await advanceDecisionFor(rows[0], 'failed');
   return rows[0] || null;
 }
 

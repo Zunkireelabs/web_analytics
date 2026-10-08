@@ -21,13 +21,41 @@ export const COVER_HEIGHT = 768;
 // Sampled from zunkireelabs.com's existing gradient covers (top of frame,
 // bottom of frame, the two blobs). Each post gets one pair, so the blog reads
 // as a family without every post looking identical.
-export const PALETTES = [
+export const ZUNKIREE_PALETTES = [
   { name: 'indigo',  top: '#292461', bottom: '#464782', left: '#3c86a6', right: '#6b3895' },
   { name: 'slate',   top: '#4a5a79', bottom: '#766e77', left: '#966d71', right: '#96897f' },
   { name: 'ember',   top: '#333f4b', bottom: '#4e5752', left: '#887343', right: '#395f65' },
   { name: 'plum',    top: '#4a2050', bottom: '#62536c', left: '#456877', right: '#8b6d7d' },
   { name: 'ocean',   top: '#2c4a73', bottom: '#5b7fa6', left: '#5f94c4', right: '#7a86b8' },
 ];
+
+// Kept so existing imports and site 1's covers keep working.
+export const PALETTES = ZUNKIREE_PALETTES;
+
+const HEX = /^#[0-9a-f]{6}$/i;
+
+function validPalette(p) {
+  return p && ['top', 'bottom', 'left', 'right'].every((k) => HEX.test(String(p[k] || '')));
+}
+
+// The palettes a site is allowed to use: its OWN, from its cover config.
+// These were previously Zunkireelabs's colours handed to ANY tenant that opted
+// in — one client's brand shipped onto another's blog. Now:
+//   1. cover.palettes in the tenant's own config (validated hex), else
+//   2. Zunkireelabs's own palettes, for Zunkireelabs's own domain only
+//      (so site 1's covers keep reproducing byte for byte), else
+//   3. null — no cover is generated. Failing closed is the point: a missing
+//      palette must never be filled with another client's brand.
+export function palettesFor(site) {
+  const own = site?.url_file_map?.newContentTargets?.['blog-outline']?.cover?.palettes;
+  if (Array.isArray(own)) {
+    const ok = own.filter(validPalette);
+    if (ok.length) return ok;
+  }
+  const domain = String(site?.website_domain || '').toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '');
+  if (domain === 'zunkireelabs.com') return ZUNKIREE_PALETTES;
+  return null;
+}
 
 export function seedOf(text) {
   return parseInt(createHash('sha1').update(String(text ?? '')).digest('hex').slice(0, 8), 16);
@@ -39,9 +67,9 @@ function jitter(seed, salt, range) {
   return Math.round((n - 0.5) * 2 * range);
 }
 
-export function gradientCoverSvg(seedText, { width = COVER_WIDTH, height = COVER_HEIGHT } = {}) {
+export function gradientCoverSvg(seedText, { width = COVER_WIDTH, height = COVER_HEIGHT, palettes = ZUNKIREE_PALETTES } = {}) {
   const seed = seedOf(seedText);
-  const p = PALETTES[seed % PALETTES.length];
+  const p = palettes[seed % palettes.length];
   const flip = (seed >> 3) % 2 === 1;
   const [leftColor, rightColor] = flip ? [p.right, p.left] : [p.left, p.right];
   const lx = Math.round(width * 0.20) + jitter(seed, 'lx', 45);
@@ -85,8 +113,10 @@ export function buildGradientCover(site, { slug }) {
   const cfg = coverConfigFor(site);
   const safe = String(slug || '').trim().replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
   if (!cfg || !safe) return null;
+  const palettes = palettesFor(site);
+  if (!palettes) return null;
   return {
-    file: { path: `${cfg.dir}/${safe}.svg`, content: gradientCoverSvg(safe), contentFormat: 'asset' },
+    file: { path: `${cfg.dir}/${safe}.svg`, content: gradientCoverSvg(safe, { palettes }), contentFormat: 'asset' },
     featuredImage: { url: `${cfg.urlBase}/${safe}.svg`, alt: GRADIENT_ALT, photographer: null },
   };
 }

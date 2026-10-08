@@ -7,7 +7,11 @@ import { getSearchDemandProvider } from '../providers/search-demand/registry.js'
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
 import { INSIGHT_CATEGORY } from '../generators/lib/blog-image-policy.js';
 import { effortForGenerator } from './lib/page-content.js';
-import { feedsForTenant, fetchAllFeeds, recentItems } from './lib/trend-feeds.js';
+import { feedsForTenant, fetchAllFeeds, recentItems, FEED_CATALOG_KEYS } from './lib/trend-feeds.js';
+import { getProductGrowthConfig } from '../store/product-growth-config.js';
+import { tenantContextTextFor } from '../lib/tenant-context.js';
+import { isTopicScorerEnabled } from './lib/topic-scorer.js';
+import { buildTopicQueue } from './lib/topic-queue.js';
 
 // Trend Radar — finds what is genuinely trending in THIS tenant's industry
 // right now, so a later phase can turn a topic into an "insight" blog post.
@@ -27,9 +31,11 @@ import { feedsForTenant, fetchAllFeeds, recentItems } from './lib/trend-feeds.js
 // Deliberately NOT tenantIndustries(): that helper prefers
 // site_seo_policy.target_industries, which for Zunkiree Labs (site 1) is the
 // list of industries it SELLS TO (Education, Healthcare, Real Estate, ...),
-// not what it does. Trending on that list would give an AI-development
-// agency real-estate headlines. The policy list is only a fallback here, for a
-// site with no profile industry yet.
+// not what it does. Trending on that list alone would give an AI-development
+// agency real-estate headlines. The policy list is a fallback for a site with
+// no profile industry, and otherwise a SECONDARY lens only (run() below): its
+// industries add a couple of feeds each and steer the model toward topics
+// where the site's own field meets them.
 //
 // Never fabricates a trend: the model may only group headlines it was
 // given, every topic must cite real item indexes, and topics that cite none
@@ -48,11 +54,19 @@ export const meta = {
 };
 
 const MAX_TOPICS = 5;
+// The editorial target per run: 4-5 posts a fortnight. A floor in the PROMPT,
+// not in code — fewer is returned when the headlines genuinely do not hold
+// four distinct, relevant topics, because padding to a number would invent
+// trends, and this agent never fabricates one.
+const TARGET_TOPICS_MIN = 4;
 const CONTEXT_SOURCES = 5;
 // Blog category insight posts are filed under; the client blog's Insights filter
 // keys on this exact label.
 export { INSIGHT_CATEGORY };
-const MAX_AGE_DAYS = 7;
+// Matches the run cadence (agents/lib/trend-cadence.js): a fortnight's runs
+// look at a fortnight's headlines, so nothing that happened between two runs
+// is ever missed and nothing is seen twice.
+const MAX_AGE_DAYS = 14;
 const MIN_ITEMS = 5;
 
 const STOPWORDS = new Set(['the', 'and', 'for', 'with', 'what', 'why', 'how', 'its', 'are', 'you', 'your', 'that', 'this', 'from', 'about', 'into', 'new', 'blog', 'insights']);
@@ -138,19 +152,29 @@ const SYSTEM = 'You are an industry news analyst for a business website. You are
   '"angle":"one sentence: how the article should explain it for THIS site\'s audience",' +
   '"whyRelevant":"one sentence: why this audience cares right now",' +
   '"sources":[indexes of the headlines this topic is based on]}]}. ' +
-  `Return at most ${MAX_TOPICS} topics. Rules: use ONLY the numbered headlines — never add a topic, fact, number ` +
+  `Aim for ${TARGET_TOPICS_MIN} to ${MAX_TOPICS} distinct topics when the headlines genuinely hold that many (return fewer rather than pad — never invent a topic to reach the number), and never more than ${MAX_TOPICS}. Include what is NEW in the field — product launches, releases, major feature announcements and new tools — alongside broader shifts, since launches are exactly what readers search for. Rules: use ONLY the numbered headlines — never add a topic, fact, number ` +
   'or event that is not in them; every topic must list at least one real index (prefer topics several outlets ' +
-  'are covering); skip anything unrelated to the site\'s industry; skip pure celebrity, sports, politics or ' +
-  'product-sale news; if nothing is both trending and relevant return {"topics":[]}.';
+  'are covering); skip anything unrelated to the site\'s industry; skip pure celebrity, sports, politics, ' +
+  'discount/sale promotions and funding-round gossip; if nothing is both trending and relevant return {"topics":[]}.';
 
-function buildUserPrompt({ site, industries, mainTopics, items }) {
+function buildUserPrompt({ site, industries, mainTopics, items, tenantContext = '', secondaryIndustries = [] }) {
   const lens = [
     `Site: ${site?.name || site?.domain || 'this site'}`,
     `Industry: ${industries.join(', ')}`,
     mainTopics?.length ? `Main topics the site covers: ${mainTopics.join(', ')}` : null,
+    // The industries this business SERVES, as opposed to what it IS. Offered as
+    // a lens, not a topic list: the best post for a business that builds AI
+    // agents is where its own field meets one of these (voice agents in
+    // healthcare, automation for real-estate teams), not generic news from them.
+    secondaryIndustries.length ? `Also serves these industries — favour topics where this site's own field meets them: ${secondaryIndustries.join(', ')}` : null,
   ].filter(Boolean).join('\n');
   const list = items.map((it, i) => `[${i}] ${it.title} — ${it.source}, ${it.publishedAt.slice(0, 10)}${it.summary ? `. ${it.summary}` : ''}`).join('\n');
-  return `${lens}\n\nHeadlines from the last ${MAX_AGE_DAYS} days:\n${list}`;
+  // Sharpens the lens without widening it. The industry line above comes from
+  // trendIndustries(), which deliberately rejects the site_seo_policy list of
+  // industries a site SELLS TO — so the caller passes no 'business' section
+  // here on purpose, for exactly the reason this file's header documents:
+  // trending on an agency's client industries hands it real-estate headlines.
+  return `${lens}${tenantContext ? `\n\n${tenantContext}` : ''}\n\nHeadlines from the last ${MAX_AGE_DAYS} days:\n${list}`;
 }
 
 function mainTopicNames(profile) {
@@ -159,32 +183,125 @@ function mainTopicNames(profile) {
   return arr.map((t) => (typeof t === 'string' ? t : t?.topic || t?.name || '')).filter(Boolean).slice(0, 8);
 }
 
-export function trendIndustries(policy, profile) {
+// `growthIndustries` is the product-tenant source, added last on purpose:
+// it is the ONLY one a product tenant can have, because profile.industry is
+// written by the Python keyword-clustering collector from Search Console
+// queries a product tenant does not have. Before this, every product tenant
+// fell straight through to the "No industry known" refusal and got no
+// trending topics at all, permanently. It sits below the policy list
+// because, like the policy list, it can be a sell-to list rather than what
+// the tenant does — but having it is strictly better than having nothing.
+export function trendIndustries(policy, profile, growthIndustries = null) {
   const own = profile?.industry ? String(profile.industry).trim() : '';
   if (own) return [own];
-  return policy?.target_industries?.length ? policy.target_industries : null;
+  if (policy?.target_industries?.length) return policy.target_industries;
+  return growthIndustries?.length ? growthIndustries : null;
 }
 
 function insufficient(message, extra = {}) {
   return { meta, status: 'insufficient-data', facts: null, narrative: null, message, generatedAt: new Date().toISOString(), ...extra };
 }
 
-export async function run({ siteId, params = {} }) {
+// A tenant with no recorded industry used to dead-end here: trend radar
+// refused to run, forever, and nothing ever recorded one. A product tenant can
+// never have one inferred (that needs Search Console queries), and a new
+// website tenant has none until the Python profiler's first run. So this
+// closes the loop instead of reporting it: read the site's own homepage, ask
+// for ONE label from the feed catalog's own vocabulary (industry-capture.js —
+// never an invented string), use it for this run, and record it with its
+// provenance so it is classified once, not every fortnight.
+//
+// Strictly a fallback: it runs only when no industry exists anywhere (policy,
+// profile, growth config), costs one fetch and one small model call, and
+// never overwrites anything a human set — saveSiteProfile protects that at the
+// SQL level too. Returns null (and run() reports the capability gap exactly as
+// before) when the homepage cannot be read or the business is genuinely
+// outside the catalog.
+export async function inferTrendIndustry(site, profile, deps = {}) {
+  try {
+    // Same rule as site-domain.js's knownDomain (explicit website_domain only,
+    // never guessed), inlined because that module statically imports the
+    // search-performance store and this agent's tests mock that store with a
+    // partial export list.
+    const domain = site?.website_domain ? String(site.website_domain).replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '') : null;
+    if (!domain) return null;
+    const analyze = deps.analyze || (await import('./lib/page-content.js')).analyzePageUrl;
+    const grounded = deps.hasGrounding || (await import('./lib/page-content.js')).hasSufficientGroundingContent;
+    const fetched = await analyze(`https://${domain}/`).catch(() => ({ ok: false }));
+    if (!fetched.ok || !grounded(fetched.analysis)) return null;
+
+    const { classifyIndustryFromText } = await import('../lib/industry-capture.js');
+    const industry = await classifyIndustryFromText(fetched.analysis.bodyText.slice(0, 3000), {
+      callJson: deps.callJson || ((system, user) => callLLMForJson(system, user, { maxTokens: 200, siteId: site.id })),
+    });
+    if (!industry) return null;
+
+    // Best effort: a failed save must not lose the industry we just worked out.
+    const save = deps.save || (await import('../store/data-analyst.js')).saveSiteProfile;
+    await save(site.id, {
+      industry, mainTopics: profile?.main_topics ?? [], siteType: profile?.site_type ?? null,
+      industrySource: 'llm-classified', industryConfidence: 'low',
+    }).catch((err) => console.warn(`[trend-radar] site ${site.id}: inferred industry "${industry}" but could not record it: ${err.message}`));
+    return industry;
+  } catch (err) {
+    console.warn(`[trend-radar] site ${site?.id}: industry inference failed: ${err.message}`);
+    return null;
+  }
+}
+
+export async function run({ siteId, params = {}, deps = {} }) {
   const [site, policy, profile] = await Promise.all([
     getSiteById(siteId),
     getSeoPolicy(siteId),
     getSiteProfile(siteId),
   ]);
 
-  const industries = trendIndustries(policy, profile);
+  // Product tenants only — getProductGrowthConfig resolves site_id to a
+  // product_id and returns null when this site has no products row at all,
+  // which is every website tenant.
+  const growthConfig = site?.property_type === 'product'
+    ? await getProductGrowthConfig(siteId).catch(() => null)
+    : null;
+
+  let industries = trendIndustries(policy, profile, growthConfig?.industries);
+  let inferredIndustry = null;
+  if (!industries && site) {
+    inferredIndustry = await inferTrendIndustry(site, profile, deps);
+    if (inferredIndustry) industries = [inferredIndustry];
+  }
   if (!industries) {
-    return insufficient('No industry known for this site yet — set target industries in the SEO policy or let the site profile run first.');
+    return insufficient(
+      site?.property_type === 'product'
+        ? 'No industry recorded for this product tenant, and none could be worked out from its homepage — set it in the product growth config (Clients console) or run the product onboarding script.'
+        : 'No industry known for this site yet, and none could be worked out from its homepage — set target industries in the SEO policy or let the site profile run first.',
+      { facts: { capabilityGap: 'industry-not-recorded' } },
+    );
   }
   const mainTopics = mainTopicNames(profile);
+  // The industries the business SERVES, from the owner's SEO policy
+  // (site_seo_policy.target_industries). trendIndustries() deliberately never
+  // lets this list REPLACE the business's own industry — trending on it alone
+  // hands an AI-agent company real-estate headlines — so it is added only as a
+  // secondary lens, and only when a primary industry already came from
+  // somewhere else. Feeds for it are capped per category (the catalog's own
+  // SECONDARY_FEEDS_PER_CATEGORY), so the primary field still leads.
+  const secondaryIndustries = (profile?.industry || growthConfig?.industries?.length) && Array.isArray(policy?.target_industries)
+    ? policy.target_industries.map((x) => String(x).trim()).filter(Boolean)
+    : [];
 
-  const feeds = feedsForTenant({ industries, topics: mainTopics, override: params.feeds });
+  const feeds = feedsForTenant({ industries, topics: [...mainTopics, ...secondaryIndustries], override: params.feeds });
   if (!feeds.length) {
-    return insufficient(`No news feeds are mapped to this site's industry (${industries.join(', ')}) yet.`);
+    // Distinct from "no industry": the industry IS recorded, it just is not
+    // something the feed catalog can serve. Said plainly and with the real
+    // list of what it can, because otherwise this reads as "nothing is
+    // trending in your industry" — and that is indistinguishable, from the
+    // outside, from a tenant that was never classified at all.
+    return insufficient(
+      `This site's industry (${industries.join(', ')}) is recorded but no news feeds are mapped to it. ` +
+      `The feed catalog currently covers: ${FEED_CATALOG_KEYS.join(', ')}. ` +
+      'Either record a closer industry, or add a custom feed list for this site.',
+      { facts: { capabilityGap: 'industry-unmapped', industries, catalogCovers: [...FEED_CATALOG_KEYS] } },
+    );
   }
 
   const { items: allItems, failed, fetched } = await fetchAllFeeds(feeds);
@@ -198,7 +315,8 @@ export async function run({ siteId, params = {} }) {
     );
   }
 
-  const llm = await callLLMForJson(SYSTEM, buildUserPrompt({ site, industries, mainTopics, items }), {
+  const tenantContext = await tenantContextTextFor(site, { sections: ['goals', 'product'] });
+  const llm = await callLLMForJson(SYSTEM, buildUserPrompt({ site, industries, mainTopics, items, tenantContext, secondaryIndustries }), {
     maxTokens: 1500, siteId,
     validate: (v) => Array.isArray(v?.topics),
   });
@@ -242,6 +360,36 @@ export async function run({ siteId, params = {} }) {
     });
   });
 
+  // Feed the same validated topics into the shared scored queue
+  // (agents/lib/topic-queue.js), where they meet the keyword pipeline's
+  // volume-ranked gaps for the first time. A topic that is BOTH trending
+  // here and genuinely searched there is the best topic available, and
+  // before this nothing ever saw the two facts together.
+  //
+  // Additive and flagged: the findings above are produced and returned
+  // exactly as before, so this agent's output is unchanged while the queue
+  // is being validated. Best-effort — a queue write must never fail a run
+  // that already has real findings.
+  let queued = null;
+  if (isTopicScorerEnabled()) {
+    queued = await buildTopicQueue(siteId, topics.map((t) => ({
+      topic: t.topic,
+      origin: 'trend-radar',
+      intent: 'new-blog',
+      demand: demand.get(t.topic) ?? null,
+      // validateTopics already computed latestAt from the real cited items,
+      // so freshness comes from the headlines themselves rather than from a
+      // second derivation that could disagree with the ordering above.
+      trend: {
+        distinctSources: t.distinctSources,
+        newestAgeDays: t.latestAt ? Math.max(0, (Date.now() - Date.parse(t.latestAt)) / 86_400_000) : null,
+      },
+    })), {}).catch((err) => {
+      console.warn(`[trend-radar] could not build the topic queue for site ${siteId}: ${err.message}`);
+      return null;
+    });
+  }
+
   const facts = {
     industries,
     feedsUsed: feeds.map((f) => f.id),
@@ -249,6 +397,9 @@ export async function run({ siteId, params = {} }) {
     headlinesConsidered: items.length,
     skippedAlreadyCovered: covered,
     findings,
+    ...(queued ? { topicQueue: { queued: queued.queued.length, dropped: queued.dropped.length } } : {}),
+    ...(inferredIndustry ? { industryInferred: inferredIndustry } : {}),
+    ...(secondaryIndustries.length ? { alsoServes: secondaryIndustries } : {}),
   };
   return { meta, status: 'ok', facts, narrative: null, generatedAt: new Date().toISOString() };
 }

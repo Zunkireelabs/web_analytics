@@ -613,3 +613,18 @@ describe('renderBlogOutlineBody — siteRoot.inlineProse: "layout" (blog layout 
     assert.match(body, /<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">/);
   });
 });
+
+describe('renderBlogOutlineBody — page role from evidence, not the URL regex', () => {
+  const content = { title: 'T', metaDescription: 'd', sections: [{ heading: 'Why it matters', body: 'Some body text here.' }] };
+  const profile = { version: 2, typography: { body: 'BODYCLS', heading: { item: 'ITEMCLS', section: 'SECTIONCLS' } }, layout: { prose: 'max-w-prose' } };
+  const site = { url_file_map: { siteRoot: { designProfile: profile } } };
+
+  test('a post under a prefix the regex does not know is projected as inline (article) prose', () => {
+    // /recursos/ classifies 'other' via classifyPageType, which used to mean
+    // section/hero scale. The action type is decisive: a blog post is an article body.
+    const unknownPrefix = renderBlogOutlineBody(content, site, { permalink: '/recursos/mi-post/' });
+    const knownPrefix = renderBlogOutlineBody(content, site, { permalink: '/blog/mi-post/' });
+    const headingClass = (html) => (html.match(/<h2[^>]*class="([^"]*)"/) || [])[1];
+    assert.equal(headingClass(unknownPrefix), headingClass(knownPrefix));
+  });
+});

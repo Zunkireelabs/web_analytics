@@ -43,6 +43,8 @@ import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mo
 import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor } from '../implementers/lib/design-drift.js';
 import { resolveOrCreateCanonicalPageTemplate, PAGE_TEMPLATE_TYPES_FOR_GENERATOR } from '../design-agent/lib/page-templates.js';
 import { buildCorrectionFeedback, canonicalTemplateForFeedback } from '../generators/lib/design-repair-feedback.js';
+import { pageFamilyOf, formatDesignKnowledge } from '../design-agent/lib/design-knowledge.js';
+import { findDesignKnowledge, recordDesignIssues, recordKnowledgeReuse } from '../store/design-knowledge.js';
 import { describeResponsiveRegressions } from '../generators/lib/responsive-preview-gate.js';
 import { hasProfileLevelMismatch, repairProfileLevelMismatch } from '../generators/lib/design-mismatch-repair.js';
 import { repairDesignProfileRolesForSites } from '../scripts/repair-design-profile-roles.js';
@@ -457,9 +459,22 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   const canonicalTemplate = canonicalTemplateForFeedback(effectiveSite, generatorId, PAGE_TEMPLATE_TYPES_FOR_GENERATOR);
   let content, summary, gateResult;
   let firstAttemptIssues = null;
-  let designCorrections = null;
+  // RETRIEVE BEFORE GENERATING. What earlier validated work taught us about
+  // THIS tenant's design — what worked on this kind of page, and what was
+  // tried and did not hold — goes to the generator on the very first attempt,
+  // not only after a failure. Strictly this site's own lessons; empty for a
+  // tenant with no history, which behaves exactly as before.
+  const designPageUrl = [params?.pageUrl, params?.url, params?.page, params?.permalink].find((v) => typeof v === 'string' && v) || null;
+  const designPageType = canonicalTemplate?.pageType || canonicalTemplate?.type || null;
+  const priorKnowledge = await findDesignKnowledge(siteId, {
+    family: designPageUrl ? pageFamilyOf(designPageUrl) : null, pageType: designPageType,
+  });
+  const knowledgeBlock = formatDesignKnowledge(priorKnowledge);
+  let designCorrections = knowledgeBlock;
+  let attemptsUsed = 0;
   let profileRepairAttempted = false;
   for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+    attemptsUsed = attempt;
     // The repair channel. A generator that doesn't read designCorrections
     // simply ignores it and the attempt behaves exactly as it always did —
     // this is additive, not a contract every generator must now satisfy.
@@ -518,6 +533,7 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
       designCorrections = buildCorrectionFeedback(gateResult.issues, {
         site: effectiveSite,
         canonicalTemplate,
+        knowledge: knowledgeBlock,
       }) || designCorrections;
       console.warn(
         `[action-center] ${generatorId} draft failed the Quality Gate (attempt ${attempt}), regenerating`
@@ -527,6 +543,15 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     }
   }
   if (!gateResult.clean) {
+    // LEARN FROM THE FAILURE TOO. What was asked of the generator and still did
+    // not pass is kept as an anti-pattern for this tenant, so the same change
+    // is not tried again on the next page of this kind.
+    await recordDesignIssues(siteId, 'anti-pattern', gateResult.issues, {
+      generatorId, pageType: designPageType, pageUrl: designPageUrl,
+      correction: designCorrections && designCorrections !== knowledgeBlock ? designCorrections : null,
+      validation: { passed: false, gate: 'quality-gate', attempts: attemptsUsed },
+    });
+    await recordKnowledgeReuse(priorKnowledge, 'failure', { siteId, generatorId });
     const err = new Error(`This recommendation could not be generated cleanly (incomplete/invalid content after ${MAX_GENERATION_ATTEMPTS} attempts) — try again shortly.`);
     err.status = 502;
     err.userFacing = true;
@@ -655,6 +680,19 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     input: params || {}, content, findingId, gateResolvedPatterns,
     renderedBody, targetFilePath, memoryRefId,
   });
+
+  // LEARN FROM THE SUCCESS. A design/structure problem the first attempt had
+  // and a later one cleared is validated knowledge about this tenant: the
+  // reason, the correction that worked, and the page's pre-fix search numbers
+  // as a baseline for the impact measured later. Needs the draft id, so it
+  // runs here rather than where the gate cleared.
+  if (firstAttemptIssues?.length) {
+    await recordDesignIssues(siteId, 'fix', firstAttemptIssues, {
+      generatorId, pageType: designPageType, pageUrl: designPageUrl, draftId: draft.id,
+      files: [targetFilePath], validation: { passed: true, gate: 'quality-gate', attempts: attemptsUsed },
+    });
+  }
+  await recordKnowledgeReuse(priorKnowledge, 'success', { siteId, generatorId });
 
   // geo-audit is a generator, not an orchestrator-run agent, so its score
   // never reached agent_runs on its own — command-center.js had nothing to

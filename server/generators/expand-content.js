@@ -6,6 +6,10 @@ import { safeMessage } from '../lib/errors.js';
 import { filterCompetitorCandidates } from '../agents/lib/competitor-policy.js';
 import { attributionNote } from '../agents/lib/zunkireelabs-growth-policy.js';
 import { checkExpandContentStructuralFit } from './lib/expand-content-structural-fit.js';
+import { tenantContextTextFor } from '../lib/tenant-context.js';
+import { loadExpandStructurePrior } from '../design-agent/lib/expand-structure-loader.js';
+import { structurePlanText } from '../design-agent/lib/expand-structure-spec.js';
+import { classifyPageType } from '../design-agent/live-analysis/schema.js';
 
 // Real citation search is opt-in, separate from TAVILY_API_KEY simply being
 // set — citation search would silently start spending Tavily's quota the
@@ -256,6 +260,7 @@ export async function generate({ siteId, params }) {
     throw Object.assign(new Error(structuralFit.detail), { status: 400, userFacing: true });
   }
 
+  let structurePrior = null;
   let system = focus && FOCUS_SYSTEMS[focus] ? FOCUS_SYSTEMS[focus] : SYSTEM_GENERAL;
   let user = `Query: ${query || ''}\nPage title: ${fetched.analysis.title}\nPage text: ${fetched.analysis.bodyText.slice(0, 3000)}`;
 
@@ -269,6 +274,28 @@ export async function generate({ siteId, params }) {
   if (focus !== 'external-citations') {
     const site = await getSiteById(siteId);
     system += attributionNote(site);
+    // Expanded prose is written INTO an existing page, so the page's own text
+    // is the primary grounding and stays first in `user`. The verified facts
+    // are appended as a secondary source for the case the page excerpt is
+    // thin — a product page that lists feature names with no explanation is
+    // exactly where expansion is requested and exactly where the model has
+    // least to work from. Deliberately not applied to external-citations,
+    // whose prompt is replaced wholesale below and must carry no other
+    // instruction.
+    const tenantContext = await tenantContextTextFor(site, { sections: ['product'] });
+    if (tenantContext) user += `\n\n${tenantContext}`;
+
+    // Opt-in structure reference, expand-content ONLY (the loader asserts
+    // that). Adds a section plan — how many sections, in what role order, no
+    // table where the site draws none — to the prompt. Facts, wording,
+    // citations and any table payload are untouched, and for a tenant that has
+    // not opted in this is a no-op. The tenant's own page evidence wins per
+    // field inside the prior.
+    structurePrior = await loadExpandStructurePrior(site, {
+      actionType: 'expand-content', pageType: classifyPageType(page, { propertyType: site?.property_type }),
+    });
+    const plan = structurePlanText(structurePrior);
+    if (plan) user += `\n\n${plan}`;
   }
 
   // external-citations has no ungrounded mode: a citation is either backed
@@ -352,7 +379,8 @@ export async function generate({ siteId, params }) {
   }
   sections = sections
     .filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string')
-    .slice(0, 4)
+    // 4 is the long-standing cap; a tenant's own structure can only tighten it.
+    .slice(0, Math.min(4, structurePrior?.sectionCount?.max ?? 4))
     .map((s) => ({ ...s, table: sanitizeTable(s.table) }));
 
   if (focus === 'external-citations') sections = mergeCitationSections(sections);

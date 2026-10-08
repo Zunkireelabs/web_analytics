@@ -21,6 +21,7 @@ import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { getProductGrowthConfig, saveProductGrowthConfig, setProspectDiscoveryEnabled, ensureCrmWebhookToken } from '../store/product-growth-config.js';
 import { GOAL_TYPES, createGoal, listGoals, getGoal, updateGoal, setGoalStatus } from '../store/site-goals.js';
 import { getProductFunnel } from '../store/product-funnel.js';
+import { provisionProductTenant } from '../lib/product-onboarding.js';
 import { callLLMForJson } from '../llm.js';
 import { setOnboardingBaseline } from '../store/upsert.js';
 import { safeMessage } from '../lib/errors.js';
@@ -115,7 +116,14 @@ router.get('/internal/clients/growth-summary', async (req, res, next) => {
 // which doesn't happen at the same moment as deciding to onboard them.
 router.post('/internal/clients', async (req, res, next) => {
   try {
-    const { name, websiteDomain, timezone, email, password, propertyType } = req.body || {};
+    const {
+      name, websiteDomain, timezone, email, password, propertyType,
+      // Product-mode fields, all optional. Passing none keeps this route's
+      // behaviour exactly as it was; passing any means the tenant is
+      // provisioned in the same request instead of through three separate
+      // admin routes nobody is reminded to visit.
+      industry, markets, icpSignals, conversionEvent, goals, capabilities,
+    } = req.body || {};
     if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required.' });
     if (!email || !password) return res.status(400).json({ error: 'email and password are required for the client\'s first login.' });
     if (String(password).length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
@@ -138,17 +146,48 @@ router.post('/internal/clients', async (req, res, next) => {
       return res.status(500).json({ error: `Site #${site.id} was created, but ${message} — finish it via \`npm run create-client -- <email> <password> --site-id ${site.id}\`.`, siteId: site.id });
     }
 
+    // Provision the product side in the same request. Everything here is
+    // independently optional and every step reports its own outcome, so a
+    // partially-known tenant is provisioned as far as it can be rather than
+    // created and then left inert — which was the previous behaviour, and
+    // the reason a product tenant could log in fine and ship nothing.
+    //
+    // Never fails the creation: the site and the login already exist and are
+    // the irreversible part. `provisioning` is returned so the console can
+    // show exactly what landed and what still needs a human.
+    let provisioning = null;
+    if (site.property_type === 'product') {
+      provisioning = await provisionProductTenant(site, {
+        industry: typeof industry === 'string' ? industry : null,
+        markets: Array.isArray(markets) ? markets : null,
+        icpSignals: Array.isArray(icpSignals) ? icpSignals : null,
+        conversionEvent: typeof conversionEvent === 'string' ? conversionEvent : null,
+        goals: Array.isArray(goals) ? goals : [],
+        capabilities: Array.isArray(capabilities) ? capabilities : [],
+      }).catch((err) => {
+        const { message } = safeMessage('clients.provisionProductTenant', err, 'product provisioning could not run');
+        return { ok: false, steps: [], failed: [{ step: 'provisioning', ok: false, error: message }] };
+      });
+    }
+
     await recordAuditEvent(req, {
       action: 'tenant.created',
       targetType: 'site',
       targetId: String(site.id),
       tenantSiteId: site.id,
       tenantName: site.name,
-      metadata: { name: site.name, websiteDomain: site.website_domain, email: normalizedEmail },
+      metadata: {
+        name: site.name, websiteDomain: site.website_domain, email: normalizedEmail,
+        ...(provisioning ? { provisioned: provisioning.ok, provisioningFailed: provisioning.failed.map((s) => s.step) } : {}),
+      },
       success: true,
     });
 
-    res.status(201).json({ id: site.id, clientNumber: site.client_number, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, propertyType: site.property_type, connected: false });
+    res.status(201).json({
+      id: site.id, clientNumber: site.client_number, name: site.name, websiteDomain: site.website_domain,
+      timezone: site.timezone, propertyType: site.property_type, connected: false,
+      ...(provisioning ? { provisioning } : {}),
+    });
   } catch (e) { next(e); }
 });
 

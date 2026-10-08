@@ -3,6 +3,7 @@ import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/sit
 import { callLLM, callLLMForJson } from '../llm.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 import { pageStructureGuidance } from './lib/design-aware-composer.js';
+import { tenantContextTextFor } from '../lib/tenant-context.js';
 import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
 import { usedPhotoIds } from './lib/blog-image-usage.js';
 import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
@@ -79,6 +80,13 @@ export async function generate({ siteId, params }) {
   const grounded = fetched.ok && hasSufficientGroundingContent(fetched.analysis);
   const groundingExcerpt = grounded ? fetched.analysis.bodyText.slice(0, GROUNDING_EXCERPT_CHARS) : null;
 
+  // A direct answer is written for a query NO existing page answers, so the
+  // homepage excerpt is often the only thing the model knows about the
+  // business — and when that fetch fails it knows nothing at all. The
+  // verified facts are the one grounding source that does not depend on a
+  // live HTTP request succeeding.
+  const tenantContext = await tenantContextTextFor(site, { sections: ['business', 'product'] });
+
   const system = 'You are a content strategist producing a real, publishable direct-answer section for a discovered ' +
     'search-query gap — the AI-citation "answer-first" pattern: a heading that echoes the real query\'s own phrasing, ' +
     `followed immediately by a complete, standalone ${MIN_WORDS}-${MAX_WORDS} word paragraph that directly answers it. ` +
@@ -87,6 +95,9 @@ export async function generate({ siteId, params }) {
         'fact, statistic, or offering not evidenced in it. '
       : 'Ground every claim ONLY in the real context given below — never invent a fact, statistic, or offering not ' +
         'evidenced in it. ') +
+    // The verified-facts block is a second permitted grounding source, so the
+    // "ONLY in X" rule above has to name it or the two instructions conflict.
+    (tenantContext ? 'The verified business/product facts given below are also grounded evidence you may write from. ' : '') +
     'If internal-link candidate URLs are given, you may suggest linking to them where topically ' +
     'relevant (choosing ONLY from that list — never invent a URL). Respond with ONLY a JSON object: {"title": "...", ' +
     '"heading": "...", "directAnswer": "...", "supportingSections": [{"heading": "...", "body": "..."}], ' +
@@ -97,6 +108,7 @@ export async function generate({ siteId, params }) {
   const structureGuidance = pageStructureGuidance(site, 'faq', { fallbackPageTypes: ['other'] });
   const user = `Query: ${query}${context ? `\nContext: ${context}` : ''}` +
     (groundingExcerpt ? `\n\nReal site content (from ${homepage}):\n${groundingExcerpt}` : '') +
+    (tenantContext ? `\n\n${tenantContext}` : '') +
     `\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}` +
     (structureGuidance ? `\n\n${structureGuidance}` : '');
   let parsed;

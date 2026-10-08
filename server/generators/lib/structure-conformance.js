@@ -22,6 +22,7 @@
 // repair attempt rather than refusing the draft outright. Blocking is only
 // what happens after repair has genuinely been tried and failed.
 import { PAGE_TEMPLATE_TYPES_FOR_GENERATOR } from '../../design-agent/lib/page-templates.js';
+import { rolesOf, normalizeExpectedRoles, orderIssues, isStructureOrderCheckEnabled } from './section-roles.js';
 
 // A generated page is not required to mirror the canonical section count
 // exactly — a real topic legitimately needs more or fewer sections than the
@@ -95,6 +96,36 @@ export function checkStructureConformance(content, generatorId, site) {
       detail: `${unheaded.length} section(s) have no heading, so they cannot occupy a position in this site's "${template.pageType}" section order.`,
       correction: 'Give every section a real, descriptive heading — never an empty string or placeholder.',
     });
+  }
+
+  // Section ORDER by role (hero / cta / faq ...), behind STRUCTURE_ORDER_CHECK.
+  // The count check above says whether the draft is the right SIZE; this says
+  // whether it is the right SHAPE — a CTA opening a page whose own pages always
+  // close with one. Off by default and, like everything here, a correction fed
+  // back for one bounded repair, never a bare rejection.
+  if (isStructureOrderCheckEnabled() && sections.length >= 2) {
+    const expectedRoles = normalizeExpectedRoles(template.sectionOrder);
+    if (expectedRoles.filter((r) => r !== 'content').length) {
+      const { outOfOrder, missing } = orderIssues(rolesOf(sections), expectedRoles);
+      if (outOfOrder.length) {
+        issues.push({
+          path: 'sections',
+          patternId: 'structure-section-order',
+          snippet: outOfOrder.map((o) => o.role).join(', '),
+          detail: `This site's own "${template.pageType}" pages order their sections ${template.sectionOrder.join(' -> ')}, but this draft places ${outOfOrder.map((o) => o.role).join(', ')} out of that order.`,
+          correction: `Reorder the sections to follow this site's real "${template.pageType}" order (${template.sectionOrder.join(' -> ')}). Keep all the content; only change the order.`,
+        });
+      }
+      if (missing.length) {
+        issues.push({
+          path: 'sections',
+          patternId: 'structure-missing-role',
+          snippet: missing.join(', '),
+          detail: `This site's own "${template.pageType}" pages always include a ${missing.join(' and ')} section, and this draft has none.`,
+          correction: `Add a real ${missing.join(' and a ')} section where this site's "${template.pageType}" pages place it, written from the facts you were given — do not invent claims to fill it.`,
+        });
+      }
+    }
   }
 
   return { issues };

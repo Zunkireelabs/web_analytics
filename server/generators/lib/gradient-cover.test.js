@@ -1,9 +1,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderBlogOutlineBody } from '../../implementers/lib/newpage-render.js';
-import { gradientCoverSvg, coverConfigFor, buildGradientCover, seedOf, GRADIENT_ALT, PALETTES } from './gradient-cover.js';
+import { gradientCoverSvg, coverConfigFor, buildGradientCover, seedOf, GRADIENT_ALT, PALETTES, palettesFor, ZUNKIREE_PALETTES } from './gradient-cover.js';
 
-const SITE = { url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', cover: { style: 'gradient', dir: 'src/assets/images/blog', urlBase: '/assets/images/blog/' } } } } };
+const SITE = { website_domain: 'zunkireelabs.com', url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', cover: { style: 'gradient', dir: 'src/assets/images/blog', urlBase: '/assets/images/blog/' } } } } };
 
 describe('gradient-cover', () => {
   test('same seed → identical SVG; different seeds differ', () => {
@@ -61,5 +61,32 @@ describe('gradient-cover', () => {
     assert.match(body, /featuredImage: .*\/assets\/images\/blog\/what-is-ml\.svg/);
     assert.match(body, /featuredImageAlt: .*Abstract gradient background/);
     assert.doesNotMatch(body, /Pexels/);
+  });
+});
+
+describe('gradient-cover — palettes belong to the tenant', () => {
+  const coverCfg = { style: 'gradient', dir: 'a/b', urlBase: '/b/' };
+  const siteWith = (extra, domain = 'acme.com') => ({ website_domain: domain, url_file_map: { newContentTargets: { 'blog-outline': { cover: { ...coverCfg, ...extra } } } } });
+  const own = [{ top: '#111111', bottom: '#222222', left: '#333333', right: '#444444' }];
+
+  test("another tenant that opts in is NEVER given Zunkireelabs's colours", () => {
+    assert.equal(palettesFor(siteWith({})), null);
+    assert.equal(buildGradientCover(siteWith({}), { slug: 'x' }), null, 'no palette means no cover, not a borrowed brand');
+  });
+
+  test("a tenant's own palettes are used", () => {
+    const c = buildGradientCover(siteWith({ palettes: own }), { slug: 'x' });
+    assert.ok(c.file.content.includes('#111111'));
+    for (const z of ZUNKIREE_PALETTES) assert.ok(!c.file.content.includes(z.top));
+  });
+
+  test('malformed palette entries are dropped, and none left means no cover', () => {
+    assert.equal(palettesFor(siteWith({ palettes: [{ top: 'red' }] })), null);
+    assert.equal(palettesFor(siteWith({ palettes: [{ top: 'red' }, ...own] })).length, 1);
+  });
+
+  test("Zunkireelabs's own covers still reproduce byte for byte", () => {
+    assert.equal(palettesFor({ website_domain: 'https://www.zunkireelabs.com' }), ZUNKIREE_PALETTES);
+    assert.equal(gradientCoverSvg('a-post'), gradientCoverSvg('a-post', { palettes: ZUNKIREE_PALETTES }));
   });
 });

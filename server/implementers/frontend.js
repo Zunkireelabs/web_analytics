@@ -4,7 +4,8 @@ import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderBlogOutlineBodyTsx, renderTranslationBody, renderTranslationBodyTsx, renderDirectAnswerBody, renderDirectAnswerBodyTsx, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
 import { buildGradientCover } from '../generators/lib/gradient-cover.js';
-import { siteHasUsableDesignProfile, checkDesignIntegrityGate } from './lib/design-drift.js';
+import { siteHasUsableDesignProfile, checkDesignIntegrityGate, getDesignProfile } from './lib/design-drift.js';
+import { runDesignGates } from './lib/design-gates.js';
 import { findRootArrayBounds, spliceMarkedArray, assertValidContent } from './adapters/lib/js-data-splice.js';
 
 export const meta = {
@@ -346,9 +347,29 @@ export async function apply(site, draft) {
   // profile (which would mean re-deriving wrapInSiteProse's own branching
   // here and risking the two drifting apart) — a confirmed role-mismatch
   // quarantines this one draft, never the whole site's other pages.
+  // Design gates (completeness, then a real render comparison): fail closed
+  // in 'enforce', record-and-ship in 'log', absent in 'off'. See
+  // lib/design-gates.js for the policy and design_gate_decisions (186) for the
+  // log-only evidence that decides when it is safe to enforce.
+  const designGate = await runDesignGates(site, draft, resolved, {
+    // Tier B of the page-role resolver: what the target directory's own
+    // human-written posts declare. Cached per directory by the contract module.
+    deriveContract: async (s, actionType) => {
+      const cfg = resolveNewContentTargetConfig(s, actionType);
+      return cfg.dir ? deriveNewContentContract(s, cfg) : null;
+    },
+  });
+  if (!designGate.ok) return designGate;
+
   if (siteHasUsableDesignProfile(site)) {
     const gate = await checkDesignIntegrityGate(site, { actionType: draft.action_type, findingId: draft.finding_id });
     if (!gate.ok) {
+      // Kept for this tenant so the same mismatch is recognised next time.
+      await (await import('../store/design-knowledge.js')).recordDesignFailure(site.id, {
+        patternId: 'design-integrity-failed', generatorId: draft.action_type,
+        detail: gate.error || `${gate.field} uses classes this site only ever uses for its ${gate.observedAs}.`,
+        draftId: draft.id ?? null, validation: { passed: false, gate: 'integrity' },
+      }).catch(() => {});
       return {
         ok: false, reason: 'design-integrity-failed',
         error: gate.error || `${gate.field} uses classes this site only ever uses for its ${gate.observedAs}.`,

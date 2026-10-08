@@ -25,6 +25,11 @@ export const FEED_CATALOG = [
       { id: 'techcrunch', name: 'TechCrunch', url: 'https://techcrunch.com/feed/' },
       { id: 'ars', name: 'Ars Technica', url: 'https://feeds.arstechnica.com/arstechnica/index' },
       { id: 'verge', name: 'The Verge', url: 'https://www.theverge.com/rss/index.xml' },
+      // New product launches, which the news feeds above only cover once a
+      // launch is big enough to be reported. Verified 200 + 50 parseable items
+      // 2026-10-07. Last in the list so, when a site's industry matches several
+      // categories, it is the first to be dropped by the secondary cap.
+      { id: 'producthunt', name: 'Product Hunt', url: 'https://www.producthunt.com/feed' },
     ],
   },
   {
@@ -46,7 +51,12 @@ export const FEED_CATALOG = [
   },
   {
     key: 'real-estate',
-    match: (s) => /\b(real estate|propert\w*|realt\w*|housing|mortgage\w*|broker\w*|landlord\w*|residential|commercial real)\b/i.test(s),
+    // relocat/downsiz/senior-move cover real-estate-adjacent businesses whose
+    // own profile never says "property": measured 2026-10-07, a senior
+    // relocation and downsizing company ("senior move management", "downsizing
+    // a family home") matched NO feed at all, so trend radar could not run for
+    // it. Their readers follow housing-market news, which is what these feeds are.
+    match: (s) => /\b(real estate|propert\w*|realt\w*|housing|mortgage\w*|broker\w*|landlord\w*|residential|commercial real|relocat\w*|downsiz\w*|senior (living|housing|move\w*)|move management)\b/i.test(s),
     feeds: [
       { id: 'housingwire', name: 'HousingWire', url: 'https://www.housingwire.com/feed/' },
       { id: 'realtor-news', name: 'Realtor.com News', url: 'https://www.realtor.com/news/feed/' },
@@ -65,10 +75,34 @@ export const FEED_CATALOG = [
   },
 ];
 
+// The exact industry labels this catalog can serve. Anything captured at
+// onboarding has to be checked against these: an industry string the
+// catalog cannot match produces NO feeds, and trend radar then reports a
+// generic "too few headlines" — so the tenant looks like it has no trends
+// rather than like it was never classified. That is the silent failure
+// lib/industry-capture.js exists to close.
+export const FEED_CATALOG_KEYS = Object.freeze(FEED_CATALOG.map((e) => e.key));
+
+// Whether any catalog entry would actually match this industry string.
+// Uses the same `match` predicates feedsForTenant does, so a synonym the
+// catalog genuinely understands ("SaaS", "IT", "fitness") counts as
+// mappable even though it is not one of the keys — the check has to agree
+// with the real selection logic, not with a hand-kept list beside it.
+export function industryIsMappable(industry) {
+  const text = Array.isArray(industry) ? industry.join(' | ') : String(industry || '');
+  if (!text.trim()) return false;
+  return FEED_CATALOG.some((e) => e.match(text));
+}
+
 // Not in the catalog by industry: an owner who wants AI coverage on a site
 // whose industry isn't tech (e.g. "AI in education") gets it through the
 // tenant's main_topics, which feedsForTenant also matches against.
-const MAX_FEEDS = 8;
+// 12, not 8: a business that serves several industries (an AI-agent company
+// selling to healthcare, education and real estate) legitimately needs its
+// own field's feeds PLUS a couple from each industry it serves. The catalog
+// already bounds the total (primary feeds + at most 2 per secondary
+// category), so this is a ceiling, not a target.
+const MAX_FEEDS = 12;
 const SECONDARY_FEEDS_PER_CATEGORY = 2;
 
 // industries: string[] from tenantIndustries(); topics: site_profiles

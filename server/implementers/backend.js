@@ -4,6 +4,8 @@ import { getFileContent } from '../github/client.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
 import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
 import { resolveInsertion, buildUnresolvedInsertionFailure } from './lib/insertion-engine.js';
+import { loadExpandStructurePrior } from '../design-agent/lib/expand-structure-loader.js';
+import { classifyPageType } from '../design-agent/live-analysis/schema.js';
 import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
 import { patchSoftNotFoundFallback } from './lib/soft-404-inject.js';
 import { patchRedirectChain } from './lib/redirect-chain-nginx-inject.js';
@@ -1367,7 +1369,16 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // "push an empty marker first" step that used to have to happen before a
   // draft could even reach preview, and the separate stand-alone bootstrap
   // PR that used to have to be merged first.
-  const { content: ensuredContent, unresolved } = await resolveInsertion(site, file.content, filePath, markerMap);
+  // Opt-in expand-content placement (siteRoot.expandStructureRef): a newly
+  // created marker goes above the page's trailing FAQ/CTA, not below them.
+  // null for every other action type and every tenant that has not opted in.
+  const expandPrior = draft.action_type === 'expand-content'
+    ? await loadExpandStructurePrior(site, { actionType: 'expand-content', pageType: classifyPageType(page, { propertyType: site?.property_type }) })
+    : null;
+  const placement = expandPrior && componentField
+    ? { field: componentField, beforeRoles: expandPrior.placement.before }
+    : null;
+  const { content: ensuredContent, unresolved } = await resolveInsertion(site, file.content, filePath, markerMap, { placement });
 
   const spliced = spliceMarkers(ensuredContent, markerMap, built.values);
   // Per this platform's daily-batch contract: a field that couldn't be

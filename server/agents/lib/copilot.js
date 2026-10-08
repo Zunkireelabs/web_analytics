@@ -10,6 +10,7 @@ import { systemPromptFor, resolveDisplayName } from './copilot-greeting.js';
 import { getUserById } from '../../store/users.js';
 import { getSiteById } from '../../store/read.js';
 import { PLATFORM_GUIDE } from './platform-guide.js';
+import { tenantContextTextForSiteId } from '../../lib/tenant-context.js';
 
 // Who is being answered, resolved server-side. Never throws — an unresolvable
 // user falls back to the client persona, which is the safe default because it
@@ -149,7 +150,8 @@ async function answerFromCache(siteId, agentIds, question, personaPrompt) {
   // itself failed) — answerQuestion's caller applies the honest-gap fallback
   // uniformly for both this path and the fresh-run path, so it isn't
   // duplicated here.
-  const narrative = await synthesizeFindings(findings, perAgent, question, personaPrompt);
+  const tenantContext = await tenantContextTextForSiteId(siteId, { sections: ['business', 'goals', 'product'] });
+  const narrative = await synthesizeFindings(findings, perAgent, question, personaPrompt, { tenantContext });
   return { findings, narrative, ranAgentIds: agentIds, fromCache: true };
 }
 

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveTargetAndBody, FRONTEND_ACTION_TYPES, COMPLIANCE_ACTION_TYPES, computeGeneratedPostsManifestUpdate } from './frontend.js';
+import { apply, resolveTargetAndBody, FRONTEND_ACTION_TYPES, COMPLIANCE_ACTION_TYPES, computeGeneratedPostsManifestUpdate } from './frontend.js';
 
 describe('resolveTargetAndBody — generation-time-prepared fast path', () => {
   test('a draft with rendered_body/target_file_path already set is returned verbatim, no recomputation', async () => {
@@ -267,5 +267,35 @@ describe('FRONTEND_ACTION_TYPES / COMPLIANCE_ACTION_TYPES', () => {
 
   test('every compliance action type is also a frontend action type', () => {
     for (const t of COMPLIANCE_ACTION_TYPES) assert.ok(FRONTEND_ACTION_TYPES.has(t), `${t} should be in FRONTEND_ACTION_TYPES`);
+  });
+});
+
+describe('apply — design completeness gate (DESIGN_GATE_FAIL_CLOSED)', () => {
+  // The prepared-body fast path means apply() reaches the gate without any
+  // repo access, so a refusal here is provably BEFORE anything is pushed.
+  const draft = {
+    action_type: 'blog-outline', finding_id: 'f',
+    rendered_body: '---\ntitle: "x"\n---\nbody', target_file_path: 'src/blog/x.md', content: { title: 'x' },
+  };
+  const withFlag = async (fn) => {
+    process.env.DESIGN_GATE_FAIL_CLOSED = 'true';
+    try { return await fn(); } finally { delete process.env.DESIGN_GATE_FAIL_CLOSED; }
+  };
+
+  test('a site with no design profile at all is held, not shipped unguarded', async () => {
+    // Today the integrity gate is skipped entirely when there is no usable
+    // profile, so this case had no guard at all.
+    const r = await withFlag(() => apply({ url_file_map: {} }, draft));
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'design-incomplete');
+    assert.match(r.error, /no-design-profile/);
+    assert.equal(r.designAssessment.repairable, true);
+  });
+
+  test('a profile that lacks what the draft renders is held with the exact missing field', async () => {
+    const site = { url_file_map: { siteRoot: { designProfile: { version: 2, typography: { body: 'b' } } } } };
+    const r = await withFlag(() => apply(site, draft));
+    assert.equal(r.reason, 'design-incomplete');
+    assert.match(r.error, /typography\.heading\.item/);
   });
 });

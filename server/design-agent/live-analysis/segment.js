@@ -153,8 +153,25 @@ export function buildPageTypePatterns(segmentedPages) {
   for (const [pageType, pages] of byType) {
     patterns[pageType] = {
       exampleUrls: pages.map((p) => p.url),
-      sectionOrder: pages[0]?.sections.map((s) => s.role) || [],
+      sectionOrder: consensusSectionOrder(pages),
     };
   }
   return patterns;
+}
+
+// The section order most of a type's captured pages share, rather than
+// whatever the first one happened to be. The most common exact order wins; a
+// tie (or a single page) goes to the longest order, i.e. the most fully
+// developed page. With one page this is identical to taking that page.
+export function consensusSectionOrder(pages) {
+  const orders = (pages || []).map((p) => (p?.sections || []).map((s) => s.role)).filter((o) => o.length);
+  if (!orders.length) return [];
+  const counts = new Map();
+  for (const o of orders) {
+    const k = o.join('>');
+    const e = counts.get(k) || { order: o, n: 0 };
+    e.n += 1;
+    counts.set(k, e);
+  }
+  return [...counts.values()].sort((a, b) => b.n - a.n || b.order.length - a.order.length)[0].order;
 }

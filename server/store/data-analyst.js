@@ -51,7 +51,8 @@ export async function getAnomalyAlerts(siteId, limit = 20) {
 
 export async function getSiteProfile(siteId) {
   const { rows } = await query(
-    `SELECT industry, main_topics_json AS main_topics, site_type, profiled_at
+    `SELECT industry, main_topics_json AS main_topics, site_type, profiled_at,
+            industry_source, industry_confidence
        FROM site_profiles
       WHERE site_id = $1`,
     [siteId]
@@ -64,16 +65,37 @@ export async function getSiteProfile(siteId) {
 // lives in data-analyst-agent/app/collectors/keyword_clustering.py, reached
 // only via the 'save_site_profile' MCP tool, never a direct DB write from
 // Python — see app/mcp_client/client.py's own "ONLY interface" rule).
-export async function saveSiteProfile(siteId, { industry, mainTopics, siteType }) {
+// `industrySource` / `industryConfidence` (183) are optional and every
+// existing caller — including the Python collector's save_site_profile MCP
+// tool — passes neither, which keeps their behaviour byte-identical.
+//
+// The CASE is the one real change: a HUMAN-asserted industry is never
+// overwritten by an inference. Without it, writing a staff-set industry
+// here would work exactly once, until the next clustering run for a tenant
+// that does have Search Console upserted over it. A human write (source
+// 'human') always wins, including over an earlier human write.
+export async function saveSiteProfile(siteId, { industry, mainTopics, siteType, industrySource = null, industryConfidence = null }) {
   await query(
-    `INSERT INTO site_profiles (site_id, industry, main_topics_json, site_type, profiled_at)
-     VALUES ($1, $2, $3, $4, now())
+    `INSERT INTO site_profiles (site_id, industry, main_topics_json, site_type, profiled_at,
+                                industry_source, industry_confidence)
+     VALUES ($1, $2, $3, $4, now(), $5, $6)
      ON CONFLICT (site_id) DO UPDATE SET
-       industry = EXCLUDED.industry,
+       industry = CASE
+         WHEN site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human'
+           THEN site_profiles.industry
+         ELSE EXCLUDED.industry END,
+       industry_source = CASE
+         WHEN site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human'
+           THEN site_profiles.industry_source
+         ELSE EXCLUDED.industry_source END,
+       industry_confidence = CASE
+         WHEN site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human'
+           THEN site_profiles.industry_confidence
+         ELSE EXCLUDED.industry_confidence END,
        main_topics_json = EXCLUDED.main_topics_json,
        site_type = EXCLUDED.site_type,
        profiled_at = EXCLUDED.profiled_at`,
-    [siteId, industry, JSON.stringify(mainTopics || []), siteType || null]
+    [siteId, industry, JSON.stringify(mainTopics || []), siteType || null, industrySource, industryConfidence]
   );
 }
 
@@ -358,10 +380,10 @@ export async function getProductKnowledge(siteId, status = 'verified') {
 }
 
 // Added through the Analyst page's own form, so 'human' + 'verified' is the
-// only path this function writes — an agent proposing a capability is a
-// separate, not-yet-built entry point that would insert source='agent_proposed',
-// status='proposed' instead. No such writer exists yet, so every row today
-// is human-asserted ground truth, per the "do not invent capabilities" rule.
+// only path this function writes. The agent-proposed path is
+// proposeProductCapability below — deliberately a separate function rather
+// than a status parameter on this one, so no caller can write a 'verified'
+// row by passing an argument.
 export async function createProductCapability(siteId, { name, category, description, industries, kind = 'capability', details }) {
   const { rows } = await query(
     `INSERT INTO product_capabilities (site_id, name, category, description, industries_json, kind, details_json, status, source)
@@ -372,6 +394,35 @@ export async function createProductCapability(siteId, { name, category, descript
       JSON.stringify(details && typeof details === 'object' ? details : {})]
   );
   return rows[0];
+}
+
+// Migration 176's `status='proposed'` gate finally gets its first writer.
+// Anything an agent extracted — from a homepage at onboarding, say — lands
+// here as 'proposed' + 'agent_proposed', which getProductKnowledge's
+// 'verified' default makes INVISIBLE to every generator until a human
+// confirms it on the Analyst page. That is the whole point: it unblocks the
+// tenant whose admin never filled in the capabilities form, without ever
+// stating a machine guess to a model as a verified fact.
+//
+// Idempotent on (site_id, lower(name), kind) so re-running onboarding, or a
+// second extraction pass, does not accumulate near-duplicate rows. A row a
+// human has already VERIFIED or REJECTED is left completely alone — a
+// re-extraction must never undo a human decision.
+export async function proposeProductCapability(siteId, { name, category, description, industries, kind = 'capability', details }) {
+  if (!name || !String(name).trim()) return null;
+  const { rows } = await query(
+    `INSERT INTO product_capabilities (site_id, name, category, description, industries_json, kind, details_json, status, source)
+     SELECT $1, $2, $3, $4, $5, $6, $7, 'proposed', 'agent_proposed'
+      WHERE NOT EXISTS (
+        SELECT 1 FROM product_capabilities
+         WHERE site_id = $1 AND kind = $6 AND lower(name) = lower($2)
+      )
+     RETURNING id, site_id, name, category, description, industries_json AS industries, kind, details_json AS details,
+               status, source, created_at, updated_at`,
+    [siteId, String(name).trim(), category || null, description || null, JSON.stringify(industries || []), kind,
+      JSON.stringify(details && typeof details === 'object' ? details : {})]
+  );
+  return rows[0] || null;
 }
 
 export async function updateProductCapabilityStatus(siteId, id, status) {

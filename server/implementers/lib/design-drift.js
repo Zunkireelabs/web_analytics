@@ -1661,7 +1661,19 @@ export async function resolvePageComponentTemplate(site, actionType, pageUrl, {
 // in this codebase requires — same shape action-center.js uses to record a
 // Quality Gate hit. Never lets a memory-write failure block the caller —
 // same fail-open discipline as everywhere else this table is touched.
-export function recordRejectedTemplateLesson({ siteId, actionType, error, recordFixOutcomeFn = recordFixOutcome }) {
+export function recordRejectedTemplateLesson({
+  siteId, actionType, error, recordFixOutcomeFn = recordFixOutcome,
+  // The retrievable twin: the row below is filed under a generator id no
+  // lookup ever asks for, so it was never read back. This one is keyed to the
+  // tenant's design knowledge, which the profile extractor does read.
+  recordDesignFailureFn = async (...a) => (await import('../../store/design-knowledge.js')).recordDesignFailure(...a),
+}) {
+  Promise.resolve(recordDesignFailureFn(siteId, {
+    patternId: 'template-missing-placeholder', component: 'component-template',
+    detail: `"${actionType}" template: ${error}`,
+    correction: `Keep every placeholder required for "${actionType}" verbatim in the derived template`,
+    validation: { passed: false, gate: 'template-placeholders' },
+  })).catch(() => {});
   return recordFixOutcomeFn({
     category: 'content', scope: 'client', siteId, generatorId: DESIGN_AGENT_GENERATOR_ID,
     validationRuleId: `missing-placeholders:${actionType}`, outcome: 'success', sourceType: 'runtime-auto',
@@ -1823,6 +1835,10 @@ export async function persistDesignProfile(site, rawProfile, {
   saveConfig = updateSiteRepoConfig,
   recordAudit = recordAuditEvent,
   persistTemplatesFn = persistDerivedComponentTemplates,
+  // Resolves siteRoot.inlineProse from the site's own human-written articles.
+  // null (the default) when INLINE_PROSE_AUTODETECT is off, so every existing
+  // caller and test is unchanged.
+  detectInlineProseFn = null,
 } = {}) {
   const profile = stampDesignProfile(rawProfile, {
     derivedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT,
@@ -1854,7 +1870,20 @@ export async function persistDesignProfile(site, rawProfile, {
   const projected = projectAllComponentTemplates(profile);
   const result = await persistTemplatesFn(siteWithProfile, projected, { jobId });
 
-  return { ok: true, profile, projected: result?.saved || {}, rejected: result?.rejected || [] };
+  // After the profile and templates are safely saved: the mode is a refinement
+  // and must never put them at risk. Lazy import — the detector pulls in the
+  // browser layer, which nothing else in this module needs.
+  let inlineProse = null;
+  const autodetect = detectInlineProseFn
+    || ((await import('../../design-agent/live-analysis/inline-prose-detect.js')).isInlineProseAutodetectEnabled()
+      ? (await import('../../design-agent/live-analysis/inline-prose-detect.js')).detectInlineProseMode
+      : null);
+  if (autodetect) {
+    const { applyInlineProseDetection } = await import('../../design-agent/live-analysis/inline-prose-detect.js');
+    inlineProse = await applyInlineProseDetection({ site: siteWithProfile, profile, saveConfig, detect: autodetect });
+  }
+
+  return { ok: true, profile, projected: result?.saved || {}, rejected: result?.rejected || [], ...(inlineProse ? { inlineProse } : {}) };
 }
 
 // The cheap sibling of persistDesignProfile above: the weekly rescan's fresh

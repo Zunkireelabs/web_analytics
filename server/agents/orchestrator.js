@@ -3,6 +3,7 @@ import { runAgent } from './runner.js';
 import { callLLM } from '../llm.js';
 import { createPageCache } from './lib/fetch-cache.js';
 import { safeMessage } from '../lib/errors.js';
+import { tenantContextTextForSiteId } from '../lib/tenant-context.js';
 
 // The one shared place that knows how to run N specialist agents and combine
 // their structured findings into one answer. Executive Report, Action
@@ -50,10 +51,19 @@ const QUESTION_SYSTEM = 'You are a senior growth analyst answering a specific qu
 // surface serves both platform admins and site owners — a client must not be
 // answered in internal vocabulary (agent ids, risk tiers, draft states).
 // Every other caller passes nothing and keeps the existing behaviour exactly.
-export async function synthesizeFindings(findings, perAgent, question, systemOverride = null) {
+// `tenantContext` (lib/tenant-context.js) is what this business actually is
+// and is trying to achieve. The briefing is the one prompt every agent's
+// output passes through, so stating the goals here is the cheapest way to
+// make the synthesis prioritise against them rather than against raw
+// finding severity — a position drop on a page that serves no active goal
+// and one on the page that does are indistinguishable without it. Passed in
+// rather than loaded here so this function stays free of a database read,
+// and '' for every tenant until the flag is on.
+export async function synthesizeFindings(findings, perAgent, question, systemOverride = null, { tenantContext = '' } = {}) {
   if (!findings.length) return null;
   const system = systemOverride || (question ? QUESTION_SYSTEM : BRIEFING_SYSTEM);
   const user = (question ? `Question: ${question}\n` : '') +
+    (tenantContext ? `${tenantContext}\n\n` : '') +
     `Findings: ${JSON.stringify(findings)}\nAgent statuses: ${JSON.stringify(perAgent)}`;
   return callLLM(system, user, { maxTokens: 450 })
     .catch((err) => { console.warn('[orchestrator] synthesis failed:', err.message); return null; });
@@ -154,7 +164,8 @@ export async function runOrchestration({
   ));
 
   const { findings, perAgent } = summarizeAgentRuns(ran);
-  const narrative = await synthesizeFindings(findings, perAgent, question, personaPrompt);
+  const tenantContext = await tenantContextTextForSiteId(siteId, { sections: ['business', 'goals', 'product'] });
+  const narrative = await synthesizeFindings(findings, perAgent, question, personaPrompt, { tenantContext });
 
   return { ranAgentIds: ids, generatedAt: new Date().toISOString(), findings, perAgent, narrative };
 }

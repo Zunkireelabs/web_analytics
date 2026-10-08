@@ -25,6 +25,8 @@ import { countDraftsBySourcesToday } from '../../store/drafts.js';
 import { listByState as listQueueItemsByState, markShipped as markQueueItemShipped, releaseItem as releaseQueueItem, countShippedFileEditsToday, QUEUE_STATES } from '../../store/shipping-queue.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { getProtectedPageSet } from '../../store/protected-pages.js';
+import { getSuppressionSet, isSuppressed, isSuppressionEnforcing } from '../../store/fix-suppressions.js';
+import { checkPreconditions, isPreconditionsEnforcing } from './preconditions.js';
 import { splitProtectedQueueItems, splitProtectedFileEdits, protectedFilePaths } from './protected-pages.js';
 import { sanitizeForCustomer } from '../../lib/errors.js';
 import { verifyRecommendation, VERIFICATION_DECISION } from '../../generators/lib/verification-layer.js';
@@ -180,7 +182,15 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // getOrInitBatchBranch's own sync-corruption check (github-ops.js) is the
   // second line of defense at the git level for anything that still slips
   // through.
-  const [rows, draftedFindingIds, pendingDraftFilePaths, draftsSpentToday, fileEditsSpentToday, learnedMap, protectedPages] = await Promise.all([
+  // Read once per run, same shape and cost as getLearnedConfidenceMap below.
+  // Enforcement is flag-gated: suppressions are always WRITTEN by the impact
+  // sweep so real evidence accumulates, and only consulted here once
+  // FIX_SUPPRESSION_ENABLED is on.
+  const suppressionsEnforced = isSuppressionEnforcing();
+  // Read once per run rather than per item: the answer cannot change
+  // mid-run, and the per-item check below is already the expensive part.
+  const preconditionsEnforced = isPreconditionsEnforcing();
+  const [rows, draftedFindingIds, pendingDraftFilePaths, draftsSpentToday, fileEditsSpentToday, learnedMap, protectedPages, suppressions] = await Promise.all([
     listOpenRecommendations(siteId),
     getDraftedFindingIds(siteId),
     getPendingDraftFilePaths(siteId),
@@ -208,6 +218,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // Pages that earn clicks / rank near the top: a title, canonical, redirect
     // or content change there is never unattended (protected-pages.js).
     getProtectedPageSet(siteId),
+    suppressionsEnforced ? getSuppressionSet(siteId).catch(() => new Set()) : Promise.resolve(new Set()),
   ]);
   // The shared ceiling's real spend for today: every autonomous fix shipped
   // by ANY source, whether it produced a `drafts` row or a file-edits queue
@@ -264,6 +275,16 @@ export async function autoRemediateSafeRecommendations(siteId, {
   const eligible = rows.filter((r) => {
     if (r.finding_ids.some((fid) => draftedFindingIds.has(fid))) return false;
     if (pendingDraftFilePaths.has(resolveFile(site, r.page))) return false;
+    // A fix measured to have made THIS page worse (fix_impact -> migration
+    // 182). learnedMap below is site-wide per generator and structurally
+    // cannot express this, which is why a harmful-but-successful fix used to
+    // come straight back on its next detection. Checked before
+    // classifyRecommendation so a suppressed page is excluded even when it
+    // would otherwise be a probation probe — re-proving a generator must
+    // happen somewhere it has not already been measured doing harm.
+    if (suppressionsEnforced && isSuppressed(suppressions, {
+      scope: 'page', scopeKey: r.params?.page || r.page, generatorId: r.recommendation_type,
+    })) return false;
     const decision = classifyRecommendation(r, learnedMap, protectedPages).decision;
     if (decision === AUTONOMY_DECISION.SAFE_TO_AUTO_EXECUTE) return true;
     return isProbationProbe(r);
@@ -632,6 +653,43 @@ export async function autoRemediateSafeRecommendations(siteId, {
         if (backfill) workQueue.push(backfill);
       }
       continue;
+    }
+
+    // "Can this work succeed at all?" — a different question from
+    // verifyRecommendation's "is the outcome already true?", and the one
+    // that accounts for the real waste: the 116 abandoned Admizz drafts each
+    // paid for a generation and then failed at APPLY time against a
+    // condition knowable before a single token was produced. See
+    // agents/lib/preconditions.js for the tri-state contract, in particular
+    // why "could not check" never refuses.
+    //
+    // Flagged, and placed here rather than earlier so it runs only for items
+    // that have actually reached their turn in the queue — the checks are
+    // repo reads, and running them for the whole backlog would cost more than
+    // it saves. Same skip-and-backfill shape as the two checks above, since
+    // nothing was attempted here either.
+    if (preconditionsEnforced) {
+      const pre = await checkPreconditions({
+        site, siteId, actionType: rec.recommendation_type, generatorId: rec.recommendation_type,
+        params: rec.params || {}, pageUrl: rec.params?.page || rec.page || null,
+      }).catch(() => ({ ok: true, failures: [] }));
+
+      if (pre.advisories?.length) {
+        console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) proceeding with advisories — ${pre.advisories.map((a) => a.reason).join(', ')}`);
+      }
+      if (!pre.ok) {
+        await blockRecommendation(
+          rec.id,
+          `Precondition check refused this before drafting (${pre.reason}): ${pre.detail}`,
+        ).catch(() => {});
+        conflicted++;
+        console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) blocked before drafting — precondition ${pre.failures.map((f) => f.reason).join(', ')}`);
+        if (attempted < remaining) {
+          const backfill = nextBackfillCandidate();
+          if (backfill) workQueue.push(backfill);
+        }
+        continue;
+      }
     }
 
     if (consecutiveSystemicFailures >= SYSTEMIC_FAILURE_LIMIT) {

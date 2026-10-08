@@ -16,6 +16,8 @@ import { opportunityDraftEligibility } from './analyst-seo-mapping.js';
 import { getSiteById } from '../../store/read.js';
 import { listActiveGoals } from '../../store/site-goals.js';
 import { pickBestGoalAlignment } from './goal-alignment.js';
+import { claimForItem } from './work-claims.js';
+import { isLeadingIndicatorsEnabled } from './leading-indicators.js';
 
 // THE EVIDENCE-FUSION ENGINE.
 //
@@ -198,6 +200,66 @@ async function fuseDecliningPages(site, { declines, pageInsights, capabilities, 
   return conclusions;
 }
 
+// Early-warning lane. Same conclusion shape and the same corroboration bar
+// as measured declines: a page's leading families plus any live insight
+// families must reach MIN_CORROBORATION_TO_ACT, so one leading indicator
+// alone can only ever be 'monitor'. Output goes through shipConclusion like
+// everything else, so safe results auto-ship via existing rails.
+async function fuseLeadingIndicators(site, { leading, pageInsights, capabilities, freshness }) {
+  const conclusions = [];
+  const primaryDomain = knownDomain(site);
+  for (const [page, warning] of leading) {
+    if (primaryDomain && hostnameOf(page) !== primaryDomain) continue;
+
+    // Independent corroboration from the Python pipeline counts too.
+    const { families: insightFamilies, signals: insightSignals } = familiesForDecliningPage({ reasons: [] }, pageInsights.filter((i) => i.page === page));
+    const families = new Set([...warning.families, ...insightFamilies]);
+    const signals = [...warning.signals, ...insightSignals];
+    const corroboration = families.size;
+
+    const mapping = await mapPageToProduct(site.id, page, capabilities);
+    const mappingText = describeMapping(mapping, page);
+    const confidence = Math.round(Math.min(1, corroboration / 4) * freshness.confidenceMultiplier * 1000) / 1000;
+    const gate = freshnessGate(freshness);
+    const verdict = corroboration >= MIN_CORROBORATION_TO_ACT && gate.allowAutonomous ? 'act' : 'monitor';
+
+    // CTR-shaped warnings are a presentation problem; anything else is
+    // coverage. Position drift is deliberately not routed to qa-content here —
+    // that needs a measured query gap this lane does not have.
+    const ctrShaped = warning.families.includes('ctr-decay-leading');
+    const action = verdict === 'act'
+      ? { generatorId: ctrShaped ? 'meta-title' : 'expand-content', params: { page } }
+      : null;
+
+    const findingId = `analyst-fusion:early-warning:${page}`;
+    const conclusion = {
+      subjectType: 'page', subjectKey: page, direction: 'early-warning', page,
+      corroboration, confidence, impact: Math.round(warning.impressionsAtRisk * 0.25), urgent: false,
+      productRelevance: mapping.relevance, feasible: true,
+      generatorId: action?.generatorId || null, params: action?.params || { page },
+      findingId, verdict, freshnessPresentation: gate.presentation,
+      signals,
+      productMapping: { capability: mapping.capability ? { id: mapping.capability.id, name: mapping.capability.name, category: mapping.capability.category } : null, relevance: mapping.relevance, topQueries: mapping.topQueries, surface: { kind: 'expand-existing-page', page } },
+      externalDemand: { available: false, note: 'not queried for early warnings' },
+      narrative: {
+        observed: `${page} is not declining yet, but shows ${signals.length} early-warning pattern(s): ${warning.reasons.join('; ')}.`,
+        changed: `${families.size} independent family(ies) of leading signal.`,
+        predicted: 'A pattern that usually precedes a measured decline — a suspicion, not a forecast.',
+        why: verdict === 'act' ? 'Independent signals agree, which clears the corroboration bar.' : 'One family alone does not clear the corroboration bar, so this is monitored only.',
+        cause: mappingText,
+        opportunity: `Impressions currently at stake: ${warning.impressionsAtRisk}.`,
+        action: action ? `${action.generatorId} on ${page}` : 'Monitor.',
+        surface: page,
+        measurement: "Re-measure this page's impressions, clicks, position and CTR ~31 days after any fix ships.",
+      },
+      topRootCause: null,
+    };
+    const { score, factors } = scoreConclusion(conclusion);
+    conclusions.push({ ...conclusion, score, scoreFactors: factors });
+  }
+  return conclusions;
+}
+
 async function fuseGrowthOpportunities(site, { opportunities, pageInsights, capabilities, freshness, provider }) {
   const conclusions = [];
   for (const opp of opportunities) {
@@ -295,6 +357,17 @@ export async function shipConclusion(siteId, gates, conclusion, activeGoals = []
   const gateResult = await gates.evaluate(conclusion.generatorId, conclusion.params).catch(() => ({ drop: null, blockedReason: null }));
   if (gateResult.drop) return { recommendationId: null, created: false, dropped: true };
 
+  // Claim the page/topic before creating anything (migration 180). Fusion
+  // reaches here having already corroborated its signal, so losing the claim
+  // means another producer is working the same page — not that the
+  // conclusion was wrong. The caller persists every conclusion to
+  // analyst_evidence regardless of what happens here, so declining to create
+  // a second recommendation loses nothing from the audit trail.
+  const claim = await claimForItem(siteId, conclusion, 'analyst-fusion');
+  if (!claim.ok) {
+    return { recommendationId: null, created: false, dropped: true, claimedBy: claim.heldBy?.producer ?? null };
+  }
+
   const goalAlignment = pickBestGoalAlignment(activeGoals, {
     page: conclusion.page, reason: conclusion.narrative?.why || conclusion.narrative?.observed, tag: conclusion.direction, category: null,
   });
@@ -336,8 +409,8 @@ export async function runAnalystFusion(siteId, { site: siteArg } = {}) {
 
   const freshness = await checkAnalystFreshness(siteId);
 
-  const [{ declines, siteWide }, pageInsights, capabilities, growth, activeGoals] = await Promise.all([
-    loadDeclines(siteId, { timezone: site.timezone || 'UTC' }).catch(() => ({ declines: new Map(), siteWide: null })),
+  const [{ declines, leading, siteWide }, pageInsights, capabilities, growth, activeGoals] = await Promise.all([
+    loadDeclines(siteId, { timezone: site.timezone || 'UTC' }).catch(() => ({ declines: new Map(), leading: new Map(), siteWide: null })),
     getRecentPageInsights(siteId).catch(() => []),
     loadVerifiedCapabilities(siteId).catch(() => []),
     buildGrowthOpportunities(siteId).catch(() => ({ opportunities: [] })),
@@ -351,12 +424,21 @@ export async function runAnalystFusion(siteId, { site: siteArg } = {}) {
 
   const provider = getSearchDemandProvider();
 
-  const [declineConclusions, growthConclusions] = await Promise.all([
+  const [declineConclusions, growthConclusions, leadingConclusions] = await Promise.all([
     fuseDecliningPages(site, { declines, pageInsights, capabilities, freshness, provider }),
     fuseGrowthOpportunities(site, { opportunities: growth.opportunities, pageInsights, capabilities, freshness, provider }),
+    // The third lane: pages not yet declining that show an early-warning
+    // pattern. Flagged, because it is the one lane that acts on something
+    // that has not happened yet.
+    isLeadingIndicatorsEnabled()
+      ? fuseLeadingIndicators(site, { leading: leading || new Map(), pageInsights, capabilities, freshness })
+      : Promise.resolve([]),
   ]);
 
-  const deduped = dedupeConclusions([...declineConclusions, ...growthConclusions]);
+  // A page is in `declines` or in `leading`, never both (decline-detection
+  // routes it to exactly one), so no page produces both a measured decline
+  // and an early warning.
+  const deduped = dedupeConclusions([...declineConclusions, ...growthConclusions, ...leadingConclusions]);
 
   const gates = createRecommendationGates(siteId, site);
   let created = 0;

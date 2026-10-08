@@ -16,6 +16,9 @@ import { getSiteById } from '../../store/read.js';
 import { createRecommendationGates } from './recommendation-gates.js';
 import { callLLMForJson } from '../../llm.js';
 import { PACED_GENERATORS } from './ship-pacing.js';
+import { claimForItem } from './work-claims.js';
+import { loadTenantContext } from '../../lib/tenant-context.js';
+import { isTopicScorerEnabled, topicKeyFor } from './topic-scorer.js';
 // gap-action-resolver.js is intentionally NOT a static import here — it
 // pulls in decision-engine.js's/decision-evidence.js's full dependency
 // chain (llm.js, store/recommendations.js's listOpenRecommendations,
@@ -90,24 +93,80 @@ const RELEVANCE_SYSTEM = 'You classify a single search topic against a list of a
   'is related background/how-to for one of them but not a direct search for the product itself. "unrelated" means ' +
   'it doesn\'t match any listed capability.';
 
-export async function classifyGapRelevance(siteId, gap) {
-  const capabilities = await getProductCapabilities(siteId, 'verified');
-  if (!capabilities.length) return null;
+// What the classifier can be told about this tenant, best evidence first.
+//
+// Verified capability rows are the strongest ground truth, and used to be the
+// ONLY accepted source: no rows meant an immediate null, which left
+// product_relevance null, which disqualified the gap in gapDraftEligibility.
+// The effect was silent and total — a tenant whose admin had never filled in
+// the capabilities form could not ship a single keyword gap, forever, with no
+// finding anywhere saying why. Product tenants are exactly the ones least
+// likely to have those rows, since nothing in onboarding creates them.
+//
+// The fallbacks below are genuinely weaker evidence, so they are reported as
+// such: `source` and `confidence` ride along with the verdict, and
+// gapDraftEligibility demands more corroboration from a low-confidence one
+// rather than treating weak evidence as no evidence.
+export async function describeTenantForRelevance(siteId, { loadContext = loadTenantContext } = {}) {
+  const capabilities = await getProductCapabilities(siteId, 'verified').catch(() => []);
+  if (capabilities.length) {
+    const list = capabilities
+      .map((c) => {
+        const industries = Array.isArray(c.industries) && c.industries.length ? ` [industries: ${c.industries.join(', ')}]` : '';
+        return `- ${c.name}${c.category ? ` (${c.category})` : ''}${c.description ? `: ${c.description}` : ''}${industries}`;
+      })
+      .join('\n');
+    return { text: list, source: 'verified-capabilities', confidence: 'high' };
+  }
 
-  const capabilityList = capabilities
-    .map((c) => {
-      const industries = Array.isArray(c.industries) && c.industries.length ? ` [industries: ${c.industries.join(', ')}]` : '';
-      return `- ${c.name}${c.category ? ` (${c.category})` : ''}${c.description ? `: ${c.description}` : ''}${industries}`;
-    })
-    .join('\n');
-  const user = `Topic: "${gap.topic}"${gap.reason ? `\nContext: ${gap.reason}` : ''}\n\nVerified capabilities:\n${capabilityList}`;
+  const ctx = await loadContext(siteId).catch(() => null);
+  if (!ctx) return null;
+
+  // Other verified knowledge kinds (migration 176: flow, pricing, audience,
+  // proof). A tenant that has described how its product works but never
+  // filled in the capabilities list specifically still knows what it sells.
+  if (ctx.productKnowledge?.length) {
+    const list = ctx.productKnowledge
+      .map((r) => `- ${r.name}${r.kind ? ` (${r.kind})` : ''}${r.description ? `: ${r.description}` : ''}`)
+      .join('\n');
+    return { text: list, source: 'product-knowledge', confidence: 'medium' };
+  }
+
+  // Growth config and goals: captured at onboarding rather than inferred
+  // from Search Console, which makes them the only sources available to a
+  // product tenant with no GSC at all.
+  const lines = [];
+  if (ctx.industries?.length) lines.push(`- Industry: ${ctx.industries.join(', ')}`);
+  if (ctx.markets?.length) lines.push(`- Markets served: ${ctx.markets.join(', ')}`);
+  if (ctx.icpSignals) {
+    const signals = Array.isArray(ctx.icpSignals) ? ctx.icpSignals : [ctx.icpSignals];
+    if (signals.length) lines.push(`- Ideal customers: ${signals.join(', ')}`);
+  }
+  for (const g of (ctx.goals || []).slice(0, 3)) {
+    if (g.objective) lines.push(`- Business goal: ${g.objective}`);
+  }
+  if (lines.length) return { text: lines.join('\n'), source: 'tenant-profile', confidence: 'low' };
+
+  // Genuinely nothing known about this tenant. Still null, but now it means
+  // what it says instead of standing in for "the capabilities form is empty".
+  return null;
+}
+
+export async function classifyGapRelevance(siteId, gap, deps = {}) {
+  const described = await describeTenantForRelevance(siteId, deps);
+  if (!described) return null;
+
+  const heading = described.source === 'verified-capabilities'
+    ? 'Verified capabilities'
+    : 'What is known about this business';
+  const user = `Topic: "${gap.topic}"${gap.reason ? `\nContext: ${gap.reason}` : ''}\n\n${heading}:\n${described.text}`;
 
   try {
     const parsed = await callLLMForJson(RELEVANCE_SYSTEM, user, { maxTokens: 150, generatorId: 'gap-relevance-classifier', siteId });
     const searchIntent = ['informational', 'commercial', 'transactional'].includes(parsed?.search_intent) ? parsed.search_intent : null;
     const productRelevance = ['direct', 'supporting', 'unrelated'].includes(parsed?.product_relevance) ? parsed.product_relevance : null;
     if (!searchIntent || !productRelevance) return null;
-    return { searchIntent, productRelevance };
+    return { searchIntent, productRelevance, source: described.source, confidence: described.confidence };
   } catch (e) {
     console.warn(`[analyst-seo-mapping] gap relevance classification failed for gap ${gap.id}: ${e.message}`);
     return null;
@@ -537,6 +596,23 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
       riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(eligibility.generatorId),
     });
   } else {
+    // Claim the topic before creating anything (migration 180). This is the
+    // producer the ledger matters most for: a keyword gap and the daily
+    // roster can both decide the same topic needs a page, by different
+    // generators, and the recommendations index cannot see that collision
+    // because the generator is part of its key.
+    //
+    // The gap's own coverage verdict (migration 179) is passed through so
+    // arbitration knows which way to rank: on an already-covered topic a new
+    // page is cannibalization and expanding or linking wins; on a genuine
+    // gap the new page wins.
+    const claim = await claimForItem(
+      siteId, { generatorId: eligibility.generatorId, params }, 'keyword-gap',
+      { coverageStatus: gap.coverage_status ?? null },
+    );
+    if (!claim.ok) {
+      return { eligible: false, dropped: `claimed-by-${claim.heldBy?.producer ?? 'another-producer'}` };
+    }
     recommendationId = (await insertRecommendation(siteId, {
       page,
       recommendationType: eligibility.generatorId,
@@ -1031,6 +1107,59 @@ const BLOG_PACING = PACED_GENERATORS.find((p) => p.generatorId === 'blog-outline
 // whenever a gap happens to qualify.
 const FAQ_WEEKLY_MAX = 10;
 
+// Highest-volume first, the ordering this pipeline has always used.
+function byVolumeDesc(gaps) {
+  return [...gaps].sort((a, b) => (b.search_volume ?? -1) - (a.search_volume ?? -1));
+}
+
+// The volume ordering, or the shared topic queue's score when the scorer is
+// on. Separated out so the ordering decision is one readable function rather
+// than a branch inside an already long pipeline, and so the fallback is
+// unmissable: EVERY failure path returns the volume ordering.
+async function rankBlogPool(siteId, blogEligible, { dryRun }) {
+  if (!blogEligible.length || !isTopicScorerEnabled()) return byVolumeDesc(blogEligible);
+
+  try {
+    const { buildTopicQueue } = await import('./topic-queue.js');
+    const { queued } = await buildTopicQueue(siteId, blogEligible.map((gap) => ({
+      topic: gap.topic,
+      origin: 'keyword-gap',
+      intent: 'new-blog',
+      // The volume on the row is REAL — DataForSEO's, recorded at discovery
+      // — so it is handed over as a measured signal rather than re-fetched
+      // and re-billed. A NULL volume is an LLM guess, and says so.
+      demand: gap.search_volume
+        ? { available: true, providerId: 'keyword-gaps', searchVolume: Number(gap.search_volume), volumeTrend: null, asOf: null }
+        : null,
+      llmEstimatedVolume: gap.search_volume ? null : 1,
+      // This gap already has its own coverage verdict and relevance
+      // classification; passing them avoids a second, possibly disagreeing
+      // classification of the same topic.
+      coverageStatus: gap.coverage_status ?? null,
+      relevance: gap.product_relevance
+        ? { productRelevance: gap.product_relevance, confidence: gap.relevance_confidence || 'medium' }
+        : null,
+    })), { limit: blogEligible.length, deps: dryRun ? { persist: async () => 0 } : {} });
+
+    const rankByTopic = new Map(queued.map((q, i) => [q.topicKey, i]));
+    const ranked = [...blogEligible].sort((a, b) => {
+      const ra = rankByTopic.get(topicKeyFor(a.topic));
+      const rb = rankByTopic.get(topicKeyFor(b.topic));
+      // A gap the queue dropped (covered, claimed, suppressed) has no rank
+      // and sorts last — it is still reported by the loop below with its own
+      // reason rather than silently disappearing.
+      if (ra == null && rb == null) return (b.search_volume ?? -1) - (a.search_volume ?? -1);
+      if (ra == null) return 1;
+      if (rb == null) return -1;
+      return ra - rb;
+    });
+    return ranked;
+  } catch (err) {
+    console.warn(`[analyst-seo-mapping] topic scoring unavailable for site ${siteId}, falling back to volume order: ${err.message}`);
+    return byVolumeDesc(blogEligible);
+  }
+}
+
 export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, now = new Date() } = {}) {
   const resolvedSite = site || await getSiteById(siteId);
   const gaps = await getKeywordGaps(siteId, 'pending_review');
@@ -1085,18 +1214,31 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, 
 
   const timezone = resolvedSite?.timezone || 'UTC';
 
-  // Rank this run's blog-outline-eligible candidates by real search volume
-  // and keep only the top MAX_BLOG_TOPIC_POOL — computed once, up front, so
-  // the main loop below can treat "in the pool" as a plain lookup. A NULL
-  // search_volume (LLM-guessed) sorts last (-1), never first.
-  const rankedBlogPool = candidates
-    .filter((gap) => gapDraftEligibility(gap)?.generatorId === 'blog-outline')
-    .sort((a, b) => (b.search_volume ?? -1) - (a.search_volume ?? -1))
+  // Rank this run's blog-outline-eligible candidates and keep only the top
+  // MAX_BLOG_TOPIC_POOL — computed once, up front, so the main loop below
+  // can treat "in the pool" as a plain lookup.
+  //
+  // Two orderings, same cap and same one-slot-per-run discipline:
+  //
+  //   * By default, by real search volume. A NULL search_volume
+  //     (LLM-guessed) sorts last (-1), never first.
+  //   * With TOPIC_SCORER_ENABLED, by the shared topic queue's score
+  //     (agents/lib/topic-queue.js), which is volume PLUS whether the topic
+  //     is also trending right now, how much coverage headroom it has, and
+  //     whether it serves an active goal. Volume alone cannot see any of
+  //     that — which is why a topic that is both genuinely trending and
+  //     genuinely searched previously had no advantage at all over one that
+  //     was merely high-volume.
+  //
+  // Falls back to the volume ordering on any failure: a scoring problem must
+  // not stop this week's one blog post from shipping.
+  const blogEligible = candidates.filter((gap) => gapDraftEligibility(gap)?.generatorId === 'blog-outline');
+  const rankedBlogPool = (await rankBlogPool(siteId, blogEligible, { dryRun }))
     .slice(0, MAX_BLOG_TOPIC_POOL);
   const blogPoolIds = new Set(rankedBlogPool.map((gap) => gap.id));
-  // The one slot this run may fill always goes to the pool's highest-volume
+  // The one slot this run may fill always goes to the pool's best-ranked
   // member, never to whichever pool member the main loop below happens to
-  // reach first (candidates are ordered by created_at, not by volume).
+  // reach first (candidates are ordered by created_at, not by rank).
   const chosenBlogGapId = rankedBlogPool[0]?.id ?? null;
   const blogGapDays = resolvedSite?.[BLOG_PACING.gapColumn] ?? BLOG_PACING.defaultGapDays;
   // Same dryRun convention as spentToday above: a dry run reports against a

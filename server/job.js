@@ -29,6 +29,7 @@ import { buildRecommendations } from './agents/lib/recommendations.js';
 import { repairSiteTemplates } from './agents/lib/template-repair.js';
 import { syncFromGrounded, refreshBlockedRecommendations } from './agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.js';
+import { runWorkArbiter } from './agents/lib/work-arbiter.js';
 import { withJobLock, jobKeyFor } from './lib/job-lock.js';
 
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
@@ -574,25 +575,24 @@ export const runCompetitorIntelligenceIfDueForAllSites = () => runAgentIfDueForA
 export const runAuthorityIfDue = (site) => runAgentIfDue(site, 'authority');
 export const runAuthorityIfDueForAllSites = () => runAgentIfDueForAllSites('authority');
 
-// Trend Radar — once per calendar month (agents/lib/trend-cadence.js), on its
-// own cron entry rather than the weekly trigger, so a run on Oct 2 is next due
-// on Nov 3's cron and never in between. Not in RECOMMENDATION_AGENT_IDS (so
+// Trend Radar — once per fortnight (agents/lib/trend-cadence.js), on its own
+// daily cron entry that asks each site whether it is due. Not in RECOMMENDATION_AGENT_IDS (so
 // never in the daily pass) and excluded from orchestrator.js's default
 // fan-out — every run costs an LLM call plus feed fetches.
-// First month the scheduled run is allowed. Rolled out for November 2026: the
-// cron fires on the 3rd-9th, and without this a deploy on Oct 2 would run it
-// for every client on Oct 3 (no October run exists yet). Override with
-// TREND_RADAR_ENABLED_FROM=YYYY-MM to move it.
-const TREND_RADAR_ENABLED_FROM = process.env.TREND_RADAR_ENABLED_FROM || '2026-11';
+// First month the scheduled run is allowed. Moved to October 2026 (owner's
+// call, 2026-10-07) so the fortnightly cycle starts on deploy instead of
+// waiting for November. Override with TREND_RADAR_ENABLED_FROM=YYYY-MM to
+// move it.
+const TREND_RADAR_ENABLED_FROM = process.env.TREND_RADAR_ENABLED_FROM || '2026-10';
 
 export async function runTrendRadarIfDue(site) {
   const [lastRun] = await getLatestAgentRuns(site.id, ['trend-radar']);
   if (!trendRadarDue(lastRun, { timeZone: site.timezone || 'UTC', enabledFrom: TREND_RADAR_ENABLED_FROM })) {
-    console.log(`[trend-radar] site ${site.id} not due (already has this month's run, or not enabled yet) — skipping.`);
+    console.log(`[trend-radar] site ${site.id} not due (ran within the last fortnight, or not enabled yet) — skipping.`);
     return null;
   }
   const output = await runAgent('trend-radar', { siteId: site.id }, { persist: true });
-  console.log(`[trend-radar] site ${site.id}: monthly run complete (status: ${output.status}).`);
+  console.log(`[trend-radar] site ${site.id}: fortnightly run complete (status: ${output.status}).`);
   return { status: output.status, findingsCount: output.facts?.findings?.length || 0 };
 }
 
@@ -1355,7 +1355,19 @@ async function shipSiteWithLocks(site, globalRemaining) {
     jobKeyFor(GITHUB_CREDENTIAL_LOCK_JOB_NAME, rateLimitKey(site)),
     () => withJobLock(
       jobKeyFor(SHIP_LOCK_JOB_NAME, site.id),
-      () => autoRemediateSafeRecommendations(site.id, { globalRemaining }),
+      async () => {
+        // Arbitration runs INSIDE the site's ship lock and immediately
+        // before shipping. That position is the only correct one: it has to
+        // see the whole set of proposals (so it cannot run while they are
+        // still being produced) and it has to settle them before any one is
+        // drafted (or the losing proposal has already cost a generation).
+        //
+        // Flag-gated and best-effort — a site whose contests could not be
+        // arbitrated ships exactly as it did before, by first-come.
+        await runWorkArbiter(site.id, { site }).catch((err) =>
+          console.warn(`[work-arbiter] site ${site.id}: ${err.message}`));
+        return autoRemediateSafeRecommendations(site.id, { globalRemaining });
+      },
     ),
   );
   if (!credRan) return { ran: false, reason: 'credential-locked' };

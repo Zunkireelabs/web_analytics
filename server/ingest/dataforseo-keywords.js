@@ -126,6 +126,18 @@ export async function fetchSearchVolume(seedTerms, { locationCode, languageCode 
       searchVolume: item.search_volume,
       competition: item.competition_level || null,
       difficulty: null,
+      // Google Ads returns the last 12 months of volume alongside the
+      // average. Carried through (newest first) because it is the only real
+      // trend evidence in this response — a direction derived from it is
+      // measured rather than guessed, which is what lets the search-demand
+      // provider report a trend at all instead of always 'stable'. Existing
+      // callers ignore the extra field.
+      monthlySearches: Array.isArray(item.monthly_searches)
+        ? item.monthly_searches
+          .filter((m) => m && Number.isFinite(Number(m.search_volume)))
+          .map((m) => ({ year: Number(m.year), month: Number(m.month), searchVolume: Number(m.search_volume) }))
+          .sort((a, b) => (b.year - a.year) || (b.month - a.month))
+        : [],
     }))
     .sort((a, b) => b.searchVolume - a.searchVolume);
 }

@@ -13,6 +13,7 @@
     "connect-site": "node server/scripts/connect-site.js",
     "connect-repo": "node server/scripts/connect-repo.js",
     "onboard-client": "node server/scripts/onboard-client.js",
+    "onboard-product-client": "node server/scripts/onboard-product-client.js",
     "audit-url-file-map": "node server/scripts/audit-url-file-map.js",
     "verify-component-templates": "node server/scripts/verify-component-templates.js",
     "force-design-profile-rescan": "node server/scripts/force-design-profile-rescan.js",

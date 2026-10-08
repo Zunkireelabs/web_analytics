@@ -29,6 +29,7 @@
 // today for any site with no usable profile at all.
 import { callLLMForJson } from '../../llm.js';
 import { isProfileUsable } from '../lib/design-profile.js';
+import { assertLayoutMatchesPrior, structurePlanText } from '../lib/expand-structure-spec.js';
 
 // Same patterns generators/lib/design-consistency-gate.js already polices
 // generator prose with — kept as a local copy rather than an import because
@@ -172,7 +173,7 @@ function buildUserPrompt(brandTokens) {
 // at all. One retry lives inside callLLMForJson's own `validate` hook; a
 // second consecutive failure is logged and treated the same as "can't
 // generate right now", not escalated.
-export async function composeGeneratedExpandLayout(profile, { siteId, generatorId = 'design-agent-expand-layout' } = {}) {
+export async function composeGeneratedExpandLayout(profile, { siteId, generatorId = 'design-agent-expand-layout', structurePrior = null } = {}) {
   if (profile?.styling !== 'tailwind') return null;
   if (!isProfileUsable(profile)) return null;
 
@@ -180,15 +181,21 @@ export async function composeGeneratedExpandLayout(profile, { siteId, generatorI
   if (!brandTokens.length) return null;
 
   try {
-    const candidate = await callLLMForJson(SYSTEM_PROMPT, buildUserPrompt(brandTokens), {
+    // The prior adds STRUCTURE only (heading level, shape) to the prompt and to
+    // the validator. The class allowlist is untouched: identity still comes
+    // from this tenant's own tokens, which is what makes borrowing structure
+    // safe in the first place.
+    const userPrompt = buildUserPrompt(brandTokens) + (structurePrior ? `\n\n${structurePlanText(structurePrior)}` : '');
+    const accepts = (parsed) => validateGeneratedExpandLayout(parsed, profile).ok
+      && assertLayoutMatchesPrior(parsed, structurePrior, profile).ok;
+    const candidate = await callLLMForJson(SYSTEM_PROMPT, userPrompt, {
       tier: 'monthly',
       maxTokens: 1200,
       generatorId,
       siteId,
-      validate: (parsed) => validateGeneratedExpandLayout(parsed, profile).ok,
+      validate: accepts,
     });
-    const verdict = validateGeneratedExpandLayout(candidate, profile);
-    return verdict.ok ? candidate : null;
+    return accepts(candidate) ? candidate : null;
   } catch (err) {
     console.warn(`[design-agent] site ${siteId}: expand-content layout generation failed — keeping the plain projected template (${err.message}).`);
     return null;

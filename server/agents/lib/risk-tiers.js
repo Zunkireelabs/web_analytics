@@ -259,11 +259,16 @@ export function riskTierForGenerator(generatorId) {
 // Per-finding, deliberately not a change to any generator's tier above.
 export function requiresHumanReview(item) {
   if (item?.source === 'geo-signals') return true;
-  // Trend insight posts make claims about current events. blog-outline is a
-  // safe-tier generator (it may open a PR unattended for a configured site),
-  // which is right for evergreen posts but not for these: a person reviews
-  // the draft before it is generated into a PR, every time.
-  if (item?.source === 'trend-radar') return true;
+  // Trend insight posts used to ALWAYS need a person, because they make claims
+  // about current events. Decided otherwise (2026-10-07, owner): they ship
+  // unattended like any other blog-outline. What still protects them is not a
+  // reviewer but the way they are built — trend-radar only groups real,
+  // linked headlines, insightContext() tells the writer every recent claim
+  // must come from those headlines and be attributed to its outlet, and the
+  // normal blog pacing, quality gate and design gates all still apply.
+  // TREND_RADAR_REQUIRE_REVIEW=true restores the old always-review behaviour
+  // without a deploy, should a bad post ever make that the right call.
+  if (item?.source === 'trend-radar' && process.env.TREND_RADAR_REQUIRE_REVIEW === 'true') return true;
   const fixType = item?.params?.fixType;
   return typeof fixType === 'string' && fixType.startsWith('typography-drift');
 }
