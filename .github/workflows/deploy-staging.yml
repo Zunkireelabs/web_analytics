@@ -415,6 +415,36 @@ jobs:
             DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
             cd "$DIR"
 
+            # Disk guard. A real deploy on 2026-10-08 died 25m into the
+            # data-analyst-agent build with "[Errno 28] No space left on
+            # device" while pip unpacked torch/sentence-transformers — three
+            # retries can't help when the disk is full, and it burned the whole
+            # cold-build budget before failing. The BuildKit pip cache mount,
+            # superseded images and --no-cache design-agent-worker rebuilds all
+            # accumulate on this VPS. The ML install needs several GB of
+            # headroom, so check BEFORE building: if free space on Docker's
+            # filesystem is under the threshold, drop dangling images and
+            # build cache older than 72h (recent layers survive, so the next
+            # build stays warm rather than going fully cold), then fail fast
+            # with a clear message if that still isn't enough.
+            MIN_FREE_GB=12
+            DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}')"
+            free_gb() { df -P --block-size=1G "$DOCKER_ROOT" | awk 'NR==2 {print $4}'; }
+            echo "Free disk on $DOCKER_ROOT: $(free_gb)GB (need ${MIN_FREE_GB}GB)"
+            if [ "$(free_gb)" -lt "$MIN_FREE_GB" ]; then
+              echo "Low disk — pruning dangling images and stale build cache..."
+              docker image prune -f
+              docker builder prune -f --filter until=72h
+              echo "Free disk after prune: $(free_gb)GB"
+            fi
+            if [ "$(free_gb)" -lt "$MIN_FREE_GB" ]; then
+              echo "ERROR: only $(free_gb)GB free on $DOCKER_ROOT after pruning (need ${MIN_FREE_GB}GB)." >&2
+              echo "Free space on the VPS (e.g. 'docker system df', 'docker builder prune -af') and re-run." >&2
+              df -h >&2
+              docker system df >&2
+              exit 1
+            fi
+
             # design-agent-worker gets --no-cache: a real deploy on 2026-08-26
             # showed its `COPY package*.json ./` / `RUN npm ci --omit=dev`
             # layers reported CACHED across multiple independent deploy
