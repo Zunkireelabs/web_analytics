@@ -558,7 +558,7 @@ jobs:
             # as done, silently killing the only retry until the 1st of next
             # month's cron — which is exactly what left Referring Domains
             # empty even after this kickoff was deployed.
-            MARKER="/home/zunkireelabs/devprojects/analytics-app-stage/.commoncrawl-graph-first-run-done"
+            MARKER="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web/.commoncrawl-graph-first-run-done"
             if [ ! -f "$MARKER" ]; then
               echo "Kicking off one-time initial Common Crawl ETL run in the background..."
               cd "$DIR"
@@ -589,7 +589,7 @@ jobs:
             # again — routine weekly staleness-based rescans take over from
             # there. Delete the marker file to force it to run again (e.g.
             # after a future derivation-logic fix of the same kind).
-            RESCAN_MARKER="/home/zunkireelabs/devprojects/analytics-app-stage/.design-profile-rescan-2026-09-16-done"
+            RESCAN_MARKER="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web/.design-profile-rescan-2026-09-16-done"
             if [ ! -f "$RESCAN_MARKER" ]; then
               echo "Queuing one-time design-profile rescan for all sites (derivation-logic fix)..."
               if docker compose -f docker-compose.dev.yml exec -T analytics npm run force-design-profile-rescan; then
@@ -617,7 +617,7 @@ jobs:
             # design-profile rescan, this reads/writes fast HTTP fetches, no
             # LLM or slow browser render, so there's no need to background
             # it), then never fires again.
-            DISCOVERY_MARKER="/home/zunkireelabs/devprojects/analytics-app-stage/.site-discovery-2026-09-17-done"
+            DISCOVERY_MARKER="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web/.site-discovery-2026-09-17-done"
             if [ ! -f "$DISCOVERY_MARKER" ]; then
               echo "Running one-time site-discovery catch-up for all connected sites..."
               if docker compose -f docker-compose.dev.yml exec -T analytics npm run force-site-discovery; then
