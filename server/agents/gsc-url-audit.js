@@ -4,8 +4,9 @@ import { ownDomains } from './lib/site-domain.js';
 import { isPrivateOrLocalHost } from './lib/page-content.js';
 import {
   classifyHost, isTombstoned, classifyProbe, hasNoindexSignal, groupByHost,
-  isHandledByOffsiteRedirect, buildDeadOwnUrlsFinding, buildUnexpectedHostsFinding,
+  isHandledByOffsiteRedirect, buildDeadOwnUrlsFinding, buildUnexpectedHostsFinding, buildRedirectActionFinding,
 } from './lib/gsc-url-audit.js';
+import { pickRedirectTarget } from './lib/redirect-target.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -21,7 +22,7 @@ export const meta = {
 // The short version: this is the ONLY consumer that deliberately queries
 // Search Console without ingest/gsc.js's own-domain filter, because finding a
 // foreign host is the job. Nothing outside the `own` bucket may ever reach a
-// generator, and neither finding this agent produces carries an action.
+// generator, and only own-domain dead URLs with a confident live target carry an action (redirect-add, PR for human review); unexpected-host findings never do.
 
 // Long by the standards of this repo's other fetches (page-content.js uses
 // 5s), and deliberately so. Doing this by hand first, a 15s timeout against
@@ -185,13 +186,29 @@ export async function run({ siteId }) {
 
   const byUrl = new Map(ownToCheck.map((p, i) => [p.url, { ...p, probe: ownProbes[i] }]));
   const deadUrls = [];
+  const liveUrls = [];
   const statusCounts = {};
   for (const entry of byUrl.values()) {
     const verdict = classifyProbe(entry.probe);
     statusCounts[verdict] = (statusCounts[verdict] || 0) + 1;
     if (verdict === 'dead') {
       deadUrls.push({ url: entry.url, impressions: entry.impressions, httpStatus: entry.probe.status });
+    } else if (verdict === 'ok' && !hasNoindexSignal(entry.probe)) {
+      // Only pages that served 200 and are indexable can be a redirect target.
+      liveUrls.push(entry.url);
     }
+  }
+
+  // Dead URLs with ONE clearly-right live replacement become reviewable
+  // redirect pull requests; the rest stay in the report-only finding below.
+  // Capped per run so a site-wide migration cannot open dozens of PRs at once.
+  const MAX_REDIRECT_ACTIONS = 15;
+  const redirectFindings = [];
+  const unmatchedDead = [];
+  for (const dead of [...deadUrls].sort((a, b) => b.impressions - a.impressions || a.url.localeCompare(b.url))) {
+    const target = redirectFindings.length < MAX_REDIRECT_ACTIONS ? pickRedirectTarget(dead.url, liveUrls) : null;
+    if (target) redirectFindings.push(buildRedirectActionFinding({ dead, target }));
+    else unmatchedDead.push(dead);
   }
 
   // A host is already handled two different ways, and both must be excluded:
@@ -211,7 +228,8 @@ export async function run({ siteId }) {
   const alreadyRedirected = handled.filter((h) => h === 'redirected').length;
 
   const findings = [
-    buildDeadOwnUrlsFinding({ deadUrls, tombstonedSkipped, checkedCount: ownToCheck.length }),
+    ...redirectFindings,
+    buildDeadOwnUrlsFinding({ deadUrls: unmatchedDead, tombstonedSkipped, checkedCount: ownToCheck.length }),
     buildUnexpectedHostsFinding({ hosts: stillIndexable }),
   ].filter(Boolean);
 
@@ -228,6 +246,7 @@ export async function run({ siteId }) {
     unexpectedHostsAlreadyNoindexed: alreadyNoindexed,
     unexpectedHostsAlreadyRedirected: alreadyRedirected,
     deadUrlCount: deadUrls.length,
+    redirectActionsProposed: redirectFindings.length,
     statusCounts,
     findings,
   };
