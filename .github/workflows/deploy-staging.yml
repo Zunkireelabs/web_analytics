@@ -469,19 +469,29 @@ jobs:
             DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
             cd "$DIR"
 
-            # Disk guard: a build that runs out of space mid-`npm ci` fails with
-            # a misleading ENOSPC deep in an image layer (the 2026-10-01 and
-            # 2026-10-08 deploys), so check first. Dangling images and build
-            # cache older than a day are safe to drop — nothing running uses
-            # them — and are reclaimed before giving up.
-            free_gb() { df -BG --output=avail / | tail -1 | tr -dc '0-9'; }
-            if [ "$(free_gb)" -lt 8 ]; then
-              echo "Only $(free_gb)G free — pruning dangling images and old build cache before building..."
+            # Disk guard. Deploys have died with ENOSPC mid-build (2026-09-30,
+            # 10-01, 10-08, the last 25m into the data-analyst pip install of
+            # torch/sentence-transformers), after burning the whole cold-build
+            # budget. Images are now pulled from ghcr rather than built, so far
+            # less headroom is needed — but the local-build fallback below
+            # still can need several GB, so check BEFORE pulling: under 12GB
+            # free on Docker's filesystem, drop dangling images and build cache
+            # older than 72h (recent layers survive, so the next build stays
+            # warm), then fail fast with diagnostics if under 6GB.
+            DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}')"
+            free_gb() { df -P --block-size=1G "$DOCKER_ROOT" | awk 'NR==2 {print $4}'; }
+            echo "Free disk on $DOCKER_ROOT: $(free_gb)GB"
+            if [ "$(free_gb)" -lt 12 ]; then
+              echo "Low disk — pruning dangling images and stale build cache..."
               docker image prune -f
-              docker builder prune -f --filter "until=24h"
+              docker builder prune -f --filter until=72h
+              echo "Free disk after prune: $(free_gb)GB"
             fi
             if [ "$(free_gb)" -lt 6 ]; then
-              echo "::error::Only $(free_gb)G free on the VPS after pruning — refusing to build. Free disk space, then re-run."
+              echo "ERROR: only $(free_gb)GB free on $DOCKER_ROOT after pruning (need 6GB)." >&2
+              echo "Free space on the VPS (e.g. 'docker system df', 'docker builder prune -af') and re-run." >&2
+              df -h >&2
+              docker system df >&2
               exit 1
             fi
 

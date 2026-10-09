@@ -1,6 +1,10 @@
 services:
   analytics:
     container_name: analytics-app-prod
+    # The ONE image for every Node service in this file: the MCP server and the
+    # Design Agent worker run from this same build with a different command,
+    # instead of building their own copies (own node_modules + Chromium each).
+    image: analytics-app:prod
     build:
       context: .
       dockerfile: Dockerfile
@@ -46,9 +50,7 @@ services:
   # env_file. See the plan: "Split the MCP server onto its own subdomain."
   analytics-mcp:
     container_name: analytics-mcp-prod
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: analytics-app:prod
     command: ["node", "mcp-server/index.js"]
     networks:
       - hosting
@@ -100,12 +102,11 @@ services:
   # the OpenHands/Docker-outside-of-Docker path (a sibling
   # ghcr.io/openhands/agent-server container per job) this used to need that
   # for was removed 2026-08-27, confirmed unreferenced by any live job
-  # dispatch (see server/design-agent/Dockerfile's own header comment).
+  # dispatch (it now runs from the shared analytics image; its old Dockerfile was removed).
   design-agent-worker:
     container_name: design-agent-worker-prod
-    build:
-      context: .
-      dockerfile: server/design-agent/Dockerfile
+    image: analytics-app:prod
+    command: ["node", "server/design-agent/worker.js"]
     networks:
       - hosting
     restart: unless-stopped
