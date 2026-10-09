@@ -25,11 +25,65 @@ jobs:
       - name: Build dashboard
         run: npm run build:web
 
+  # Build the images here, on GitHub's runners, and push them to ghcr.io so the
+  # VPS only has to pull them. Building on the VPS took ~20 minutes of its CPU
+  # and enough scratch disk to fail deploys with ENOSPC (2026-09-30, 10-01,
+  # 10-08). Layer cache lives in the Actions cache, so a code-only change
+  # rebuilds just the last layers.
+  build-images:
+    name: Build images
+    runs-on: ubuntu-latest
+    needs: checks
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Node app image: serves the dashboard, and is also run as the MCP server
+      # and the design worker (see docker-compose.dev.yml). VITE_MCP_ORIGIN is
+      # baked into the built SPA, so it must be supplied here at build time.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          build-args: |
+            VITE_MCP_ORIGIN=https://${{ vars.STAGING_MCP_DOMAIN }}
+          tags: |
+            ghcr.io/zunkireelabs/web-analytics-stage-app:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,mode=max,scope=app
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: data-analyst-agent
+          push: true
+          tags: |
+            ghcr.io/zunkireelabs/web-analytics-stage-data-analyst:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=data-analyst
+          cache-to: type=gha,mode=max,scope=data-analyst
+
   deploy:
     name: Deploy to Staging
     runs-on: ubuntu-latest
-    needs: checks
+    needs: [checks, build-images]
     environment: staging
+    permissions:
+      contents: read
+      packages: read
     steps:
       # Split into four SSH steps (2026-09-08): the single combined script
       # below this point used to run bootstrap + both .env writes + the
@@ -415,19 +469,29 @@ jobs:
             DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
             cd "$DIR"
 
-            # Disk guard: a build that runs out of space mid-`npm ci` fails with
-            # a misleading ENOSPC deep in an image layer (the 2026-10-01 and
-            # 2026-10-08 deploys), so check first. Dangling images and build
-            # cache older than a day are safe to drop — nothing running uses
-            # them — and are reclaimed before giving up.
-            free_gb() { df -BG --output=avail / | tail -1 | tr -dc '0-9'; }
-            if [ "$(free_gb)" -lt 8 ]; then
-              echo "Only $(free_gb)G free — pruning dangling images and old build cache before building..."
+            # Disk guard. Deploys have died with ENOSPC mid-build (2026-09-30,
+            # 10-01, 10-08, the last 25m into the data-analyst pip install of
+            # torch/sentence-transformers), after burning the whole cold-build
+            # budget. Images are now pulled from ghcr rather than built, so far
+            # less headroom is needed — but the local-build fallback below
+            # still can need several GB, so check BEFORE pulling: under 12GB
+            # free on Docker's filesystem, drop dangling images and build cache
+            # older than 72h (recent layers survive, so the next build stays
+            # warm), then fail fast with diagnostics if under 6GB.
+            DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}')"
+            free_gb() { df -P --block-size=1G "$DOCKER_ROOT" | awk 'NR==2 {print $4}'; }
+            echo "Free disk on $DOCKER_ROOT: $(free_gb)GB"
+            if [ "$(free_gb)" -lt 12 ]; then
+              echo "Low disk — pruning dangling images and stale build cache..."
               docker image prune -f
-              docker builder prune -f --filter "until=24h"
+              docker builder prune -f --filter until=72h
+              echo "Free disk after prune: $(free_gb)GB"
             fi
             if [ "$(free_gb)" -lt 6 ]; then
-              echo "::error::Only $(free_gb)G free on the VPS after pruning — refusing to build. Free disk space, then re-run."
+              echo "ERROR: only $(free_gb)GB free on $DOCKER_ROOT after pruning (need 6GB)." >&2
+              echo "Free space on the VPS (e.g. 'docker system df', 'docker builder prune -af') and re-run." >&2
+              df -h >&2
+              docker system df >&2
               exit 1
             fi
 
@@ -437,8 +501,29 @@ jobs:
             # `--no-cache` design-agent-worker build that wrote a fresh set of
             # layers on every deploy and was a main source of the disk pressure
             # that kept failing the deploy. Normal layer caching applies.
-            docker compose -f docker-compose.dev.yml build analytics
-            docker compose -f data-analyst-agent/docker-compose.dev.yml build
+            # Pull the images CI just built and give them the local tags the
+            # compose files already use, so `up -d` below needs no other change.
+            # The sha tag is removed right after tagging: it would otherwise stay
+            # as a second tag on every past deploy's image and never be pruned.
+            # If a pull fails (first deploy: package not yet readable), fall back
+            # to building on the VPS so a registry problem can't block a deploy.
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            APP_REF="ghcr.io/zunkireelabs/web-analytics-stage-app:${{ github.sha }}"
+            DAA_REF="ghcr.io/zunkireelabs/web-analytics-stage-data-analyst:${{ github.sha }}"
+            if docker pull "$APP_REF"; then
+              docker tag "$APP_REF" analytics-stage-app:latest
+              docker image rm "$APP_REF"
+            else
+              echo "::warning::Could not pull $APP_REF — building the app image on the VPS instead."
+              docker compose -f docker-compose.dev.yml build analytics
+            fi
+            if docker pull "$DAA_REF"; then
+              docker tag "$DAA_REF" data-analyst-agent-app:latest
+              docker image rm "$DAA_REF"
+            else
+              echo "::warning::Could not pull $DAA_REF — building the data analyst image on the VPS instead."
+              docker compose -f data-analyst-agent/docker-compose.dev.yml build
+            fi
 
             echo "Applying database migrations..."
             docker compose -f docker-compose.dev.yml run --rm analytics node server/migrations/run.js

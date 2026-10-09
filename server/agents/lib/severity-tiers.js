@@ -52,6 +52,7 @@ const TIER_BY_GENERATOR = {
   // link, not of which of the two fixes the site's structure allows.
   'missing-page-create': SEVERITY_TIER.CRITICAL_TECHNICAL,
   'redirect-fix': SEVERITY_TIER.CRITICAL_TECHNICAL,
+  'redirect-add': SEVERITY_TIER.CRITICAL_TECHNICAL,  // a dead indexed URL is a live search result that 404s
   'duplicate-id-fix': SEVERITY_TIER.CRITICAL_TECHNICAL, // duplicate ids break parsing/anchors
   'html-lang': SEVERITY_TIER.CRITICAL_TECHNICAL,
   viewport: SEVERITY_TIER.CRITICAL_TECHNICAL,        // mobile usability is an indexing input
