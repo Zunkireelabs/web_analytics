@@ -54,7 +54,7 @@ jobs:
           script: |
             set -eo pipefail
 
-            DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
+            DIR="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web"
 
             # First-push bootstrap: create directory and clone if missing
             if [ ! -d "$DIR" ]; then
@@ -83,7 +83,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
+            DIR="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web"
             cd "$DIR"
 
             cat > .env << 'ENVEOF'
@@ -335,7 +335,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
+            DIR="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web"
             cd "$DIR"
 
             # ── Data Analyst Agent's own .env (data-analyst-agent/) ──────────
@@ -412,7 +412,7 @@ jobs:
             # serving stale code while CI showed green.
             set -eo pipefail
 
-            DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
+            DIR="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web"
             cd "$DIR"
 
             # Disk guard: a build that runs out of space mid-`npm ci` fails with

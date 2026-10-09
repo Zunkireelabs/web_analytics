@@ -49,7 +49,7 @@ jobs:
             # space), silently serving stale code while CI showed green.
             set -eo pipefail
 
-            DIR="/home/zunkireelabs/devprojects/analytics-app-prod"
+            DIR="/home/zunkireelabs/devprojects/websiteprojects/analytics-web"
 
             # First-push bootstrap: create directory and clone if missing
             if [ ! -d "$DIR" ]; then

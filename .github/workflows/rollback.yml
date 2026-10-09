@@ -34,11 +34,11 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             if [ "${{ inputs.environment }}" = "production" ]; then
-              DIR="/home/zunkireelabs/devprojects/analytics-app-prod"
+              DIR="/home/zunkireelabs/devprojects/websiteprojects/analytics-web"
               COMPOSE_FILE="docker-compose.yml"
               CONTAINER="analytics-app-prod"
             else
-              DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
+              DIR="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web"
               COMPOSE_FILE="docker-compose.dev.yml"
               CONTAINER="analytics-app-stage"
             fi
