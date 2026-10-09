@@ -1,6 +1,13 @@
 services:
+  # ONE image for all three Node services (this app, the MCP server, the design
+  # worker). Only this service has a `build:`; the other two reuse the tag, so a
+  # deploy builds and stores the image once instead of three times. The root
+  # Dockerfile already carries Chromium and mcp-server/, and server/ includes
+  # design-agent/worker.js — each service differs only by `command`.
   analytics:
     container_name: analytics-app-stage
+    image: analytics-stage-app:latest
+    mem_limit: 768m
     build:
       context: .
       dockerfile: Dockerfile
@@ -41,9 +48,10 @@ services:
   # service for the full explanation.
   analytics-mcp:
     container_name: analytics-mcp-stage
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: analytics-stage-app:latest
+    mem_limit: 512m
+    depends_on:
+      - analytics
     command: ["node", "mcp-server/index.js"]
     networks:
       - hosting
@@ -80,9 +88,14 @@ services:
   # deployment's own .env, no Docker socket needed as of 2026-08-27).
   design-agent-worker:
     container_name: design-agent-worker-stage
-    build:
-      context: .
-      dockerfile: server/design-agent/Dockerfile
+    image: analytics-stage-app:latest
+    # Chromium runs OUTSIDE the Node heap, so the container limit is well above
+    # the heap cap: a runaway job hits V8's limit (a catchable, logged error)
+    # before the kernel OOM-kills the whole container.
+    mem_limit: 1536m
+    depends_on:
+      - analytics
+    command: ["node", "server/design-agent/worker.js"]
     networks:
       - hosting
     restart: unless-stopped
@@ -90,6 +103,7 @@ services:
       - .env
     environment:
       - NODE_ENV=production
+      - NODE_OPTIONS=--max-old-space-size=768
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f 'node server/design-agent/worker.js' > /dev/null || exit 1"]
       interval: 30s
