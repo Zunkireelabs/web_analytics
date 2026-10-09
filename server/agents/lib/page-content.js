@@ -1383,7 +1383,7 @@ const GENERATOR_EFFORT = {
   'analytics-install': 'Low',
   'security-headers': 'Low', 'html-lang': 'Low', sitemap: 'Low',
   viewport: 'Low', canonical: 'Low', 'robots-fix': 'Low', 'robots-bootstrap': 'Low', 'open-graph': 'Low',
-  'broken-link-fix': 'Low', 'redirect-fix': 'Low', breadcrumbs: 'Low', 'alt-text': 'Low',
+  'broken-link-fix': 'Low', 'redirect-fix': 'Low', 'redirect-add': 'Low', breadcrumbs: 'Low', 'alt-text': 'Low',
   'blog-outline': 'High', 'landing-page': 'High', translation: 'High', 'expand-content': 'High', 'direct-answer': 'High',
   // High, not Low like its broken-link-fix sibling: removing a link is a
   // one-line deletion, writing the page it pointed at is a whole new page.

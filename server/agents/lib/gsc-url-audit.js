@@ -1,4 +1,5 @@
 import { makeFinding } from './findings.js';
+import { effortForGenerator } from './page-content.js';
 
 // Pure helpers for the GSC URL audit (server/agents/gsc-url-audit.js) — same
 // "DB/HTTP stays in the agent, real logic lives in a testable lib" split as
@@ -277,5 +278,44 @@ export function buildUnexpectedHostsFinding({ hosts }) {
         'its noindex, so blocking the crawl freezes it in the index rather than removing it.',
     },
     expectedImpact: { label: 'Medium', basis: 'computed', value: totalUrls },
+  });
+}
+
+// One dead own URL that has a confident live target: an ACTIONABLE finding.
+//
+// This is the "redirect it to its replacement" option the report-only finding
+// above lists, made draftable — and it is only reachable for URLs in the `own`
+// bucket whose target is itself one of the site's own live 200 pages
+// (agents/lib/redirect-target.js), so rule 1 of the invariant at the top of
+// this file still holds: nothing outside `own` can reach a generator.
+//
+// The retired-vs-accidentally-deleted ambiguity that keeps the aggregate
+// finding report-only is not ignored, it is moved to the right place: the
+// action is a pull request, never an auto-merge, and a human reviewing it is
+// exactly the person who knows whether the page was meant to go.
+export function buildRedirectActionFinding({ dead, target }) {
+  const impressions = dead.impressions || 0;
+  return makeFinding({
+    id: `gsc-url-audit:redirect:${normalizeUrlKey(dead.url)}`,
+    evidence: {
+      deadUrl: dead.url,
+      httpStatus: dead.httpStatus ?? null,
+      impressions,
+      redirectTo: target.url,
+      matchBasis: target.basis,
+      matchScore: target.score,
+    },
+    whyItMatters:
+      `${dead.url} still appears in Google Search (${impressions} impression${impressions === 1 ? '' : 's'}) but now returns ` +
+      `${dead.httpStatus ?? '404'}. ${target.url} is live and the closest match (${target.basis === 'legacy-prefix' ? 'same page under an older URL structure' : 'near-identical URL words'}), ` +
+      'so a permanent redirect keeps visitors and the ranking signal. Review before merging: if the page was removed on purpose, leave it as a 404 instead.',
+    priority: impressions > 0 ? 'high' : 'medium',
+    recommendedAction: {
+      label: 'Redirect dead URL to its replacement',
+      generatorId: 'redirect-add',
+      params: { from: dead.url, to: target.url },
+      effort: effortForGenerator('redirect-add'),
+    },
+    expectedImpact: { label: impressions > 0 ? 'Medium' : 'Low', basis: 'computed', value: impressions },
   });
 }

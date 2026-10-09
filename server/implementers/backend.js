@@ -1,7 +1,8 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
-import { getFileContent } from '../github/client.js';
+import { getFileContent, getRepoTree } from '../github/client.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
+import { planRedirect } from './lib/redirect-writer.js';
 import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
 import { resolveInsertion, buildUnresolvedInsertionFailure } from './lib/insertion-engine.js';
 import { loadExpandStructurePrior } from '../design-agent/lib/expand-structure-loader.js';
@@ -35,7 +36,7 @@ export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'sitemap-frontmatter-exclude', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx', 'compression-nginx'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'redirect-add', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'sitemap-frontmatter-exclude', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx', 'compression-nginx'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -506,6 +507,43 @@ async function pushRedirectFixBranch(site, draft, batchInfo, beforeRef) {
   const merged = await computeRedirectFixMerge(site, draft, beforeRef);
   if (!merged.ok) return merged;
   return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+// redirect-add: adds a 301 for a dead indexed URL to the redirect mechanism
+// the repo already has (see lib/redirect-writer.js — it refuses any layout it
+// does not positively recognise, which leaves the recommendation open for a
+// human rather than shipping a guessed config).
+async function computeRedirectAddMerge(site, draft, beforeRef) {
+  const { from, to } = draft.content || {};
+  if (!from || !to) return { ok: false, reason: 'draft-not-ready', error: 'This draft has no from/to URL.' };
+  let tree;
+  try { tree = await getRepoTree(site, beforeRef); } catch (err) {
+    return { ok: false, reason: 'repo-tree-unavailable', error: String(err?.message || err) };
+  }
+  const plan = await planRedirect({
+    files: tree.files,
+    read: async (path) => (await getFileContent(site, path, beforeRef))?.content ?? null,
+    from, to,
+  });
+  if (!plan.ok) return plan;
+  const conflict = detectConflictMarkers(plan.oldContent);
+  if (conflict) return conflict;
+  return {
+    ok: true, filePath: plan.filePath, oldContent: plan.oldContent, newContent: plan.newContent,
+    changedRegions: [{ field: 'redirect', before: plan.from, after: `${plan.to} (301, ${plan.format})` }],
+  };
+}
+
+async function pushRedirectAddBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeRedirectAddMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveRedirectAdd(site, draft) {
+  const merged = await computeRedirectAddMerge(site, draft, baseBranch(site));
+  if (!merged.ok) return merged;
+  return { ok: true, filePath: merged.filePath, live: false, changedRegions: merged.changedRegions };
 }
 
 async function previewLiveRedirectFix(site, draft) {
@@ -1462,6 +1500,7 @@ export async function apply(site, draft, opts = {}) {
   if (draft.action_type === 'robots-fix') return pushRobotsFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'robots-bootstrap') return pushRobotsBootstrapBranch(site, draft, batchInfo);
   if (draft.action_type === 'redirect-fix') return pushRedirectFixBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'redirect-add') return pushRedirectAddBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'broken-link-fix') return pushBrokenLinkFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'duplicate-id-fix') return pushDuplicateIdFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'schema-repair') return pushSchemaRepairBranch(site, draft, batchInfo, beforeRef);
@@ -1524,6 +1563,7 @@ export async function preview(site, draft, opts = {}) {
       return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'robotsTxt', content: file?.content || '' }] };
     }
     if (draft.action_type === 'redirect-fix') return previewLiveRedirectFix(site, draft);
+    if (draft.action_type === 'redirect-add') return previewLiveRedirectAdd(site, draft);
     if (draft.action_type === 'broken-link-fix') return previewLiveBrokenLinkFix(site, draft);
     if (draft.action_type === 'duplicate-id-fix') return previewLiveDuplicateIdFix(site, draft);
     if (draft.action_type === 'schema-repair') return previewLiveSchemaRepair(site, draft);
@@ -1566,6 +1606,7 @@ export async function preview(site, draft, opts = {}) {
     return { ok: true, filePath: path, oldContent: file?.content || '', newContent: draft.content.robotsTxt };
   }
   if (draft.action_type === 'redirect-fix') return computeRedirectFixMerge(site, draft, beforeRef);
+  if (draft.action_type === 'redirect-add') return computeRedirectAddMerge(site, draft, beforeRef);
   if (draft.action_type === 'broken-link-fix') return computeBrokenLinkFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'duplicate-id-fix') return computeDuplicateIdFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'schema-repair') return computeSchemaRepairMerge(site, draft, beforeRef);
