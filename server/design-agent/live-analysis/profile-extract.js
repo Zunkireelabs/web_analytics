@@ -440,14 +440,57 @@ function compactPageForPrompt(page) {
   };
 }
 
+// OpenAI's per-minute limit counts the whole request. Staging measured the
+// uncapped prompt at 43k-76k tokens against a 30k TPM limit, so every
+// extraction 429'd and retrying the same oversized request could never help.
+// The system prompt (~4k tokens) and the 4000-token completion cap come out of
+// the same budget, leaving ~20k; 48k chars of compact JSON (~3 chars/token for
+// class-heavy data) stays well under that.
+export const PROMPT_PAGES_CHAR_BUDGET = 48000;
+
+// Pick the pages that go to the model. One page per pageType first (so
+// pageTypePatterns still sees every kind of page), then the rest; sections
+// identical to one already included (site chrome repeated on every page) are
+// dropped; stops at the budget. Compact JSON, no indentation.
+export function buildPromptPages(segmentedPages, budgetChars = PROMPT_PAGES_CHAR_BUDGET) {
+  const all = segmentedPages || [];
+  const seenTypes = new Set();
+  const leaders = all.filter((p) => !seenTypes.has(p.pageType) && seenTypes.add(p.pageType));
+  const ordered = [...leaders, ...all.filter((p) => !leaders.includes(p))];
+  const seenSections = new Set();
+  const out = [];
+  let used = 0;
+  for (const page of ordered) {
+    const compact = compactPageForPrompt(page);
+    compact.sections = compact.sections.filter((s) => {
+      const key = JSON.stringify(s);
+      if (seenSections.has(key)) return false;
+      seenSections.add(key);
+      return true;
+    });
+    // Trim sections to fit rather than skipping a page-type's only page.
+    while (compact.sections.length && used + JSON.stringify(compact).length > budgetChars) {
+      compact.sections.pop();
+    }
+    if (!compact.sections.length) continue;
+    used += JSON.stringify(compact).length;
+    out.push(compact);
+  }
+  return out;
+}
+
 // segmentedPages: segment.js's segmentSite() output. Returns a Design
 // Profile v2 object, NOT yet stamped/validated — design-drift.js's
 // persistDesignProfile does both, the same as the v1 pipeline always did.
 export async function extractDesignProfile(segmentedPages, {
   siteId, generatorId = 'design-agent-live', responsiveMeasured = null, designKnowledge = '',
 } = {}) {
-  const pages = (segmentedPages || []).map(compactPageForPrompt);
-  const userPrompt = `Here is the structural data extracted from ${pages.length} real page(s) of this site:\n\n${JSON.stringify(pages, null, 2)}`
+  // designKnowledge rides in the same request, so it comes out of the page
+  // budget (floor keeps a few pages even if the knowledge block is large).
+  const pages = buildPromptPages(
+    segmentedPages, Math.max(12000, PROMPT_PAGES_CHAR_BUDGET - (designKnowledge || '').length),
+  );
+  const userPrompt = `Here is the structural data extracted from ${pages.length} real page(s) of this site:\n\n${JSON.stringify(pages)}`
     + (designKnowledge ? `\n\n${designKnowledge}` : '');
 
   const extracted = await callLLMForJson(SYSTEM_PROMPT, userPrompt, {

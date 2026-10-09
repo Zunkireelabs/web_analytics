@@ -241,15 +241,40 @@ const STALE_EXECUTING_MS = Number(process.env.DESIGN_AGENT_TASK_TIMEOUT_MS || 10
 // claim, by this worker or any other, gets a genuine, fresh attempt. Scoped
 // to kind='design_generate' only — the one kind this table's workers ever
 // execute (see claimNextDesignAgentJob's own WHERE clause).
-export async function reclaimStaleExecutingJobs({ olderThanMs = STALE_EXECUTING_MS } = {}) {
+// A job stuck in 'executing' means its worker died mid-run. Putting it back
+// in the queue is right once — but if the job itself is what kills the worker
+// (an out-of-memory crash on a huge page), unlimited reclaiming just re-runs
+// it into the same crash forever. Staging did exactly that: two jobs were
+// reclaimed 40+ times and the worker restarted 86 times. So after
+// MAX_RECLAIMS reclaims the job is failed instead of requeued. The count is
+// read from the job's own log (every reclaim appends a 'Reclaimed:' entry),
+// so this needs no schema change.
+export const MAX_RECLAIMS = 2;
+
+export async function reclaimStaleExecutingJobs({ olderThanMs = STALE_EXECUTING_MS, maxReclaims = MAX_RECLAIMS } = {}) {
   const { rows } = await query(
     `UPDATE execution_jobs
-       SET status = 'queued', started_at = null,
-           logs = logs || $2::jsonb
-     WHERE kind = 'design_generate' AND status = 'executing'
-       AND started_at < now() - ($1::text || ' milliseconds')::interval
-     RETURNING id, site_id`,
-    [olderThanMs, JSON.stringify([{ at: new Date().toISOString(), message: `Reclaimed: stuck in 'executing' past the ${Math.round(olderThanMs / 60000)}-minute stale threshold — its worker process is presumed dead. Reset to 'queued' for a fresh attempt.` }])]
+       SET status = CASE WHEN prior.n >= $3 THEN 'failed' ELSE 'queued' END,
+           started_at = CASE WHEN prior.n >= $3 THEN started_at ELSE null END,
+           finished_at = CASE WHEN prior.n >= $3 THEN now() ELSE finished_at END,
+           result = CASE WHEN prior.n >= $3 THEN $4::jsonb ELSE result END,
+           logs = logs || CASE WHEN prior.n >= $3 THEN $5::jsonb ELSE $2::jsonb END
+      FROM (
+        SELECT j.id, (SELECT count(*) FROM jsonb_array_elements(j.logs) e
+                       WHERE e->>'message' LIKE 'Reclaimed:%') AS n
+          FROM execution_jobs j
+         WHERE j.kind = 'design_generate' AND j.status = 'executing'
+           AND j.started_at < now() - ($1::text || ' milliseconds')::interval
+      ) prior
+     WHERE execution_jobs.id = prior.id
+     RETURNING execution_jobs.id, execution_jobs.site_id, execution_jobs.status`,
+    [
+      olderThanMs,
+      JSON.stringify([{ at: new Date().toISOString(), message: `Reclaimed: stuck in 'executing' past the ${Math.round(olderThanMs / 60000)}-minute stale threshold — its worker process is presumed dead. Reset to 'queued' for a fresh attempt.` }]),
+      maxReclaims,
+      JSON.stringify({ failure: { stage: 'worker_crash', recoverable: false, message: 'This job repeatedly stopped its worker before finishing, so it was failed instead of retried again.' } }),
+      JSON.stringify([{ at: new Date().toISOString(), message: `Failed: reclaimed ${maxReclaims} times already — the job itself is likely crashing the worker. Not requeued.` }]),
+    ]
   );
   return rows;
 }

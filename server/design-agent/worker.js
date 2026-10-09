@@ -255,7 +255,10 @@ export function createWorker({
     lastReclaimAt = Date.now();
     try {
       const reclaimed = await reclaim();
-      if (reclaimed.length) console.warn(`[design-agent-worker] reclaimed ${reclaimed.length} stale 'executing' job(s) back to 'queued': ${reclaimed.map((j) => `#${j.id}`).join(', ')}`);
+      const requeued = reclaimed.filter((j) => j.status !== 'failed');
+      const gaveUp = reclaimed.filter((j) => j.status === 'failed');
+      if (requeued.length) console.warn(`[design-agent-worker] reclaimed ${requeued.length} stale 'executing' job(s) back to 'queued': ${requeued.map((j) => `#${j.id}`).join(', ')}`);
+      if (gaveUp.length) console.error(`[design-agent-worker] FAILED ${gaveUp.length} job(s) that kept stranding the worker, not requeued: ${gaveUp.map((j) => `#${j.id}`).join(', ')}`);
       if (onReclaim) onReclaim(reclaimed);
     } catch (err) {
       console.error('[design-agent-worker] stale-job reclaim failed:', err.message);

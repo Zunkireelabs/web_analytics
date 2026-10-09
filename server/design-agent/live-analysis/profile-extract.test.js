@@ -360,3 +360,38 @@ describe('correctSpacing', () => {
     assert.deepEqual(correctSpacing({}), {});
   });
 });
+
+describe('buildPromptPages keeps the extraction prompt under the model rate limit', () => {
+  const sec = (n, classes = `c${n}`) => ({
+    role: 'content', classes, alignment: 'left', width: 'full',
+    textHierarchy: [{ role: 'h2', tag: 'h2', classes: `t-${classes}`, style: 'x' }], components: [], spacing: {},
+  });
+  const page = (url, pageType, sections) => ({ url, pageType, title: url, sections });
+
+  test('drops sections repeated across pages (site chrome)', async () => {
+    const { buildPromptPages } = await import('./profile-extract.js');
+    const out = buildPromptPages([
+      page('/a', 'home', [sec(0, 'nav'), sec(1)]),
+      page('/b', 'blog', [sec(0, 'nav'), sec(2)]),
+    ]);
+    assert.equal(out.flatMap((p) => p.sections).filter((s) => s.classes === 'nav').length, 1);
+  });
+
+  test('every pageType appears before a second page of any type', async () => {
+    const { buildPromptPages } = await import('./profile-extract.js');
+    const out = buildPromptPages([
+      page('/1', 'blog', [sec(1)]), page('/2', 'blog', [sec(2)]), page('/3', 'home', [sec(3)]),
+    ], 700);
+    assert.deepEqual(out.slice(0, 2).map((p) => p.pageType).sort(), ['blog', 'home']);
+  });
+
+  test('output never exceeds the character budget', async () => {
+    const { buildPromptPages } = await import('./profile-extract.js');
+    const pages = Array.from({ length: 40 }, (_, i) => page(`/p${i}`, `t${i % 5}`, Array.from({ length: 30 }, (_, j) => sec(i * 100 + j))));
+    const out = buildPromptPages(pages, 6000);
+    assert.ok(out.length > 0);
+    assert.ok(JSON.stringify(out).length <= 6000 + 200 * out.length);
+    const { PROMPT_PAGES_CHAR_BUDGET } = await import('./profile-extract.js');
+    assert.ok(JSON.stringify(buildPromptPages(pages)).length <= PROMPT_PAGES_CHAR_BUDGET);
+  });
+});

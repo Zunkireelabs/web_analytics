@@ -415,22 +415,29 @@ jobs:
             DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
             cd "$DIR"
 
-            # design-agent-worker gets --no-cache: a real deploy on 2026-08-26
-            # showed its `COPY package*.json ./` / `RUN npm ci --omit=dev`
-            # layers reported CACHED across multiple independent deploy
-            # attempts spanning 30+ minutes, even though package-lock.json's
-            # content had genuinely changed on disk (git-level verified —
-            # the VPS's checkout was confirmed at the exact commit carrying
-            # the fix). BuildKit's COPY caching is supposed to be content-
-            # hashed, so a stale hit like that shouldn't be possible; rather
-            # than chase a persisted daemon-cache bug on this host with no
-            # SSH access to inspect it live, force this one image to always
-            # rebuild the dependency-install layer from scratch. The other
-            # two images don't have this problem (nothing in their build
-            # fails from a stale npm ci) and keep normal caching so most
-            # deploys stay fast.
-            docker compose -f docker-compose.dev.yml build --no-cache design-agent-worker
-            docker compose -f docker-compose.dev.yml build analytics analytics-mcp
+            # Disk guard: a build that runs out of space mid-`npm ci` fails with
+            # a misleading ENOSPC deep in an image layer (the 2026-10-01 and
+            # 2026-10-08 deploys), so check first. Dangling images and build
+            # cache older than a day are safe to drop — nothing running uses
+            # them — and are reclaimed before giving up.
+            free_gb() { df -BG --output=avail / | tail -1 | tr -dc '0-9'; }
+            if [ "$(free_gb)" -lt 8 ]; then
+              echo "Only $(free_gb)G free — pruning dangling images and old build cache before building..."
+              docker image prune -f
+              docker builder prune -f --filter "until=24h"
+            fi
+            if [ "$(free_gb)" -lt 6 ]; then
+              echo "::error::Only $(free_gb)G free on the VPS after pruning — refusing to build. Free disk space, then re-run."
+              exit 1
+            fi
+
+            # ONE image for the app, the MCP server and the design worker (see
+            # docker-compose.dev.yml): only `analytics` has a build, the other
+            # two reuse its tag. This replaces three builds, including a
+            # `--no-cache` design-agent-worker build that wrote a fresh set of
+            # layers on every deploy and was a main source of the disk pressure
+            # that kept failing the deploy. Normal layer caching applies.
+            docker compose -f docker-compose.dev.yml build analytics
             docker compose -f data-analyst-agent/docker-compose.dev.yml build
 
             echo "Applying database migrations..."
@@ -459,6 +466,12 @@ jobs:
                 exit 1
               fi
             done
+
+            # Every deploy re-tags analytics-stage-app:latest, leaving the previous
+            # build untagged. Drop those (dangling only — never an image a
+            # container uses) and stale build cache so images don't pile up.
+            docker image prune -f
+            docker builder prune -f --filter "until=72h"
 
             # ── Data Analyst Agent nightly pipeline ──────────────────────────
             # The container's CMD only starts uvicorn, so the API serves fine
