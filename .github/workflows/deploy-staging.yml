@@ -60,18 +60,16 @@ jobs:
             if [ ! -d "$DIR" ]; then
               echo "First deployment — bootstrapping $DIR"
               mkdir -p "$DIR"
-              git clone -b stage git@github.com:${{ github.repository }}.git "$DIR"
+              git clone -b stage https://github.com/${{ github.repository }}.git "$DIR"
             fi
 
             cd "$DIR"
-            # Force the remote back to SSH every deploy: a previous deploy
-            # (2026-08-13) set origin to an HTTPS+PAT URL, which persists in
-            # this checkout's .git/config across deploys since the bootstrap
-            # clone above only runs once. Without this line, reverting the
-            # script's own clone command back to SSH silently did nothing —
-            # the existing checkout kept using the stale HTTPS remote and
-            # kept 403'ing.
-            git remote set-url origin git@github.com:${{ github.repository }}.git
+            # Force the remote to anonymous HTTPS every deploy: an existing checkout's
+            # .git/config may still point at the old SSH remote, which has no deploy
+            # key on this box (the repo is public, so anonymous HTTPS clones fine) —
+            # the bootstrap clone above only runs once, so without this line an
+            # existing checkout would keep using the stale SSH remote and fail.
+            git remote set-url origin https://github.com/${{ github.repository }}.git
             git fetch origin
             git checkout stage
             git pull origin stage

@@ -55,7 +55,7 @@ jobs:
             if [ ! -d "$DIR" ]; then
               echo "First deployment — bootstrapping $DIR"
               mkdir -p "$DIR"
-              git clone -b main git@github.com:${{ github.repository }}.git "$DIR"
+              git clone -b main https://github.com/${{ github.repository }}.git "$DIR"
             fi
 
             cd "$DIR"
