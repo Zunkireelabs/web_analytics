@@ -180,9 +180,13 @@ jobs:
 
             docker compose up -d
 
-            # ── data-analyst-agent: sibling Python service, same repo, own
-            # docker-compose.yml (own dedicated Postgres in prod — see that
-            # file's own `db` service — never this app's Neon database).
+            # ── data-analyst-agent: sibling Python service, same repo.
+            # Sadin's explicit call (2026-10-14, after the risk was flagged):
+            # production reads/writes the literal same database as staging
+            # (STAGING_DATA_ANALYST_DATABASE_URL) — no isolated prod DB, not
+            # even a separate database on the same Supabase project. No
+            # dedicated Postgres container here anymore; docker-compose.yml's
+            # own `db` service was removed to match.
             # Reverse-proxied under this app's own domain at /data-agent
             # (routes/data-agent.js) via DATA_ANALYST_AGENT_INTERNAL_URL
             # above, so no separate DNS/Traefik domain is required for it
@@ -191,8 +195,7 @@ jobs:
             cd "$DIR/data-analyst-agent"
 
             cat > .env << 'ENVEOF'
-            DATABASE_URL=postgresql+asyncpg://data_analyst_agent:${{ secrets.DATA_ANALYST_AGENT_POSTGRES_PASSWORD }}@db:5432/data_analyst_agent
-            POSTGRES_PASSWORD=${{ secrets.DATA_ANALYST_AGENT_POSTGRES_PASSWORD }}
+            DATABASE_URL=${{ secrets.STAGING_DATA_ANALYST_DATABASE_URL }}
             DATA_ANALYST_AGENT_DOMAIN=${{ vars.DATA_ANALYST_AGENT_DOMAIN }}
             ROOT_PATH=/data-agent
             TOKEN_ENCRYPTION_KEY=${{ secrets.DATA_ANALYST_AGENT_TOKEN_ENCRYPTION_KEY }}
