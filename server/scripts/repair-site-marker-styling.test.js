@@ -1,0 +1,428 @@
+import { test, describe } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { repairSiteMarkerStyling } from './repair-site-marker-styling.js';
+
+// The site's real captured FAQ template — deliberately built for a full-bleed
+// page SECTION (the site's homepage FAQ), the same shape as a real capture.
+const SITE_TEMPLATES = {
+  faq: {
+    wrapper: '<dl class="container-custom py-12 md:py-20">\n{{ROWS}}\n</dl>',
+    row: '  <dt class="text-2xl md:text-3xl font-normal text-gray-900">{{QUESTION}}</dt>\n  <dd class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">{{ANSWER}}</dd>',
+  },
+  qaContent: {
+    wrapper: '<div class="container-custom py-12 md:py-20">\n{{ROWS}}\n</div>',
+    row: '  <details>\n    <summary><h3 class="text-2xl md:text-3xl">{{QUESTION}}</h3></summary>\n    <div class="text-lg">{{ANSWER}}</div>\n  </details>',
+  },
+};
+
+async function writeRepo(files) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'marker-styling-test-'));
+  for (const [rel, content] of Object.entries(files)) {
+    const abs = path.join(dir, 'src', rel);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, content, 'utf8');
+  }
+  return dir;
+}
+
+// Reported 2026-09-09: PROSE_TEMPLATES had entries for EXPANDEDCONTENT and
+// QACONTENT but not FAQ, so a blog post's FAQ marker fell through to the
+// site's raw page-section template above and carried `container-custom
+// py-12 md:py-20` into the post's own prose column.
+describe('repairSiteMarkerStyling — FAQ on a blog (.md) post gets the same bare prose treatment as QACONTENT/EXPANDEDCONTENT', () => {
+  const blogFaqRegion = [
+    '<!-- SEOAI:FAQ:START -->',
+    '<dl class="container-custom py-12 md:py-20">',
+    '  <dt class="text-2xl md:text-3xl font-normal text-gray-900">Why is patient data security important for healthcare providers?</dt>',
+    '  <dd class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">Because compromised data leads to identity theft and loss of trust.</dd>',
+    '</dl>',
+    '<!-- SEOAI:FAQ:END -->',
+  ].join('\n');
+
+  test('a blog post FAQ marker is re-rendered bare, with no page-section sizing classes', async () => {
+    const dir = await writeRepo({ 'blog/patient-data-security.md': `# Post\n\n${blogFaqRegion}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, SITE_TEMPLATES, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'blog', 'patient-data-security.md'), 'utf8');
+      assert.doesNotMatch(out, /container-custom/);
+      assert.doesNotMatch(out, /text-2xl|max-w-2xl/);
+      assert.match(out, /<dt>Why is patient data security important for healthcare providers\?<\/dt>/);
+      assert.match(out, /<dd>Because compromised data leads to identity theft and loss of trust\.<\/dd>/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('the same FAQ marker on a real .njk page (not prose-hosted) keeps the site\'s real section styling', async () => {
+    const dir = await writeRepo({ 'pages/services.njk': `<main>\n${blogFaqRegion}\n</main>\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, SITE_TEMPLATES, { write: true });
+      assert.equal(result.changedRegions, 0); // already matches handler.template byte-for-byte
+      const out = await readFile(path.join(dir, 'src', 'pages', 'services.njk'), 'utf8');
+      assert.match(out, /container-custom py-12 md:py-20/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('QACONTENT on the same blog post still gets its own existing bare treatment (regression guard)', async () => {
+    const region = [
+      '<!-- SEOAI:QACONTENT:START -->',
+      '<div class="container-custom py-12 md:py-20">',
+      '  <details>',
+      '    <summary><h3 class="text-2xl md:text-3xl">How do I get in touch?</h3></summary>',
+      '    <div class="text-lg">Email or call us.</div>',
+      '  </details>',
+      '</div>',
+      '<!-- SEOAI:QACONTENT:END -->',
+    ].join('\n');
+    const dir = await writeRepo({ 'blog/contact-info.md': `# Post\n\n${region}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, SITE_TEMPLATES, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'blog', 'contact-info.md'), 'utf8');
+      assert.doesNotMatch(out, /container-custom/);
+      assert.match(out, /<h3>How do I get in touch\?<\/h3>/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// The retroactive half of the 2026-09-15 expand-content prose fix: every
+// EXPANDEDCONTENT block shipped before marker-merge.js's proseStyleFor
+// existed has a bare, unstyled <p>/<ul>/<li>/<a> body — normaliseTables
+// above already retroactively fixes tables the same way; normaliseProse
+// extends that to prose, gated on a real designProfile being passed in.
+describe('repairSiteMarkerStyling — retroactively grounds EXPANDEDCONTENT prose (normaliseProse)', () => {
+  const TEMPLATES_WITH_EXPAND = { expandContent: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h2>{{HEADING}}</h2>\n{{BODY}}' } };
+  const REAL_PROFILE = {
+    typography: { body: 'text-lg text-gray-600 leading-relaxed', link: 'text-zunkiree-600 hover:underline' },
+    components: { list: { wrapper: 'space-y-2 my-4', item: 'flex items-start gap-2' } },
+  };
+  const bareRegion = [
+    '<!-- SEOAI:EXPANDEDCONTENT:START -->',
+    '<h2>Why It Matters</h2>',
+    '<p>See <a href="https://example.com/docs">our docs</a> for more.</p>',
+    '<ul><li>First point</li><li>Second point</li></ul>',
+    '<!-- SEOAI:EXPANDEDCONTENT:END -->',
+  ].join('\n');
+
+  test('with a real design profile, a bare shipped body gets the site\'s real classes added', async () => {
+    const dir = await writeRepo({ 'blog/post.md': `# Post\n\n${bareRegion}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, TEMPLATES_WITH_EXPAND, { write: true, designProfile: REAL_PROFILE });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'blog', 'post.md'), 'utf8');
+      assert.match(out, /<p class="text-lg text-gray-600 leading-relaxed">/);
+      assert.match(out, /<a href="https:\/\/example\.com\/docs" class="text-zunkiree-600 hover:underline">/);
+      assert.match(out, /<ul class="space-y-2 my-4">/);
+      assert.match(out, /<li class="flex items-start gap-2">First point<\/li>/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('with no design profile given, the body is left exactly as bare as it already was — no behavior change', async () => {
+    const dir = await writeRepo({ 'blog/post.md': `# Post\n\n${bareRegion}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, TEMPLATES_WITH_EXPAND, { write: true });
+      const out = await readFile(path.join(dir, 'src', 'blog', 'post.md'), 'utf8');
+      // Rewritten (blockSafeRow/whitespace normalization still applies), but
+      // no class attributes are introduced onto p/ul/li/a.
+      assert.doesNotMatch(out, /<p class=/);
+      assert.doesNotMatch(out, /<ul class=/);
+      assert.doesNotMatch(out, /<a[^>]+class=/);
+      assert.ok(result.changedRegions >= 0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a tag that already carries a real class is never overwritten by the generic one', async () => {
+    const alreadyClassedRegion = [
+      '<!-- SEOAI:EXPANDEDCONTENT:START -->',
+      '<h2>Why It Matters</h2>',
+      '<p class="custom-existing-class">Already styled by a prior run or a hand-captured template.</p>',
+      '<!-- SEOAI:EXPANDEDCONTENT:END -->',
+    ].join('\n');
+    const dir = await writeRepo({ 'blog/post.md': `# Post\n\n${alreadyClassedRegion}\n` });
+    try {
+      await repairSiteMarkerStyling(dir, TEMPLATES_WITH_EXPAND, { write: true, designProfile: REAL_PROFILE });
+      const out = await readFile(path.join(dir, 'src', 'blog', 'post.md'), 'utf8');
+      assert.match(out, /<p class="custom-existing-class">/);
+      assert.doesNotMatch(out, /text-lg text-gray-600/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Confirmed live on site 1 (2026-09-18): src/pages/privacy-policy-
+// zunkiree-labs.njk's EXPANDEDCONTENT wrapper still carried `py-12
+// md:py-20` section-scale spacing. The old hostIsProse check was
+// file.endsWith('.md') only, so a legal page (.njk, not .md) always fell
+// through to the site's raw page-section template — the same defect the
+// 2026-09-09 FAQ fix above exists to prevent, just for a page TYPE the
+// check never recognised rather than a marker TYPE it never recognised.
+const FULL_SECTION_EXPAND_TEMPLATES = {
+  expandContent: {
+    wrapper: '<div class="container-custom py-12 md:py-20">\n{{ROWS}}\n</div>',
+    row: '  <section class="gap-3">\n    <h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">{{HEADING}}</h2>\n    <div class="text-gray-600 leading-relaxed">{{BODY}}</div>\n  </section>',
+  },
+};
+
+describe('repairSiteMarkerStyling — a legal (.njk) page gets the same bare prose treatment as a blog post', () => {
+  const legalExpandedContentRegion = [
+    '<!-- SEOAI:EXPANDEDCONTENT:START -->',
+    '<section class="py-12 md:py-20">',
+    '<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">Data Retention</h2>',
+    '<p>We retain your data only as long as necessary.</p>',
+    '</section>',
+    '<!-- SEOAI:EXPANDEDCONTENT:END -->',
+  ].join('\n');
+
+  test('a privacy-policy.njk page is re-rendered bare, with no page-section sizing classes', async () => {
+    const dir = await writeRepo({ 'pages/privacy-policy-zunkiree-labs.njk': `---\npermalink: /privacy/\n---\n\n${legalExpandedContentRegion}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, FULL_SECTION_EXPAND_TEMPLATES, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'pages', 'privacy-policy-zunkiree-labs.njk'), 'utf8');
+      assert.doesNotMatch(out, /py-12 md:py-20/);
+      assert.doesNotMatch(out, /container-custom/);
+      assert.match(out, /<h2>Data Retention<\/h2>/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a terms-of-service page is also recognised as a prose host', async () => {
+    const dir = await writeRepo({ 'pages/zunkiree-labs-terms-of-service.njk': `---\npermalink: /terms/\n---\n\n${legalExpandedContentRegion}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, FULL_SECTION_EXPAND_TEMPLATES, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'pages', 'zunkiree-labs-terms-of-service.njk'), 'utf8');
+      assert.doesNotMatch(out, /py-12 md:py-20/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a non-legal, non-blog .njk page still gets the full raw section template', async () => {
+    const dir = await writeRepo({ 'pages/about.njk': `---\npermalink: /about/\n---\n\n${legalExpandedContentRegion}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, FULL_SECTION_EXPAND_TEMPLATES, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'pages', 'about.njk'), 'utf8');
+      assert.match(out, /container-custom py-12 md:py-20/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Confirmed live on site 8864 (chayceproperties.com, 2026-09-20): several
+// Action Center batches spliced EXPANDEDCONTENT regions using a stale
+// componentTemplates.expandContent row that was itself a bare, unclassed
+// `<h1>` (fixed going forward by freshness-check, but that fix never touches
+// content already shipped). The EXPANDEDCONTENT parser only matched h2/h3,
+// so these regions came back `null` from parse() and were skipped every
+// time this repair ran — the site's own daily auto-remediation cron
+// (repair-site-content-live.js) could never heal them even after the
+// template was corrected.
+describe('repairSiteMarkerStyling — EXPANDEDCONTENT shipped with a bare <h1> heading still gets repaired', () => {
+  const h1Region = [
+    '<!-- SEOAI:EXPANDEDCONTENT:START --><div class="container">',
+    '  <section>',
+    '    <h1>Comparison of Moving Services</h1>',
+    '    <div><p>Some comparison copy.</p></div>',
+    '  </section>',
+    '</div><!-- SEOAI:EXPANDEDCONTENT:END -->',
+  ].join('\n');
+
+  const CORRECTED_TEMPLATES = {
+    expandContent: {
+      wrapper: '<div class="container">\n{{ROWS}}\n</div>',
+      row: '  <section>\n    <h2 class="home-h2">{{HEADING}}</h2>\n    <div class="body-copy">{{BODY}}</div>\n  </section>',
+    },
+  };
+
+  test('the h1 region is re-rendered through the corrected h2 template, not skipped', async () => {
+    const dir = await writeRepo({ 'bronze-essentials.njk': `---\npermalink: /bronze-essentials/\n---\n\n${h1Region}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, CORRECTED_TEMPLATES, { write: true });
+      assert.equal(result.skipped, 0);
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'bronze-essentials.njk'), 'utf8');
+      assert.match(out, /<h2 class="home-h2">Comparison of Moving Services<\/h2>/);
+      assert.doesNotMatch(out, /<h1>/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Confirmed live (2026-09-24): running this script a SECOND time against its
+// own prior output on a real page (src/pages/resources/ai-search-stack-
+// guide.njk, 3 EXPANDEDCONTENT items) tripled the content — each item's body
+// swallowed every later item's heading and body too, cascading across a
+// second pass. Root cause: the EXPANDEDCONTENT parser used
+// $(h).nextAll() — "everything after this heading" — which only happened to
+// equal "everything up to the NEXT heading" on the very first run, when each
+// item still sat in its own captured wrapper <div>/<section>. This script's
+// own first-pass output flattens that into plain sibling <h2>/<p> pairs, so
+// a second run's nextAll() reached straight through into later items.
+describe('repairSiteMarkerStyling — EXPANDEDCONTENT re-run is idempotent (regression: nextAll() cascading duplication)', () => {
+  const threeItemFlatRegion = [
+    '<!-- SEOAI:EXPANDEDCONTENT:START --><div>',
+    '<h2>Comparison of AI Search Solutions</h2>',
+    '<p class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">First section body.</p>',
+    '<h2>Last Updated</h2>',
+    '<p class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">Second section body.</p>',
+    '<h2>Security Considerations</h2>',
+    '<p class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">Third section body.</p>',
+    '</div><!-- SEOAI:EXPANDEDCONTENT:END -->',
+  ].join('\n');
+  const expandTemplates = { expandContent: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h2>{{HEADING}}</h2>\n{{BODY}}' } };
+
+  test('a second run over the same (already-flat) content produces byte-identical output, not duplication', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'marker-repair-idempotent-'));
+    try {
+      const abs = path.join(dir, 'src', 'pages', 'resources', 'guide.njk');
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, `---\npermalink: /resources/guide/\n---\n\n${threeItemFlatRegion}\n`);
+
+      await repairSiteMarkerStyling(dir, expandTemplates, { write: true });
+      const afterFirst = await readFile(abs, 'utf8');
+      // First-run content stays flat — exactly 3 headings, no duplication.
+      assert.equal((afterFirst.match(/<h2>/g) || []).length, 3);
+      assert.equal((afterFirst.match(/First section body\./g) || []).length, 1);
+
+      const second = await repairSiteMarkerStyling(dir, expandTemplates, { write: true });
+      const afterSecond = await readFile(abs, 'utf8');
+      assert.equal(second.changedRegions, 0, 'a second run over already-correct content must be a no-op');
+      assert.equal(afterSecond, afterFirst, 'byte-identical — never cascading duplication');
+      assert.equal((afterSecond.match(/<h2>/g) || []).length, 3);
+      assert.equal((afterSecond.match(/First section body\./g) || []).length, 1);
+      assert.equal((afterSecond.match(/Third section body\./g) || []).length, 1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Confirmed live (2026-09-24): src/pages/resources/ai-search-stack-guide.njk's
+// QACONTENT region had already been mangled into bare <h3>/unwrapped-text by
+// an earlier run of this script (before the "always ground the heading,
+// always wrap the answer" fix). Its parser only ever recognized <details>
+// elements, so once a page was in that shape, no later run — even with a
+// corrected template — could ever heal it; it silently skipped every time
+// ("unrecognised shape, left as-is"). The fallback below lets a page already
+// in that shape be healed the next time this script runs.
+describe('repairSiteMarkerStyling — QACONTENT self-heals a page already mangled into bare <h3>/text (no <details>)', () => {
+  const qaTemplates = {
+    qaContent: {
+      wrapper: '<div class="container-custom py-12 md:py-20">\n{{ROWS}}\n</div>',
+      row: '  <details class="gap-2">\n    <summary><h3 class="text-2xl md:text-3xl font-normal text-gray-900">{{QUESTION}}</h3></summary>\n    <div class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">{{ANSWER}}</div>\n  </details>',
+    },
+  };
+  const alreadyBareRegion = [
+    '<!-- SEOAI:QACONTENT:START --><div>',
+    '<h3>What are the key benefits?</h3>',
+    'AI-powered search enhances customer experience.',
+    '<h3>What does the architecture blueprint include?</h3>',
+    'A comprehensive design for enterprises.',
+    '</div><!-- SEOAI:QACONTENT:END -->',
+  ].join('\n');
+
+  test('a page already mangled into bare <h3>/text is recognised and healed, not skipped', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'marker-repair-selfheal-'));
+    try {
+      const abs = path.join(dir, 'src', 'pages', 'resources', 'ai-search-stack-guide.njk');
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, `---\npermalink: /resources/ai-search-stack-guide/\n---\n\n${alreadyBareRegion}\n`);
+
+      const result = await repairSiteMarkerStyling(dir, qaTemplates, { write: true, designProfile: {
+        typography: { body: 'text-lg text-gray-600', heading: { item: 'text-2xl md:text-3xl font-normal text-gray-900' } },
+      } });
+      assert.equal(result.skipped, 0);
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(abs, 'utf8');
+      assert.match(out, /<h3 class="text-2xl font-normal text-gray-900">What are the key benefits\?<\/h3>/);
+      assert.match(out, /<p class="text-lg text-gray-600">AI-powered search enhances customer experience\.<\/p>/);
+      assert.match(out, /<h3 class="text-2xl font-normal text-gray-900">What does the architecture blueprint include\?<\/h3>/);
+      assert.match(out, /<p class="text-lg text-gray-600">A comprehensive design for enterprises\.<\/p>/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Explicit owner decision (2026-09-24): a visible "About the Author" section
+// is retired platform-wide. generators/expand-content.js's author-byline
+// focus stops NEW drafts, but every already-published page still has its old
+// one sitting in a live EXPANDEDCONTENT region — often bundled alongside
+// OTHER real items (References, Last Updated) in the SAME region, confirmed
+// live on /about/. This repair now strips it unconditionally on every run.
+describe('repairSiteMarkerStyling — retroactively removes "About the Author" from an already-published page', () => {
+  const expandTemplates = { expandContent: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h2>{{HEADING}}</h2>\n{{BODY}}' } };
+
+  test('an "About the Author" item is dropped; other real items in the same region survive', async () => {
+    const region = [
+      '<!-- SEOAI:EXPANDEDCONTENT:START --><div class="container-custom py-12 md:py-20">',
+      '<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">References</h2>',
+      '<p>Some real reference content.</p>',
+      '<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">About the Author</h2>',
+      '<p>By the Zunkiree Labs Team</p>',
+      '<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">Last Updated</h2>',
+      '<p>This page was last updated on 2026-09-17.</p>',
+      '</div><!-- SEOAI:EXPANDEDCONTENT:END -->',
+    ].join('\n');
+    const dir = await mkdtemp(path.join(tmpdir(), 'marker-repair-retireauthor-'));
+    try {
+      const abs = path.join(dir, 'src', 'pages', 'about.njk');
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, `---\npermalink: /about/\n---\n\n${region}\n`);
+
+      const result = await repairSiteMarkerStyling(dir, expandTemplates, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(abs, 'utf8');
+      assert.doesNotMatch(out, /About the Author/);
+      assert.doesNotMatch(out, /By the Zunkiree Labs Team/);
+      assert.match(out, /<h2>References<\/h2>/);
+      assert.match(out, /Some real reference content\./);
+      assert.match(out, /<h2>Last Updated<\/h2>/);
+      assert.match(out, /This page was last updated on 2026-09-17\./);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a region that is ONLY "About the Author" is emptied out, not skipped', async () => {
+    const region = [
+      '<!-- SEOAI:EXPANDEDCONTENT:START --><div>',
+      '<h2>About the Author</h2>',
+      '<p>By the Zunkiree Labs Team</p>',
+      '</div><!-- SEOAI:EXPANDEDCONTENT:END -->',
+    ].join('\n');
+    const dir = await mkdtemp(path.join(tmpdir(), 'marker-repair-retireauthor-only-'));
+    try {
+      const abs = path.join(dir, 'src', 'blog', 'post.md');
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, `# Post\n\n${region}\n`);
+
+      const result = await repairSiteMarkerStyling(dir, expandTemplates, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(abs, 'utf8');
+      assert.doesNotMatch(out, /About the Author/);
+      assert.doesNotMatch(out, /By the Zunkiree Labs Team/);
+      assert.match(out, /SEOAI:EXPANDEDCONTENT:START/); // marker stays, ready for future content
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

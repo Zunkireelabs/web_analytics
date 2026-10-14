@@ -15,15 +15,18 @@ mock.module(resolve('../../store/design-integrity-verdicts.js'), {
 });
 
 const {
-  extractLiteralClassNames, extractStylesheetHrefs, checkTemplateFreshness,
+  extractLiteralClassNames, extractStylesheetHrefs, checkTemplateFreshness, checkTemplateStructuralMatch,
   templateActionRequiresRow, resolveOrCreateComponentTemplate,
   isTemplateVerified, stampTemplateVerification, componentTemplateVerification,
   componentTemplateActionTypeFor, TEMPLATE_VERIFIED_BY,
   persistDerivedComponentTemplates, sitePageUrl, verifyTemplateAgainstLiveSite,
   contentWrapperAvailability, filterTemplateToLiveClasses, withDesignContext, DESIGN_CONTEXT_GENERATOR_IDS,
-  bodySlotLooksLikeLabel,
+  bodySlotLooksLikeLabel, captureClassRules, checkClassRuleDrift,
   observedClassesByRole, checkTypographyRole, verifyProfileRoles,
   designReviewFingerprint, designReviewState, checkDesignIntegrityGate,
+  extractPageTypographyEvidence, buildPageEvidenceComponentTemplate,
+  resolvePageComponentTemplate, pageTemplateFileKey, PAGE_COMPONENT_TEMPLATE_TIER,
+  validatePlaceholders,
 } = await import('./design-drift.js');
 const { DESIGN_PROFILE_VERSION } = await import('../../design-agent/lib/design-profile.js');
 
@@ -438,6 +441,37 @@ describe('resolveOrCreateComponentTemplate', () => {
     assert.equal(queuedFor, site.id, 'the profile itself is re-derived, since that is where the bad body class came from');
   });
 
+  test('a projection is NOT structurally checked — it composes new markup, it does not claim to mirror the page', async () => {
+    // The admizzeducation.com incident, from the other direction. A projected
+    // template for a component the site has never had cannot possibly already
+    // appear on the reference page, so running the structural shape check
+    // against it produces a guaranteed failure that means nothing. All five of
+    // that site's templates failed exactly this way; enforcing it would leave
+    // every newly onboarded client on plain unstyled defaults forever. Class
+    // existence and body-slot role ARE still checked here — only shape is
+    // skipped, and only for projections.
+    const site = {
+      ...baseSite,
+      website_domain: 'admizzeducation.com',
+      url_file_map: { siteRoot: { designProfile: PROFILE } },
+    };
+    let saved = null;
+
+    const result = await resolveOrCreateComponentTemplate(site, 'faq', {
+      ...noopDeps(),
+      saveConfig: async ({ urlFileMap }) => { saved = urlFileMap; return { id: 1, url_file_map: urlFileMap }; },
+      // A live page that contains no FAQ whatsoever — the exact situation a
+      // first-ever FAQ projection is created in.
+      fetchPage: async () => '<html><head><link rel="stylesheet" href="/main.css"></head><body><p>No FAQ on this page at all.</p></body></html>',
+      fetchStylesheet: async () => '.max-w-3xl{a}.mx-auto{a}.text-lg{a}.font-medium{a}.text-gray-600{a}.prose{a}',
+    });
+
+    assert.equal(result.ok, true, 'the projection is usable despite matching no existing shape');
+    assert.equal(result.source, 'design-profile');
+    assert.equal(result.template.verifiedBy, 'freshness-check', 'verified on live CSS evidence, the check that IS meaningful here');
+    assert.ok(saved.siteRoot.componentTemplates.faq, 'and persisted, not discarded');
+  });
+
   test('an UNVERIFIED existing template with real markup is self-healed by a live-CSS check, not replaced', async () => {
     // The self-heal check runs BEFORE the projection path — for a template
     // that is merely unstamped and genuinely matches the live site, checking
@@ -455,7 +489,10 @@ describe('resolveOrCreateComponentTemplate', () => {
     const result = await resolveOrCreateComponentTemplate(site, 'faq', {
       ...noopDeps(),
       saveConfig: async ({ urlFileMap }) => { saved = urlFileMap; return { id: 1, url_file_map: urlFileMap }; },
-      fetchPage: async () => '<html><head><link rel="stylesheet" href="/main.css"></head></html>',
+      // Body actually contains the real shape, not just a page with the
+      // right stylesheet link — the self-heal now checks structure too
+      // (checkTemplateStructuralMatch), not just class-existence.
+      fetchPage: async () => `<html><head><link rel="stylesheet" href="/main.css"></head><body>${wrapper.replace('{{ROWS}}', row.replace('{{QUESTION}}', 'Q?').replace('{{ANSWER}}', 'A.'))}</body></html>`,
       fetchStylesheet: async () => '.py-12{a}.divide-y>:not([hidden]){a}.divide-gray-200{a}.py-5{a}',
     });
 
@@ -485,7 +522,13 @@ describe('resolveOrCreateComponentTemplate', () => {
     // siteWithProfile only ever merges extra.siteRoot, so website_domain has
     // to be applied on top of its result, not passed through it.
     const liveSite = (extra = {}) => ({ ...siteWithProfile(extra), website_domain: 'zunkireelabs.com' });
-    const html = '<html><head><link rel="stylesheet" href="/main.css"></head></html>';
+    // Body actually contains a content-wrapper shape (projectContentWrapper's
+    // `<div class="...">{{BODY}}</div>`, filled with real content) — the
+    // structural check now runs on top of class-existence, so the fetched
+    // page has to genuinely contain the wrapper's shape, not just link the
+    // right stylesheet.
+    const html = '<html><head><link rel="stylesheet" href="/main.css"></head>'
+      + '<body><div class="max-w-3xl mx-auto">Real page content.</div></body></html>';
 
     test('a projection whose classes are all live is stamped freshness-check, the strongest evidence', async () => {
       // max-w-3xl mx-auto (container) and text-lg/text-gray-600/text-blue-600
@@ -852,13 +895,493 @@ describe('checkTemplateFreshness', () => {
     assert.equal(result.stale, true);
     assert.deepEqual(result.missingClasses, ['divide-y']);
   });
+
+  // Regression: a site built with page-scoped inline CSS (a <style> block
+  // per page, no <link rel="stylesheet"> at all — Chayce's actual design)
+  // was reported stale on every page, because only linked stylesheets were
+  // ever checked. The classes are real and live; they were just never
+  // looked for in the one place this site actually puts them.
+  test('classes defined only in an inline <style> block on the page are found, not reported missing', async () => {
+    const inlineHtml = '<html><head><style>.py-12{padding-top:3rem}.text-xl{font-size:1.25rem}' +
+      '.font-normal{font-weight:400}@media(min-width:768px){.md\\:py-20{padding-top:5rem}' +
+      '.md\\:text-2xl{font-size:1.5rem}}</style></head><body></body></html>';
+    const result = await checkTemplateFreshness({
+      pageUrl: 'https://example.com/page/',
+      templateEntry: template,
+      fetchPage: async () => inlineHtml,
+      fetchStylesheet: async () => { throw new Error('no linked stylesheet to fetch'); },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.stale, false);
+    assert.deepEqual(result.missingClasses, []);
+  });
+
+  test('no <link rel="stylesheet"> and no inline <style> -> honest error, not a false stale verdict', async () => {
+    const bareHtml = '<html><head></head><body></body></html>';
+    const result = await checkTemplateFreshness({
+      pageUrl: 'https://example.com/page/',
+      templateEntry: template,
+      fetchPage: async () => bareHtml,
+      fetchStylesheet: async () => 'irrelevant',
+    });
+    assert.equal(result.ok, false);
+    assert.ok(result.error);
+  });
+});
+
+describe('extractPageTypographyEvidence', () => {
+  test('finds the real heading and body classes on a page, ignoring nav/header/footer', () => {
+    const html = '<html><body>'
+      + '<nav><h2 class="nav-h2">Menu</h2></nav>'
+      + '<header><p class="header-p">A header blurb long enough to look like real body copy at first glance.</p></header>'
+      + '<section class="content-section"><h2 class="real-heading">A Real Section Heading</h2>'
+      + '<p class="real-body">This is the real paragraph of body copy on this page, long enough to count.</p></section>'
+      + '<footer><p class="footer-p">Copyright footer text that is also long enough to otherwise look like body copy.</p></footer>'
+      + '</body></html>';
+    const evidence = extractPageTypographyEvidence(html);
+    assert.equal(evidence.headingClass, 'real-heading');
+    assert.equal(evidence.bodyClass, 'real-body');
+    assert.equal(evidence.containerClass, 'content-section');
+  });
+
+  test('returns null when the page has no classed heading at all — never invents one', () => {
+    const html = '<html><body><h2>No class here</h2><p class="some-body">Long enough real paragraph text right here.</p></body></html>';
+    assert.equal(extractPageTypographyEvidence(html), null);
+  });
+
+  test('returns null when the page has no classed paragraph long enough to count as body copy', () => {
+    const html = '<html><body><h2 class="heading">A Real Heading Here</h2><p class="tiny">Too short</p></body></html>';
+    assert.equal(extractPageTypographyEvidence(html), null);
+  });
+
+  test('skips a short heading/paragraph (likely a label/eyebrow) in favor of a later, real one', () => {
+    const html = '<html><body>'
+      + '<h3 class="eyebrow">New</h3>'
+      + '<h2 class="real-heading">A Proper Section Heading</h2>'
+      + '<p class="real-body">A real, sufficiently long paragraph of body copy for this page.</p>'
+      + '</body></html>';
+    const evidence = extractPageTypographyEvidence(html);
+    assert.equal(evidence.headingClass, 'real-heading');
+  });
+});
+
+// Real incident, Chayce Properties (site 8864), fetched live 2026-09-18:
+// /get-started/index.html?package=... styles its hero heading and lead
+// paragraph via container-scoped descendant selectors in its own inline
+// <style> block, with ZERO class on the tags themselves.
+const GS_HTML = '<html><head><style>'
+  + '.gs-hero h1{font-size:48px}.gs-hero h1 em{font-style:italic}.gs-hero p{color:#555;font-size:17px}'
+  + '</style></head><body>'
+  + '<div class="gs-hero"><h1>A guided <em>conversation,</em> at your own pace.</h1>'
+  + '<p>Answer a few simple questions and we\'ll point you to the right support and next steps for your situation.</p></div>'
+  + '</body></html>';
+const GS_CSS = ".gs-hero h1{font-size:48px}.gs-hero h1 em{font-style:italic}.gs-hero p{color:#555;font-size:17px}";
+
+describe('extractPageTypographyEvidence — bare-tag-via-container fallback (Chayce /get-started/ incident)', () => {
+  test('with no css given, a class-less heading/paragraph still returns null — unchanged, backward-compatible default', () => {
+    assert.equal(extractPageTypographyEvidence(GS_HTML), null);
+  });
+
+  test('with the real live css, finds tag-based evidence for a heading and paragraph that carry no class of their own', () => {
+    const evidence = extractPageTypographyEvidence(GS_HTML, GS_CSS);
+    assert.ok(evidence, 'must find usable evidence now that css is available to confirm it');
+    assert.equal(evidence.headingClass, null);
+    assert.equal(evidence.headingTag, 'h1');
+    assert.equal(evidence.headingContainerClass, 'gs-hero');
+    assert.equal(evidence.bodyClass, null);
+    assert.equal(evidence.bodyTag, 'p');
+    assert.equal(evidence.bodyContainerClass, 'gs-hero');
+  });
+
+  test('a selector whose real target is a DIFFERENT tag does not count as evidence — .gs-hero h1 em styles em, not h1', () => {
+    // Isolate: css defines .gs-hero ONLY via the em-targeting rule, never a
+    // real h1-targeting rule, so the ONLY honest answer is "no evidence".
+    const emOnlyCss = ".gs-hero h1 em{font-style:italic}";
+    const html = '<html><head><style>' + emOnlyCss + '</style></head><body>'
+      + '<div class="gs-hero"><h1>A heading with <em>emphasis</em> inside, long enough to count.</h1>'
+      + '<p class="gs-lead">A real classed paragraph, long enough to count as body copy here.</p></div>'
+      + '</body></html>';
+    assert.equal(extractPageTypographyEvidence(html, emOnlyCss), null, 'h1 must not be credited from a rule that really targets em');
+  });
+
+  test('a mixed page — bare tag-styled heading, but a real classed paragraph — resolves both slots independently', () => {
+    const evidence = extractPageTypographyEvidence(GS_HTML.replace(
+      '<p>Answer a few simple questions',
+      '<p class="gs-lead">Answer a few simple questions',
+    ), GS_CSS);
+    assert.equal(evidence.headingTag, 'h1');
+    assert.equal(evidence.headingContainerClass, 'gs-hero');
+    assert.equal(evidence.bodyClass, 'gs-lead');
+    assert.equal(evidence.bodyTag, null, 'a slot resolved via a literal class must not also carry tag evidence');
+  });
+});
+
+describe('buildPageEvidenceComponentTemplate', () => {
+  test('composes a real template using ONLY the classes found in the page evidence — nothing invented', () => {
+    const evidence = { headingClass: 'faqp-question', bodyClass: 'faqp-answer', containerClass: 'faqp-section' };
+    const template = buildPageEvidenceComponentTemplate('expand-content', evidence);
+    assert.match(template.row, /faqp-question/);
+    assert.match(template.row, /faqp-answer/);
+    assert.match(template.wrapper, /faqp-section/);
+    assert.doesNotMatch(template.wrapper + template.row, /home-|shared-/, 'must carry only this page\'s own real classes');
+  });
+
+  test('falls back to the body class for the wrapper when no container was found, rather than failing outright', () => {
+    const evidence = { headingClass: 'h', bodyClass: 'b', containerClass: null };
+    const template = buildPageEvidenceComponentTemplate('expand-content', evidence);
+    assert.ok(template, 'a missing container must not block a derivation that otherwise has real heading/body evidence');
+  });
+
+  test('returns null for non-projectable action types and for missing evidence', () => {
+    assert.equal(buildPageEvidenceComponentTemplate('meta-title', { headingClass: 'h', bodyClass: 'b' }), null);
+    assert.equal(buildPageEvidenceComponentTemplate('expand-content', null), null);
+    assert.equal(buildPageEvidenceComponentTemplate('expand-content', { headingClass: 'h' }), null);
+  });
+
+  describe('bare-tag-via-container evidence (Chayce /get-started/ incident)', () => {
+    test('puts the real container class on the wrapper and NO class on the bare heading/body tags', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: 'gs-hero', bodyClass: null, bodyTag: 'p', bodyContainerClass: 'gs-hero', containerClass: null };
+      const template = buildPageEvidenceComponentTemplate('expand-content', evidence);
+      assert.match(template.wrapper, /class="gs-hero"/);
+      assert.match(template.row, /<h1>\{\{HEADING\}\}<\/h1>/, 'the real h1 tag, no class attribute at all');
+      assert.match(template.row, /<p>\{\{BODY\}\}<\/p>/, 'the real p tag, no class attribute at all');
+      const check = validatePlaceholders('expand-content', template);
+      assert.equal(check.ok, true, check.error);
+    });
+
+    test('a mixed slot (tag-based heading, classed body) renders each slot per its own evidence kind', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: 'gs-hero', bodyClass: 'gs-lead', bodyTag: null, bodyContainerClass: null, containerClass: null };
+      const template = buildPageEvidenceComponentTemplate('expand-content', evidence);
+      assert.match(template.row, /<h1>\{\{HEADING\}\}<\/h1>/);
+      assert.match(template.row, /<div class="gs-lead">\{\{BODY\}\}<\/div>/);
+      assert.match(template.wrapper, /class="gs-hero"/, 'the confirmed container class still grounds the wrapper');
+    });
+
+    test('faq is not supported for the bare-tag shape — clean refusal, not a guess', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: 'gs-hero', bodyClass: null, bodyTag: 'p', bodyContainerClass: 'gs-hero' };
+      assert.equal(buildPageEvidenceComponentTemplate('faq', evidence), null);
+    });
+
+    test('a slot with a tag but no confirmed container (should never happen from real extraction, but must not fabricate one) refuses', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: null, bodyClass: null, bodyTag: 'p', bodyContainerClass: 'gs-hero' };
+      assert.equal(buildPageEvidenceComponentTemplate('expand-content', evidence), null);
+    });
+
+    // Real incident, Chayce Properties (site 8864), confirmed live 2026-09-22:
+    // every qa-content draft against silver-comfort/bronze-essentials/
+    // discovery/news/platinum-bespoke/about-chayce abandoned with
+    // "no-page-evidence" because the site's SITE-tier qaContent template
+    // (captured from the homepage's own classes) never verifies fresh
+    // against any other page — Chayce's CSS is page-scoped — forcing
+    // recapture on every draft, and recapture's real, confirmed evidence for
+    // these pages' bare <h1>/<p style="..."> tags was a bare-tag-via-
+    // container match, previously refused for qa-content specifically.
+    test('qa-content gets its own real <details>/<summary> shape from bare-tag evidence, not a refusal', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: 'container', bodyClass: null, bodyTag: 'p', bodyContainerClass: 'container', containerClass: 'container' };
+      const template = buildPageEvidenceComponentTemplate('qa-content', evidence);
+      assert.match(template.wrapper, /class="container"/);
+      assert.match(template.row, /<details>/);
+      assert.match(template.row, /<summary>\s*<h1>\{\{QUESTION\}\}<\/h1>\s*<\/summary>/);
+      assert.match(template.row, /<p>\{\{ANSWER\}\}<\/p>/);
+      const check = validatePlaceholders('qa-content', template);
+      assert.equal(check.ok, true, check.error);
+    });
+
+    test('qa-content bare-tag shape also honors a classed slot mixed with a tag-based one', () => {
+      const evidence = { headingClass: null, headingTag: 'h2', headingContainerClass: 'htxt', bodyClass: 'lede', bodyTag: null, bodyContainerClass: null, containerClass: null };
+      const template = buildPageEvidenceComponentTemplate('qa-content', evidence);
+      assert.match(template.row, /<summary>\s*<h2>\{\{QUESTION\}\}<\/h2>\s*<\/summary>/);
+      assert.match(template.row, /<div class="lede">\{\{ANSWER\}\}<\/div>/);
+    });
+  });
+});
+
+describe('resolvePageComponentTemplate — page-scoped component templates (Chayce-shaped fixtures)', () => {
+  // Real shape: chayceproperties.com has NO shared design system — every
+  // page ships its own inline <style> block, and classes like home-h2/
+  // home-section/body-copy are only ever DEFINED on the homepage. /faq/ and
+  // /news/ each define their own, completely disjoint class vocabulary. This
+  // is exactly the incident resolvePageComponentTemplate exists to fix: a
+  // componentTemplates.expandContent entry captured from the homepage must
+  // never ship those classes onto a page that never had them.
+  const HOME_URL = 'https://chayce.example/';
+  const FAQ_URL = 'https://chayce.example/faq/';
+  const NEWS_URL = 'https://chayce.example/news/';
+
+  const HOME_HTML = '<html><head><style>'
+    + ".home-h2{font-family:'Playfair',serif;font-size:34px}.home-section{padding:80px 0}.body-copy{color:#555;font-size:16.5px}"
+    + '</style></head><body>'
+    + '<section class="home-section"><h2 class="home-h2">Welcome to Chayce Properties</h2>'
+    + '<p class="body-copy">Real homepage body copy, long enough to count as prose for the extraction heuristic.</p></section>'
+    + '</body></html>';
+
+  const FAQ_HTML = '<html><head><style>'
+    + '.faqp-section{padding:56px 0}.faqp-question{font-size:20px}.faqp-answer{color:#666;font-size:15px}'
+    + '</style></head><body>'
+    + '<section class="faqp-section"><h2 class="faqp-question">Frequently Asked Questions</h2>'
+    + '<p class="faqp-answer">A real FAQ answer, long enough in length to count as this page\'s own body copy.</p></section>'
+    + '</body></html>';
+
+  const NEWS_HTML = '<html><head><style>'
+    + '.news-section{padding:64px 0}.news-h3{font-size:24px}.news-body{color:#444;font-size:15px}'
+    + '</style></head><body>'
+    + '<div class="news-section"><h3 class="news-h3">Latest Chayce Properties News Update</h3>'
+    + '<p class="news-body">A real news blurb, long enough to be picked up as this page\'s own body copy.</p></div>'
+    + '</body></html>';
+
+  const fetchPageFor = (map) => async (url) => map[url] ?? null;
+  const noStylesheet = async () => { throw new Error('page-scoped inline-CSS sites have no linked stylesheet to fetch'); };
+
+  const homeExpandContentTemplate = {
+    wrapper: '<div class="home-section">\n{{ROWS}}\n</div>',
+    row: '  <section>\n    <h2 class="home-h2">{{HEADING}}</h2>\n    <div class="body-copy">{{BODY}}</div>\n  </section>',
+    verifiedAt: '2026-09-16T01:49:50.097Z', verifiedBy: 'freshness-check', verifiedRef: HOME_URL,
+  };
+
+  function chayceSite(extraSiteRoot = {}) {
+    return {
+      id: 8864,
+      name: 'Chayceproperties',
+      url_file_map: {
+        pages: { '/': { file: 'src/index.njk' }, '/faq/': { file: 'src/faq.njk' }, '/news/': { file: 'src/news.njk' } },
+        siteRoot: { componentTemplates: { expandContent: homeExpandContentTemplate }, ...extraSiteRoot },
+      },
+    };
+  }
+  const noopDeps = () => ({ saveConfig: async ({ urlFileMap }) => ({ id: 8864, url_file_map: urlFileMap }), recordAudit: async () => {} });
+
+  test('a homepage-captured template is never silently applied to /faq/', async () => {
+    const result = await resolvePageComponentTemplate(chayceSite(), 'expand-content', FAQ_URL, {
+      fetchPage: fetchPageFor({ [FAQ_URL]: FAQ_HTML }), fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, true, 'a page with its own real design must not be treated as a failure');
+    assert.notEqual(result.tier, PAGE_COMPONENT_TEMPLATE_TIER.SITE, 'must not silently reuse the homepage-captured template');
+    assert.doesNotMatch(
+      `${result.template.wrapper}${result.template.row}`,
+      /home-h2|home-section|body-copy/,
+      'the homepage-only classes must never ship onto /faq/',
+    );
+  });
+
+  test('/faq/ ends up using its own, independently-verified design', async () => {
+    const result = await resolvePageComponentTemplate(chayceSite(), 'expand-content', FAQ_URL, {
+      fetchPage: fetchPageFor({ [FAQ_URL]: FAQ_HTML }), fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.template.row, /faqp-question/);
+    assert.match(result.template.row, /faqp-answer/);
+    assert.equal(result.source, 'captured-from-page');
+  });
+
+  test('/news/ likewise uses its own design, not the homepage\'s or /faq/\'s', async () => {
+    const result = await resolvePageComponentTemplate(chayceSite(), 'expand-content', NEWS_URL, {
+      fetchPage: fetchPageFor({ [NEWS_URL]: NEWS_HTML }), fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.template.row, /news-h3/);
+    assert.match(result.template.row, /news-body/);
+    assert.doesNotMatch(result.template.row, /faqp-|home-h2/);
+  });
+
+  test('a genuinely SHARED template (one global stylesheet, same classes everywhere) is reused, not re-captured per page', async () => {
+    const sharedTemplate = {
+      wrapper: '<div class="shared-section">\n{{ROWS}}\n</div>',
+      row: '<section><h2 class="shared-h2">{{HEADING}}</h2><div class="shared-body">{{BODY}}</div></section>',
+      verifiedAt: '2026-09-01T00:00:00.000Z', verifiedBy: 'freshness-check', verifiedRef: HOME_URL,
+    };
+    const sharedCss = '.shared-h2{font-size:32px}.shared-body{font-size:16px}.shared-section{padding:64px 0}';
+    const linkedPageHtml = '<html><head><link rel="stylesheet" href="/main.css"></head><body><p>irrelevant</p></body></html>';
+    const site = { id: 1, name: 'Shared Design Site', url_file_map: { siteRoot: { componentTemplates: { expandContent: sharedTemplate } } } };
+    const result = await resolvePageComponentTemplate(site, 'expand-content', 'https://shared.example/some-other-page/', {
+      fetchPage: async () => linkedPageHtml,
+      fetchStylesheet: async () => sharedCss,
+      ...noopDeps(),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.tier, PAGE_COMPONENT_TEMPLATE_TIER.SITE, 'a genuinely shared template must be reused, not re-derived per page');
+    assert.equal(result.source, 'existing');
+    assert.deepEqual(result.template, sharedTemplate);
+  });
+
+  test('a stale template is automatically recaptured and the draft proceeds — never abandoned to human review for a page with its own valid design', async () => {
+    const result = await resolvePageComponentTemplate(chayceSite(), 'expand-content', FAQ_URL, {
+      fetchPage: fetchPageFor({ [FAQ_URL]: FAQ_HTML }), fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, true, 'must not fall through to an abandon/human-review outcome');
+    assert.equal(result.justCaptured, true);
+    assert.notEqual(result.reason, 'template-stale');
+  });
+
+  test('persists the freshly captured template so a later draft for the same page/file reuses it without re-deriving', async () => {
+    let savedUrlFileMap = null;
+    await resolvePageComponentTemplate(chayceSite(), 'expand-content', FAQ_URL, {
+      fetchPage: fetchPageFor({ [FAQ_URL]: FAQ_HTML }),
+      fetchStylesheet: noStylesheet,
+      saveConfig: async ({ urlFileMap }) => { savedUrlFileMap = urlFileMap; return { id: 8864, url_file_map: urlFileMap }; },
+      recordAudit: async () => {},
+    });
+    assert.ok(savedUrlFileMap.siteRoot.pageComponentTemplates.expandContent.byUrl[FAQ_URL], 'page-specific slot persisted');
+    assert.ok(savedUrlFileMap.siteRoot.pageComponentTemplates.expandContent.byFile['src/faq.njk'], 'promoted to the page-type (file) slot too');
+
+    const siteAfterCapture = chayceSite({ pageComponentTemplates: savedUrlFileMap.siteRoot.pageComponentTemplates });
+    let fetchCount = 0;
+    const second = await resolvePageComponentTemplate(siteAfterCapture, 'expand-content', FAQ_URL, {
+      fetchPage: async (url) => { fetchCount += 1; return url === FAQ_URL ? FAQ_HTML : null; },
+      fetchStylesheet: noStylesheet,
+      ...noopDeps(),
+    });
+    assert.equal(second.ok, true);
+    assert.equal(second.tier, PAGE_COMPONENT_TEMPLATE_TIER.PAGE);
+    assert.equal(second.source, 'existing');
+    assert.equal(fetchCount, 1, 'reuses the persisted template via an ordinary freshness check — no re-derivation fetch');
+  });
+
+  test('recapture succeeds end-to-end via the bare-tag-via-container fallback when the page has real evidence but no class on its heading/body', async () => {
+    // Real shape (Chayce Properties /get-started/, fetched live 2026-09-18):
+    // no class on <h1>/<p> at all, styled only through the page's own
+    // .gs-hero h1 / .gs-hero p descendant rules — this is the exact page
+    // shape resolvePageComponentTemplate previously refused with
+    // "no-page-evidence" even though the page visibly has real, styled,
+    // expandable content. `site` here has NO existing tier at any level,
+    // so this exercises extraction -> build -> the REAL
+    // verifyTemplateAgainstLiveSite (not a mocked bypass) end to end.
+    const GS_URL = 'https://chayce.example/get-started/index.html?package=Silver';
+    const GS_PAGE_HTML = '<html><head><style>'
+      + '.gs-hero h1{font-family:\'Playfair\',serif;font-size:48px}.gs-hero h1 em{font-style:italic}'
+      + '.gs-hero p{color:#555;font-size:17px}'
+      + '</style></head><body>'
+      + '<div class="gs-hero"><h1>A guided <em>conversation,</em> at your own pace.</h1>'
+      + '<p>Answer a few simple questions and we\'ll point you to the right support and next steps for your situation.</p></div>'
+      + '</body></html>';
+    const site = { id: 8864, name: 'Chayceproperties', url_file_map: { pages: {}, siteRoot: {} } };
+    const result = await resolvePageComponentTemplate(site, 'expand-content', GS_URL, {
+      fetchPage: fetchPageFor({ [GS_URL]: GS_PAGE_HTML }), fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, true, result.error);
+    assert.notEqual(result.reason, 'no-page-evidence');
+    assert.match(result.template.wrapper, /class="gs-hero"/);
+    assert.match(result.template.row, /<h1>\{\{HEADING\}\}<\/h1>/);
+    assert.match(result.template.row, /<p>\{\{BODY\}\}<\/p>/);
+    // Confirms this real path is NOT rejected via verifyTemplateAgainstLiveSite's
+    // 'no-design-claims' branch — the derived template is not fully classless
+    // (the wrapper carries the real, confirmed 'gs-hero' class), so
+    // freshness.checkedClasses is non-empty and stamping proceeds normally.
+    assert.equal(result.template.verifiedBy, 'freshness-check');
+    assert.ok(result.template.verifiedAt);
+  });
+
+  test('when recapture genuinely cannot succeed (the page is reachable but has no real styled heading/body), it fails safely instead of shipping broken classes', async () => {
+    // A real, fetchable page with its OWN CSS (so the SITE-tier freshness
+    // check can positively confirm staleness rather than merely failing to
+    // check at all) that simply has no classed heading/paragraph for the
+    // recapture step to derive anything real from.
+    const bareHtml = '<html><head><style>.unrelated{color:red}</style></head><body><h2>Untitled</h2><p>short</p></body></html>';
+    const result = await resolvePageComponentTemplate(chayceSite(), 'expand-content', FAQ_URL, {
+      fetchPage: fetchPageFor({ [FAQ_URL]: bareHtml }), fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'no-page-evidence');
+    assert.ok(result.error);
+  });
+
+  test('when there is no existing template at all and the target page is genuinely unreachable, fails safely rather than guessing', async () => {
+    // No componentTemplates configured for this action type at all — the
+    // tier loop has nothing to check (and therefore never even calls
+    // fetchPage), so this exercises the recapture step's OWN fetch failing
+    // on the very first attempt, distinct from a tier check merely being
+    // unable to verify an existing template (which fails open by design).
+    const site = { id: 8864, name: 'Chayceproperties', url_file_map: { pages: chayceSite().url_file_map.pages, siteRoot: {} } };
+    const result = await resolvePageComponentTemplate(site, 'expand-content', FAQ_URL, {
+      fetchPage: async () => null, fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'unreachable');
+  });
+
+  test('a componentTemplateKey with no concept (e.g. a page-scoped action type with no COMPONENT_TEMPLATE_KEY entry) is a clean passthrough', async () => {
+    const result = await resolvePageComponentTemplate(chayceSite(), 'meta-title', FAQ_URL, noopDeps());
+    assert.equal(result.ok, true);
+    assert.equal(result.reason, 'no-concept');
+  });
+});
+
+// A page whose body actually contains one real, filled-in example of
+// wrapper/row — realistic evidence a structural check should find, the same
+// way a real captured template's source page always does. Built once so
+// every "this template genuinely matches the live page" test below shares
+// identical, obviously-consistent fixtures instead of each writing its own
+// slightly-different page body.
+function pageContaining(wrapper, row) {
+  const filledRow = row.replace('{{QUESTION}}', 'What is this?').replace('{{ANSWER}}', 'An answer.');
+  const body = wrapper.replace('{{ROWS}}', filledRow);
+  return `<html><head><link rel="stylesheet" href="/assets/main.css"></head><body>${body}</body></html>`;
+}
+
+describe('checkTemplateStructuralMatch', () => {
+  const wrapper = '<section class="py-12 bg-gray-50"><div x-data="{ activeIndex: null }">{{ROWS}}</div></section>';
+  const row = '<div class="py-5"><button @click="activeIndex = 1"><span>{{QUESTION}}</span></button><p>{{ANSWER}}</p></div>';
+
+  test('matches when the real page body contains the template\'s shape, placeholders filled with real content', async () => {
+    const html = pageContaining(wrapper, row);
+    const result = await checkTemplateStructuralMatch({ pageUrl: 'https://example.com/', templateEntry: { wrapper, row }, html });
+    assert.equal(result.ok, true);
+    assert.equal(result.structurallyStale, false);
+    assert.deepEqual(result.missingStructure, []);
+  });
+
+  // The actual 2026-09-10 incident, reproduced directly: a captured flat <dl>
+  // template whose individual classes are all perfectly real and live
+  // (checkTemplateFreshness would pass it every time), spliced against a
+  // page whose real component is a completely different shape (an Alpine
+  // accordion with a <button>/x-data, not a <dl>). Every class the flat
+  // template names may well exist somewhere on this same page's own CSS —
+  // structural match doesn't care about CSS at all, only about whether this
+  // markup SHAPE is literally present.
+  test('does not match a structurally different component even when its classes would be live (the 2026-09-10 incident)', async () => {
+    const wrongTemplate = {
+      wrapper: '<dl class="py-12 md:py-20">{{ROWS}}</dl>',
+      row: '<dt class="text-2xl md:text-3xl font-normal text-gray-900">{{QUESTION}}</dt><dd class="text-lg text-gray-600">{{ANSWER}}</dd>',
+    };
+    // The real page has the real accordion, not a <dl> anywhere.
+    const html = pageContaining(wrapper, row);
+    const result = await checkTemplateStructuralMatch({ pageUrl: 'https://example.com/', templateEntry: wrongTemplate, html });
+    assert.equal(result.ok, true);
+    assert.equal(result.structurallyStale, true);
+    assert.deepEqual(result.missingStructure, ['wrapper', 'row']);
+  });
+
+  test('tolerates indentation/whitespace differences between the captured copy and the live page', async () => {
+    const spacedWrapper = wrapper.replace('><div', '>\n  <div').replace('>{{ROWS}}', '>\n    {{ROWS}}');
+    const html = pageContaining(spacedWrapper, row);
+    // Checked against the ORIGINAL (unspaced) captured template — real repo
+    // formatting drift, not a shape change, must not be flagged.
+    const result = await checkTemplateStructuralMatch({ pageUrl: 'https://example.com/', templateEntry: { wrapper, row }, html });
+    assert.equal(result.structurallyStale, false);
+  });
+
+  test('a template with no wrapper has nothing to check, not a false failure', async () => {
+    const result = await checkTemplateStructuralMatch({ pageUrl: 'https://example.com/', templateEntry: {}, html: '<html></html>' });
+    assert.equal(result.ok, true);
+    assert.equal(result.structurallyStale, false);
+  });
+
+  test('an unfetchable page fails as unreachable, never as a silent pass', async () => {
+    const result = await checkTemplateStructuralMatch({
+      pageUrl: 'https://example.com/', templateEntry: { wrapper, row }, fetchPage: async () => null,
+    });
+    assert.equal(result.ok, false);
+    assert.ok(result.error);
+  });
 });
 
 describe('verifyTemplateAgainstLiveSite', () => {
   const wrapper = '<section class="py-12"><div class="divide-y divide-gray-200">{{ROWS}}</div></section>';
   const row = '<div class="py-5"><span>{{QUESTION}}</span><p>{{ANSWER}}</p></div>';
   const liveCss = '.py-12{a}.divide-y>:not([hidden]){a}.divide-gray-200{a}.py-5{a}';
-  const html = '<html><head><link rel="stylesheet" href="/assets/main.css"></head></html>';
+  // Body actually contains the shape (see checkTemplateStructuralMatch above)
+  // — every "should verify cleanly" test below needs this now that structure
+  // is checked too, not just CSS class existence.
+  const html = pageContaining(wrapper, row);
 
   test('a real, live-matching template is verified and stamped freshness-check', async () => {
     const result = await verifyTemplateAgainstLiveSite('faq', { wrapper, row }, {
@@ -910,6 +1433,91 @@ describe('verifyTemplateAgainstLiveSite', () => {
     const result = await verifyTemplateAgainstLiveSite('faq', { wrapper, row }, {});
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'unreachable');
+  });
+
+  // The actual regression this whole feature exists to close: a template
+  // whose classes are all live (checkTemplateFreshness alone would pass it)
+  // but whose structure is a completely different, unrelated component —
+  // must be rejected, not stamped as the strongest verification tier.
+  test('a template with live classes but the wrong structure is rejected as structural-mismatch, never stamped', async () => {
+    const wrongShape = {
+      wrapper: '<dl class="py-12">{{ROWS}}</dl>',
+      row: '<dt class="divide-y">{{QUESTION}}</dt><dd class="divide-gray-200 py-5">{{ANSWER}}</dd>',
+    };
+    // Every class wrongShape uses is real and live in liveCss, so a
+    // class-existence-only check would pass this — the live page's real
+    // component is the <section>/divide-y accordion above, not a <dl>.
+    const result = await verifyTemplateAgainstLiveSite('faq', wrongShape, {
+      pageUrl: 'https://zunkireelabs.com', fetchPage: async () => html, fetchStylesheet: async () => liveCss,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'structural-mismatch');
+    assert.ok(result.missingStructure.length > 0);
+  });
+
+  // Same-name, different meaning: neither checkTemplateFreshness (existence
+  // only) nor checkTemplateStructuralMatch (same markup shape) can see a
+  // class whose real declaration changed behind an unchanged name.
+  test('first pass: no prior baseline, nothing to compare — passes and captures one', async () => {
+    const result = await verifyTemplateAgainstLiveSite('faq', { wrapper, row }, {
+      pageUrl: 'https://zunkireelabs.com', fetchPage: async () => html, fetchStylesheet: async () => liveCss,
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.stamped.verifiedClassRules, { 'py-12': 'a', 'divide-y': 'a', 'divide-gray-200': 'a', 'py-5': 'a' });
+  });
+
+  test('re-verification: a class whose real CSS declaration changed is rejected as class-rule-drift, stamp not refreshed', async () => {
+    const priorStamp = { wrapper, row, verifiedClassRules: { 'py-12': 'a', 'divide-y': 'a', 'divide-gray-200': 'a', 'py-5': 'a' } };
+    // Same class names, same markup shape (liveCss still defines every one
+    // of them) — but .py-5's real rule body is now different text.
+    const rebrandedCss = liveCss.replace('.py-5{a}', '.py-5{b}');
+    const result = await verifyTemplateAgainstLiveSite('faq', priorStamp, {
+      pageUrl: 'https://zunkireelabs.com', fetchPage: async () => html, fetchStylesheet: async () => rebrandedCss,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'class-rule-drift');
+    assert.equal(result.drifted.length, 1);
+    assert.equal(result.drifted[0].cls, 'py-5');
+    assert.equal(result.stamped, undefined, 'a rejected re-verification must not carry a fresh stamp');
+  });
+
+  test('re-verification: every prior rule body still matches — passes, no drift', async () => {
+    const priorStamp = { wrapper, row, verifiedClassRules: { 'py-12': 'a', 'divide-y': 'a', 'divide-gray-200': 'a', 'py-5': 'a' } };
+    const result = await verifyTemplateAgainstLiveSite('faq', priorStamp, {
+      pageUrl: 'https://zunkireelabs.com', fetchPage: async () => html, fetchStylesheet: async () => liveCss,
+    });
+    assert.equal(result.ok, true);
+  });
+});
+
+describe('captureClassRules / checkClassRuleDrift', () => {
+  test('captureClassRules skips a class with no real rule body, includes every class that has one', () => {
+    const rules = captureClassRules(['py-5', 'not-a-real-class'], '.py-5{padding:1.25rem 0}');
+    assert.deepEqual(rules, { 'py-5': 'padding:1.25rem 0' });
+  });
+
+  test('captureClassRules normalizes whitespace so a cosmetic reformat is not a drift', () => {
+    const rules = captureClassRules(['py-5'], '.py-5 {\n  padding: 1.25rem   0;\n}');
+    assert.equal(rules['py-5'], 'padding: 1.25rem 0;');
+  });
+
+  test('checkClassRuleDrift only compares classes present in both snapshots', () => {
+    const before = { 'py-5': 'padding:1.25rem 0', 'gone-now': 'x' };
+    const { drifted } = checkClassRuleDrift(before, '.py-5{padding:1.25rem 0}');
+    assert.equal(drifted.length, 0, 'gone-now has no live rule body at all — that is checkTemplateFreshness missingClasses\' job, not this one\'s');
+  });
+
+  test('checkClassRuleDrift flags a real value change', () => {
+    const before = { 'py-5': 'padding:1.25rem 0' };
+    const { drifted } = checkClassRuleDrift(before, '.py-5{padding:0.5rem 0}');
+    assert.equal(drifted.length, 1);
+    assert.equal(drifted[0].before, 'padding:1.25rem 0');
+    assert.equal(drifted[0].after, 'padding:0.5rem 0');
+  });
+
+  test('an empty/missing baseline compares nothing — never a false drift on a first pass', () => {
+    assert.deepEqual(checkClassRuleDrift(null, '.py-5{padding:1.25rem 0}').drifted, []);
+    assert.deepEqual(checkClassRuleDrift({}, '.py-5{padding:1.25rem 0}').drifted, []);
   });
 });
 
@@ -1139,7 +1747,8 @@ describe('checkDesignIntegrityGate', () => {
     assert.equal(recordedVerdicts.length, 0, 'nothing to log when there is no profile to check');
   });
 
-  test('LOG-ONLY mode (the default): a confirmed role-mismatch is recorded but never blocks shipping', async () => {
+  test('LOG-ONLY mode (opt-out via DESIGN_INTEGRITY_ENFORCE=false): a confirmed role-mismatch is recorded but never blocks shipping', async () => {
+    process.env.DESIGN_INTEGRITY_ENFORCE = 'false';
     const site = { id: 2, url_file_map: { siteRoot: { designProfile: roleMismatchProfile } } };
     const gate = await checkDesignIntegrityGate(site, { actionType: 'faq', findingId: 'faq:1' });
 
@@ -1155,14 +1764,14 @@ describe('checkDesignIntegrityGate', () => {
   });
 
   test('LOG-ONLY mode: a clean profile passes and is recorded as passing', async () => {
+    process.env.DESIGN_INTEGRITY_ENFORCE = 'false';
     const site = { id: 3, url_file_map: { siteRoot: { designProfile: cleanProfile } } };
     const gate = await checkDesignIntegrityGate(site, { actionType: 'qa-content' });
     assert.equal(gate.ok, true);
     assert.equal(recordedVerdicts[0].verdict.ok, true);
   });
 
-  test('ENFORCE mode: a confirmed role-mismatch blocks that draft, with the same evidence a human reviewer would have seen', async () => {
-    process.env.DESIGN_INTEGRITY_ENFORCE = 'true';
+  test('ENFORCE mode (the default): a confirmed role-mismatch blocks that draft, with the same evidence a human reviewer would have seen', async () => {
     const site = { id: 4, url_file_map: { siteRoot: { designProfile: roleMismatchProfile } } };
     const gate = await checkDesignIntegrityGate(site, { actionType: 'faq', findingId: 'faq:2' });
 
@@ -1174,8 +1783,7 @@ describe('checkDesignIntegrityGate', () => {
     assert.equal(recordedVerdicts[0].enforced, true);
   });
 
-  test('ENFORCE mode: a clean profile still ships normally', async () => {
-    process.env.DESIGN_INTEGRITY_ENFORCE = 'true';
+  test('ENFORCE mode (the default): a clean profile still ships normally', async () => {
     const site = { id: 5, url_file_map: { siteRoot: { designProfile: cleanProfile } } };
     const gate = await checkDesignIntegrityGate(site, { actionType: 'qa-content' });
     assert.equal(gate.ok, true);
@@ -1347,6 +1955,26 @@ describe('bodySlotLooksLikeLabel', () => {
       row: '  <li><a href="{{URL}}" class="text-xs uppercase">{{ANCHOR_TEXT}}</a></li>',
     }, CSS);
     assert.equal(reason, null);
+  });
+
+  test('a class that is only an ANCESTOR in a small-text rule is not a label (chayce .container false positive)', () => {
+    const css = [
+      '.container{max-width:1140px;margin:0 auto}',
+      '.navbar .container .upper-side .phone-email small{font-size:9px}',
+      '.slider .container .social-media ul li a{font-size:12px}',
+    ].join('\n');
+    const reason = bodySlotLooksLikeLabel('content-wrapper', {
+      wrapper: '<div class="container">\n{{BODY}}\n</div>',
+    }, css);
+    assert.equal(reason, null);
+  });
+
+  test('a class that IS the subject of a descendant small-text rule is still a label', () => {
+    const css = '.footer .fine-print{font-size:11px}';
+    const reason = bodySlotLooksLikeLabel('content-wrapper', {
+      wrapper: '<div class="fine-print">\n{{BODY}}\n</div>',
+    }, css);
+    assert.ok(reason);
   });
 
   test('no CSS and no classes both mean "cannot tell", never "failed"', () => {

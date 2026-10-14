@@ -1,9 +1,13 @@
 import { createHash } from 'crypto';
-import { getSearchPerformanceForPages } from '../store/read.js';
-import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
+import { getSearchPerformanceForPages, getSiteById } from '../store/read.js';
+import { priorityByRank, impactFromPriority, makeFinding, effortFromDifficulty } from './lib/findings.js';
 import { analyzePageUrl } from './lib/page-content.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
-import { updatePageContentHashBatch, listContentHashesForSite } from '../store/page-inventory.js';
+import { updatePageContentHashBatch, listContentHashesForSite, listPageInventory } from '../store/page-inventory.js';
+import { createVariantProber } from './lib/live-probe.js';
+import { makeVerification, VERDICT } from './lib/verdict.js';
+import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS, isLikelyFunctionalQueryParam } from './lib/duplicate-evidence.js';
+import { getOrClassifyPageContentType } from './lib/page-content-classifier.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -11,6 +15,7 @@ export const meta = {
   name: 'Duplicate Content Agent',
   description: 'Finds pages whose full body content is byte-identical to another page on the site — the same content reachable at two different URLs, a real, common crawl-budget and ranking-dilution problem.',
   category: 'seo',
+  requiresCapabilities: ['public-web'],
   version: 1,
 };
 
@@ -33,7 +38,7 @@ function hashContent(bodyText) {
   return createHash('sha256').update(bodyText).digest('hex');
 }
 
-export async function run({ siteId, start, end, pageCache, params }) {
+export async function run({ siteId, start, end, pageCache, params, dryRun = false }) {
   const { batch, impressionsByPage } = params?.pages?.length
     ? await getSearchPerformanceForPages(siteId, start, end, params.pages).then((rows) => ({
       batch: params.pages,
@@ -56,20 +61,39 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // Only pages with real, substantial content get hashed — thin pages are
   // excluded from the comparison pool entirely (never recorded with a hash
   // that could coincidentally match another thin page).
+  //
+  // A page whose request REDIRECTED is never hashed: fetch() follows the
+  // redirect silently, so an alias (www/http/trailing-slash/old path) would
+  // hash identically to its destination and be reported as "duplicate
+  // content" — the redirect is the fix, not the defect. Judged two ways:
+  // analyzePageUrl's own wasRedirected flag, and a manual-redirect probe
+  // (which, unlike that flag, also catches a www -> apex hop).
+  const probeVariants = createVariantProber({ checkCanonical: false });
+  const hashable = fetched.filter(({ result }) => result.ok && result.analysis.wordCount >= MIN_WORDS_FOR_HASH && !result.analysis.wasRedirected);
+  const hashProbes = await probeVariants(hashable.map((f) => f.page));
+  const rejectedPages = new Set(); // pages whose stored hash must not be trusted this run
   const hashByPage = new Map();
   for (const { page, result } of fetched) {
-    if (!result.ok || result.analysis.wordCount < MIN_WORDS_FOR_HASH) continue;
+    if (!result.ok) { rejectedPages.add(page); continue; }
+    if (result.analysis.wordCount < MIN_WORDS_FOR_HASH) continue;
+    if (result.analysis.wasRedirected || hashProbes.get(page)?.verdict !== 'live') { rejectedPages.add(page); continue; }
     hashByPage.set(page, hashContent(result.analysis.bodyText));
   }
-  if (hashByPage.size) await updatePageContentHashBatch(siteId, hashByPage);
+  // dryRun (preview/audit) must not write content hashes.
+  if (hashByPage.size && !dryRun) await updatePageContentHashBatch(siteId, hashByPage);
 
   // Compares against the site's own real accumulated coverage (every page
   // ever hashed by a past run, not just today's rotation batch) — same
   // "merge today's fresh data with everything already known" pattern
   // technical-seo.js's detectDuplicateTitles already uses for titles.
-  const known = await listContentHashesForSite(siteId);
+  // Stale rows are excluded: orphaned inventory rows, and any page this run
+  // just observed redirecting/failing (its stored hash predates that).
+  const inventoryRows = await listPageInventory(siteId, { limit: 2000 }).catch(() => []);
+  const orphanedPages = new Set(inventoryRows.filter((r) => r.orphaned).map((r) => r.page));
+  const known = (await listContentHashesForSite(siteId)).filter((r) => !orphanedPages.has(r.page) && !rejectedPages.has(r.page));
   const byHash = new Map();
   for (const { page, content_hash: hash } of known) {
+    if (hashByPage.has(page)) continue; // this run's fresh hash supersedes the stored one
     if (!byHash.has(hash)) byHash.set(hash, new Set());
     byHash.get(hash).add(page);
   }
@@ -78,14 +102,157 @@ export async function run({ siteId, start, end, pageCache, params }) {
     byHash.get(hash).add(page);
   }
 
-  const duplicateGroups = [...byHash.entries()]
+  const candidateGroups = [...byHash.entries()]
     .filter(([, pages]) => pages.size >= 2)
     .map(([hash, pages]) => ({ hash, pages: [...pages] }));
 
+  // A member that came from an EARLIER run's stored hash is re-verified live
+  // before it can anchor a finding: it must still answer 200 at its own
+  // address (no redirect/404) and still hash to the group's value. Members
+  // fetched this run already passed both checks above.
+  const analysisByPage = new Map(fetched.filter((f) => f.result.ok).map((f) => [f.page, f.result.analysis]));
+  const duplicateGroups = [];
+  let staleMembersDropped = 0;
+  for (const group of candidateGroups) {
+    const stored = group.pages.filter((p) => !hashByPage.has(p));
+    const probes = stored.length ? await probeVariants(stored) : new Map();
+    const keep = group.pages.filter((p) => hashByPage.has(p));
+    for (const p of stored) {
+      let ok = probes.get(p)?.verdict === 'live';
+      if (ok) {
+        const result = await fetchPage(p);
+        ok = Boolean(result.ok && !result.analysis.wasRedirected && result.analysis.bodyText != null && hashContent(result.analysis.bodyText) === group.hash);
+        if (ok) analysisByPage.set(p, result.analysis);
+      }
+      if (ok) keep.push(p); else staleMembersDropped++;
+    }
+    if (keep.length >= 2) duplicateGroups.push({ hash: group.hash, pages: keep });
+  }
+
+  // A duplicate-content group is not a live problem if every member already
+  // carries a <link rel="canonical"> pointing at ONE consistent target —
+  // search engines already know which URL to index, so flagging it (or
+  // blocking it for a human "which URL should win" decision) would ask a
+  // question the site has already answered itself. The target does not have
+  // to be a member of this byte-hash group itself (a group can legitimately
+  // form from only the parameterized variants, with the bare canonical page
+  // outside today's hash-matched set) — group membership here is about
+  // detection coverage, not about where the true canonical lives. Confirmed
+  // real on zunkireelabs.com 2026-09-12: /resources/?type=X and
+  // /contact/?source=X query-string variants all already emit a
+  // self-resolving canonical to the bare URL via the shared Eleventy
+  // template — the common case for tracking-parameter variants, not a
+  // hypothetical. Reuses this run's own fetches (analysisByPage) where
+  // available; a group member outside today's rotation batch gets one extra
+  // live fetch, since canonical resolution isn't derivable from the stored
+  // content_hash alone.
+  async function groupAlreadyCanonicalized(pages) {
+    const targets = new Set();
+    for (const page of pages) {
+      let analysis = analysisByPage.get(page);
+      if (!analysis) {
+        const result = await fetchPage(page);
+        if (!result.ok) return false; // can't confirm resolution without a live read — leave it open
+        analysis = result.analysis;
+        analysisByPage.set(page, analysis);
+      }
+      if (!analysis.hasCanonical || !analysis.canonicalUrl) return false; // nothing decided yet
+      targets.add(analysis.canonicalUrl.replace(/\/$/, ''));
+    }
+    return targets.size === 1; // every member agrees on one real target
+  }
+  const unresolvedGroups = [];
+  for (const group of duplicateGroups) {
+    if (await groupAlreadyCanonicalized(group.pages)) continue;
+    unresolvedGroups.push(group);
+  }
+
   const sumImpressions = (pages) => pages.reduce((s, p) => s + (impressionsByPage.get(p) || 0), 0);
-  const rankedGroups = [...duplicateGroups].sort((a, b) => sumImpressions(b.pages) - sumImpressions(a.pages));
+  const rankedGroups = [...unresolvedGroups].sort((a, b) => sumImpressions(b.pages) - sumImpressions(a.pages));
   const priorities = priorityByRank(rankedGroups);
+
+  // Evidence-based winner decision — same shared model url-variant-duplicates.js,
+  // query-param-duplicates.js and templated-duplicates.js already use for
+  // "which of these competing URLs is the real one": HIGH confidence only
+  // when exactly one page has any real 90-day clicks/impressions and the
+  // rest have none, or when 2+ pages each earn real traffic AND every pair's
+  // real search queries overlap substantially (confirming shared search
+  // intent, not just shared bytes). That query-overlap escalation is what
+  // was missing until now — it's a genuinely independent signal from raw
+  // impressions, and is exactly the kind of editorial-intent evidence the
+  // comment below used to say didn't exist. Still never auto-decides on
+  // impressions alone (MEDIUM/LOW stays a human reportOnly decision, same
+  // as before) — see decideWinner's own doc comment for the exact bar.
+  const site = await getSiteById(siteId);
+  const { start: evidenceStart, end: evidenceEnd } = evidenceWindow(site);
+  const allGroupPages = rankedGroups.flatMap((g) => g.pages);
+  const trafficByPage = new Map(
+    (await fetchTraffic(siteId, allGroupPages, evidenceStart, evidenceEnd)).map((t) => [t.page, t])
+  );
+  const decisionByHash = new Map();
+  for (const g of rankedGroups) {
+    const traffic = g.pages.map((p) => trafficByPage.get(p) || { page: p, clicks: 0, impressions: 0 });
+    // Split-traffic escalation signals — all reused from data this run
+    // already has in hand (analysisByPage), never a fresh fetch spent just
+    // to obtain them. Deliberately NOT wiring contentSimilarity here: every
+    // group this agent forms is already byte-hash-identical by
+    // construction, so a pairwise text-similarity score would always read
+    // as maximal and carry zero new information — using it here would
+    // silently re-introduce exactly the "consolidate on whichever page has
+    // more clicks" guess the MEDIUM tier's own doc comment (see
+    // duplicate-evidence.js) explicitly refuses to make. Canonical
+    // agreement, page purpose, and functional-param detection ARE
+    // independent of the hash match, so those are real signals here.
+    const canonicalByPage = new Map();
+    const pagePurposeByPage = new Map();
+    const internalLinkCountByPage = new Map();
+    const functionalParamPages = new Set();
+    for (const page of g.pages) {
+      const analysis = analysisByPage.get(page);
+      if (analysis?.hasCanonical && analysis.canonicalUrl) canonicalByPage.set(page, analysis.canonicalUrl);
+      if (typeof analysis?.internalLinkCount === 'number') internalLinkCountByPage.set(page, analysis.internalLinkCount);
+      if (isLikelyFunctionalQueryParam(page)) functionalParamPages.add(page);
+      // dryRun runs must be side-effect free (classifier cache upsert +
+      // LLM call).
+      const purpose = dryRun ? null : await getOrClassifyPageContentType(siteId, page).catch(() => null);
+      if (purpose?.contentType) pagePurposeByPage.set(page, purpose.contentType);
+    }
+    decisionByHash.set(g.hash, await decideWinner(traffic, {
+      siteId, start: evidenceStart, end: evidenceEnd,
+      signals: { canonicalByPage, pagePurposeByPage, internalLinkCountByPage, functionalParamPages },
+    }));
+  }
+
   const findings = rankedGroups.map((g, i) => {
+    const decision = decisionByHash.get(g.hash);
+    const verification = makeVerification(VERDICT.CONFIRMED, 'content-hash', `${g.pages.length} pages each answered 200 at their own address (no redirect) with an identical body hash`);
+    if (decision.winner) {
+      const losers = g.pages.filter((p) => p !== decision.winner.page);
+      return makeFinding({
+        id: `duplicate-content:hash:${g.hash}`,
+        evidence: { pages: [...g.pages].sort(), pageCount: g.pages.length, contentHash: g.hash, traffic: decision.withTraffic, winner: decision.winner.page, confidence: 'high', queryOverlap: decision.queryOverlap },
+        whyItMatters: decision.queryOverlap?.overlapping
+          ? `${g.pages.length} pages have byte-identical body content at different URLs — ${decision.winner.page} earns more real clicks (${decision.winner.clicks}) than the other(s), and their real search queries overlap substantially, confirming they compete for the same search intent. Confident enough to consolidate automatically.`
+          : `${g.pages.length} pages have byte-identical body content at different URLs — ${decision.winner.page} has all ${decision.winner.clicks} real click(s)/${decision.winner.impressions} impression(s) across the last ${EVIDENCE_LOOKBACK_DAYS} days, and the other page(s) have none. Confident enough to consolidate automatically: the losing page(s) get a canonical tag pointing at the real one.`,
+        priority: priorities[i],
+        verification,
+        // Same safe canonical generator every self-referential canonical
+        // fix already uses — one loser per recommendation (mirrors
+        // url-variant-duplicates.js), since each is its own separate
+        // page/file/PR target. The generator re-verifies the target is
+        // still live and refuses rather than guess if anything changed
+        // since this evidence was gathered. Still ends at a human-reviewed
+        // PR — autonomy here means zero manual investigation to REACH that
+        // PR, not a bypass of the merge step.
+        recommendedAction: {
+          label: `Canonicalize duplicate content → ${decision.winner.page}`,
+          generatorId: 'canonical',
+          params: { page: losers[0], canonicalTarget: decision.winner.page },
+          effort: effortFromDifficulty(1),
+        },
+        expectedImpact: { label: impactFromPriority(priorities[i]), basis: 'computed', value: decision.winner.clicks || sumImpressions(g.pages) },
+      });
+    }
     return makeFinding({
       // Keyed on the CONTENT HASH the group is defined by, not on a member
       // page. The id used to be the alphabetically-first page in the group,
@@ -101,10 +268,46 @@ export async function run({ siteId, start, end, pageCache, params }) {
       id: `duplicate-content:hash:${g.hash}`,
       // Sorted so the same group renders identically run to run regardless of
       // the order pages happened to come back from the inventory query.
-      evidence: { pages: [...g.pages].sort(), pageCount: g.pages.length, contentHash: g.hash },
+      evidence: { pages: [...g.pages].sort(), pageCount: g.pages.length, contentHash: g.hash, traffic: decision.withTraffic, confidence: decision.confidence, queryOverlap: decision.queryOverlap },
       whyItMatters: `${g.pages.length} pages have byte-identical body content — the same content is reachable at ${g.pages.length} different URLs, which splits ranking signals and wastes crawl budget instead of consolidating them onto one real page.`,
       priority: priorities[i],
-      recommendedAction: null, // picking a canonical URL / merging pages is a real editorial decision, not draftable content
+      verification,
+      recommendedAction: null, // no evidenced winner yet — see decideWinner's HIGH-confidence bar above
+      // Deliberately NOT auto-canonicalized when the evidence doesn't clear
+      // decideWinner's HIGH bar (exactly one page with real traffic, or
+      // substantial cross-page query overlap confirming shared intent).
+      // Choosing which URL owns the content decides which page keeps its
+      // ranking — pointing that at the wrong page is a traffic loss no
+      // later fix recovers cheaply, so with split/no traffic evidence this
+      // stays a human decision, same as every sibling duplicate detector.
+      // Until 2026-09-09 this finding had a null action and no reportOnly,
+      // which meant buildRecommendations dropped it outright: byte-identical
+      // duplicate pages were detected on every run and shown to nobody.
+      //
+      // 'leave-both-independent-intent' is an ACTIVE autonomous decision
+      // (functional query parameter or genuinely different declared page
+      // purpose among the traffic-bearing pages), not a punt — no human
+      // decision is pending here, so this is surfaced as a decided outcome
+      // rather than a reportOnly block. Only the true "still inconclusive"
+      // case (decision === null) keeps the human-needed reportOnly copy.
+      reportOnly: decision.decision === 'leave-both-independent-intent'
+        ? {
+          kind: 'duplicate-content',
+          label: `${g.pages.length} URLs share identical content but were left independent`,
+          page: [...g.pages].sort()[0],
+          decided: true,
+          whyBlocked: decision.decisionReason === 'functional-query-parameter'
+            ? 'These URLs serve byte-identical content, but at least one variant carries a query parameter that isn\'t known tracking noise — treated as functional (may drive real visitor-facing behavior), so these are left independent rather than consolidated.'
+            : 'These URLs serve byte-identical content, but the traffic-bearing pages were classified with genuinely different page purposes — treated as independent intent, so left as separate pages rather than consolidated.',
+        }
+        : {
+          kind: 'duplicate-content',
+          label: `${g.pages.length} URLs serve identical content`,
+          page: [...g.pages].sort()[0],
+          whyBlocked: decision.withTraffic.length > 1
+            ? 'These URLs serve byte-identical content and more than one of them earns real search traffic with no confirmed shared search intent — picking one to consolidate the rest onto would risk redirecting a page that\'s still earning its own real clicks, so it needs a person who knows which page is the intended one.'
+            : 'These URLs serve byte-identical content, but no real search traffic points to a clear winner yet. Consolidating them means choosing which single URL should own this content — that decision changes which page keeps its search ranking, so it needs a person who knows which page is the intended one.',
+        },
       expectedImpact: { label: impactFromPriority(priorities[i]), basis: 'computed', value: sumImpressions(g.pages) },
     });
   });
@@ -113,6 +316,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     rangeStart: start, rangeEnd: end,
     batchSize: batch.length,
     pagesHashedThisRun: hashByPage.size,
+    staleMembersDropped,
     totalPagesTracked: known.length + hashByPage.size, // approximate — known already excludes this run's fresh hashes until persisted, so this is real coverage right after this run's writes land
     findings,
   };

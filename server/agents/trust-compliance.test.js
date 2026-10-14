@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildComplianceDesignDriftFindings } from './trust-compliance.js';
+import { buildComplianceDesignDriftFindings, linkMatchesCheck, PAGE_CHECKS } from './trust-compliance.js';
 
 const TRACKER_FACTS = { siteName: 'Acme', domain: 'acme.example', cookiesObserved: [], trackersDetected: [] };
 const RESOLVED_PAGES = [
@@ -57,3 +57,26 @@ describe('buildComplianceDesignDriftFindings', () => {
 // after repeated identical failures while leaving it open and visible for a
 // human — see store/drafts.test.js and auto-remediation.test.js's
 // 'unverified placeholder field'/UNVERIFIED_PLACEHOLDER_FRAGMENT coverage.
+
+describe('linkMatchesCheck — path segment or text, not any URL containing the word', () => {
+  const cookie = PAGE_CHECKS.find((c) => c.key === 'cookie-policy');
+  const terms = PAGE_CHECKS.find((c) => c.key === 'terms-of-service');
+  const m = (check, href, text = '') => linkMatchesCheck(check, { href, text });
+
+  test('real policy slugs match', () => {
+    assert.equal(m(cookie, '/cookie-policy'), true);
+    assert.equal(m(cookie, 'https://a.com/legal/cookies/'), true);
+    assert.equal(m(terms, '/terms-and-conditions'), true);
+    assert.equal(m(terms, '/terms'), true);
+  });
+  test('a URL that merely contains the word does not match', () => {
+    assert.equal(m(cookie, '/blog/cookie-recipes'), false);
+    assert.equal(m(cookie, '/recipes?type=cookie'), false);
+    assert.equal(m(terms, '/glossary/terms-of-art'), false);
+    assert.equal(m(terms, '/terminology'), false);
+  });
+  test('visible link text naming the policy matches regardless of path', () => {
+    assert.equal(m(cookie, '/legal-3', 'Cookie Policy'), true);
+    assert.equal(m(terms, '/p/42', 'Terms & Conditions'), true);
+  });
+});

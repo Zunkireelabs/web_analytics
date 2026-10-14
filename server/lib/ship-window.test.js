@@ -1,6 +1,8 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { isShippable, hourInTimezone, isShipCatchupOwed, SHIP_HOUR_LOCAL, SHIP_CATCHUP_END_HOUR_LOCAL } from './ship-window.js';
+import { isShippable, hourInTimezone, isShipCatchupOwed, checkShipStall, siteDailyTarget, SHIP_STALL_RATIO, SHIP_HOUR_LOCAL, SHIP_CATCHUP_END_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './ship-window.js';
+import { rateLimitKey } from '../github/client.js';
+import { jobKeyFor } from './job-lock.js';
 
 const withRepo = { id: 1, repo_owner: 'acme', repo_name: 'site-a', timezone: 'Asia/Kolkata', auto_remediation_daily_limit: 30 };
 const noRepo = { id: 2, repo_owner: null, repo_name: null, timezone: 'Asia/Kolkata' };
@@ -96,5 +98,124 @@ describe('isShipCatchupOwed', () => {
   // would call the day's work "not owed yet" for six hours after it was.
   test('defaults the ship hour to 07:00, matching the daily run', () => {
     assert.equal(SHIP_HOUR_LOCAL, 7);
+  });
+});
+
+describe('siteDailyTarget', () => {
+  test('uses the explicit per-site override when set', () => {
+    assert.equal(siteDailyTarget(withRepo), 30);
+  });
+
+  test('defaults to 60 when unset, matching isShipCatchupOwed\'s own default', () => {
+    assert.equal(siteDailyTarget({ ...withRepo, auto_remediation_daily_limit: undefined }), 60);
+  });
+});
+
+// The Chayceproperties incident (2026-09-12) this exists for: a missing
+// GitHub App secret made every draft abandon with "GitHub App is not
+// configured," and the site shipped 9 against an expected ~60-80 for a full
+// day before anyone noticed, because nothing compared the two.
+describe('checkShipStall', () => {
+  const chayce = { id: 8864, name: 'Chayceproperties', auto_remediation_daily_limit: 60 };
+
+  test('flags a site that shipped far below its target', () => {
+    const event = checkShipStall({ site: chayce, shipped: 9, now: new Date('2026-09-12T00:00:00Z') });
+    assert.ok(event);
+    assert.equal(event.type, 'ship-stall');
+    assert.equal(event.severity, 'high');
+    assert.match(event.title, /Chayceproperties/);
+    assert.match(event.title, /9/);
+    assert.match(event.title, /60/);
+    assert.match(event.body, /2026-09-12/);
+  });
+
+  test('treats exactly 25% of target as healthy, one below it as stalled', () => {
+    // 0.25 * 60 = 15 exactly — "far below" means strictly under the ratio,
+    // so hitting the ratio precisely is not itself a stall.
+    assert.equal(checkShipStall({ site: chayce, shipped: 15 }), null);
+    assert.ok(checkShipStall({ site: chayce, shipped: 14 }));
+  });
+
+  test('does not flag a healthy day, even one that shipped less than the full target', () => {
+    assert.equal(checkShipStall({ site: chayce, shipped: 45 }), null);
+  });
+
+  test('flags a total no-op day even though nothing was "attempted" — this is not gated on attempted count', () => {
+    const event = checkShipStall({ site: chayce, shipped: 0 });
+    assert.ok(event);
+  });
+
+  test('never flags a paused tenant (daily limit 0)', () => {
+    assert.equal(checkShipStall({ site: { ...chayce, auto_remediation_daily_limit: 0 }, shipped: 0 }), null);
+  });
+
+  test('uses the default target of 60 when the site has no override', () => {
+    const noLimit = { ...chayce, auto_remediation_daily_limit: undefined };
+    assert.ok(checkShipStall({ site: noLimit, shipped: 10 }));
+    assert.equal(checkShipStall({ site: noLimit, shipped: 20 }), null);
+  });
+
+  test('SHIP_STALL_RATIO is 0.25', () => {
+    assert.equal(SHIP_STALL_RATIO, 0.25);
+  });
+});
+
+// The scheduled shipping run and its catch-up guard must contend for the SAME
+// per-site key. If they ever diverge, the guard can open a second batch branch
+// and a second PR for a client-day that is supposed to be one commit.
+describe('shipping lock identity', () => {
+  test('is scoped to a single site, so one tenant cannot stall another', () => {
+    assert.equal(jobKeyFor(SHIP_LOCK_JOB_NAME, 1), 'auto-remediation-ship:1');
+    assert.notEqual(
+      jobKeyFor(SHIP_LOCK_JOB_NAME, 1), jobKeyFor(SHIP_LOCK_JOB_NAME, 2),
+      'two tenants must never share one shipping lock',
+    );
+  });
+
+  test('is not the old platform-wide key', () => {
+    assert.notEqual(jobKeyFor(SHIP_LOCK_JOB_NAME, 1), 'auto-remediation-ship:all-sites');
+  });
+});
+
+// Two live tenants (sites 1 and 8862) share one GitHub App installation as
+// of 2026-09-09. The per-site lock above correctly lets them ship in
+// different processes at the same moment — but each process's in-memory
+// rate-limit tracking (github/client.js's lastRateLimitByCredential) is
+// process-local, so without a SEPARATE lock keyed by the credential itself,
+// two processes could spend the same shared budget without either seeing
+// the other's spending. This is what closes that gap.
+describe('GitHub credential shipping lock', () => {
+  test('two sites on the same GitHub App installation resolve to the same credential key', () => {
+    const siteA = { id: 1, github_app_installation_id: 153416356 };
+    const siteB = { id: 8862, github_app_installation_id: 153416356 };
+    assert.equal(rateLimitKey(siteA), rateLimitKey(siteB));
+    assert.equal(
+      jobKeyFor(GITHUB_CREDENTIAL_LOCK_JOB_NAME, rateLimitKey(siteA)),
+      jobKeyFor(GITHUB_CREDENTIAL_LOCK_JOB_NAME, rateLimitKey(siteB)),
+      'sharing one credential must mean sharing one credential-lock key, so the two sites serialize',
+    );
+  });
+
+  test('two sites on distinct credentials never share a credential-lock key', () => {
+    const siteA = { id: 1, github_app_installation_id: 153416356 };
+    const siteC = { id: 999, github_app_installation_id: 999999999 };
+    assert.notEqual(
+      jobKeyFor(GITHUB_CREDENTIAL_LOCK_JOB_NAME, rateLimitKey(siteA)),
+      jobKeyFor(GITHUB_CREDENTIAL_LOCK_JOB_NAME, rateLimitKey(siteC)),
+    );
+  });
+
+  test('is a distinct lock namespace from the per-site lock, so acquiring one never satisfies the other', () => {
+    const site = { id: 1, github_app_installation_id: 153416356 };
+    assert.notEqual(
+      jobKeyFor(GITHUB_CREDENTIAL_LOCK_JOB_NAME, rateLimitKey(site)),
+      jobKeyFor(SHIP_LOCK_JOB_NAME, site.id),
+    );
+  });
+
+  test('a PAT-based site is keyed by its env var name, not by site id', () => {
+    const siteA = { id: 1, github_pat_env_var: 'GITHUB_PAT' };
+    const siteB = { id: 2, github_pat_env_var: 'GITHUB_PAT' };
+    assert.equal(rateLimitKey(siteA), rateLimitKey(siteB));
   });
 });

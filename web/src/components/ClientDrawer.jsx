@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, timeAgo } from '../api.js';
 import {
@@ -153,11 +153,12 @@ const EXAMPLE_URL_FILE_MAP = `{
 }`;
 
 function RepoConnectStep({ client, onConnected }) {
-  const [repoOwner, setRepoOwner] = useState('');
-  const [repoName, setRepoName] = useState('');
+  const [repoOwner, setRepoOwner] = useState(client.repoOwner || '');
+  const [repoName, setRepoName] = useState(client.repoName || '');
   const [repoDefaultBranch, setRepoDefaultBranch] = useState('main');
   const [techStack, setTechStack] = useState('');
-  const [githubPatEnvVar, setGithubPatEnvVar] = useState('GITHUB_PAT');
+  const [githubPatEnvVar, setGithubPatEnvVar] = useState(client.githubPatEnvVar || 'GITHUB_PAT');
+  const [githubAppInstallationId, setGithubAppInstallationId] = useState(client.githubAppInstallationId ?? '');
   const [urlFileMapText, setUrlFileMapText] = useState('');
   const [state, setState] = useState('idle');
   const [error, setError] = useState(null);
@@ -176,8 +177,18 @@ function RepoConnectStep({ client, onConnected }) {
         return;
       }
     }
+    const trimmedInstallationId = String(githubAppInstallationId).trim();
+    if (trimmedInstallationId && !/^\d+$/.test(trimmedInstallationId)) {
+      setError('GitHub App Installation ID must be a whole number.');
+      setState('error');
+      return;
+    }
     try {
-      await api.clients.connectRepo(client.id, { repoOwner, repoName, repoDefaultBranch, techStack: techStack || undefined, githubPatEnvVar, urlFileMap });
+      await api.clients.connectRepo(client.id, {
+        repoOwner, repoName, repoDefaultBranch, techStack: techStack || undefined, githubPatEnvVar,
+        githubAppInstallationId: trimmedInstallationId ? Number(trimmedInstallationId) : null,
+        urlFileMap,
+      });
       setState('done');
       onConnected?.();
     } catch (err) {
@@ -213,6 +224,10 @@ function RepoConnectStep({ client, onConnected }) {
       </div>
       <Field label="GitHub PAT Env Var Name" value={githubPatEnvVar} onChange={(e) => setGithubPatEnvVar(e.target.value)}
         placeholder="GITHUB_PAT" hint="Server-side environment variable key naming the GitHub access token." icon={Key} />
+      <Field label="GitHub App Installation ID (optional)" value={githubAppInstallationId} onChange={(e) => setGithubAppInstallationId(e.target.value)}
+        placeholder="e.g. 64837201"
+        hint="Overrides the PAT above entirely once set — tokens are minted per-installation instead of shared. Usually filled in automatically once the client installs the GitHub App; leave blank to keep using the PAT, or clear it to move back."
+        icon={Key} />
       <label className="block">
         <span className={labelCls}>url_file_map (JSON, optional)</span>
         <textarea className={inputMonoCls} rows={8} value={urlFileMapText} onChange={(e) => setUrlFileMapText(e.target.value)}
@@ -296,6 +311,33 @@ function IntegrationsTab({ client, onReload }) {
   const [retryResult, setRetryResult] = useState(null);
   const [retryError, setRetryError] = useState(null);
 
+  // The two IDs generators/analytics-install.js reads live at draft time
+  // (server/db.js's updateSiteAnalyticsIds) — separate from "GA4 Property
+  // ID" above, which is the Data API reporting property this dashboard
+  // ingests from, not the on-site gtag/Pixel install target. Saved together,
+  // same paired-save shape as auto-remediation's enabled+dailyLimit, since
+  // the server route takes both in one PATCH.
+  const [ga4MeasurementId, setGa4MeasurementId] = useState(client.ga4MeasurementId || '');
+  const [facebookPixelId, setFacebookPixelId] = useState(client.facebookPixelId || '');
+  const [analyticsIdsSaving, setAnalyticsIdsSaving] = useState(false);
+  const [analyticsIdsError, setAnalyticsIdsError] = useState(null);
+  const [analyticsIdsSaved, setAnalyticsIdsSaved] = useState(false);
+
+  const saveAnalyticsIds = async () => {
+    setAnalyticsIdsSaving(true);
+    setAnalyticsIdsError(null);
+    setAnalyticsIdsSaved(false);
+    try {
+      await api.clients.setAnalyticsIds(client.id, ga4MeasurementId.trim(), facebookPixelId.trim());
+      setAnalyticsIdsSaved(true);
+      onReload();
+    } catch (err) {
+      setAnalyticsIdsError(err.message || 'Could not save.');
+    } finally {
+      setAnalyticsIdsSaving(false);
+    }
+  };
+
   const retryBaseline = async () => {
     setRetrying(true);
     setRetryError(null);
@@ -354,6 +396,33 @@ function IntegrationsTab({ client, onReload }) {
         </span>
         <p className="text-xs font-bold text-slate-800">{client.repoConnected ? 'Connected' : 'Not connected'}</p>
         <p className="text-[10.5px] font-semibold text-slate-400 mt-1">Manage repository details in the Repository tab.</p>
+      </div>
+
+      {/* GA4/Meta Pixel install target — what the Action Center's
+          analytics-install generator drafts a script for. Distinct from
+          "GA4 Property ID" above (the reporting ingestion source). */}
+      <div className="border-t border-slate-100 pt-4">
+        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5 mb-2">
+          <Globe size={11} /> Analytics install (GA4 / Meta Pixel)
+        </span>
+        <div className="space-y-2.5">
+          <Field label="GA4 Measurement ID" value={ga4MeasurementId}
+            onChange={(e) => { setGa4MeasurementId(e.target.value); setAnalyticsIdsSaved(false); }}
+            placeholder="G-XXXXXXXXXX" hint="Used for the on-site gtag install script, not the reporting property above." />
+          <Field label="Meta (Facebook) Pixel ID" value={facebookPixelId}
+            onChange={(e) => { setFacebookPixelId(e.target.value); setAnalyticsIdsSaved(false); }}
+            placeholder="123456789012345" hint="Numeric Pixel ID from Meta Events Manager." />
+        </div>
+        <button type="button" onClick={saveAnalyticsIds} disabled={analyticsIdsSaving}
+          className="mt-2.5 text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-650 transition disabled:opacity-60">
+          {analyticsIdsSaving ? 'Saving…' : 'Save Analytics IDs'}
+        </button>
+        {analyticsIdsSaved && !analyticsIdsError && (
+          <p className="text-[10px] font-bold text-emerald-700 mt-1.5">Saved — the next analytics-install draft will use this.</p>
+        )}
+        {analyticsIdsError && (
+          <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mt-2">{analyticsIdsError}</div>
+        )}
       </div>
     </div>
   );
@@ -588,7 +657,16 @@ function RepositoryTab({ client, onReload }) {
           <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
             <GitBranch size={11} /> Repository link
           </span>
-          <p className="text-xs font-bold text-slate-800 mt-1">{client.repoConnected ? 'Connected' : 'Not connected'}</p>
+          <p className="text-xs font-bold text-slate-800 mt-1">
+            {client.repoConnected ? `${client.repoOwner}/${client.repoName}` : 'Not connected'}
+          </p>
+          {client.repoConnected && (
+            <p className="text-[10.5px] font-semibold text-slate-400 mt-0.5">
+              {client.githubAppInstallationId
+                ? `Auth: GitHub App (installation #${client.githubAppInstallationId})`
+                : `Auth: PAT (${client.githubPatEnvVar || 'GITHUB_PAT'})`}
+            </p>
+          )}
         </div>
         {client.repoConnected && (
           <span className="text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md border border-slate-200 text-slate-500 bg-slate-50">Git link</span>
@@ -707,13 +785,565 @@ function AdvancedTab({ client, onReload, onClose }) {
   );
 }
 
+// ── Product Growth tab ───────────────────────────────────────────────────
+// Configures server/store/product-growth-config.js — markets/industries/ICP
+// signals are free-text lists (comma-separated in the UI, stored as JSON
+// arrays), and conversionEvent is a plain string so a future product with a
+// different funnel (trial, signup, purchase...) isn't forced into
+// "booked_demo". None of this reads or writes anything Zenly-specific.
+function csvToList(s) {
+  return s.split(',').map((v) => v.trim()).filter(Boolean);
+}
+
+function ProductGrowthTab({ client }) {
+  const [config, setConfig] = useState(null); // null = loading
+  const [conversionEvent, setConversionEvent] = useState('');
+  const [markets, setMarkets] = useState('');
+  const [industries, setIndustries] = useState('');
+  const [icpSignals, setIcpSignals] = useState('');
+  const [competitorSignals, setCompetitorSignals] = useState('');
+  const [outreachEnabled, setOutreachEnabled] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const [prospectDiscoveryEnabled, setProspectDiscoveryEnabled] = useState(false);
+  const [discoveryToggling, setDiscoveryToggling] = useState(false);
+  const [crmToken, setCrmToken] = useState(null);
+  const [issuingToken, setIssuingToken] = useState(false);
+
+  const reload = () => api.clients.productGrowthConfig.get(client.id).then((c) => {
+    setConfig(c);
+    setConversionEvent(c.conversionEvent || '');
+    setMarkets((c.markets || []).join(', '));
+    setIndustries((c.industries || []).join(', '));
+    setIcpSignals((c.icpSignals || []).join(', '));
+    setCompetitorSignals((c.competitor_signals || []).join(', '));
+    setOutreachEnabled(!!c.outreachEnabled);
+    setProspectDiscoveryEnabled(!!c.prospect_discovery_enabled);
+    setCrmToken(c.crm_webhook_token || null);
+  }).catch(() => setConfig({}));
+
+  useEffect(() => { reload(); }, [client.id]);
+
+  const toggleProspectDiscovery = async (next) => {
+    setDiscoveryToggling(true);
+    setProspectDiscoveryEnabled(next);
+    try {
+      await api.clients.productGrowthConfig.setProspectDiscovery(client.id, next);
+    } catch {
+      setProspectDiscoveryEnabled(!next);
+    } finally {
+      setDiscoveryToggling(false);
+    }
+  };
+
+  const issueCrmToken = async () => {
+    setIssuingToken(true);
+    try {
+      const { crmWebhookToken } = await api.clients.productGrowthConfig.issueCrmWebhookToken(client.id);
+      setCrmToken(crmWebhookToken);
+    } finally {
+      setIssuingToken(false);
+    }
+  };
+
+  const save = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await api.clients.productGrowthConfig.save(client.id, {
+        conversionEvent: conversionEvent.trim() || null,
+        markets: csvToList(markets),
+        industries: csvToList(industries),
+        icpSignals: csvToList(icpSignals),
+        competitorSignals: csvToList(competitorSignals),
+        outreachEnabled,
+      });
+      setConfig(updated);
+    } catch (err) {
+      setError(err.message || 'Could not save.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (config === null) return <p className="text-xs text-slate-400 font-semibold py-4">Loading…</p>;
+
+  return (
+    <form onSubmit={save} className="space-y-4">
+      <p className="text-[10.5px] font-semibold text-slate-400 leading-relaxed">
+        This property runs the visibility + demand-generation agent set instead of the traffic-history agents (see
+        Universal Product Growth mode). Nothing here is required for those agents to start finding real issues —
+        it only configures the demand-generation layer: which conversion event counts as success, and which
+        prospects are worth surfacing.
+      </p>
+
+      <label className="block">
+        <span className={labelCls}>Primary conversion event</span>
+        <input className={inputCls} value={conversionEvent} onChange={(e) => setConversionEvent(e.target.value)}
+          placeholder="e.g. booked_demo, trial, signup, purchase" />
+      </label>
+
+      <label className="block">
+        <span className={labelCls}>Target markets</span>
+        <input className={inputCls} value={markets} onChange={(e) => setMarkets(e.target.value)} placeholder="Comma-separated, e.g. US, UK, South Asia" />
+      </label>
+
+      <label className="block">
+        <span className={labelCls}>Target industries</span>
+        <input className={inputCls} value={industries} onChange={(e) => setIndustries(e.target.value)} placeholder="Comma-separated, e.g. Salons, Dental clinics" />
+      </label>
+
+      <label className="block">
+        <span className={labelCls}>ICP qualification signals</span>
+        <input className={inputCls} value={icpSignals} onChange={(e) => setIcpSignals(e.target.value)} placeholder="Comma-separated, e.g. 2+ locations, 5+ staff" />
+        <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">
+          Configurable per product — never a hardcoded rule. Used only to qualify prospects with real evidence; a
+          prospect the platform can't back with evidence is reported as insufficient-data, never guessed.
+        </span>
+      </label>
+
+      <label className="block">
+        <span className={labelCls}>Competitor signal phrases</span>
+        <input className={inputCls} value={competitorSignals} onChange={(e) => setCompetitorSignals(e.target.value)} placeholder="Comma-separated, e.g. booking software, salon management platform" />
+        <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">
+          Language a same-category seller would use about itself. When a "see it live" trial signup's own real
+          homepage contains one of these — or matches an already-tracked real competitor's domain — it's flagged as
+          a competitor suspect on the Demand page, never auto-blocked.
+        </span>
+      </label>
+
+      <label className="flex items-center gap-2.5 cursor-pointer">
+        <input type="checkbox" checked={outreachEnabled} onChange={(e) => setOutreachEnabled(e.target.checked)}
+          className="w-4 h-4 rounded border-slate-300 text-[#6C63FF] focus:ring-[#6C63FF]/20" />
+        <span className="text-xs font-bold text-slate-700">Outreach handoff enabled</span>
+      </label>
+      <p className="text-[9.5px] font-semibold text-slate-400 -mt-2.5 ml-6">
+        Qualified prospects are sent to the external CRM for a human to review — this platform never sends outreach
+        itself.
+      </p>
+
+      {error && <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>}
+
+      <div className="border-t border-slate-100 pt-4 space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <span className="text-xs font-bold text-slate-700 block">Prospect discovery</span>
+            <span className="text-[9.5px] font-semibold text-slate-400">Own opt-in — real SERP-backed, evidence-gated, cron-only. Never gated on other DataForSEO features being present.</span>
+          </div>
+          <button type="button" onClick={() => toggleProspectDiscovery(!prospectDiscoveryEnabled)} disabled={discoveryToggling}
+            className={`shrink-0 text-[9.5px] font-black uppercase tracking-wider px-3 py-2 rounded-lg transition disabled:opacity-60 ${
+              prospectDiscoveryEnabled ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'bg-slate-50 text-slate-500 border border-slate-200'
+            }`}>
+            {prospectDiscoveryEnabled ? 'Enabled' : 'Disabled'}
+          </button>
+        </div>
+
+        <div>
+          <span className={labelCls}>CRM webhook token</span>
+          {crmToken ? (
+            <div className={`${inputMonoCls} select-all`}>{crmToken}</div>
+          ) : (
+            <button type="button" onClick={issueCrmToken} disabled={issuingToken}
+              className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition disabled:opacity-60">
+              {issuingToken ? 'Generating…' : 'Generate CRM Token'}
+            </button>
+          )}
+          <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">
+            Give this to the external CRM: <code>GET /api/crm/export</code> to pull staff-approved prospects,
+            <code> POST /api/crm/webhook</code> to report real outcome status back, both authenticated with
+            <code> Authorization: Bearer &lt;token&gt;</code>.
+          </span>
+        </div>
+      </div>
+
+      <button type="submit" disabled={saving}
+        className="text-[10px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60 shadow-md shadow-indigo-500/10"
+        style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
+        {saving ? 'Saving…' : 'Save Product Growth Config'}
+      </button>
+    </form>
+  );
+}
+
+// ── Business Goals tab ───────────────────────────────────────────────────
+// Stage 2 of the goal-driven-prioritization plan (Stage 1: server/routes/
+// clients.js goals routes + server/agents/lib/goal-alignment.js). Every
+// field here maps 1:1 to server/store/site-goals.js's shapeGoal output —
+// no client-side transform beyond the comma-separated page-patterns list,
+// same csvToList convention ProductGrowthTab already uses above.
+const GOAL_TYPES = [
+  'generate_leads', 'increase_organic_traffic', 'increase_conversions',
+  'reduce_bounce_rate', 'increase_organic_visibility', 'increase_qualified_traffic',
+  'grow_bookings', 'grow_sales',
+  'book_demos', 'grow_signups', 'activate_users',
+  'custom',
+];
+
+const EMPTY_GOAL_FORM = {
+  goalType: GOAL_TYPES[0],
+  objective: '',
+  targetBusinessArea: '',
+  targetPagePatterns: '',
+  primaryMetric: '',
+  description: '',
+  importance: 1,
+};
+
+function goalToForm(g) {
+  return {
+    goalType: g.goalType,
+    objective: g.objective || '',
+    targetBusinessArea: g.targetBusinessArea || '',
+    targetPagePatterns: (g.targetPagePatterns || []).join(', '),
+    primaryMetric: g.primaryMetric || '',
+    description: g.description || '',
+    importance: g.importance ?? 1,
+  };
+}
+
+function GoalForm({ clientId, initial, onCancel, onSubmit, submitLabel }) {
+  const [form, setForm] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  // Stage 2b: custom-goal AI structure preview. This only ever fills the
+  // fields below — it never calls onSubmit itself, so the existing Save
+  // button below is still the one explicit confirm step before anything is
+  // persisted, per the brief's "never auto-save an AI-structured goal" rule.
+  const [customDescription, setCustomDescription] = useState('');
+  const [proposing, setProposing] = useState(false);
+  const [proposeError, setProposeError] = useState(null);
+  const [proposed, setProposed] = useState(false);
+
+  const suggestStructure = async () => {
+    if (!customDescription.trim()) return setProposeError('Describe the goal first.');
+    setProposing(true);
+    setProposeError(null);
+    try {
+      const proposal = await api.clients.goals.structurePreview(clientId, customDescription.trim());
+      setForm((f) => ({
+        ...f,
+        objective: proposal.objective,
+        targetBusinessArea: proposal.targetBusinessArea || '',
+        targetPagePatterns: (proposal.targetPagePatterns || []).join(', '),
+        primaryMetric: proposal.primaryMetric || '',
+      }));
+      setProposed(true);
+    } catch (err) {
+      setProposeError(err.message || 'Could not suggest a structure.');
+    } finally {
+      setProposing(false);
+    }
+  };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.objective.trim()) return setError('objective is required.');
+    setSaving(true);
+    setError(null);
+    try {
+      await onSubmit({
+        goalType: form.goalType,
+        objective: form.objective.trim(),
+        targetBusinessArea: form.targetBusinessArea.trim() || null,
+        targetPagePatterns: csvToList(form.targetPagePatterns),
+        primaryMetric: form.primaryMetric.trim() || null,
+        description: form.description.trim() || null,
+        importance: Number(form.importance) || 1,
+      });
+    } catch (err) {
+      setError(err.message || 'Could not save.');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-3 bg-slate-50/60 border border-slate-100 rounded-xl p-4">
+      <label className="block">
+        <span className={labelCls}>Goal type</span>
+        <select className={inputCls} value={form.goalType} onChange={set('goalType')}>
+          {GOAL_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+        </select>
+      </label>
+
+      {form.goalType === 'custom' && (
+        <div className="bg-white border border-indigo-100 rounded-xl p-3 space-y-2">
+          <span className={labelCls}>Describe the goal in your own words</span>
+          <textarea className={`${inputCls} min-h-16 resize-y`} value={customDescription}
+            onChange={(e) => setCustomDescription(e.target.value)}
+            placeholder="e.g. We want more small teams finding us for our new team-scheduling feature" />
+          {proposeError && <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-lg px-2.5 py-1.5">{proposeError}</div>}
+          <button type="button" onClick={suggestStructure} disabled={proposing}
+            className="text-[10px] font-black uppercase tracking-wider px-3.5 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 transition disabled:opacity-60">
+            {proposing ? 'Suggesting…' : 'Suggest structure with AI'}
+          </button>
+          {proposed && (
+            <p className="text-[9.5px] font-semibold text-indigo-500">
+              AI-suggested below — review and edit before saving.
+            </p>
+          )}
+        </div>
+      )}
+
+      <label className="block">
+        <span className={labelCls}>Objective</span>
+        <input className={inputCls} value={form.objective} onChange={set('objective')}
+          placeholder="e.g. Grow qualified demo bookings from organic search 20% this quarter" />
+      </label>
+
+      <div className="grid grid-cols-2 gap-3">
+        <label className="block">
+          <span className={labelCls}>Target business area</span>
+          <input className={inputCls} value={form.targetBusinessArea} onChange={set('targetBusinessArea')} placeholder="e.g. Pricing, Onboarding" />
+        </label>
+        <label className="block">
+          <span className={labelCls}>Primary metric</span>
+          <input className={inputCls} value={form.primaryMetric} onChange={set('primaryMetric')} placeholder="e.g. booked_demo conversions" />
+        </label>
+      </div>
+
+      <label className="block">
+        <span className={labelCls}>Target page patterns</span>
+        <input className={inputCls} value={form.targetPagePatterns} onChange={set('targetPagePatterns')} placeholder="Comma-separated, e.g. /pricing, /blog/*" />
+      </label>
+
+      <label className="block">
+        <span className={labelCls}>Description</span>
+        <input className={inputCls} value={form.description} onChange={set('description')} placeholder="Optional context for how findings should be judged against this goal" />
+      </label>
+
+      <label className="block w-28">
+        <span className={labelCls}>Importance</span>
+        <input type="number" min="1" className={inputCls} value={form.importance} onChange={set('importance')} />
+        <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">Lower number = higher priority on ties.</span>
+      </label>
+
+      {error && <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>}
+
+      <div className="flex items-center gap-2 pt-1">
+        <button type="submit" disabled={saving}
+          className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60 shadow-md shadow-indigo-500/10"
+          style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
+          {saving ? 'Saving…' : submitLabel}
+        </button>
+        <button type="button" onClick={onCancel} className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition">
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// Progress for a PRODUCT site's goals — read from the CRM/prospect pipeline and
+// trial signups (server/store/product-funnel.js). Shown only for a 'product'
+// property; a website client has no product funnel, so nothing is rendered for
+// it. Counts are real rows only; website-side GA4 events are NOT included yet.
+const PROGRESS_WINDOWS = [7, 30, 90];
+
+function ProductGoalProgress({ clientId }) {
+  const [days, setDays] = useState(30);
+  const [state, setState] = useState({ loading: true, funnel: null, error: null });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ loading: true, funnel: null, error: null });
+    api.clients.goals.progress(clientId, days)
+      .then((r) => { if (!cancelled) setState({ loading: false, funnel: r.funnel, error: null }); })
+      .catch((e) => { if (!cancelled) setState({ loading: false, funnel: null, error: e.message || 'Could not load goal progress.' }); });
+    return () => { cancelled = true; };
+  }, [clientId, days]);
+
+  const { loading, funnel, error } = state;
+  const stats = funnel ? [
+    { label: 'Demos booked', value: funnel.counts.demosBooked },
+    { label: 'Trial signups', value: funnel.counts.trialSignups },
+    { label: 'Converted', value: funnel.counts.converted },
+  ] : [];
+
+  return (
+    <div className="border border-slate-100 rounded-xl p-3.5 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[9.5px] font-black uppercase tracking-wider text-slate-500">Goal progress</span>
+        <div className="flex items-center gap-1">
+          {PROGRESS_WINDOWS.map((d) => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => setDays(d)}
+              className={`text-[9.5px] font-black uppercase tracking-wider px-2 py-1 rounded-lg transition ${days === d ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-50 text-slate-400 hover:bg-slate-100'}`}
+            >
+              {d}d
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {loading && <p className="text-xs text-slate-400 font-semibold">Loading…</p>}
+      {error && <p className="text-xs font-semibold text-rose-700">{error}</p>}
+
+      {funnel && (
+        <>
+          {funnel.headline ? (
+            <div>
+              <p className="text-2xl font-black text-slate-800 leading-none">{funnel.headline.value}</p>
+              <p className="text-[10.5px] font-semibold text-slate-400 mt-1">
+                {funnel.headline.label} · last {funnel.windowDays} days · conversion event: {funnel.conversionEvent}
+              </p>
+            </div>
+          ) : (
+            <p className="text-[10.5px] font-semibold text-slate-400">
+              {funnel.conversionEvent
+                ? `"${funnel.conversionEvent}" doesn't match a tracked funnel stage, so no single headline is shown.`
+                : 'Set a conversion event in the Product Growth tab to see a headline number.'}
+            </p>
+          )}
+          <div className="grid grid-cols-3 gap-2">
+            {stats.map((st) => (
+              <div key={st.label} className="rounded-lg bg-slate-50 px-3 py-2">
+                <p className="text-sm font-black text-slate-700">{st.value}</p>
+                <p className="text-[9.5px] font-semibold text-slate-400">{st.label}</p>
+              </div>
+            ))}
+          </div>
+          {funnel.counts.competitorSuspectSignups > 0 && (
+            <p className="text-[10px] font-semibold text-slate-400">
+              {funnel.counts.competitorSuspectSignups} signup{funnel.counts.competitorSuspectSignups === 1 ? '' : 's'} flagged as likely competitors — not counted above.
+            </p>
+          )}
+          <p className="text-[9.5px] font-semibold text-slate-300">
+            From the CRM pipeline and trial signups. Website-side events (visits, form views) are not included yet.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+function GoalsTab({ client }) {
+  const [goals, setGoals] = useState(null); // null = loading
+  const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [error, setError] = useState(null);
+
+  const reload = () => api.clients.goals.list(client.id).then(setGoals).catch(() => setGoals([]));
+  useEffect(() => { reload(); }, [client.id]);
+
+  const toggleStatus = async (goal) => {
+    const next = goal.status === 'active' ? 'paused' : 'active';
+    setGoals((gs) => gs.map((g) => (g.id === goal.id ? { ...g, status: next } : g)));
+    try {
+      await api.clients.goals.setStatus(client.id, goal.id, next);
+    } catch (err) {
+      setError(err.message || 'Could not update status.');
+      reload();
+    }
+  };
+
+  if (goals === null) return <p className="text-xs text-slate-400 font-semibold py-4">Loading…</p>;
+
+  return (
+    <div className="space-y-4">
+      <p className="text-[10.5px] font-semibold text-slate-400 leading-relaxed">
+        Business goals let the decision engine weigh findings against what this client actually cares about right
+        now, instead of treating every recommendation as equally important. A goal only affects prioritization — it
+        never blocks or forces a decision on its own.
+      </p>
+
+      {client.propertyType === 'product' && <ProductGoalProgress clientId={client.id} />}
+
+      {error && <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>}
+
+      {goals.length === 0 && !adding && (
+        <p className="text-xs text-slate-400 font-semibold py-2">No goals set yet.</p>
+      )}
+
+      <div className="space-y-2">
+        {goals.map((g) => (
+          <div key={g.id} className="border border-slate-100 rounded-xl p-3.5">
+            {editingId === g.id ? (
+              <GoalForm
+                clientId={client.id}
+                initial={goalToForm(g)}
+                submitLabel="Save Goal"
+                onCancel={() => setEditingId(null)}
+                onSubmit={async (body) => {
+                  const updated = await api.clients.goals.update(client.id, g.id, body);
+                  setGoals((gs) => gs.map((x) => (x.id === g.id ? updated : x)));
+                  setEditingId(null);
+                }}
+              />
+            ) : (
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[9.5px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700">{g.goalType}</span>
+                    <span className={`text-[9.5px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${g.status === 'active' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+                      {g.status}
+                    </span>
+                    <span className="text-[9.5px] font-semibold text-slate-400">priority {g.importance}</span>
+                  </div>
+                  <p className="text-xs font-bold text-slate-700 mt-1.5">{g.objective}</p>
+                  {g.description && <p className="text-[10.5px] font-semibold text-slate-400 mt-1">{g.description}</p>}
+                  {(g.targetPagePatterns?.length > 0 || g.primaryMetric) && (
+                    <p className="text-[9.5px] font-semibold text-slate-400 mt-1">
+                      {g.primaryMetric && <>metric: {g.primaryMetric}</>}
+                      {g.primaryMetric && g.targetPagePatterns?.length > 0 && ' · '}
+                      {g.targetPagePatterns?.length > 0 && <>pages: {g.targetPagePatterns.join(', ')}</>}
+                    </p>
+                  )}
+                </div>
+                <div className="flex flex-col items-end gap-1.5 shrink-0">
+                  <button type="button" onClick={() => setEditingId(g.id)} className="text-[9.5px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-600 transition">
+                    Edit
+                  </button>
+                  <button type="button" onClick={() => toggleStatus(g)} className="text-[9.5px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-600 transition">
+                    {g.status === 'active' ? 'Pause' : 'Activate'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {adding ? (
+        <GoalForm
+          clientId={client.id}
+          initial={EMPTY_GOAL_FORM}
+          submitLabel="Add Goal"
+          onCancel={() => setAdding(false)}
+          onSubmit={async (body) => {
+            const created = await api.clients.goals.create(client.id, body);
+            setGoals((gs) => [...gs, created]);
+            setAdding(false);
+          }}
+        />
+      ) : (
+        <button type="button" onClick={() => setAdding(true)}
+          className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition">
+          + Add Goal
+        </button>
+      )}
+    </div>
+  );
+}
+
 const TABS = [
   { value: 'general', label: 'General' },
   { value: 'integrations', label: 'Integrations' },
   { value: 'ai', label: 'AI Configuration' },
   { value: 'repository', label: 'Repository' },
   { value: 'advanced', label: 'Advanced' },
+  { value: 'goals', label: 'Goals' },
 ];
+
+// Only shown for a 'product' property (see PROPERTY_TYPES in
+// ClientOnboarding.jsx) — a 'website' client never sees this tab, and
+// nothing in it assumes any specific product.
+const PRODUCT_GROWTH_TAB = { value: 'product-growth', label: 'Product Growth' };
 
 export default function ClientDrawer({ client, owner, isOpen, onClose, onReload, initialTab = 'general' }) {
   const [tab, setTab] = useState(initialTab);
@@ -727,14 +1357,18 @@ export default function ClientDrawer({ client, owner, isOpen, onClose, onReload,
 
   if (!client) return null;
 
+  const tabs = client.propertyType === 'product' ? [...TABS, PRODUCT_GROWTH_TAB] : TABS;
+
   return (
     <Drawer isOpen={isOpen} onClose={onClose} title={client.name} subtitle={client.websiteDomain || 'no domain configured'} icon={Building} maxWidth="max-w-2xl">
-      <Tabs tabs={TABS} active={tab} onChange={setTab} />
+      <Tabs tabs={tabs} active={tab} onChange={setTab} />
       {tab === 'general' && <GeneralTab client={client} owner={owner} />}
       {tab === 'integrations' && <IntegrationsTab client={client} onReload={onReload} />}
       {tab === 'ai' && <AiConfigTab client={client} onReload={onReload} />}
       {tab === 'repository' && <RepositoryTab client={client} onReload={onReload} />}
       {tab === 'advanced' && <AdvancedTab client={client} onReload={onReload} onClose={onClose} />}
+      {tab === 'goals' && <GoalsTab client={client} />}
+      {tab === 'product-growth' && <ProductGrowthTab client={client} />}
     </Drawer>
   );
 }

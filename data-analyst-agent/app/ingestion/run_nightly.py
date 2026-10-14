@@ -11,6 +11,7 @@ from app.config import settings
 from app.db.models import Client, IngestionRun, MetricObservation
 from app.db.session import SessionLocal
 from app.mcp_client.client import McpAuthError, McpClient, McpToolError
+from app.mcp_client.datasource import DataSource
 
 
 async def run_nightly(today: date | None = None) -> None:
@@ -60,14 +61,30 @@ async def _run_one(client: Client, collector, window_start: date, window_end: da
     client or collector. Errors are recorded, never raised further."""
     started = time.monotonic()
     status, error = "ok", None
+    source = None
+    fallback_notes: list[str] = []
 
     try:
-        mcp = McpClient(client.mcp_token_ciphertext) if collector.requires_mcp else None
         async with SessionLocal() as session:
+            # MCP stays the preferred source; DataSource only reaches for the
+            # shared database when MCP is unreachable or rejects the token AND
+            # the tool has a real Node-side table behind it. Passing the same
+            # session the collector writes through means the fallback reads
+            # inside the collector's own transaction.
+            mcp = None
+            if collector.requires_mcp:
+                mcp = DataSource(
+                    client_id=client.id,
+                    session=session,
+                    mcp=McpClient(client.mcp_token_ciphertext),
+                )
             observations = await collector.collect(
                 session=session, client=client, mcp=mcp,
                 window_start=window_start, window_end=window_end,
             )
+            if mcp is not None:
+                source = mcp.provenance
+                fallback_notes = mcp.fallback_reasons
             if collector.writes_own_storage:
                 # Already persisted directly within collect() using the
                 # passed session — an empty return here is expected, not a
@@ -93,11 +110,22 @@ async def _run_one(client: Client, collector, window_start: date, window_end: da
         # ingestion_runs nobody queries.
         print(f"[run_nightly] collector {collector.collector_id} FAILED for client {client.id}: {error}", flush=True)
 
+    if fallback_notes:
+        # A degraded-but-working night must be as visible as a failing one.
+        # The row records it too (source), but this is what a human tailing
+        # logs actually sees.
+        print(
+            f"[run_nightly] collector {collector.collector_id} for client {client.id} "
+            f"fell back to the database: {'; '.join(fallback_notes)}",
+            flush=True,
+        )
+
     took_ms = int((time.monotonic() - started) * 1000)
     async with SessionLocal() as session:
         session.add(IngestionRun(
             client_id=client.id, collector_id=collector.collector_id,
             run_date=window_end, status=status, error=error, took_ms=took_ms,
+            source=source,
         ))
         await session.commit()
 

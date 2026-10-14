@@ -28,6 +28,18 @@
  *                                          existing GSC/GA4 tables. Absent/empty = fully self-sufficient
  *                                          today. An agent whose sources are all "not-connected" must
  *                                          return status "insufficient-data" rather than a fabricated estimate.
+ * @property {string[]} [requiresCapabilities] site-level capability ids this agent needs to run at
+ *                                          all, e.g. ['gsc'], ['gsc','ga4'] — checked by runner.js
+ *                                          against server/lib/site-capabilities.js's
+ *                                          computeSiteCapabilities(site) before every run. Unlike
+ *                                          dataSources (an external source the agent itself checks
+ *                                          and degrades gracefully around), this is enforced upstream:
+ *                                          an agent whose capabilities aren't met is skipped before
+ *                                          agent.run() is ever called — no agent_runs row, no
+ *                                          insufficient-data noise. Absent/empty = runs on any site
+ *                                          (the default for the 18 live-page agents that read no
+ *                                          gsc_*/ga4_* tables at all). Use this, not dataSources, for
+ *                                          a hard dependency on this platform's own GSC/GA4 ingestion.
  */
 
 /**

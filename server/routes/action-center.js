@@ -11,39 +11,51 @@ import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation
 import { applyPacing, applyConvergenceCap } from '../agents/lib/ship-pacing.js';
 import { draftShipState, SHIP_STATE } from '../lib/draft-ship-state.js';
 import { recordOutcome } from '../agents/lib/generator-learning.js';
-import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState, reopenRecommendation } from '../store/recommendations.js';
+import { getProtectedPageSet } from '../store/protected-pages.js';
+import { isProtectedChange } from '../agents/lib/protected-pages.js';
+import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState, reopenRecommendation, blockRecommendation, closeRecommendation, getRecommendationByFindingId } from '../store/recommendations.js';
 import { recordAttempt } from '../store/recommendation-attempts.js';
+import { classifyAbandonReason, RETRY_POLICY } from '../lib/attempt-classification.js';
 import { query as pgQuery } from '../db.js';
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
 import { scheduleImpactMeasurement } from '../store/fix-impact.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
-import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
+import { getLatestAgentRunSummaries } from '../agents/lib/fresh-runs.js';
 import { saveAgentRun } from '../store/agent-runs.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import { runQualityGate } from '../generators/lib/quality-gate.js';
 import { extractEditLesson } from '../agents/lib/draft-lesson-extraction.js';
 import { recordFixOutcome, findRelevantMemory, getActiveAutoMemories } from '../agent-memory.js';
-import { VERIFIABLE_GENERATOR_IDS } from '../store/fix-verifications.js';
+import { VERIFIABLE_GENERATOR_IDS, scheduleVerificationForDraft, attachDeploymentToDraftVerifications, verificationMethodFor } from '../store/fix-verifications.js';
+import { checkContentAgainstExpectation } from '../agents/lib/fix-verification.js';
+import { recordDeploymentObserved } from '../store/deployments.js';
 import { categoryForPattern, rootCauseForPattern, fixDirectiveForPattern, topLevelCategoryForGenerator } from '../generators/lib/pattern-categories.js';
 import { evaluateApprovalGate } from './lib/approval-gate.js';
 import { validateRendering, validateRenderingBatch, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
 import { reviewPrChecks, generatedFilePaths, AGENT_REVIEW_STATE } from '../implementers/lib/pr-self-review.js';
 import {
-  createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
+  createDraft, getDraftByFindingId, listDrafts, listDraftsForBoard, countDraftsByLifecycle, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, markCmsDraftPublished, recordAgentReviewState, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds,
 } from '../store/drafts.js';
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
 import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor } from '../implementers/lib/design-drift.js';
+import { resolveOrCreateCanonicalPageTemplate, PAGE_TEMPLATE_TYPES_FOR_GENERATOR } from '../design-agent/lib/page-templates.js';
+import { buildCorrectionFeedback, canonicalTemplateForFeedback } from '../generators/lib/design-repair-feedback.js';
+import { pageFamilyOf, formatDesignKnowledge } from '../design-agent/lib/design-knowledge.js';
+import { findDesignKnowledge, recordDesignIssues, recordKnowledgeReuse } from '../store/design-knowledge.js';
+import { describeResponsiveRegressions } from '../generators/lib/responsive-preview-gate.js';
+import { hasProfileLevelMismatch, repairProfileLevelMismatch } from '../generators/lib/design-mismatch-repair.js';
+import { repairDesignProfileRolesForSites } from '../scripts/repair-design-profile-roles.js';
 import { FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { triggerCmsRebuild } from '../sanity/rebuild.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
 import { resolvePageSource } from '../implementers/lib/page-resolution.js';
-import { getFileContent, getPullRequest, getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../github/client.js';
-import { baseBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush } from '../implementers/lib/github-ops.js';
+import { getFileContent, getPullRequest, getLastKnownRateLimit, getDefaultBranchSha, RATE_LIMIT_RESERVE } from '../github/client.js';
+import { baseBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush, openPrForBranch } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
 import { getSiteById } from '../store/read.js';
 import { getUserById } from '../store/users.js';
@@ -51,6 +63,7 @@ import { runSiteDiscoveryIfDue } from '../job.js';
 import { notifyOfPageChange } from '../ingest/gsc-technical.js';
 import { markQueryDrafted } from '../store/growth-queries.js';
 import { safeMessage, sanitizeForCustomer } from '../lib/errors.js';
+import { siteOriginFor } from '../agents/lib/site-domain.js';
 
 // Best-effort post-merge Search Console notification (multi-tenant
 // refactor Part 3) — never blocks or fails the caller's response, since
@@ -194,7 +207,7 @@ router.get('/action-center/recommendations', async (req, res, next) => {
 export async function buildStalenessContext(siteId) {
   const [meta, runs] = await Promise.all([
     listAgentMeta(),
-    getLatestAgentRuns(siteId, RECOMMENDATION_AGENT_IDS),
+    getLatestAgentRunSummaries(siteId, RECOMMENDATION_AGENT_IDS),
   ]);
   const nameById = new Map(meta.map((m) => [m.id, m]));
   const byId = new Map(runs.map((r) => [r.agent_id, r]));
@@ -278,7 +291,7 @@ router.get('/action-center/generators', async (req, res, next) => {
 // wait budget in ms — dataAnalyst.js's "Generate Content Draft" button uses a
 // short one so a mid-derivation click gets a real result instead of an
 // immediate "come back later", without hanging the request for minutes.
-export async function generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId: presetMemoryRefId = null, waitForDesignAgent = false } = {}) {
+export async function generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId: presetMemoryRefId = null, waitForDesignAgent = false, enforceDesignIntegrity = true } = {}) {
   if (!generatorId) { const err = new Error('generatorId is required'); err.status = 400; throw err; }
   const generator = await getGenerator(generatorId);
   if (!generator) { const err = new Error(`Unknown generator "${generatorId}"`); err.status = 404; throw err; }
@@ -355,20 +368,76 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
       };
     }
 
-    // Informational only, deliberately NOT a gate. Design Context (verified
-    // template / v2 profile) shapes what gets generated below when it's
-    // available; when it isn't (new site, context still queued, a stale
-    // background rescan) the generator's own zero-config fallback renders
-    // instead — see marker-merge.js/newpage-render.js. A missing or
-    // not-yet-derived Design Context must never stop an unrelated draft from
-    // shipping: that hard-422 used to block every faq/expand-content/
-    // internal-links/qa-content/net-new-page draft on a site any time the
-    // analysis job failed, which is exactly the stuck-Action-Center failure
-    // mode this replaces. 'no-concept' action types (meta-title, schema,
-    // canonical, sitemap, robots-fix, ...) were never affected either way.
+    // Informational only, deliberately NOT a gate, for every reason EXCEPT
+    // one. Design Context (verified template / v2 profile) shapes what gets
+    // generated below when it's available; when it isn't (new site, context
+    // still queued, a stale background rescan) the generator's own
+    // zero-config fallback renders instead — see marker-merge.js/
+    // newpage-render.js. A missing or not-yet-derived Design Context must
+    // never stop an unrelated draft from shipping: that hard-422 used to
+    // block every faq/expand-content/internal-links/qa-content/net-new-page
+    // draft on a site any time the analysis job failed, which is exactly the
+    // stuck-Action-Center failure mode this replaces. 'no-concept' action
+    // types (meta-title, schema, canonical, sitemap, robots-fix, ...) were
+    // never affected either way.
+    //
+    // 'body-slot-is-label' is the one templateResult reason that IS a gate
+    // (see design-drift.js's own comment on that branch): every other reason
+    // here means "we could not yet confirm a template," which is recoverable
+    // by shipping the safe zero-config fallback. That one means the design
+    // profile WAS checked against the live site and found wrong — the body
+    // slot carries label/eyebrow styling, so generated prose would render as
+    // a caption. Falling through there doesn't degrade gracefully, it ships
+    // visibly broken styled content, which is precisely what "no
+    // design-unverified generation" exists to prevent. The Design Agent is
+    // already queued to re-derive the profile (design-drift.js does that
+    // before returning), so this is retried automatically, not a dead end.
+    if (templateResult && templateResult.ok === false && templateResult.reason === 'body-slot-is-label') {
+      throw httpError(
+        422,
+        `${generatorId} is blocked: the site's design profile describes its body text with a class the live CSS `
+        + `defines as a label, so generated content would render as a caption instead of prose.`,
+        { reason: 'design-unverified', detail: templateResult.detail },
+      );
+    }
+
     const verification = componentTemplateVerification(effectiveSite, componentTemplateActionTypeFor(generatorId));
     if (!verification.ok) {
       console.warn(`[action-center] ${generatorId} has no verified Design Context yet (${verification.reason}) — generating with the default fallback template.`);
+    }
+
+    // CANONICAL PAGE TEMPLATE, stage — the page-TYPE-level sibling of the
+    // componentTemplate resolution just above. For a net-new-WHOLE-PAGE
+    // generator (design-agent/lib/page-templates.js's
+    // PAGE_TEMPLATE_TYPES_FOR_GENERATOR), find-or-compose this site's
+    // canonical structural template BEFORE the generator ever runs, exactly
+    // the same "first use pays the derivation cost, every later use of the
+    // same type reuses it" contract componentTemplates already gives faq/
+    // expand-content/qa-content/internal-links/content-wrapper. Persisted by
+    // resolveOrCreateCanonicalPageTemplate itself (not here), so the very
+    // next generateDraft call for this site+type — even from a different
+    // process — sees it too. Never a gate: a site with no usable design
+    // profile yet, or genuinely no real pattern for this page type, simply
+    // generates with no structural guidance, same as before this existed.
+    const pageTemplateTypes = PAGE_TEMPLATE_TYPES_FOR_GENERATOR[generatorId];
+    if (pageTemplateTypes) {
+      const pageTemplateResult = await resolveOrCreateCanonicalPageTemplate(effectiveSite, pageTemplateTypes)
+        .catch((err) => { console.error(`[action-center] canonical page-template resolution failed for ${generatorId}:`, err.message); return null; });
+      if (pageTemplateResult?.ok && pageTemplateResult.template) {
+        effectiveSite = {
+          ...effectiveSite,
+          url_file_map: {
+            ...effectiveSite.url_file_map,
+            siteRoot: {
+              ...effectiveSite.url_file_map?.siteRoot,
+              pageTemplates: {
+                ...effectiveSite.url_file_map?.siteRoot?.pageTemplates,
+                [pageTemplateResult.pageType]: pageTemplateResult.template,
+              },
+            },
+          },
+        };
+      }
     }
   }
 
@@ -382,19 +451,107 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   // generator's output is validated, whether called from the manual UI,
   // the MCP tool, or the unattended execution-engine/auto-remediation
   // chains — a future generator gets this for free just by existing.
-  const MAX_GENERATION_ATTEMPTS = 2;
+  // Three attempts, not two, because a retry is no longer a coin flip: the
+  // second and third carry a real, specific correction derived from what
+  // the gate just found (design-repair-feedback.js), so an extra attempt is
+  // a genuinely different try rather than the same dice re-rolled.
+  const MAX_GENERATION_ATTEMPTS = 3;
+  const canonicalTemplate = canonicalTemplateForFeedback(effectiveSite, generatorId, PAGE_TEMPLATE_TYPES_FOR_GENERATOR);
   let content, summary, gateResult;
   let firstAttemptIssues = null;
+  // RETRIEVE BEFORE GENERATING. What earlier validated work taught us about
+  // THIS tenant's design — what worked on this kind of page, and what was
+  // tried and did not hold — goes to the generator on the very first attempt,
+  // not only after a failure. Strictly this site's own lessons; empty for a
+  // tenant with no history, which behaves exactly as before.
+  const designPageUrl = [params?.pageUrl, params?.url, params?.page, params?.permalink].find((v) => typeof v === 'string' && v) || null;
+  const designPageType = canonicalTemplate?.pageType || canonicalTemplate?.type || null;
+  const priorKnowledge = await findDesignKnowledge(siteId, {
+    family: designPageUrl ? pageFamilyOf(designPageUrl) : null, pageType: designPageType,
+  });
+  const knowledgeBlock = formatDesignKnowledge(priorKnowledge);
+  let designCorrections = knowledgeBlock;
+  let attemptsUsed = 0;
+  let profileRepairAttempted = false;
   for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
-    ({ content, summary } = await generator.generate({ siteId, params: params || {} }));
-    gateResult = await runQualityGate(content, generatorId, siteId);
+    attemptsUsed = attempt;
+    // The repair channel. A generator that doesn't read designCorrections
+    // simply ignores it and the attempt behaves exactly as it always did —
+    // this is additive, not a contract every generator must now satisfy.
+    ({ content, summary } = await generator.generate({
+      siteId,
+      params: { ...(params || {}), ...(designCorrections ? { designCorrections } : {}) },
+    }));
+    gateResult = await runQualityGate(content, generatorId, siteId, { site: effectiveSite, enforceDesignIntegrity });
     if (attempt === 1 && !gateResult.clean) firstAttemptIssues = gateResult.issues;
     if (gateResult.clean) break;
+
+    // DIAGNOSE -> ROUTE TO WHATEVER CAN ACTUALLY FIX IT.
+    //
+    // Not every design mismatch lives in the generated content. A
+    // `design-role-mismatch` is a defect in the SITE'S STORED DESIGN
+    // PROFILE (design-drift.js's verifyProfileRoles never reads the draft),
+    // so regenerating cannot change the verdict — left to the content loop
+    // it would burn every attempt and then block, which is exactly the
+    // outcome this loop exists to prevent. Route it to the deterministic
+    // profile role correction instead, then revalidate against the
+    // corrected profile.
+    //
+    // Tried at most once: the repair is deterministic, so if it didn't fix
+    // the profile the first time it will not fix it on a second run.
+    if (attempt < MAX_GENERATION_ATTEMPTS && !profileRepairAttempted && hasProfileLevelMismatch(gateResult.issues)) {
+      profileRepairAttempted = true;
+      const { repaired, site: refreshedSite } = await repairProfileLevelMismatch(siteId, {
+        repairSites: repairDesignProfileRolesForSites,
+        fetchSite: getSiteById,
+        loadSiteRow: async (id) => (await pgQuery('select * from sites where id = $1', [id])).rows[0] || null,
+      });
+      if (repaired && refreshedSite) {
+        console.warn(`[action-center] ${generatorId}: design profile role mismatch repaired for site ${siteId}, revalidating`);
+        // Carry forward whatever the just-resolved profile now says, while
+        // keeping the canonical page template this call may have composed.
+        effectiveSite = {
+          ...refreshedSite,
+          url_file_map: {
+            ...refreshedSite.url_file_map,
+            siteRoot: {
+              ...refreshedSite.url_file_map?.siteRoot,
+              pageTemplates: effectiveSite?.url_file_map?.siteRoot?.pageTemplates
+                || refreshedSite.url_file_map?.siteRoot?.pageTemplates,
+            },
+          },
+        };
+      }
+    }
+
+    // CONTENT-LEVEL repair. Where this used to discard the gate's findings
+    // and re-roll blindly, it now turns them into an instruction naming
+    // exactly what was wrong and restating the site's own design language,
+    // and hands that to the generator for the next attempt. Only a mismatch
+    // that survives every attempt is refused below.
     if (attempt < MAX_GENERATION_ATTEMPTS) {
-      console.warn(`[action-center] ${generatorId} draft failed the Quality Gate (attempt ${attempt}), regenerating:`, gateResult.issues);
+      designCorrections = buildCorrectionFeedback(gateResult.issues, {
+        site: effectiveSite,
+        canonicalTemplate,
+        knowledge: knowledgeBlock,
+      }) || designCorrections;
+      console.warn(
+        `[action-center] ${generatorId} draft failed the Quality Gate (attempt ${attempt}), regenerating`
+        + `${designCorrections ? ' with a design/structure correction' : ''}:`,
+        gateResult.issues,
+      );
     }
   }
   if (!gateResult.clean) {
+    // LEARN FROM THE FAILURE TOO. What was asked of the generator and still did
+    // not pass is kept as an anti-pattern for this tenant, so the same change
+    // is not tried again on the next page of this kind.
+    await recordDesignIssues(siteId, 'anti-pattern', gateResult.issues, {
+      generatorId, pageType: designPageType, pageUrl: designPageUrl,
+      correction: designCorrections && designCorrections !== knowledgeBlock ? designCorrections : null,
+      validation: { passed: false, gate: 'quality-gate', attempts: attemptsUsed },
+    });
+    await recordKnowledgeReuse(priorKnowledge, 'failure', { siteId, generatorId });
     const err = new Error(`This recommendation could not be generated cleanly (incomplete/invalid content after ${MAX_GENERATION_ATTEMPTS} attempts) — try again shortly.`);
     err.status = 502;
     err.userFacing = true;
@@ -524,6 +681,19 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     renderedBody, targetFilePath, memoryRefId,
   });
 
+  // LEARN FROM THE SUCCESS. A design/structure problem the first attempt had
+  // and a later one cleared is validated knowledge about this tenant: the
+  // reason, the correction that worked, and the page's pre-fix search numbers
+  // as a baseline for the impact measured later. Needs the draft id, so it
+  // runs here rather than where the gate cleared.
+  if (firstAttemptIssues?.length) {
+    await recordDesignIssues(siteId, 'fix', firstAttemptIssues, {
+      generatorId, pageType: designPageType, pageUrl: designPageUrl, draftId: draft.id,
+      files: [targetFilePath], validation: { passed: true, gate: 'quality-gate', attempts: attemptsUsed },
+    });
+  }
+  await recordKnowledgeReuse(priorKnowledge, 'success', { siteId, generatorId });
+
   // geo-audit is a generator, not an orchestrator-run agent, so its score
   // never reached agent_runs on its own — command-center.js had nothing to
   // read, unlike authority/ai-visibility. Persist a matching snapshot here,
@@ -563,7 +733,13 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
 router.post('/action-center/generate', async (req, res, next) => {
   try {
     const { generatorId, params, source, findingId } = req.body || {};
-    res.json(await generateDraft(req.siteId, { generatorId, params, source, findingId }));
+    // A MANUAL generate is never withheld over a design mismatch. Someone is
+    // sitting there waiting to look at the output; handing them nothing is
+    // strictly worse than handing them a draft with the mismatch reported on
+    // it, which they can then read, edit, or discard. The design gate stays
+    // enforcing on the unattended path (generateDraft's default), where
+    // refusing to ship really is the only protection a live site has.
+    res.json(await generateDraft(req.siteId, { generatorId, params, source, findingId, enforceDesignIntegrity: false }));
   } catch (e) {
     if (e.status === 400 || e.status === 404) {
       const message = e.userFacing ? e.message : sanitizeForCustomer(e.message, 'This recommendation could not be generated right now — try again shortly.');
@@ -573,10 +749,46 @@ router.post('/action-center/generate', async (req, res, next) => {
   }
 });
 
+// geo-audit produces a READ-ONLY markdown report, not an applicable change,
+// so it has nothing for this pipeline to open a PR for. Over its entire
+// lifetime 70 of 71 geo-audit drafts ended 'abandoned' with reason
+// 'sent_back_to_recommendations' and not one was ever implemented — it was
+// pure clutter in a list whose whole purpose is "changes waiting to ship".
+//
+// Hidden here, at the Action Center listing only, rather than by stopping
+// its generation: the weekly audit still runs (job.js's runGeoAuditIfDue),
+// still saves its agent_runs snapshot for the Command Center, and its draft
+// row is still what agents/lib/agent-status.js reads the site's GEO score
+// from. Removing the draft would blank that score; hiding the row from this
+// one list costs nothing and loses nothing.
+//
+// An explicit ?actionType=geo-audit request is still honoured, so anything
+// asking for it by name (or a human debugging) can still reach it.
+const ACTION_CENTER_HIDDEN_ACTION_TYPES = new Set(['geo-audit']);
+
 router.get('/action-center/drafts', async (req, res, next) => {
   try {
     const { actionType, status } = req.query;
-    res.json(await listDrafts(req.siteId, { actionType, status }));
+    // The unfiltered "whole board" load (neither param given — the
+    // dashboard's own default fetch) is the one that grew without bound as
+    // autonomous shipping accumulated history; see listDraftsForBoard's own
+    // comment for the real incident. Any actual filter (actionType/status)
+    // is already naturally bounded by that filter, so it keeps the exact
+    // unbounded behavior it always had — explicit history/export use is
+    // unaffected.
+    const drafts = (actionType || status)
+      ? await listDrafts(req.siteId, { actionType, status })
+      : await listDraftsForBoard(req.siteId);
+    res.json(actionType ? drafts : drafts.filter((d) => !ACTION_CENTER_HIDDEN_ACTION_TYPES.has(d.action_type)));
+  } catch (e) { next(e); }
+});
+
+// Exact tab-badge counts, independent of listDraftsForBoard's own cap —
+// see countDraftsByLifecycle's own comment for why these must never be
+// derived from a possibly-capped list.
+router.get('/action-center/drafts/counts', async (req, res, next) => {
+  try {
+    res.json(await countDraftsByLifecycle(req.siteId));
   } catch (e) { next(e); }
 });
 
@@ -678,6 +890,17 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
     throw httpError(404, 'Draft not found, or not submitted for approval');
   }
 
+  // Fetched here (moved up from further below, where a second, redundant
+  // getSiteById used to run) specifically so the Quality Gate call right
+  // after this has a real `site` to pass — without it, checkStructureConformance
+  // and rendered-markup-guard.js's bare-markup checks silently skip
+  // themselves (both are gated on `site` being present, not just siteId),
+  // so a hand-edited draft that reintroduced flat/unstyled markup between
+  // generation and approval could pass this gate uncaught. Same site object
+  // is reused below for the actual apply/PR step — no second fetch.
+  const site = await getSiteById(siteId);
+  if (!site) throw httpError(404, 'Site not found');
+
   // Quality Gate stage 2 — re-validated here, not just at generation time,
   // because a draft can be hand-edited (DraftModal.jsx) between generateDraft
   // and this approval step; a human editing scaffolding/a duplicate
@@ -685,7 +908,7 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   // never reach a real PR. No regeneration possible here (a human already
   // wrote this content) — just refuse approval with the specific issues so
   // they know what to fix.
-  const gateResult = await runQualityGate(draft.content, draft.action_type, siteId);
+  const gateResult = await runQualityGate(draft.content, draft.action_type, siteId, { site });
   // Approval Gate (routes/lib/approval-gate.js): recorded whether it passes
   // or fails, so Action Center can show "quality gate: ok" as real evidence,
   // not just silence-means-fine — see that module's comment for the
@@ -755,7 +978,6 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
     }).catch((err) => console.error(`[action-center] failed to record override for memory ${m.id}:`, err.message))));
   }
 
-  const site = await getSiteById(siteId);
   let resolved = null;
   if (site.repo_owner && site.repo_name) {
     resolved = await resolveImplementerForApply(site, draft, renderMode);
@@ -764,12 +986,71 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
     }
     if (resolved.error) throw httpError(400, resolved.error);
     if (typeof resolved.implementer.preview === 'function') {
-      const previewResult = await resolved.implementer.preview(site, draft, { renderModeOverride: renderMode });
+      // DESIGN-VALIDATE + FIX/RETRY, stage — backend.js's computeMarkerMerge
+      // already renders the EXACT content this draft is about to publish
+      // into a live copy of the real target page (responsive-preview-gate.js's
+      // checkResponsivePreview) and diffs it against that same page's own
+      // unmodified baseline, so a pre-existing site defect this draft didn't
+      // cause is never blamed on it. That check alone isn't the fix/retry
+      // rule, though: a real regression must not simply dead-end the draft
+      // here and wait on a human, same as the Quality Gate loop in
+      // generateDraft above already refuses to do for content issues. So a
+      // 'responsive-regression' verdict gets a bounded number of automatic
+      // repair attempts — regenerate with the concrete measured regression
+      // as correction feedback, re-validate through the Quality Gate (a
+      // repair the LLM writes is new content, not a human edit, so it must
+      // clear the same bar generation always does), then re-check the real
+      // browser render again — before this ever becomes the human's problem.
+      // Any other preview failure (render-mode-uncertain, missing classes,
+      // ...) isn't something a content regeneration can fix, so it still
+      // fails immediately, unchanged from before.
+      const MAX_DESIGN_VALIDATE_ATTEMPTS = 3; // 1 real check + 2 repair retries
+      let previewResult = null;
+      let activeContent = draft.content;
+      for (let attempt = 1; attempt <= MAX_DESIGN_VALIDATE_ATTEMPTS; attempt++) {
+        previewResult = await resolved.implementer.preview(site, { ...draft, content: activeContent }, { renderModeOverride: renderMode });
+        if (previewResult.ok || previewResult.reason !== 'responsive-regression' || attempt === MAX_DESIGN_VALIDATE_ATTEMPTS) break;
+
+        const regressionSummary = describeResponsiveRegressions(previewResult.regressions);
+        console.warn(`[action-center] draft ${draft.id} broke the page's real layout on approval preview (attempt ${attempt}), attempting repair: ${regressionSummary}`);
+        // eslint-disable-next-line no-await-in-loop
+        const generator = await getGenerator(draft.action_type);
+        if (!generator) break; // nothing that can regenerate this action type — fall through to the honest failure below
+        const repaired = await generator.generate({
+          siteId,
+          params: {
+            ...(draft.input || {}),
+            designCorrections: `CORRECTION REQUIRED — the previous version of this content was checked in a real browser at real `
+              + `device widths against the actual live page it publishes to, and it broke the layout: ${regressionSummary}. Fix `
+              + 'exactly this problem (the content itself, not the page around it) and keep everything else you already wrote.',
+          },
+        }).catch((err) => { console.error(`[action-center] design-validate repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
+        if (!repaired?.content) break;
+
+        // The repaired content is a fresh, machine-written attempt — it must
+        // clear the same Quality Gate any other generation does before it's
+        // trusted enough to even re-check visually. A repair that fixes the
+        // layout by breaking the content (truncating it into invalid JSON-LD,
+        // say) must not quietly become this draft's new content.
+        // eslint-disable-next-line no-await-in-loop
+        const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site });
+        if (!repairGate.clean) { console.warn(`[action-center] draft ${draft.id}'s design-validate repair failed the Quality Gate, abandoning repair`); break; }
+
+        activeContent = repaired.content;
+      }
       if (!previewResult.ok) {
         throw httpError(422, previewResult.error, {
           reason: previewResult.reason, confidence: previewResult.confidence, suggestedMode: previewResult.suggestedMode,
           missingClasses: previewResult.missingClasses, componentKey: previewResult.componentKey,
         });
+      }
+      // A repair attempt above changed the content that will actually ship —
+      // persist it onto the real draft row so approveDraft()/apply() below
+      // (and anything a human looks at afterwards) see the content that was
+      // actually validated, not the original that failed.
+      if (activeContent !== draft.content) {
+        const updated = await updateDraft(siteId, draft.id, { content: activeContent });
+        if (updated) draft.content = updated.content;
       }
 
       // Approval Gate, Phase 1 (implementers/lib/rendering-gate.js) — the
@@ -790,6 +1071,58 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
       const renderingGate = evaluateApprovalGate({ renderingConfig: renderingCheck });
       if (!renderingGate.ok) {
         throw httpError(422, `This draft can't be approved yet — ${renderingGate.blockingError}`, { reason: renderingCheck.reason });
+      }
+
+      // SEO/TECH VALIDATE, stage — fix-verification.js's real re-check
+      // methods (does the shipped page actually have the html-lang attribute
+      // it claims, is the broken link actually gone, is the excerpt actually
+      // present) used to only ever run AFTER merge/deploy, on a delay —
+      // meaning a generator whose splice logic silently failed to do what it
+      // claimed shipped anyway and only got caught days later. The four
+      // methods that are pure content checks (verificationMethodFor's
+      // PAGE_PATTERN/PAGE_ABSENCE/PAGE_CONTENT/REPO_FILE — see
+      // checkContentAgainstExpectation's own comment for why the other
+      // methods need a live deploy and stay post-ship-only) need nothing but
+      // the exact content this draft is about to publish, which is already
+      // sitting right here as previewResult.newContent. Same bounded
+      // repair-and-recheck posture as DESIGN-VALIDATE above, reusing the
+      // same MAX_DESIGN_VALIDATE_ATTEMPTS budget rather than opening a
+      // second, uncoordinated retry budget for what is really one
+      // "does this draft's real output do what it claims" gate.
+      const verificationSpec = verificationMethodFor({ ...draft, content: activeContent }, { siteOrigin: siteOriginFor(site) });
+      let techCheck = checkContentAgainstExpectation(verificationSpec.method, verificationSpec.expected, previewResult.newContent, verificationSpec.target);
+      for (let attempt = 1; techCheck.checkable && techCheck.present === false && attempt < MAX_DESIGN_VALIDATE_ATTEMPTS; attempt++) {
+        console.warn(`[action-center] draft ${draft.id}'s own final content does not satisfy what it claims to fix (${JSON.stringify(techCheck.evidence)}), attempting repair`);
+        // eslint-disable-next-line no-await-in-loop
+        const generator = await getGenerator(draft.action_type);
+        if (!generator) break;
+        const repaired = await generator.generate({
+          siteId,
+          params: {
+            ...(draft.input || {}),
+            designCorrections: `CORRECTION REQUIRED — the previous version of this content was checked against its own final `
+              + `output and does not actually do what it claims to fix: ${JSON.stringify(techCheck.evidence)}. Fix exactly this `
+              + 'problem and keep everything else you already wrote.',
+          },
+        }).catch((err) => { console.error(`[action-center] seo/tech-validate repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
+        if (!repaired?.content) break;
+        // eslint-disable-next-line no-await-in-loop
+        const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site });
+        if (!repairGate.clean) { console.warn(`[action-center] draft ${draft.id}'s seo/tech-validate repair failed the Quality Gate, abandoning repair`); break; }
+        activeContent = repaired.content;
+        // eslint-disable-next-line no-await-in-loop
+        const repairedPreview = await resolved.implementer.preview(site, { ...draft, content: activeContent }, { renderModeOverride: renderMode });
+        if (!repairedPreview.ok) break; // let the DESIGN-VALIDATE-shaped failure above have already been the honest error in that case
+        previewResult = repairedPreview;
+        techCheck = checkContentAgainstExpectation(verificationSpec.method, verificationSpec.expected, previewResult.newContent, verificationSpec.target);
+      }
+      if (techCheck.checkable && techCheck.present === false) {
+        throw httpError(422, `This draft can't be approved yet — its own final content does not do what it claims to fix `
+          + `(${verificationSpec.method}: ${JSON.stringify(techCheck.evidence)}).`, { reason: 'seo-tech-validation-failed', evidence: techCheck.evidence });
+      }
+      if (activeContent !== draft.content) {
+        const updated = await updateDraft(siteId, draft.id, { content: activeContent });
+        if (updated) draft.content = updated.content;
       }
     }
   }
@@ -1107,6 +1440,33 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false,
       outcome: 'failed',
       reason: message,
     }).catch((err) => console.error(`[action-center] could not record attempt for rec ${rec.id}:`, err.message));
+    // A generator that proves the recommendation's premise is already false
+    // (schema.js/canonical.js: the page already has what was being added)
+    // marks its refusal `stale`. auto-remediation.js closes the row on that
+    // signal; this path didn't, so the same recommendation stayed open and
+    // failed again on every Ship.
+    if (e?.stale === true) {
+      await closeRecommendation(rec.id).catch((err) => console.error(`[action-center] could not close stale rec ${rec.id}:`, err.message));
+    }
+    // Same block-on-NEEDS_HUMAN decision action-center-reconciler.js's
+    // classifyUnrecordedFailures makes for a failure it discovers — but that
+    // pass only ever looks at drafts with NO recommendation_attempts row yet,
+    // and the attempt was just recorded, right above, unconditionally. That
+    // is deliberate there (its own comment: avoid a duplicate-decision on the
+    // same data) but means a NEEDS_HUMAN classification recorded THIS way —
+    // the common case, not the reconciler's gap-filling case — never gets
+    // blocked at all otherwise, and stays open to be re-attempted on the
+    // normal schedule. Confirmed live, 2026-09-09: a missing-GitHub-PAT
+    // recommendation reached 19 failed attempts over 6 days before a rare
+    // gap let the reconciler's pass finally catch and block it. Blocking here
+    // — the moment the classification is known, not after N more retries —
+    // is what NEEDS_HUMAN's own contract already promises everywhere else.
+    if (!rec.blocked_reason) {
+      const { retryPolicy, summary } = classifyAbandonReason(message);
+      if (retryPolicy === RETRY_POLICY.NEEDS_HUMAN) {
+        await blockRecommendation(rec.id, summary).catch((err) => console.error(`[action-center] could not block rec ${rec.id}:`, err.message));
+      }
+    }
     return { ok: false, error: message };
   }
 }
@@ -1129,18 +1489,50 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false,
 // strand-and-hide concern approveAndPublishDraftUnattended's own doc
 // comment describes: a 'branch_pushed' draft nobody ever finalizes would
 // otherwise permanently hide its recommendation from future runs.
-export async function finalizeBatchPr(site, branchName, draftIds) {
-  const pushResult = await endBatchPush(site, branchName);
+// dpOpenDraftPr/dpMarkDraftPrOpened/dpOpenPrForBranch: injectable, same DI
+// convention as approveAndPublishDraftUnattended just above — lets this
+// function's own decision (which of the two PR-opening paths to take, and
+// what happens on each failure) be tested directly against real, small fakes
+// instead of module-mocking action-center.js's own huge import graph (which
+// breaks under --experimental-test-module-mocks the same way documented
+// elsewhere in this repo — see action-center-batch-pr-finalize.test.js).
+export async function finalizeBatchPr(site, branchName, draftIds, {
+  dpOpenDraftPr = openDraftPr,
+  dpMarkDraftPrOpened = markDraftPrOpened,
+  dpOpenPrForBranch = openPrForBranch,
+  dpEndBatchPush = endBatchPush,
+} = {}) {
+  const pushResult = await dpEndBatchPush(site, branchName);
   if (!pushResult.ok) return { ok: false, error: pushResult.error, rateLimited: pushResult.rateLimited === true };
-  if (pushResult.pushed === 0 || draftIds.length === 0) {
+  if (pushResult.pushed === 0) {
     return { ok: true, pushed: 0, prNumber: null, prUrl: null };
   }
   try {
-    const first = await openDraftPr(site.id, draftIds[0]);
-    const prNumber = first.pr_number;
-    const prUrl = first.pr_url;
-    for (const id of draftIds.slice(1)) {
-      await markDraftPrOpened(site.id, id, { prNumber, prUrl, rollbackSnapshot: null });
+    let prNumber; let prUrl;
+    if (draftIds.length > 0) {
+      const first = await dpOpenDraftPr(site.id, draftIds[0]);
+      prNumber = first.pr_number;
+      prUrl = first.pr_url;
+      for (const id of draftIds.slice(1)) {
+        await dpMarkDraftPrOpened(site.id, id, { prNumber, prUrl, rollbackSnapshot: null });
+      }
+    } else {
+      // Real commits landed on this batch branch with no `drafts` row behind
+      // ANY of them — the shape a content-repair-only day produces (its
+      // file-edits are queued and pushed straight from
+      // server/lib/shipping-queue-drain.js, never through the drafts table
+      // at all; see store/shipping-queue.js). Before this branch existed,
+      // `draftIds.length === 0` short-circuited above and returned
+      // prUrl: null even though pushResult.pushed was > 0 — a real pushed
+      // branch with no PR, exactly the stranded shape
+      // lib/batch-pr-recovery.js exists to recover FROM, created here
+      // instead of by an outage. Opened generically, the same way
+      // repair-site-content-live.js used to open its own separate PR before
+      // it was routed through the shared queue.
+      const pr = await dpOpenPrForBranch(site, null, branchName);
+      if (!pr.ok) throw Object.assign(new Error(pr.error || 'Batch PR could not be opened'), { rateLimited: pr.rateLimited === true });
+      prNumber = pr.prNumber;
+      prUrl = pr.prUrl;
     }
     return { ok: true, pushed: pushResult.pushed, prNumber, prUrl };
   } catch (err) {
@@ -1221,12 +1613,17 @@ export async function prepareSafeFixesJob(siteId, { userId, limit = SAFE_FIX_BAT
   // shipped. auto-remediation.js applies both rules BEFORE its daily budget
   // for exactly this reason. 4x covers a batch that is overwhelmingly one
   // paced generator while keeping the query bounded.
-  const [rawSelected, site, pendingDraftFilePaths, draftedFindingIds] = await Promise.all([
+  const [rawSelectedAll, site, pendingDraftFilePaths, draftedFindingIds, protectedPages] = await Promise.all([
     listOpenSafeRecommendations(siteId, limit * 4),
     getSiteById(siteId),
     getPendingDraftFilePaths(siteId),
     getDraftedFindingIds(siteId),
+    getProtectedPageSet(siteId),
   ]);
+  // This bulk path is a selector the unattended rules must also bind: a
+  // title/canonical/redirect/content change on a page that earns clicks is
+  // held for a person, same as in auto-remediation.js (protected-pages.js).
+  const rawSelected = rawSelectedAll.filter((r) => !isProtectedChange(r, protectedPages));
   const job = await createExecutionJob(siteId, { trigger: 'bulk', requestedBy: userId });
 
   // Same exclusion auto-remediation.js's unattended path already applies
@@ -1311,7 +1708,7 @@ export async function runSafeFixesJob({ job, recs, pendingDraftFilePaths, site, 
     // and retrying through githubRequest's own backoff on each one, all the
     // way down a 60-item batch, instead of stopping after the first item that
     // proves the budget is gone.
-    if (getLastKnownRateLimit().low) {
+    if (getLastKnownRateLimit(site).low) {
       await appendJobLog(job.id, `GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${recs.length - shipped - failed} item(s) left untouched; they will be re-attempted next run.`);
       break;
     }
@@ -1638,9 +2035,45 @@ router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
 // refresh (never fails the caller's response — the draft is already
 // correctly marked implemented at this point; runSiteDiscoveryIfDue is
 // already cheap/idempotent when a real discovery isn't due yet).
-async function finalizeImplemented(siteId, draftId, site) {
+// Records that a human's merge happened, and what commit it produced, so the
+// question "did this actually reach the live site?" has something to hang off.
+// Deliberately NOT a claim that anything deployed: the row starts 'pending'
+// and only fix-verification.js's real live re-check can promote it (see
+// store/deployments.js). Best-effort — a merge that we fail to record must
+// still finalize the draft.
+async function recordMergeDeployment(site, draft) {
+  try {
+    const commitSha = await getDefaultBranchSha(site);
+    return await recordDeploymentObserved(site.id, {
+      commitSha,
+      prNumber: draft.pr_number ?? null,
+      prUrl: draft.pr_url ?? null,
+    });
+  } catch (err) {
+    console.error(`[action-center] could not record deployment for draft ${draft.id}:`, err.message);
+    return null;
+  }
+}
+
+async function finalizeImplemented(siteId, draftId, site, { deployment = null } = {}) {
   const draft = await markDraftImplemented(siteId, draftId);
   if (draft) {
+    // Verify stage, for EVERY generator type — not just the 9 that
+    // markDraftImplemented's own narrow isVerifiableDraft path covers. Each
+    // draft gets whichever re-check its change type actually supports (see
+    // verificationMethodFor in store/fix-verifications.js); a change with no
+    // externally checkable evidence is recorded as 'unverifiable' WITH its
+    // reason, never counted as verified. Idempotent: skips a draft that
+    // markDraftImplemented already scheduled.
+    try {
+      await scheduleVerificationForDraft(siteId, draft, {
+        siteOrigin: siteOriginFor(site),
+        deploymentId: deployment?.id ?? null,
+      });
+      if (deployment?.id) await attachDeploymentToDraftVerifications(siteId, draft.id, deployment.id);
+    } catch (err) {
+      console.error(`[action-center] could not schedule verification for draft ${draft.id}:`, err.message);
+    }
     // Phase 5: a real merge is the strongest positive signal a generator can
     // earn — a human actually shipped this to production. Recorded
     // regardless of how the draft originated (auto-remediation or a human
@@ -1661,11 +2094,28 @@ async function finalizeImplemented(siteId, draftId, site) {
     // Best-effort by design: this is a reporting/learning signal, and failing
     // to schedule it must never make a genuinely merged fix look unmerged.
     try {
+      // Best-effort, deliberately separate from the try below: a lookup
+      // failure here must fall back to goalId: null, not skip scheduling the
+      // measurement itself, which is the real signal.
+      let goalId = null;
+      if (draft.finding_id) {
+        const rec = await getRecommendationByFindingId(siteId, draft.finding_id);
+        goalId = rec?.goal_id ?? null;
+      }
       await scheduleImpactMeasurement(siteId, {
         draftId: draft.id,
         pageUrl: draft.content?.page || draft.input?.page || null,
         generatorId: draft.action_type,
         mergedAt: new Date(),
+        goalId,
+        // Threads the same deployment record fix-verification.js's live
+        // re-check promotes to 'deployed' — measureOne consults it before
+        // trusting that this merge actually reached production (2026-09
+        // lifecycle-gap audit finding #2). null when recordMergeDeployment
+        // above couldn't resolve a commit sha or itself failed — the
+        // measurement still schedules, just without that extra check,
+        // unchanged from before this existed.
+        deploymentId: deployment?.id ?? null,
       });
     } catch (err) {
       console.error(`[action-center] could not schedule impact measurement for draft ${draftId}:`, err.message);
@@ -1795,6 +2245,12 @@ export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
     throw httpError(422, result.error, {
       reason: result.reason, confidence: result.confidence, suggestedMode: result.suggestedMode, attempted: result.attempted,
       missingClasses: result.missingClasses, componentKey: result.componentKey, unresolved: result.unresolved,
+      // result.stale (currently only set by backend.js's confirmed-absent
+      // broken-link case) means the implementer found live evidence this
+      // recommendation's own premise no longer holds — auto-remediation.js's
+      // stale-refusal handling closes it instead of leaving it to re-refuse
+      // forever, same as a generator throwing stale:true at generate time.
+      stale: result.stale,
     });
   }
   // Provenance for the reviewer: what actually renders this page, whether
@@ -2005,12 +2461,18 @@ export async function checkDraftPrStatus(siteId, draftId) {
   if (pr.merged) {
     await recordPrState(siteId, draft.id, 'merged');
     notifyGscBestEffort(site, draft);
+    // A merge is evidence the change was accepted, never evidence it is live.
+    // Recording the resulting commit here is what lets the Verify stage tell
+    // "merged but not deployed yet" apart from "deployed and still wrong" —
+    // before this, both looked identical and a merge was silently treated as
+    // a shipped change.
+    const deployment = await recordMergeDeployment(site, draft);
     // The one outcome that ends a recommendation's life successfully. Recorded
     // so the card's history reads as a completed story rather than going
     // silent at the last step, and so a finding that regresses later shows
     // "shipped once, came back" instead of looking brand new.
     await recordAttemptForDraft(siteId, draft, { outcome: 'shipped', reason: `Merged in ${draft.pr_url || `PR #${draft.pr_number}`}.` });
-    return finalizeImplemented(siteId, draft.id, site);
+    return finalizeImplemented(siteId, draft.id, site, { deployment });
   }
   if (pr.state === 'closed') {
     // Closed without merging — the fix was abandoned, not shipped. Record

@@ -1,5 +1,5 @@
 import { hasRecentDraftOfType, countFailedAttemptsByFinding } from '../../store/drafts.js';
-import { countRecoveryCyclesByFinding } from '../../store/recommendation-attempts.js';
+import { countRecoveryCyclesByFinding, countRefusalRecoveryCyclesByRecommendation } from '../../store/recommendation-attempts.js';
 import { countRefusalsByRecommendation } from './generator-learning.js';
 
 // Candidate thinning shared by BOTH ship paths — auto-remediation.js's
@@ -30,6 +30,19 @@ import { countRefusalsByRecommendation } from './generator-learning.js';
 // Paced items are NOT given a separate allowance — the one that survives
 // competes for the same budget slot as every ordinary fix, which is what
 // keeps "30 a day" a single honest number.
+// The category trend-radar files its posts under (generators/lib/
+// blog-image-policy.js's INSIGHT_CATEGORY, which trend-radar passes as
+// params.category). It is the one durable marker of a trend post on both the
+// recommendation and the finished draft.
+export const TREND_CATEGORY = 'Insights';
+
+// Days between trend posts. A fortnight's 4-5 topics need 4-5 slots in 14
+// days; 14/5 rounds up to 3, so five posts fit (days 0, 3, 6, 9, 12).
+// Overridable without a deploy.
+export const TREND_BLOG_GAP_DAYS = Number(process.env.TREND_BLOG_MIN_GAP_DAYS) || 3;
+
+export const isTrendBlog = (r) => r?.params?.category === TREND_CATEGORY;
+
 export const PACED_GENERATORS = [
   { generatorId: 'blog-outline', gapColumn: 'blog_min_gap_days', defaultGapDays: 3 },
 ];
@@ -101,11 +114,11 @@ export async function applyPacing(site, candidates, { recentDraftCheck = hasRece
   const notes = [];
   const dropped = new Set();
 
-  for (const { generatorId, gapColumn, defaultGapDays } of PACED_GENERATORS) {
-    const matching = candidates.filter((r) => r.recommendation_type === generatorId);
-    if (matching.length === 0) continue;
-
-    const gapDays = site[gapColumn] ?? defaultGapDays;
+  // One lane's pacing: the requested-topic override, the cadence gap, and the
+  // one-per-run rule. Pulled out so the trend lane and the ordinary lane run
+  // exactly the same logic against their own candidates and history.
+  async function paceLane({ items: matching, gapDays, label, filter }, { gapColumn }) {
+    if (matching.length === 0) return;
 
     // A blog someone explicitly asked for on the Analyst page ("write a blog
     // on this keyword?") is a request, not the agent's own choice of what to
@@ -119,21 +132,43 @@ export async function applyPacing(site, candidates, { recentDraftCheck = hasRece
     if (requested.length > 0) {
       for (const r of matching) if (r.id !== requested[0].id) dropped.add(r.id);
       const heldNote = matching.length > 1 ? ` ${matching.length - 1} other candidate(s) wait for a later run.` : '';
-      notes.push(`${generatorId}: shipping 1 explicitly requested topic ("${requested[0].params?.topic ?? 'unknown'}") — the ${gapColumn}=${gapDays} cadence gap does not apply to a requested blog.${heldNote}`);
-      continue;
+      notes.push(`${label}: shipping 1 explicitly requested topic ("${requested[0].params?.topic ?? 'unknown'}") — the ${gapColumn}=${gapDays} cadence gap does not apply to a requested blog.${heldNote}`);
+      return;
     }
 
-    if (await recentDraftCheck(site.id, generatorId, gapDays, timezone)) {
+    if (await recentDraftCheck(site.id, matching[0].recommendation_type, gapDays, timezone, filter)) {
       for (const r of matching) dropped.add(r.id);
-      notes.push(`${generatorId}: ${matching.length} candidate(s) held — one was published within the last ${gapDays} day(s) (${gapColumn}=${gapDays}).`);
-      continue;
+      notes.push(`${label}: ${matching.length} candidate(s) held — one was published within the last ${gapDays} day(s) (${gapColumn}=${gapDays}).`);
+      return;
     }
     // Due: keep the highest-priority one (candidates arrive in
     // listOpenRecommendations' order), defer the rest to future runs.
     for (const r of matching.slice(1)) dropped.add(r.id);
     if (matching.length > 1) {
-      notes.push(`${generatorId}: taking 1 of ${matching.length} open candidate(s); the rest wait for the next ${gapDays}-day slot.`);
+      notes.push(`${label}: taking 1 of ${matching.length} open candidate(s); the rest wait for the next ${gapDays}-day slot.`);
     }
+  }
+
+  for (const { generatorId, gapColumn, defaultGapDays } of PACED_GENERATORS) {
+    const all = candidates.filter((r) => r.recommendation_type === generatorId);
+    if (all.length === 0) continue;
+
+    // TREND LANE. Trend-radar posts (filed under the 'Insights' category) are
+    // paced on their OWN clock, separate from every other blog. Sharing one
+    // clock meant a fortnight's 4-5 trend posts competed with the keyword
+    // blogs for the same one-per-gap slot, so whichever lane the ordering
+    // favoured starved the other — a client could get no trend posts for a
+    // month, or no keyword blogs. Each lane now keeps its own gap, its own
+    // one-per-run rule and its own history. Only blog-outline has a trend lane.
+    const ordinaryGap = site[gapColumn] ?? defaultGapDays;
+    const lanes = generatorId === 'blog-outline'
+      ? [
+        { items: all.filter(isTrendBlog), gapDays: TREND_BLOG_GAP_DAYS, label: `${generatorId} (trend)`, filter: { contentCategory: TREND_CATEGORY } },
+        { items: all.filter((r) => !isTrendBlog(r)), gapDays: ordinaryGap, label: generatorId, filter: { excludeContentCategory: TREND_CATEGORY } },
+      ]
+      : [{ items: all, gapDays: ordinaryGap, label: generatorId, filter: undefined }];
+
+    for (const lane of lanes) await paceLane(lane, { gapColumn });
   }
 
   return { paced: candidates.filter((r) => !dropped.has(r.id)), notes };
@@ -169,22 +204,54 @@ export async function applyPacing(site, candidates, { recentDraftCheck = hasRece
 // stops is spending a model call per run to reach the same honest refusal.
 export const MAX_REFUSALS = 5;
 
+// The refusal counterpart to MAX_RECOVERY_CYCLES/effectiveConvergenceCap
+// above — until this existed, MAX_REFUSALS was a permanent hold with no way
+// back: countRefusalsByRecommendation only ever sees refusals, and
+// applyRefusalCap filters a held item out of every future candidate list
+// before the generate/push loop can ever attempt it again, so a refusal
+// caused by a now-resolved transient condition (confirmed live: GitHub rate
+// limiting during the exact window that produced most of site 1's held
+// broken-link-fix refusals) sat re-classified as a permanent defect forever,
+// identically to a genuinely unfixable one. driveAutonomousRefusalRecovery
+// (action-center-reconciler.js) is what actually spends a cycle — one real,
+// fresh attempt against live evidence per cycle, same "earn it, don't assume
+// it" discipline the convergence cap already uses.
+export const MAX_REFUSAL_RECOVERY_CYCLES = 2;
+
+// The real, current refusal ceiling once however many recovery cycles have
+// already been earned — same formula shape as effectiveConvergenceCap,
+// kept as its own function (not a shared one) because the two caps count
+// two structurally different things (recommendation-scoped refusals vs.
+// finding-scoped failures) from two different queries.
+export function effectiveRefusalCap(recoveryCycles) {
+  return MAX_REFUSALS * ((recoveryCycles || 0) + 1);
+}
+
 /**
- * Drops candidates that have already been refused MAX_REFUSALS times.
- * Same shape as applyPacing/applyConvergenceCap so a caller applies all three
- * the same way.
+ * Drops candidates that have already been refused past their current
+ * effective cap. Same shape as applyPacing/applyConvergenceCap so a caller
+ * applies all three the same way.
  */
-export async function applyRefusalCap(site, candidates, { refusalCounts = null } = {}) {
+export async function applyRefusalCap(site, candidates, { refusalCounts = null, recoveryCounts = null } = {}) {
   if (candidates.length === 0) return { kept: candidates, notes: [] };
   const counts = refusalCounts ?? await countRefusalsByRecommendation(site.id);
   if (counts.size === 0) return { kept: candidates, notes: [] };
+  // Only fetched when there's actually a held candidate to raise the cap
+  // for — a site with no refusals never needs its recovery history either.
+  const recoveries = recoveryCounts ?? await countRefusalRecoveryCyclesByRecommendation(site.id);
 
   const notes = [];
   const kept = [];
   for (const rec of candidates) {
     const refusals = counts.get(rec.id) || 0;
-    if (refusals >= MAX_REFUSALS) {
-      notes.push(`${rec.recommendation_type} #${rec.id}: held after ${refusals} honest refusal(s) — still open for a human, but no longer auto-drafted.`);
+    const cycles = recoveries.get(rec.id) || 0;
+    const cap = effectiveRefusalCap(cycles);
+    if (refusals >= cap) {
+      // Held here means "wait for the reconciler's next pass" — it either
+      // raises this very cap by spending a fresh recovery cycle (if any
+      // remain) or, once MAX_REFUSAL_RECOVERY_CYCLES is spent, hands the
+      // card to a human. Never a dead end on its own.
+      notes.push(`${rec.recommendation_type} #${rec.id}: held after ${refusals} honest refusal(s) (cap ${cap} after ${cycles} recovery cycle(s)) — awaiting autonomous re-analysis or a human.`);
       continue;
     }
     kept.push(rec);

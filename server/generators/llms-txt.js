@@ -1,6 +1,6 @@
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { analyzePageUrl, checkLlmsReadiness } from '../agents/lib/page-content.js';
-import { ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
+import { ownDomains, filterOwnDomainPages, siteOriginFor } from '../agents/lib/site-domain.js';
 
 export const meta = {
   id: 'llms-txt',
@@ -167,5 +167,40 @@ export async function generate({ siteId, params }) {
     content,
     summary: `llms.txt draft for ${origin} (${keyPages.length} key page(s))` +
       (robotsDirectives ? ' + robots.txt update' : ' — robots.txt already allows AI crawlers, no change needed'),
+  };
+}
+
+// Side-effect-free re-verification (server/generators/lib/verification-layer.js).
+// Conservative on purpose: this generator also REFRESHES an already-valid
+// llms.txt's key-pages content over time, which is a legitimate reason to
+// regenerate even when nothing is structurally broken — so already_resolved
+// is only reported when checkLlmsReadiness (the same real live check
+// ai-visibility.js's own finding is built from) shows BOTH halves of what
+// this recommendation exists to fix are already true: a structurally valid
+// llms.txt AND robots.txt already allowing every AI crawler. Anything short
+// of that stays still_valid rather than guessing whether a refresh is worth
+// it — that judgment call belongs to whatever agent/cadence decided to
+// recommend this in the first place, not to this pre-flight check.
+export async function verifyCurrentState(rec, { site } = {}) {
+  if (!site) return { decision: 'still_valid', reason: 'no-site-context', evidence: null };
+  const origin = siteOriginFor(site);
+  if (!origin) return { decision: 'still_valid', reason: 'no-checkable-target', evidence: null };
+
+  let readiness;
+  try {
+    readiness = await checkLlmsReadiness(origin);
+  } catch (err) {
+    return { decision: 'still_valid', reason: 'unreachable', evidence: { origin, error: err.message } };
+  }
+
+  if (readiness.hasLlmsTxt && readiness.hasValidLlmsTxtStructure && readiness.robotsAllowsAiCrawlers === true) {
+    return { decision: 'already_resolved', reason: 'llms-txt-and-robots-already-compliant', evidence: { origin } };
+  }
+  return {
+    decision: 'still_valid', reason: 'llms-txt-or-robots-incomplete',
+    evidence: {
+      origin, hasLlmsTxt: readiness.hasLlmsTxt, hasValidLlmsTxtStructure: readiness.hasValidLlmsTxtStructure,
+      robotsAllowsAiCrawlers: readiness.robotsAllowsAiCrawlers,
+    },
   };
 }

@@ -1,6 +1,8 @@
 import { getSiteById, getSearchPerformanceForPages, getQueriesForPage } from '../store/read.js';
 import { priorityByRank, impactFromPriority, makeFinding, aggregateSystemicFinding } from './lib/findings.js';
 import { effortForGenerator, inferSchemaType, fetchTextIfExists, checkHttpsStatus, MAX_INLINE_STYLE_COUNT, MAX_HTML_SIZE_BYTES } from './lib/page-content.js';
+import { probeMany } from './lib/live-probe.js';
+import { MAX_CRAWL_DEPTH } from './lib/site-discovery.js';
 import { runPageChecks, detectDuplicateTitles, crawlInternalLinks, crawlExternalCitations } from './lib/technical-seo-analysis.js';
 import { upsertTechnicalSeoCheck, getCheckedAtForPages as getTechnicalSeoCheckedAt } from '../store/technical-seo-checks.js';
 import { selectCandidatePages } from './lib/candidate-pages.js';
@@ -12,13 +14,34 @@ import { discoverFromSitemaps, parseRobotsDisallowRules, originForSite } from '.
 import { hostnameOf } from './lib/site-domain.js';
 import { configured as pagespeedConfigured } from '../ingest/pagespeed.js';
 import { callLLM } from '../llm.js';
+import { getGscBreakdownRange } from '../store/read.js';
+import { detectSpamUrlPatterns, detectForeignScriptQueries } from './lib/index-bloat.js';
 
 export const meta = {
   id: 'technical-seo',
   name: 'Technical SEO Agent',
   description: 'Checks real Google index status, Core Web Vitals, technical page health, and broken links/redirects — whether Google can actually see and serve your pages well.',
   category: 'seo',
-  version: 5,
+  requiresCapabilities: ['public-web'],
+  version: 7,
+  // v7 makes the compression finding (added in v4, see below) draftable:
+  // when the site tracks its own nginx config (url_file_map.siteRoot.
+  // nginxConfig — the same file security-headers.js/redirect-chain.js
+  // already patch), this now hands off to a real generator
+  // (compression-nginx, implementers/backend.js's computeCompressionMerge)
+  // instead of always staying recommendedAction: null. Sites that haven't
+  // onboarded that marker yet still get the real gap reported, just as
+  // reportOnly instead of a silent drop — see compressionFinding() below.
+  // v6 adds two real, previously-uncovered checks: a missing robots.txt
+  // (now draftable via the new robots-bootstrap generator, unlike
+  // robots-fix.js which needs an existing file to splice into) and legacy
+  // index spam — real GSC pages/queries pattern-matched against a set of
+  // off-platform signatures (foreign-platform file extensions, spam-farm
+  // numeric query params, a query script inconsistent with the site's own
+  // declared language) that almost certainly belong to a prior owner of the
+  // domain, not this site. Found by hand on chayceproperties.com (1.5M+
+  // indexed URLs from a legacy ASP.NET storefront this Eleventy site never
+  // had) — see server/agents/lib/index-bloat.js.
   // v5 adds two more page-weight checks off the same per-page fetch already
   // done for the technical audit: excessive inline style="" attributes and
   // raw HTML document size over 100KB. Both informational — same reasoning
@@ -28,10 +51,14 @@ export const meta = {
   // cross-check against the sibling audit tool: per-page response
   // compression (Content-Encoding: gzip/br/deflate) and site-level
   // HTTPS/SSL enablement (does the host serve HTTPS at all, and does a
-  // plain http:// request actually redirect there). Both informational —
-  // recommendedAction stays null, since fixing either is a server/CDN/DNS
-  // infra change (enabling gzip, issuing a cert, adding a redirect rule)
-  // this tool has no safe way to draft as a PR.
+  // plain http:// request actually redirect there). Both were informational
+  // at the time — recommendedAction stayed null, since fixing either is a
+  // server/CDN/DNS infra change (enabling gzip, issuing a cert, adding a
+  // redirect rule) this tool had no safe way to draft as a PR. Compression
+  // became draftable in v7 (see above) once the same nginx-config-tracking
+  // mechanism security-headers.js already used was wired in here; HTTPS
+  // enablement (a certificate/DNS change, not a file this platform can
+  // write) is unaffected and still stays informational.
   // v3 splits layout shift (CLS) out of the generic Core Web Vitals buckets
   // into its own `technical-seo:site:layout-shift` finding — a pre-v3 row's
   // findings won't have it.
@@ -71,6 +98,47 @@ function sumImpressions(pages) {
 // generators/schema.js only validates field VALUES, never the @type, so that
 // wrong type could be drafted, approved and merged into a tenant's live site
 // with no human ever reading it.
+// Uncompressed responses are usually one shared server/CDN config gap, not
+// a per-page authoring choice, so this stays one "N of M checked pages"
+// finding, not a card per page — same shape as missingSchemaFinding above.
+//
+// Draftable exactly when this site tracks its own nginx config
+// (site.url_file_map.siteRoot.nginxConfig — the same file
+// security-headers.js/redirect-chain.js already patch): the fix reuses
+// implementers/backend.js's computeCompressionMerge, which splices a fixed
+// gzip/brotli directive block (generators/compression-nginx.js) into a
+// human-placed `# SEOAI:COMPRESSION:START/END` marker pair and never
+// guesses at a location. When the site hasn't onboarded that marker yet,
+// this still reports the real, verified gap (reportOnly), same "needs nginx
+// marker + url_file_map onboarding" gap as security-headers.js's own
+// onboarding prerequisite — never needsHuman, never an error.
+export function compressionFinding(pageResults, nginxConfigPath) {
+  const checkedCount = pageResults.filter((r) => r.compression.ok).length;
+  const affected = pageResults.filter((r) => r.compression.ok && !r.compression.compressed);
+  const canAttemptAutoFix = Boolean(nginxConfigPath);
+  const finding = aggregateSystemicFinding({
+    id: 'technical-seo:site:uncompressed',
+    affected,
+    checkedCount,
+    getPage: (r) => r.page,
+    getImpressions: (r) => r.impressions,
+    whyItMatters: (n, c) => `${n} of ${c} checked pages are served without gzip/Brotli compression — enabling it reduces transfer size and improves load time at no content cost.${canAttemptAutoFix ? ' This site tracks its own nginx config, so the platform will attempt to enable it directly.' : ''}`,
+    recommendedAction: canAttemptAutoFix
+      ? () => ({ label: 'Enable gzip/Brotli compression', generatorId: 'compression-nginx', params: {}, effort: effortForGenerator('compression-nginx') })
+      : null,
+  });
+  if (!finding) return null;
+  if (!canAttemptAutoFix) {
+    finding.reportOnly = {
+      kind: 'uncompressed-response',
+      label: 'Response compression disabled',
+      page: '',
+      whyBlocked: 'Enabling gzip/Brotli compression means editing this site\'s nginx config — this site has no tracked nginx config to check against, so there\'s nowhere safe to draft the fix yet. Add one via `npm run connect-repo` (site.url_file_map.siteRoot.nginxConfig) to unblock it.',
+    };
+  }
+  return finding;
+}
+
 export function missingSchemaFinding(pageResults) {
   const schemaTypeFor = (r) => inferSchemaType(r.page, r.analysis?.schemaTypes || [], r.analysis);
   return aggregateSystemicFinding({
@@ -99,8 +167,9 @@ export function missingSchemaFinding(pageResults) {
   });
 }
 
-export async function run({ siteId, start, end, pageCache, params }) {
+export async function run({ siteId, start, end, pageCache, params, dryRun = false }) {
   const site = await getSiteById(siteId);
+  const nginxConfigPath = site?.url_file_map?.siteRoot?.nginxConfig || null;
   // params.pages (from the bulk full-site-audit engine, agents/lib/bulk-audit.js)
   // bypasses the normal rotation entirely and checks exactly the given pages
   // — a full audit wants exhaustive coverage of a caller-chosen set, not this
@@ -139,7 +208,9 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // Persist each checked page's snapshot — drives next run's rotation
   // (checked_at) and (for duplicate-title detection) accumulates real
   // titles site-wide over time, not just this run's batch.
-  await Promise.all(pageResults.map((r) => upsertTechnicalSeoCheck(siteId, r.page, {
+  // A dryRun leaves no trace: these snapshots feed the NEXT run's rotation and
+  // duplicate-title detection, so a preview must not write them.
+  if (!dryRun) await Promise.all(pageResults.map((r) => upsertTechnicalSeoCheck(siteId, r.page, {
     indexStatus: r.indexStatus, coreWebVitals: r.coreWebVitals, technicalAudit: r.technicalAudit,
     brokenLinks: null, // filled in below once the crawl results are known
     lastImpressions: r.impressions,
@@ -151,7 +222,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const crawl = await crawlInternalLinks(pageResults);
   const citationCrawl = await crawlExternalCitations(pageResults);
   // Re-upsert with the per-page broken-link slice now that the crawl is done.
-  await Promise.all(pageResults.map((r) => {
+  if (!dryRun) await Promise.all(pageResults.map((r) => {
     const broken = crawl.broken.filter((b) => b.sourcePages.includes(r.page));
     const redirectChains = crawl.redirectChains.filter((c) => c.sourcePages.includes(r.page));
     if (!broken.length && !redirectChains.length) return null;
@@ -164,7 +235,18 @@ export async function run({ siteId, start, end, pageCache, params }) {
     }).catch((err) => console.error(`[agents] technical-seo: failed to persist link results for ${r.page}:`, err.message));
   }));
 
-  const duplicateGroups = await detectDuplicateTitles(siteId, pageResults.map((r) => ({ page: r.page, technicalAudit: r.technicalAudit, impressions: r.impressions })));
+  const candidateGroups = await detectDuplicateTitles(siteId, pageResults.map((r) => ({ page: r.page, technicalAudit: r.technicalAudit, impressions: r.impressions })));
+  // Stored titles can belong to pages that have since been redirected (or
+  // were recorded as a redirect's DESTINATION title before that was caught —
+  // confirmed on zunkireelabs.com: three 301 aliases of one post counted as
+  // "4 pages with the same title"). Only a page that is live right now at its
+  // own URL counts toward a duplicate; anything unprobed or unverifiable is
+  // left out rather than asserted.
+  const probed = await probeMany([...new Set(candidateGroups.flatMap((g) => g.pages.map((p) => p.page)))], { maxProbes: 40 });
+  const liveNow = new Set(probed.results.filter((p) => p.verdict === 'live').map((p) => p.url));
+  const duplicateGroups = candidateGroups
+    .map((g) => ({ ...g, pages: g.pages.filter((p) => liveNow.has(p.page)) }))
+    .filter((g) => g.pages.length >= 2);
 
   // GSC quota visibility — a rotating-quota problem should be visible on
   // Integration Health, not silently degrade every page's indexStatus to an
@@ -175,7 +257,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // would silently split into two never-reconciled states depending on
   // which path last wrote to it.
   const quotaExceeded = pageResults.some((r) => r.indexStatus.quotaExceeded);
-  await recordIntegrationCheck('gsc-url-inspection', null, {
+  if (!dryRun) await recordIntegrationCheck('gsc-url-inspection', null, {
     ok: !quotaExceeded,
     authStatus: quotaExceeded ? 'quota_exceeded' : 'ok',
     errorMessage: quotaExceeded ? 'GSC URL Inspection quota exceeded this run — some pages were not checked.' : null,
@@ -267,24 +349,10 @@ export async function run({ siteId, start, end, pageCache, params }) {
   });
   if (layoutShiftFinding) cwvFindings.push(layoutShiftFinding);
 
-  // Response compression (Content-Encoding: gzip/br/deflate) — a real,
-  // previously-uncovered check confirmed via a cross-check against the
-  // sibling audit tool. Uncompressed responses are usually one shared
-  // server/CDN config gap, not a per-page authoring choice, so this is one
-  // "N of M checked pages" finding like the CWV/canonical/schema checks
-  // above, not a card per page.
-  const compressionCheckedCount = pageResults.filter((r) => r.compression.ok).length;
-  const uncompressedCandidates = pageResults.filter((r) => r.compression.ok && !r.compression.compressed);
-  const compressionFinding = aggregateSystemicFinding({
-    id: 'technical-seo:site:uncompressed',
-    affected: uncompressedCandidates,
-    checkedCount: compressionCheckedCount,
-    getPage: (r) => r.page,
-    getImpressions: (r) => r.impressions,
-    whyItMatters: (n, c) => `${n} of ${c} checked pages are served without gzip/Brotli compression — enabling it reduces transfer size and improves load time at no content cost.`,
-    recommendedAction: null, // a server/CDN config change, not draftable content — same reasoning as security-headers.js's per-header findings
-  });
-  const compressionFindings = compressionFinding ? [compressionFinding] : [];
+  // Response compression (Content-Encoding: gzip/br/deflate) — see
+  // compressionFinding() above for the real draftable-vs-informational gate.
+  const compressionFindingResult = compressionFinding(pageResults, nginxConfigPath);
+  const compressionFindings = compressionFindingResult ? [compressionFindingResult] : [];
 
   // Inline style="" bloat and raw HTML document size — both real page-weight
   // signals off the same fetch already done for the technical audit above
@@ -378,8 +446,18 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // shared template gap, a mismatch is usually a specific redirect/param
   // issue — each reported as its own "N of M checked pages" finding.
   const missingCanonicalCandidates = pageResults.filter((r) => r.technicalAudit.ok && !r.technicalAudit.hasCanonical);
+  // `indexStatus.userCanonical` is GSC's OWN last-crawl snapshot, not current
+  // live state — confirmed live on zunkireelabs-web (2026-09-30): a
+  // www->non-www redirect and self-referencing canonical were both already
+  // correct, but GSC hadn't recrawled since, so its stale userCanonical still
+  // disagreed with googleCanonical and produced a false mismatch. Re-verify
+  // against our own fresh fetch's canonicalUrl (technicalAudit, this same
+  // run) instead of trusting GSC's cached userCanonical — only report a
+  // mismatch Google's data AND the page's current live tag still agree is
+  // real.
   const canonicalMismatchCandidates = pageResults.filter((r) =>
-    r.indexStatus.ok && r.indexStatus.googleCanonical && r.indexStatus.userCanonical && r.indexStatus.googleCanonical !== r.indexStatus.userCanonical);
+    r.indexStatus.ok && r.indexStatus.googleCanonical && r.technicalAudit.ok && r.analysis?.canonicalUrl
+    && r.analysis.canonicalUrl !== r.indexStatus.googleCanonical);
   const canonicalFindings = [
     aggregateSystemicFinding({
       id: 'technical-seo:site:missing-canonical',
@@ -396,7 +474,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       checkedCount: pageResults.filter((r) => r.indexStatus.ok).length,
       getPage: (r) => r.page,
       getImpressions: (r) => r.impressions,
-      extraEvidence: (affected) => ({ samples: affected.slice(0, 5).map((r) => ({ page: r.page, googleCanonical: r.indexStatus.googleCanonical, userCanonical: r.indexStatus.userCanonical })) }),
+      extraEvidence: (affected) => ({ samples: affected.slice(0, 5).map((r) => ({ page: r.page, googleCanonical: r.indexStatus.googleCanonical, userCanonical: r.analysis?.canonicalUrl })) }),
       whyItMatters: (n, c) => `Google's chosen canonical disagrees with the page's own declared canonical on ${n} of ${c} checked pages.`,
       recommendedAction: null,
     }),
@@ -454,6 +532,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
         // fabricated URL.
         : { label: 'Remove broken link', generatorId: 'broken-link-fix', params: { page: c.sourcePages[0], href: c.href, sourcePages: c.sourcePages }, effort: effortForGenerator('broken-link-fix') },
       expectedImpact: { label: impactFromPriority(brokenPriorities[i]), basis: 'computed', value: sourceImpressions(c.sourcePages) },
+      verification: c.verification,
     });
   });
 
@@ -472,6 +551,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     priority: citationPriorities[i],
     recommendedAction: { label: 'Remove invalid citation', generatorId: 'broken-link-fix', params: { page: c.sourcePages[0], href: c.href, sourcePages: c.sourcePages }, effort: effortForGenerator('broken-link-fix') },
     expectedImpact: { label: impactFromPriority(citationPriorities[i]), basis: 'computed', value: sourceImpressions(c.sourcePages) },
+    verification: c.verification,
   }));
 
   const chainCandidates = [...crawl.redirectChains].sort((a, b) => sourceImpressions(b.sourcePages) - sourceImpressions(a.sourcePages) || b.hops - a.hops);
@@ -501,7 +581,12 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const orphanedFindings = orphanedPages.map((p, i) => makeFinding({
     id: `technical-seo:orphaned:${p.page}`,
     evidence: { page: p.page, knownSince: p.first_seen_at },
-    whyItMatters: `${p.page} is listed in the sitemap but no internal link on the site actually points to it — search engines and users can only reach it directly.`,
+    // What the weekly crawl proved is only "not reached within MAX_CRAWL_DEPTH
+    // clicks of the homepage" — NOT "nothing links to it". Confirmed live on
+    // zunkireelabs.com: all 20 flagged blog posts ARE linked, but only from
+    // /blog/page/4 and /blog/page/9-11, deeper than the crawl goes. The honest
+    // finding is "buried", so that is what is said.
+    whyItMatters: `${p.page} is listed in the sitemap but the site crawl could not reach it within ${MAX_CRAWL_DEPTH} clicks of the homepage — it may be linked only from deep pagination pages, which buries it for search engines and visitors.`,
     priority: orphanedPriorities[i],
     recommendedAction: null,
     expectedImpact: { label: impactFromPriority(orphanedPriorities[i]), basis: 'estimate', value: null },
@@ -570,11 +655,66 @@ export async function run({ siteId, start, end, pageCache, params }) {
   });
   const robotsBlockedFindings = robotsBlockedFinding ? [robotsBlockedFinding] : [];
 
+  // Real GSC pages/queries that almost certainly belong to a PRIOR owner of
+  // this domain, not this site — see index-bloat.js's header comment for the
+  // chayceproperties.com case this was built from (1.5M+ indexed URLs from a
+  // legacy ASP.NET storefront + an unrelated Arabic top query, on a site
+  // that has never been anything but an English Eleventy site). Pulls the
+  // site's own top pages/queries directly (not limited to this run's ~20-page
+  // rotation batch, which is chosen for content-quality checks and would
+  // rarely include zero-real-content spam URLs), so this needs no extra
+  // fetch beyond two already-ingested Search Analytics reads.
+  const [spamPageRows, queryRows] = await Promise.all([
+    getGscBreakdownRange(siteId, start, end, 'page', 200),
+    getGscBreakdownRange(siteId, start, end, 'query', 100),
+  ]);
+  const spamPatterns = detectSpamUrlPatterns(spamPageRows);
+  const foreignQueries = detectForeignScriptQueries(queryRows, site.language_code);
+  const disallowPatterns = spamPatterns.map((p) => p.pattern);
+
+  // No robots.txt at all — previously just recorded in facts.robotsTxtFound
+  // and never turned into an actionable finding. robots-bootstrap.js (unlike
+  // robots-fix.js, which needs an existing file to splice into) drafts a
+  // brand-new baseline file, folding in any real spam patterns found above
+  // so this is one draft, not two competing full-file-overwrite drafts.
+  const robotsMissingFindings = (!robotsFetch.ok) ? [makeFinding({
+    id: 'technical-seo:site:robots-txt-missing',
+    evidence: { hostname: siteHostname, disallowPatterns },
+    whyItMatters: `${siteHostname || 'This site'} has no robots.txt — search engines default to crawling everything, with no way to steer them away from paths that shouldn't be indexed.`,
+    priority: 'medium',
+    recommendedAction: { label: 'Create robots.txt', generatorId: 'robots-bootstrap', params: { disallowPatterns }, effort: effortForGenerator('robots-bootstrap') },
+    expectedImpact: { label: 'Medium', basis: 'estimate', value: null },
+  })] : [];
+
+  // Reported even when robots.txt already exists (still real, still worth a
+  // human's attention) — but no recommendedAction in that case: safely
+  // ADDING Disallow rules to an arbitrary existing robots.txt (rather than
+  // writing a brand-new one, robots-bootstrap.js's only job) has no safe
+  // automated path yet, same "real fact, no safe auto-fix" discipline as
+  // compression/CWV/HTTPS above. When robots.txt is missing, this finding
+  // still reports the fact but leaves the actual draft to the
+  // robots-txt-missing finding above rather than emitting a second,
+  // competing robots-bootstrap draft for the same file.
+  const legacySpamFindings = (spamPatterns.length || foreignQueries.length) ? [makeFinding({
+    id: 'technical-seo:site:legacy-index-spam',
+    evidence: { spamPatterns, foreignQueries: foreignQueries.slice(0, 5) },
+    whyItMatters: spamPatterns.length
+      ? `Google is indexing ${spamPatterns.length} URL pattern(s) on this domain (e.g. ${spamPatterns[0].samplePages[0]}) that don't match anything this site actually serves — almost always crawl history left over from a prior owner of this domain, wasting crawl budget and inflating the "not indexed" count in Search Console.`
+      : `A top real query for this site (in a script unrelated to its actual content) suggests this domain carries indexed content from a prior owner, unrelated to what this site serves now.`,
+    priority: 'high',
+    // Never a robots-bootstrap action here even when robots.txt is missing —
+    // the robots-txt-missing finding above already carries that exact draft
+    // (with these same disallowPatterns folded in) so the two findings never
+    // race to draft two competing full-file writes to the same path.
+    recommendedAction: null,
+    expectedImpact: { label: 'High', basis: 'estimate', value: spamPatterns.reduce((s, p) => s + p.impressions, 0) || null },
+  })] : [];
+
   const findings = [
     ...deindexedFindings, ...cwvFindings, ...duplicateFindings, ...canonicalFindings,
     ...schemaFindings, ...brokenFindings, ...citationFindings, ...chainFindings, ...sitemapFindings, ...orphanedFindings,
     ...crossDomainSitemapFindings, ...robotsBlockedFindings, ...compressionFindings, ...httpsFindings,
-    ...inlineStylesFindings, ...largeHtmlFindings,
+    ...inlineStylesFindings, ...largeHtmlFindings, ...robotsMissingFindings, ...legacySpamFindings,
   ];
 
   const facts = {
@@ -591,13 +731,15 @@ export async function run({ siteId, start, end, pageCache, params }) {
     })),
     sitemaps: sitemapResult.ok ? sitemapResult.sitemaps : [],
     sitemapsError: sitemapResult.ok ? null : sitemapResult.error,
-    linkCrawl: { checked: crawl.checked, brokenCount: crawl.broken.length, redirectChainCount: crawl.redirectChains.length, checkedPages: crawl.checkedPages },
-    citationCrawl: { checked: citationCrawl.checked, brokenCount: citationCrawl.broken.length, checkedPages: citationCrawl.checkedPages },
+    linkCrawl: { checked: crawl.checked, brokenCount: crawl.broken.length, unverifiableCount: crawl.unverifiableCount, redirectChainCount: crawl.redirectChains.length, checkedPages: crawl.checkedPages },
+    citationCrawl: { checked: citationCrawl.checked, brokenCount: citationCrawl.broken.length, unverifiableCount: citationCrawl.unverifiableCount, checkedPages: citationCrawl.checkedPages },
     orphanedPageCount: orphanedPages.length,
     sitemapUrlCount: sitemapUrls.length,
     crossDomainSitemapUrlCount: crossDomainUrls.length,
     robotsTxtFound: robotsFetch.ok,
     robotsBlockedTopPageCount: robotsBlockedCandidates.length,
+    legacyIndexSpamPatternCount: spamPatterns.length,
+    foreignScriptQueryCount: foreignQueries.length,
     httpsEnabled: httpsStatus.httpsEnabled,
     httpRedirectsToHttps: httpsStatus.httpRedirectsToHttps,
     findings,

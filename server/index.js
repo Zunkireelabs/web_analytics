@@ -27,6 +27,8 @@ import commoncrawlBacklinksRouter from './routes/commoncrawl-backlinks.js';
 import mcpTokensRouter from './routes/mcp-tokens.js';
 import { apiBridgeRouter, rootBridgeRouter } from './routes/mcp-bridge.js';
 import webhooksRouter from './routes/webhooks.js';
+import crmWebhookRouter from './routes/crm-webhook.js';
+import trialSignupRouter from './routes/trial-signup.js';
 import oauthConsentRouter from './routes/oauth-consent.js';
 import usersRouter from './routes/users.js';
 import userInvitationsRouter from './routes/user-invitations.js';
@@ -35,9 +37,11 @@ import systemHealthRouter from './routes/system-health.js';
 import auditLogRouter from './routes/audit-log.js';
 import opsCenterRouter from './routes/ops-center.js';
 import dataAgentRouter from './routes/data-agent.js';
+import demandRouter from './routes/demand.js';
 import { startCron } from './cron.js';
-import { runStartupCatchup } from './job.js';
-import { reapStaleAuditRuns } from './store/audit-runs.js';
+import { runStartupCatchup, reconcileBlockedRecommendationsOnStartup } from './job.js';
+import { reapStaleAuditRuns, countAuditRunsByTrigger } from './store/audit-runs.js';
+import { startFullSiteAudit } from './agents/lib/bulk-audit.js';
 import { pool } from './db.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -113,6 +117,11 @@ app.use('/api', apiBridgeRouter);
 // every blanket-requireAuth router below, or requireAuth 401s the webhook
 // before this router's own route is ever checked.
 app.use('/api', webhooksRouter);
+// Public, per-site-bearer-token-authenticated (Universal Product Growth
+// mode's CRM boundary) — same mount-order hazard as webhooksRouter above.
+app.use('/api', crmWebhookRouter);
+// Same token/boundary shape, for "see it live" trial-signup reporting.
+app.use('/api', trialSignupRouter);
 app.use(rootBridgeRouter);
 // Reverse-proxies data-analyst-agent/ under this app's own domain — /data-agent
 // is a root path, not under /api (see routes/data-agent.js), and must be
@@ -121,6 +130,7 @@ app.use(rootBridgeRouter);
 // first and serve index.html instead of proxying it.
 app.use(dataAgentRouter);
 app.use('/api', metricsRouter);
+app.use('/api', demandRouter);
 app.use('/api', agentsRouter);
 app.use('/api', actionCenterRouter);
 app.use('/api', reportsRouter);
@@ -212,9 +222,31 @@ httpServer.listen(port, () => {
   if (process.env.DISABLE_CRON !== 'true') startCron();
   // Catch up on anything missed while the machine was off/asleep (non-blocking).
   runStartupCatchup();
+  // Independent of the DISABLE_CATCHUP-gated call above (staging sets that
+  // flag permanently) — re-evaluates blocked_reason on every restart so a
+  // config fix that just deployed clears the same moment it goes live
+  // instead of waiting for tomorrow's cron. See job.js's own comment.
+  reconcileBlockedRecommendationsOnStartup();
   // Reap any audit_runs left stuck 'running' by a previous process that
-  // died/restarted mid-audit (non-blocking).
+  // died/restarted mid-audit (non-blocking). An onboarding-triggered audit
+  // reaped this way gets auto-retried (capped) so a deploy landing mid-crawl
+  // doesn't strand a new client's Milestones baseline on "audit not
+  // available" forever — see baseline-report.js's onboarding top-up.
+  const MAX_ONBOARDING_AUDIT_ATTEMPTS = 3;
   reapStaleAuditRuns()
-    .then((reaped) => { if (reaped.length) console.log(`[server] reaped ${reaped.length} stale audit run(s)`); })
+    .then(async (reaped) => {
+      if (reaped.length) console.log(`[server] reaped ${reaped.length} stale audit run(s)`);
+      for (const run of reaped) {
+        if (run.triggered_by !== 'onboarding') continue;
+        const attempts = await countAuditRunsByTrigger(run.site_id, 'onboarding');
+        if (attempts >= MAX_ONBOARDING_AUDIT_ATTEMPTS) {
+          console.warn(`[server] site ${run.site_id} onboarding audit has failed ${attempts} times — not auto-retrying further`);
+          continue;
+        }
+        console.log(`[server] retrying reaped onboarding audit for site ${run.site_id} (attempt ${attempts + 1})`);
+        startFullSiteAudit(run.site_id, { triggeredBy: 'onboarding' })
+          .catch((err) => console.error(`[server] retry of onboarding audit for site ${run.site_id} failed to start:`, err.message));
+      }
+    })
     .catch((err) => console.error('[server] reapStaleAuditRuns failed:', err.message));
 });

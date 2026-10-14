@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolvePlaceholders, needsArticleFallback, meta, generate } from './schema.js';
+import { resolvePlaceholders, needsArticleFallback, meta, generate, verifyCurrentState } from './schema.js';
 
 // Stubs global fetch (the only thing page-content.js's fetchHtml calls) so
 // generate()'s pre-LLM guards (requireGroundedContent, the duplicate-schema
@@ -50,6 +50,53 @@ describe('schema generator — content-extraction and duplicate-schema guards', 
         /already has real "Article" schema/i,
       );
     } finally { restore(); }
+  });
+});
+
+describe('schema generator — listing pages', () => {
+  test('refuses (stale) Article schema for a section index', async () => {
+    const links = Array.from({ length: 6 }, (_, i) => `<a href="/blog/post-${i}/">Post ${i}</a>`).join('');
+    const restore = stubFetchHtml(
+      '<html><head><title>Blog</title></head><body><main><h1>Blog</h1>'
+      + `<p>${REAL_ARTICLE_PARAGRAPH}</p>${links}</main></body></html>`,
+    );
+    try {
+      await assert.rejects(
+        () => generate({ siteId: 1, params: { page: 'https://example.com/blog/', schemaType: 'Article' } }),
+        (err) => err.stale === true && /listing/i.test(err.message),
+      );
+    } finally { restore(); }
+  });
+});
+
+describe('schema verifyCurrentState (pre-flight)', () => {
+  const ARTICLE_HTML = '<html><head><title>T</title>'
+    + '<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"T"}</script>'
+    + `</head><body><article><h1>T</h1><p>${REAL_ARTICLE_PARAGRAPH}</p></article></body></html>`;
+
+  test('already_resolved when the page already carries the recommended type', async () => {
+    const restore = stubFetchHtml(ARTICLE_HTML);
+    try {
+      const r = await verifyCurrentState({ params: { page: 'https://example.com/a', schemaType: 'Article' } });
+      assert.equal(r.decision, 'already_resolved');
+    } finally { restore(); }
+  });
+
+  test('still_valid when the type is genuinely missing', async () => {
+    const restore = stubFetchHtml(ARTICLE_HTML);
+    try {
+      const r = await verifyCurrentState({ params: { page: 'https://example.com/a', schemaType: 'Organization' } });
+      assert.equal(r.decision, 'still_valid');
+    } finally { restore(); }
+  });
+
+  test('still_valid (not resolved) when the page cannot be fetched', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => { throw new Error('network down'); };
+    try {
+      const r = await verifyCurrentState({ params: { page: 'https://example.com/a', schemaType: 'Article' } });
+      assert.equal(r.decision, 'still_valid');
+    } finally { globalThis.fetch = original; }
   });
 });
 

@@ -324,7 +324,9 @@ export async function getTopPagePerQuery(siteId, start, end) {
 // (DISTINCT ON), which is exactly why this was invisible before. Grouped in
 // JS rather than a single SQL query since "2+ real-ranking pages for the
 // same query" needs a per-query array, not a flat row set.
-export async function getCannibalizedQueries(siteId, start, end, { minImpressions = 5, maxPosition = 20, limit = 20 } = {}) {
+// minImpressions was 5: a page with a handful of stray impressions on a query
+// is not "competing" for it — raised to 20 so both pages need real exposure.
+export async function getCannibalizedQueries(siteId, start, end, { minImpressions = 20, maxPosition = 20, limit = 20 } = {}) {
   const { rows } = await query(
     `SELECT query, page,
             SUM(clicks) AS clicks,
@@ -426,9 +428,36 @@ export async function getTopDeviceCountryPerQuery(siteId, start, end) {
   return rows;
 }
 
+// Drops movers that are noise or an artifact of what the breakdown table
+// happens to contain. Pure so it is unit-testable without a DB.
+//   minClicks      — the LARGER of the two periods must reach this, so a
+//                    '2 to 0' / '1 to 3' wobble is never a mover.
+//   significantZ   — |recent-prior|/sqrt(recent+prior) (a Poisson-difference
+//                    z) must reach this; 0 disables the test.
+//   requireBoth    — the query must have a row in BOTH windows. gsc_breakdown
+//                    stores only the top-N queries per day (and anonymised
+//                    queries not at all: query-dimension clicks are ~37% of
+//                    total on site 1, with per-day rows jumping ~25 -> 60-120
+//                    on 2026-08-29), so a query ABSENT from one window may
+//                    simply have fallen out of the top-N — absence is not 0.
+export function filterMovers(rows, { minClicks = 0, significantZ = 0, requireBoth = false } = {}) {
+  return rows.filter((x) => {
+    const recent = Number(x.recent);
+    const prior = Number(x.prior);
+    if (recent - prior === 0) return false;
+    if (requireBoth && (!x.in_recent || !x.in_prior)) return false;
+    if (Math.max(recent, prior) < minClicks) return false;
+    if (significantZ > 0 && Math.abs(recent - prior) / Math.sqrt(recent + prior) < significantZ) return false;
+    return true;
+  });
+}
+
 // Top movers: change in query clicks, recent week vs the week before.
 // Returns gainers (biggest increase) and droppers (biggest decrease).
-export async function getTopMovers(siteId, recent, prior, limit = 8) {
+// `opts` is filterMovers' options; the default (none) is the legacy
+// unfiltered behavior that the daily/weekly report and dashboard still use —
+// the query-intelligence agent opts in to the conservative filters.
+export async function getTopMovers(siteId, recent, prior, limit = 8, opts = {}) {
   const { rows } = await query(
     `WITH r AS (
         SELECT dim_value, SUM(clicks) clicks FROM gsc_breakdown
@@ -441,14 +470,46 @@ export async function getTopMovers(siteId, recent, prior, limit = 8) {
      SELECT COALESCE(r.dim_value, p.dim_value) AS query,
             COALESCE(r.clicks,0) AS recent,
             COALESCE(p.clicks,0) AS prior,
-            COALESCE(r.clicks,0) - COALESCE(p.clicks,0) AS delta
+            COALESCE(r.clicks,0) - COALESCE(p.clicks,0) AS delta,
+            (r.dim_value IS NOT NULL) AS in_recent,
+            (p.dim_value IS NOT NULL) AS in_prior
        FROM r FULL OUTER JOIN p ON r.dim_value = p.dim_value`,
     [siteId, recent.start, recent.end, prior.start, prior.end]
   );
-  const moved = rows.filter((x) => Number(x.delta) !== 0);
+  const moved = filterMovers(rows, opts);
   const gainers = moved.filter((x) => x.delta > 0).sort((a, b) => b.delta - a.delta).slice(0, limit);
   const droppers = moved.filter((x) => x.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, limit);
   return { gainers, droppers };
+}
+
+// Window helper: every date in [start, end] that `table` has at least one row
+// for (table is 'gsc' -> gsc_breakdown, 'ga4' -> ga4_breakdown). Feeds
+// agents/lib/window-coverage.js's assessWindows so a recent-vs-prior
+// comparison can abstain when a window is mostly missing. Read-only.
+export async function getBreakdownDataDates(siteId, source, dimType, start, end) {
+  const table = source === 'ga4' ? 'ga4_breakdown' : 'gsc_breakdown';
+  const { rows } = await query(
+    `SELECT DISTINCT to_char(date, 'YYYY-MM-DD') AS d FROM ${table}
+      WHERE site_id = $1 AND dim_type = $2 AND date BETWEEN $3 AND $4`,
+    [siteId, dimType, start, end]
+  );
+  return rows.map((r) => r.d);
+}
+
+// Clicks/impressions/position for ONE exact query over a range, straight from
+// gsc_breakdown — a direct lookup, not a scan of the top-N queries, so a
+// query outside the top 200 is still found. Null when it has no rows.
+export async function getQueryPerformance(siteId, queryText, start, end) {
+  const { rows } = await query(
+    `SELECT SUM(clicks) AS clicks, SUM(impressions) AS impressions,
+            CASE WHEN SUM(impressions) = 0 THEN NULL
+                 ELSE ROUND(SUM(position * impressions) / SUM(impressions), 2) END AS avg_position
+       FROM gsc_breakdown
+      WHERE site_id = $1 AND dim_type = 'query' AND dim_value = $2 AND date BETWEEN $3 AND $4
+     HAVING COUNT(*) > 0 AND SUM(impressions) > 0`,
+    [siteId, queryText, start, end]
+  );
+  return rows[0] || null;
 }
 
 // Per-dim_value search performance aggregated over a date range: clicks,
@@ -494,6 +555,34 @@ export async function getSearchPerformanceForPages(siteId, start, end, pages) {
     [siteId, start, end, pages]
   );
   return rows;
+}
+
+// The pages actually driving one specific device's real search volume,
+// ranked by impressions — the missing piece device-ctr-diagnosis.js needs
+// to go from "this DEVICE's CTR is low" (device-intelligence.js's own
+// sitewide gsc_breakdown aggregate) to "these are the real PAGES behind it,
+// worth inspecting for a page-level cause." gsc_query_page already stores a
+// device column per row (ingest/gsc.js's 4-dim query/page/device/country
+// pull); nothing before this read it grouped by (page, device) — every
+// existing device query (getSearchPerformanceRange, getTopDeviceCountryPerQuery)
+// aggregates by query or by device alone, never surfacing which pages sit
+// behind a device's own numbers.
+export async function getPagePerformanceByDevice(siteId, start, end, device, limit = 10) {
+  const { rows } = await query(
+    `SELECT page,
+            SUM(clicks) AS clicks,
+            SUM(impressions) AS impressions,
+            CASE WHEN SUM(impressions) = 0 THEN 0
+                 ELSE ROUND(SUM(clicks)::numeric / SUM(impressions), 5) END AS ctr
+       FROM gsc_query_page
+      WHERE site_id = $1 AND device = $2 AND date BETWEEN $3 AND $4
+      GROUP BY page
+     HAVING SUM(impressions) > 0
+      ORDER BY impressions DESC
+      LIMIT $5`,
+    [siteId, device, start, end, limit]
+  );
+  return rows.map((r) => ({ page: r.page, clicks: Number(r.clicks), impressions: Number(r.impressions), ctr: Number(r.ctr) }));
 }
 
 // Top movers for a ga4_breakdown dimension (e.g. 'country'): change in
@@ -588,6 +677,32 @@ export async function getMonthlyTotals(siteId, year, month) {
      LEFT JOIN gsc_daily g ON g.site_id = $1 AND g.date = d::date
      LEFT JOIN ga4_daily a ON a.site_id = $1 AND a.date = d::date`,
     [siteId, start]
+  );
+  return rows[0];
+}
+
+// Staleness cache for metrics.js's /ai-compare and /ai-compare-range — lets
+// the route skip a fresh callLLM when the underlying totals for the same
+// (site, compareType, paramsKey) haven't changed since the last generation.
+// See migration 160.
+export async function getAiCompareCache(siteId, compareType, paramsKey) {
+  const { rows } = await query(
+    `SELECT data_signature, plan, generated_at
+       FROM ai_compare_cache
+      WHERE site_id = $1 AND compare_type = $2 AND params_key = $3`,
+    [siteId, compareType, paramsKey]
+  );
+  return rows[0] || null;
+}
+
+export async function saveAiCompareCache(siteId, compareType, paramsKey, dataSignature, plan) {
+  const { rows } = await query(
+    `INSERT INTO ai_compare_cache (site_id, compare_type, params_key, data_signature, plan)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (site_id, compare_type, params_key)
+     DO UPDATE SET data_signature = EXCLUDED.data_signature, plan = EXCLUDED.plan, generated_at = now()
+     RETURNING data_signature, plan, generated_at`,
+    [siteId, compareType, paramsKey, JSON.stringify(dataSignature), plan]
   );
   return rows[0];
 }

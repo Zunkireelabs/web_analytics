@@ -1,4 +1,4 @@
-import { getOrCreateSite, query } from './db.js';
+import { getOrCreateSite, query, resumeDueAutoRemediationPauses } from './db.js';
 import { safeMessage } from './lib/errors.js';
 import { callDataAnalystAgent } from './lib/data-analyst-client.js';
 import { fetchGscForDate } from './ingest/gsc.js';
@@ -17,31 +17,40 @@ import { isGoogleAuthError } from './integrations/google-oauth.js';
 import { daysAgoInTz, dateRange, previousWeek, previousMonth, monthBounds, todayInTz } from './util/dates.js';
 import { runOrchestration } from './agents/orchestrator.js';
 import { runAgent } from './agents/runner.js';
+import { trendRadarDue } from './agents/lib/trend-cadence.js';
 import { saveAgentRun, getLatestAgentRuns } from './store/agent-runs.js';
 import { meta as execReportMeta, orchestrationStatus } from './agents/executive-report.js';
 import { computeHealthScore } from './agents/lib/health-score.js';
 import { RECOMMENDATION_AGENT_IDS } from './agents/lib/insights.js';
 import { detectNotificationEvents } from './notifications/detect.js';
 import { deliverToAllChannels } from './notifications/channels/index.js';
+import { hasRecentNotification } from './store/notifications.js';
 import { buildRecommendations } from './agents/lib/recommendations.js';
 import { repairSiteTemplates } from './agents/lib/template-repair.js';
 import { syncFromGrounded, refreshBlockedRecommendations } from './agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.js';
+import { runWorkArbiter } from './agents/lib/work-arbiter.js';
+import { withJobLock, jobKeyFor } from './lib/job-lock.js';
 
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
 
 import { syncAnalystInsightsToActionCenter, syncGrowthOpportunitiesToActionCenter, refreshPendingKeywordGapObservations, qualifyAndShipContentGaps } from './agents/lib/analyst-seo-mapping.js';
+import { runKeywordDemandIfDue } from './agents/lib/keyword-demand.js';
 import { runAnalystFusion } from './agents/lib/analyst-fusion.js';
 import { sweepAnalystOutcomes } from './agents/lib/analyst-outcome.js';
 import { checkFaqOnboardingCoverage } from './agents/lib/faq-onboarding-check.js';
 import { getImplementedFindingIds, countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
-import { isShippable, isShipCatchupOwed, SHIP_HOUR_LOCAL } from './lib/ship-window.js';
+import { countShippedFileEditsTodayAllSites } from './store/shipping-queue.js';
+import { AUTONOMOUS_DRAFT_SOURCES } from './lib/autonomous-quota.js';
+import { isShippable, isShipCatchupOwed, checkShipStall, SHIP_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './lib/ship-window.js';
+import { rateLimitKey } from './github/client.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
 
 import { syncWatchlist } from './agents/lib/watchlist.js';
 import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js';
 import { getSearchPerformanceRange } from './store/read.js';
 import { ownDomains, filterOwnDomainPages } from './agents/lib/site-domain.js';
+import { isForeignPlatformSpamUrl } from './agents/lib/index-bloat.js';
 import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages } from './store/page-inventory.js';
 import { runDueVerifications } from './agents/lib/fix-verification.js';
 import { siteHasUsableDesignProfile, sitePageUrl, getDesignProfile } from './implementers/lib/design-drift.js';
@@ -79,7 +88,7 @@ import { createDesignProfileJob, getQueuedComponentTemplateJob, getLatestDesignA
 // that moment. Both are daily now, and the real per-run cost is bounded
 // where it belongs — in each agent's own page batch size — rather than by
 // starving the agent of runs.
-const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation']);
+const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation', 'trend-radar']);
 const WEEKLY_ONLY_AGENT_IDS = new Set(['content-gap', 'growth-queries']);
 const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !THROTTLED_AGENT_IDS.has(id) && !WEEKLY_ONLY_AGENT_IDS.has(id));
 
@@ -241,21 +250,24 @@ export async function runDailyAgentAnalysisForSite(site) {
   await syncFromGrounded(site.id, grounded)
     .catch((err) => console.error(`[job] site ${site.id} recommendation coordinator sync failed:`, err.message));
 
-  await autoRemediateSafeRecommendations(site.id)
-    .catch((err) => console.error(`[job] site ${site.id} auto-remediation failed:`, err.message));
+  // Deliberately does NOT ship here. THE authoritative shipping invocation is
+  // runAutoRemediationForAllSites (cron.js's daily body, and its :35 catch-up
+  // guard) — one call per site per day, under that site's own shipping lock.
+  //
+  // This function used to call autoRemediateSafeRecommendations(site.id)
+  // itself, directly contradicting the comment that sat right below it. That
+  // made shipping reachable from three places in a single day: here, the
+  // chained site-wide run, and the :05 hourly catch-up guard, which re-enters
+  // this very function while holding only the 'daily-job' lock and not the
+  // shipping one — so the guard could open a second batch alongside a
+  // shipping run already in progress. Detection fills the recommendations
+  // table; shipping reads it. Keeping the two apart is what makes the day's
+  // work land as ONE reviewable branch/commit/PR per client.
+
   // Deliberately the PRE-repair list, not `grounded`. A repaired item's issue
   // is still genuinely live on the site until a human merges its PR, so the
   // watchlist must keep tracking it — dropping it here would mark the problem
   // as handled before anything actually shipped.
-
-  // Deliberately does NOT auto-remediate here. Detection and shipping are two
-  // separate schedules now: this morning run only DETECTS (fills the
-  // recommendations table), and runAutoRemediationForAllSites ships what it
-  // found on its own later trigger (cron.js, 13:00 site-local by default).
-  // Splitting them is what makes the day's PR a reviewable batch that lands at
-  // a predictable hour, instead of branches appearing the instant an agent
-  // happens to notice something.
-
   const groundedById = new Map(recommendations.items.map((item) => [item.id, item]));
   const watchlistSync = await syncWatchlist(site.id, result.findings, groundedById)
     .catch((err) => { console.error(`[job] site ${site.id} watchlist sync failed:`, err.message); return { added: 0, closed: 0 }; });
@@ -384,11 +396,15 @@ export async function runExecutiveIfDue(site) {
   return r;
 }
 
-// Sites with GSC/GA4 actually connected. Automation skips a site that
-// doesn't have both configured yet (e.g. a newly onboarded client whose
-// GSC/GA4 hasn't been wired up) rather than attempting and failing every
-// cycle — it will start receiving automation automatically the moment both
-// are set on its `sites` row.
+// Sites eligible for automation at all. A 'website' site still needs GSC/GA4
+// actually connected — automation skips it (e.g. a newly onboarded client
+// whose GSC/GA4 hasn't been wired up) rather than attempting and failing
+// every cycle, and it starts receiving automation automatically the moment
+// both are set on its `sites` row. A 'product' site (Universal Product
+// Growth mode) is eligible without GSC/GA4 at all — it just won't get the
+// GSC/GA4-only agents, which runner.js skips per-agent via
+// meta.requiresCapabilities (see server/lib/site-capabilities.js). This is
+// list-level eligibility only, not per-agent scheduling.
 //
 // status === 'active' (PLATFORM-ADMIN-DESIGN.md §D, §K Phase 3): a
 // suspended or soft-deleted tenant stops consuming GSC/GA4 quota and
@@ -398,7 +414,11 @@ export async function runExecutiveIfDue(site) {
 // the gsc_property/ga4_property_id filter above.
 export async function listConnectedSites() {
   const sites = await listSites();
-  return sites.filter((s) => s.gsc_property && s.ga4_property_id && s.status === 'active');
+  return sites.filter((s) => {
+    if (s.status !== 'active') return false;
+    if (s.property_type === 'product') return true;
+    return Boolean(s.gsc_property && s.ga4_property_id);
+  });
 }
 
 // Run the full daily pipeline independently for every connected site. A
@@ -477,6 +497,24 @@ export async function runCompetitorCheckIfDueForAllSites() {
   return results;
 }
 
+// Real DataForSEO keyword-demand ingest — same "checked weekly, real work
+// only once a month" shape as runCompetitorCheckIfDue above, for the
+// search-volume-backed keyword_gaps rows the weekly keyword-gap ship cycle
+// (runKeywordGapShipCycleForAllSites) then works through across the rest of
+// the month. See server/agents/lib/keyword-demand.js.
+export async function runKeywordDemandCheckIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runKeywordDemandIfDue(site));
+    } catch (err) {
+      console.error(`[job] keyword demand check failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return results;
+}
+
 // Shared "checked often, acts rarely" guard for any agent that should only
 // really run once a real calendar month (or, opt-in, week) has passed — the
 // exact pattern competitor-intelligence proved first (see its comment
@@ -537,6 +575,40 @@ export const runCompetitorIntelligenceIfDueForAllSites = () => runAgentIfDueForA
 export const runAuthorityIfDue = (site) => runAgentIfDue(site, 'authority');
 export const runAuthorityIfDueForAllSites = () => runAgentIfDueForAllSites('authority');
 
+// Trend Radar — once per fortnight (agents/lib/trend-cadence.js), on its own
+// daily cron entry that asks each site whether it is due. Not in RECOMMENDATION_AGENT_IDS (so
+// never in the daily pass) and excluded from orchestrator.js's default
+// fan-out — every run costs an LLM call plus feed fetches.
+// First month the scheduled run is allowed. Moved to October 2026 (owner's
+// call, 2026-10-07) so the fortnightly cycle starts on deploy instead of
+// waiting for November. Override with TREND_RADAR_ENABLED_FROM=YYYY-MM to
+// move it.
+const TREND_RADAR_ENABLED_FROM = process.env.TREND_RADAR_ENABLED_FROM || '2026-10';
+
+export async function runTrendRadarIfDue(site) {
+  const [lastRun] = await getLatestAgentRuns(site.id, ['trend-radar']);
+  if (!trendRadarDue(lastRun, { timeZone: site.timezone || 'UTC', enabledFrom: TREND_RADAR_ENABLED_FROM })) {
+    console.log(`[trend-radar] site ${site.id} not due (ran within the last fortnight, or not enabled yet) — skipping.`);
+    return null;
+  }
+  const output = await runAgent('trend-radar', { siteId: site.id }, { persist: true });
+  console.log(`[trend-radar] site ${site.id}: fortnightly run complete (status: ${output.status}).`);
+  return { status: output.status, findingsCount: output.facts?.findings?.length || 0 };
+}
+
+export async function runTrendRadarIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runTrendRadarIfDue(site));
+    } catch (err) {
+      console.error(`[job] trend-radar run failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return results;
+}
+
 // font-consistency and visual-quality had their own runAgentIfDue wrappers
 // here (monthly and weekly). Both are ordinary DAILY_AGENT_IDS members as of
 // 2026-09-03 — see THROTTLED_AGENT_IDS above for why — so they now run
@@ -555,6 +627,14 @@ export const runAuthorityIfDueForAllSites = () => runAgentIfDueForAllSites('auth
 const aiRecommendationCadence = () => (process.env.AI_RECOMMENDATION_CADENCE === 'week' ? 'week' : 'month');
 export const runAiRecommendationIfDue = (site) => runAgentIfDue(site, 'ai-recommendation', { cadence: aiRecommendationCadence() });
 export const runAiRecommendationIfDueForAllSites = () => runAgentIfDueForAllSites('ai-recommendation', { cadence: aiRecommendationCadence() });
+
+// Prospect Discovery — real DataForSEO SERP calls, same monthly-cadence cost
+// discipline as authority/competitor-intelligence above. The agent's own
+// opt-in check (product_growth_config.prospect_discovery_enabled) means this
+// honestly no-ops via insufficient-data for every site that hasn't turned it
+// on, same as authority already does for missing DataForSEO credentials.
+export const runProspectDiscoveryIfDue = (site) => runAgentIfDue(site, 'prospect-discovery');
+export const runProspectDiscoveryIfDueForAllSites = () => runAgentIfDueForAllSites('prospect-discovery');
 
 // Growth Query Discovery — real GSC query movement and page coverage don't
 // meaningfully shift day to day, and its own LLM/page-fetch cost multiplies
@@ -620,25 +700,39 @@ export async function runGeoAuditIfDueForAllSites() {
 // impolite. Also folds in GSC's own top pages as a third discovery source,
 // tagged 'gsc', so page_inventory becomes the single superset rather than
 // just the sitemap+crawl subset.
-export async function runSiteDiscoveryIfDue(site) {
+export async function runSiteDiscoveryIfDue(site, {
+  force = false,
+  getLastDiscoveryAtFn = getLastDiscoveryAt,
+  discoverFromSitemapsFn = discoverFromSitemaps,
+  crawlSiteFn = crawlSite,
+  getSearchPerformanceRangeFn = getSearchPerformanceRange,
+  upsertPageInventoryBatchFn = upsertPageInventoryBatch,
+  markOrphanedPagesFn = markOrphanedPages,
+} = {}) {
   const { start, end } = previousWeek(site.timezone);
-  const lastDiscoveredAt = await getLastDiscoveryAt(site.id);
-  if (lastDiscoveredAt && new Date(lastDiscoveredAt) >= new Date(start)) {
+  const lastDiscoveredAt = await getLastDiscoveryAtFn(site.id);
+  if (!force && lastDiscoveredAt && new Date(lastDiscoveredAt) >= new Date(start)) {
     console.log(`[site-discovery] site ${site.id} week of ${start} already discovered — skipping.`);
     return null;
   }
 
   const [sitemapUrls, crawledUrls, gscPagesRaw] = await Promise.all([
-    discoverFromSitemaps(site).catch((err) => { console.error(`[site-discovery] site ${site.id} sitemap fetch failed:`, err.message); return []; }),
-    crawlSite(site).catch((err) => { console.error(`[site-discovery] site ${site.id} crawl failed:`, err.message); return []; }),
-    getSearchPerformanceRange(site.id, start, end, 'page', 200),
+    discoverFromSitemapsFn(site).catch((err) => { console.error(`[site-discovery] site ${site.id} sitemap fetch failed:`, err.message); return []; }),
+    crawlSiteFn(site).catch((err) => { console.error(`[site-discovery] site ${site.id} crawl failed:`, err.message); return []; }),
+    getSearchPerformanceRangeFn(site.id, start, end, 'page', 200),
   ]);
   const domain = ownDomains(site);
-  const gscPages = filterOwnDomainPages(gscPagesRaw, domain);
+  // Own-domain match alone isn't enough — a prior owner's legacy platform
+  // (e.g. chayceproperties.com's old ASP.NET storefront) shares the same
+  // domain and passes that check, so it also needs the deterministic
+  // spam-URL check (index-bloat.js) that technical-seo.js's own
+  // legacy-index-spam finding already uses, applied here so those URLs
+  // never enter page_inventory as 'gsc' pages in the first place.
+  const gscPages = filterOwnDomainPages(gscPagesRaw, domain).filter((p) => !isForeignPlatformSpamUrl(p.dim_value));
 
-  await upsertPageInventoryBatch(site.id, sitemapUrls, 'sitemap');
-  await upsertPageInventoryBatch(site.id, crawledUrls, 'crawl');
-  await upsertPageInventoryBatch(site.id, gscPages.map((p) => p.dim_value), 'gsc');
+  await upsertPageInventoryBatchFn(site.id, sitemapUrls, 'sitemap');
+  await upsertPageInventoryBatchFn(site.id, crawledUrls, 'crawl');
+  await upsertPageInventoryBatchFn(site.id, gscPages.map((p) => p.dim_value), 'gsc');
 
   // Real orphaned-page signal: a page the sitemap lists but this run's real
   // homepage-outward crawl never reached via any actual internal link — the
@@ -651,18 +745,35 @@ export async function runSiteDiscoveryIfDue(site) {
   const normalize = (u) => u.replace(/\/+$/, '');
   const crawledSet = new Set(crawledUrls.map(normalize));
   const orphanedUrls = sitemapUrls.filter((u) => !crawledSet.has(normalize(u)));
-  await markOrphanedPages(site.id, orphanedUrls);
+  await markOrphanedPagesFn(site.id, orphanedUrls);
 
   console.log(`[site-discovery] site ${site.id}: ${sitemapUrls.length} sitemap URL(s), ${crawledUrls.length} crawled URL(s), ${gscPages.length} GSC page(s), ${orphanedUrls.length} orphaned.`);
   return { sitemapCount: sitemapUrls.length, crawlCount: crawledUrls.length, gscCount: gscPages.length, orphanedCount: orphanedUrls.length };
 }
 
-export async function runSiteDiscoveryIfDueForAllSites() {
-  const sites = await listConnectedSites();
+// `force` bypasses only the weekly staleness gate (every other precondition
+// still applies) — for the same reason design-profile rescanning gained one
+// (see queueDesignProfileRescanForSite): page_inventory can go stale not
+// just from time passing but from a site's OWN sitemap changing. Confirmed
+// on chayceproperties.com: its real sitemap.xml lists /news/, but every
+// existing page_inventory row is tagged discovered_via 'crawl', never
+// 'sitemap' — the sitemap fetch never successfully landed a result there,
+// so /news/ has stayed invisible to every page-level agent
+// (selectCandidatePages, candidate-pages.js) regardless of how long it
+// waits, since the weekly gate only asks "did we run recently," never
+// "did the site change since." force-site-discovery.js is the one-time
+// catch-up; routine weekly discovery resumes normally afterward.
+export async function runSiteDiscoveryIfDueForAllSites({
+  force = false,
+  listAllSites = listConnectedSites,
+  runForSite = runSiteDiscoveryIfDue,
+} = {}) {
+  const sites = await listAllSites();
   const results = [];
   for (const site of sites) {
     try {
-      results.push(await runSiteDiscoveryIfDue(site));
+      // eslint-disable-next-line no-await-in-loop -- sequential, same as every other fleet loop in this file
+      results.push(await runForSite(site, { force }));
     } catch (err) {
       console.error(`[job] site discovery failed for site ${site.id} "${site.name}":`, err.message);
     }
@@ -1057,11 +1168,28 @@ export async function fetchAnalystInsights(siteId) {
 // Seeded from a real count of today's already-shipped drafts (not reset to
 // 0) so the hourly catch-up loop below correctly resumes the same day's
 // running total rather than re-granting a fresh ceiling every time it fires.
+// Counts EVERY autonomous shipping lane, not just auto-remediation's — the
+// same canonical source list agents/lib/auto-remediation.js sizes its own
+// per-site budget against (server/lib/autonomous-quota.js), imported rather
+// than re-listed here: a locally re-declared copy previously went stale and
+// silently dropped 'learned-repair', 'content-repair',
+// 'template-capability-repair' and 'design-agent' from the platform-wide
+// ceiling while the per-site budget still counted them.
 async function globalRemainingSeed() {
   const ceiling = Number(process.env.AUTO_REMEDIATION_GLOBAL_DAILY_CEILING);
   if (!Number.isFinite(ceiling) || ceiling < 0) return Infinity;
-  const alreadyShipped = await countDraftsBySourceTodayAllSites('auto-remediation');
-  return Math.max(0, ceiling - alreadyShipped);
+  // Drafts-table spend (auto-remediation, analyst-keyword-gap, learned-repair
+  // once shipped, design-agent) plus the file-edits queue's own spend
+  // (content-repair, template-capability-repair — see
+  // store/shipping-queue.js's countShippedFileEditsTodayAllSites for why that
+  // second count exists and why it is scoped to kind:'file-edits' only, to
+  // avoid double-counting learned-repair's shipped queue rows against the
+  // drafts row that same fix already produced).
+  const [draftsShipped, fileEditsShipped] = await Promise.all([
+    countDraftsBySourceTodayAllSites(AUTONOMOUS_DRAFT_SOURCES),
+    countShippedFileEditsTodayAllSites(),
+  ]);
+  return Math.max(0, ceiling - draftsShipped - fileEditsShipped);
 }
 
 // Runs server/scripts/repair-template-capability.js's core for every
@@ -1069,12 +1197,16 @@ async function globalRemainingSeed() {
 // capability-repair story, distinct from autoHealFileMapping/
 // autoHealNewContentTarget (implementers/lib/discover-*.js, already run
 // inline inside every recommendation-gates.js pass, no separate cron entry
-// needed). This one opens its own PR directly (bypassing the drafts table
-// entirely — see that file's own doc comment on why), so it gets its own
-// step here rather than folding into runAutoRemediationForAllSites, which
-// only ever ships already-drafted, already-approved recommendations.
+// needed). It still gets its own step here, run BEFORE
+// runAutoRemediationForAllSites in the same morning chain (see cron.js) —
+// not because it opens its own PR any more (it doesn't: like
+// repair-site-content-live.js, its edits are queued via
+// store/shipping-queue.js and shipped in the SAME single batch/PR the
+// shipping run below opens), but because unblocking a capability gap here is
+// what lets THIS SAME morning's auto-remediation pass actually draft the
+// recommendations that gap was blocking.
 // Per-site error isolation, same as every other *ForAllSites function: one
-// site's repo/PR failure must never cost every other site its own run.
+// site's repo failure must never cost every other site its own run.
 export async function runTemplateCapabilityRepairForAllSites() {
   const { repairTemplateCapabilitiesForSite } = await import('./scripts/repair-template-capability.js');
   const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
@@ -1082,10 +1214,10 @@ export async function runTemplateCapabilityRepairForAllSites() {
   for (const site of sites) {
     try {
       const report = await repairTemplateCapabilitiesForSite(site.id);
-      const prCount = report.prsCreated.length;
+      const queuedCount = report.queued ? 1 : 0;
       const fixedCount = report.plumbingGapsFixed.length + report.safeCapabilityGapsRepaired.length;
-      if (prCount || fixedCount) {
-        console.log(`[job] template-capability-repair site ${site.id} "${site.name}": ${fixedCount} config fix(es), ${prCount} PR(s) opened, ${report.architecturalGapsBlocked.length} still needing a human decision.`);
+      if (queuedCount || fixedCount) {
+        console.log(`[job] template-capability-repair site ${site.id} "${site.name}": ${fixedCount} config fix(es), ${queuedCount ? 'queued for the shared shipping run' : 'nothing queued'}, ${report.architecturalGapsBlocked.length} still needing a human decision.`);
       }
       results.push({ siteId: site.id, ...report });
     } catch (err) {
@@ -1125,6 +1257,14 @@ export async function runDesignProfileRoleCorrectionForAllSites() {
 // visible_faq_cap enforcement, blog front-matter contract, directory-collection
 // self-inclusion, and unresolved-placeholder/fabricated-competitor removal),
 // now automated. See scripts/repair-site-content-live.js's own module comment.
+//
+// Queues, never ships. repairSiteContentLive computes and validates its
+// edits here but no longer commits or opens a PR — it enqueues them onto the
+// shared shipping queue (source='content-repair', migration 148) for the
+// 07:00 auto-remediation run to include in that day's ONE batch/commit/PR
+// alongside every other autonomous lane. This is one of the two
+// previously-independent PR-opening paths closed for "one build, one
+// commit, one PR" (the other is learned-repair.js).
 export async function runContentRepairForAllSites() {
   const { repairSiteContentLive } = await import('./scripts/repair-site-content-live.js');
   const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
@@ -1132,8 +1272,8 @@ export async function runContentRepairForAllSites() {
   for (const site of sites) {
     try {
       const report = await repairSiteContentLive(site.id);
-      if (report.prCreated) {
-        console.log(`[job] content-repair site ${site.id} "${site.name}": ${report.changedFiles.length} file(s) repaired, PR ${report.prCreated.url}`);
+      if (report.queued) {
+        console.log(`[job] content-repair site ${site.id} "${site.name}": ${report.changedFiles.length} file(s) repaired, queued (shipping_queue #${report.queued.id}) for the 07:00 shared shipping run — no PR opened here.`);
       }
       results.push(report);
     } catch (err) {
@@ -1202,7 +1342,65 @@ export async function refreshContentGapRecommendationsForAllSites() {
   return results;
 }
 
+// Shared by both shipping loops below. Nests the per-site lock inside a
+// per-CREDENTIAL lock (see ship-window.js's GITHUB_CREDENTIAL_LOCK_JOB_NAME
+// for why the credential lock exists at all): a site never ships without
+// first holding the budget its GitHub calls will actually spend from.
+// Acquire order matters here — credential outside, site inside — so two
+// sites sharing one credential contend on the SAME outer lock and are
+// serialized by it, while two sites on distinct credentials never share a
+// key and never wait on each other.
+async function shipSiteWithLocks(site, globalRemaining) {
+  const { ran: credRan, result } = await withJobLock(
+    jobKeyFor(GITHUB_CREDENTIAL_LOCK_JOB_NAME, rateLimitKey(site)),
+    () => withJobLock(
+      jobKeyFor(SHIP_LOCK_JOB_NAME, site.id),
+      async () => {
+        // Arbitration runs INSIDE the site's ship lock and immediately
+        // before shipping. That position is the only correct one: it has to
+        // see the whole set of proposals (so it cannot run while they are
+        // still being produced) and it has to settle them before any one is
+        // drafted (or the losing proposal has already cost a generation).
+        //
+        // Flag-gated and best-effort — a site whose contests could not be
+        // arbitrated ships exactly as it did before, by first-come.
+        await runWorkArbiter(site.id, { site }).catch((err) =>
+          console.warn(`[work-arbiter] site ${site.id}: ${err.message}`));
+        return autoRemediateSafeRecommendations(site.id, { globalRemaining });
+      },
+    ),
+  );
+  if (!credRan) return { ran: false, reason: 'credential-locked' };
+  const { ran: siteRan, result: siteResult } = result;
+  if (!siteRan) return { ran: false, reason: 'site-locked' };
+  return { ran: true, result: siteResult };
+}
+
+// Runs after every ship attempt (scheduled run and catch-up guard alike),
+// right where result.shipped is known. detectNotificationEvents can't do this
+// itself — it runs earlier in the daily chain (runDailyJobForSite), before
+// runAutoRemediationForAllSites ships anything — so this stays inline here
+// rather than forcing a bad fit into that function. Same cooldown pattern
+// (hasRecentNotification) as every other notification type in detect.js:
+// once per site per day is enough, so a re-check by the catch-up guard an
+// hour later doesn't refire the same alert.
+// `shipped` must be the site's TOTAL for the day, not just one call's
+// increment — the catch-up guard's own ship is normally a small top-up on
+// top of whatever the morning run already shipped, and comparing that
+// increment alone against the full daily target would misfire on a perfectly
+// healthy day.
+const SHIP_STALL_COOLDOWN_DAYS = 1;
+async function alertIfShipStalled(site, shipped) {
+  const stallEvent = checkShipStall({ site, shipped });
+  if (!stallEvent) return;
+  const alreadyNotified = await hasRecentNotification(site.id, stallEvent.type, SHIP_STALL_COOLDOWN_DAYS);
+  if (alreadyNotified) return;
+  await deliverToAllChannels(site.id, [stallEvent])
+    .catch((err) => console.error(`[job] ship-stall alert delivery failed for site ${site.id}:`, err.message));
+}
+
 export async function runAutoRemediationForAllSites() {
+  await resumeDueAutoRemediationPauses().catch((err) => console.error('[job] resumeDueAutoRemediationPauses failed:', err.message));
   const sites = (await listSites()).filter(isShippable);
   const results = [];
   let globalRemaining = await globalRemainingSeed();
@@ -1212,11 +1410,28 @@ export async function runAutoRemediationForAllSites() {
       break;
     }
     try {
-      const result = await autoRemediateSafeRecommendations(site.id, { globalRemaining });
+      // Per-SITE lock nested inside a per-CREDENTIAL lock (shipSiteWithLocks
+      // above). The work this protects (a GitHub App token's budget, one
+      // batch branch) is per-tenant, so a single platform-wide key made one
+      // slow tenant stall every other tenant's PR for the rest of the pass —
+      // but two tenants sharing one actual credential (see
+      // GITHUB_CREDENTIAL_LOCK_JOB_NAME) must still ship one at a time, or
+      // each process's own in-memory rate-limit tracking blind-sides the
+      // other's. The cross-process protection either lock exists for (the
+      // 2026-09-08 laptop-vs-VPS double-run) is unchanged: two processes
+      // still cannot ship the same site, or spend the same credential's
+      // budget, at the same time.
+      const { ran, reason, result } = await shipSiteWithLocks(site, globalRemaining);
+      if (!ran) {
+        console.log(`[job] auto-remediation site ${site.id} "${site.name}" skipped — ${reason === 'credential-locked' ? 'another site sharing its GitHub credential is shipping right now' : "another process holds this site's shipping lock"}`);
+        results.push({ siteId: site.id, skipped: reason === 'credential-locked' ? 'credential-locked' : 'locked' });
+        continue;
+      }
       globalRemaining -= result.shipped || 0;
       if (result.attempted || result.shipped) {
         console.log(`[job] auto-remediation site ${site.id} "${site.name}": attempted ${result.attempted}, shipped ${result.shipped}, failed ${result.failed}${result.stoppedReason ? ` (stopped: ${result.stoppedReason})` : ''}`);
       }
+      await alertIfShipStalled(site, result.shipped || 0);
       results.push({ siteId: site.id, ...result });
     } catch (err) {
       console.error(`[job] auto-remediation failed for site ${site.id} "${site.name}":`, err.message);
@@ -1244,6 +1459,7 @@ export async function runAutoRemediationForAllSites() {
 // recommendation detected later in the day still ships the same day, onto the
 // same batch branch/PR.
 export async function runAutoRemediationCatchupForAllSites(tz) {
+  await resumeDueAutoRemediationPauses().catch((err) => console.error('[job] resumeDueAutoRemediationPauses failed:', err.message));
   const sites = (await listSites()).filter(isShippable);
   let globalRemaining = await globalRemainingSeed();
   for (const site of sites) {
@@ -1255,9 +1471,16 @@ export async function runAutoRemediationCatchupForAllSites(tz) {
       const alreadyShippedToday = await countDraftsBySourceToday(site.id, 'auto-remediation', site.timezone || tz);
       if (!isShipCatchupOwed({ site, alreadyShippedToday, fallbackTimezone: tz })) continue;
 
-      const result = await autoRemediateSafeRecommendations(site.id, { globalRemaining });
+      // Same locks the scheduled run above takes (shipSiteWithLocks), which
+      // is what makes this guard incapable of opening a second batch
+      // alongside a run already in flight for this site, or spending a
+      // credential another site is mid-batch against — in this process or
+      // another one.
+      const { ran, result } = await shipSiteWithLocks(site, globalRemaining);
+      if (!ran) continue; // this site, or its GitHub credential, is already shipping right now
       globalRemaining -= result.shipped || 0;
       if (result.shipped) console.log(`[job] auto-remediation catch-up: site ${site.id} shipped ${result.shipped} after a missed ${SHIP_HOUR_LOCAL}:00 run`);
+      await alertIfShipStalled(site, alreadyShippedToday + (result.shipped || 0));
     } catch (err) {
       console.error(`[job] auto-remediation catch-up failed for site ${site.id} "${site.name}":`, err.message);
     }
@@ -1412,6 +1635,16 @@ export async function queueDesignProfileRescanForSite(site, {
   resolvePageUrl = sitePageUrl,
   now = () => Date.now(),
   staleAfterMs = DESIGN_PROFILE_RESCAN_STALE_AFTER_MS,
+  // Bypasses the staleness check only — every other precondition (usable
+  // profile required, no double-queueing) still applies. For the one-time
+  // post-deploy catch-up (server/scripts/force-design-profile-rescan.js):
+  // a fix to HOW the profile is derived (a capture-cap change, a correction-
+  // pass bug fix) makes every EXISTING profile worth re-deriving immediately,
+  // regardless of how recently it happened to run under the old code. The
+  // routine weekly cadence resumes normally the moment this one force-run
+  // completes, since it goes through the exact same job and re-sets
+  // derivedAt like any other rescan.
+  force = false,
 } = {}) {
   if (!site?.auto_remediation_enabled || !site?.repo_owner || !site?.repo_name) return false;
   // A site with no usable profile yet is queueDesignAgentDerivationForSite's
@@ -1421,7 +1654,7 @@ export async function queueDesignProfileRescanForSite(site, {
 
   const profile = getProfile(site);
   const derivedAt = profile?.derivedAt ? Date.parse(profile.derivedAt) : NaN;
-  if (Number.isFinite(derivedAt) && now() - derivedAt < staleAfterMs) return false;
+  if (!force && Number.isFinite(derivedAt) && now() - derivedAt < staleAfterMs) return false;
 
   try {
     const pending = await findQueuedProfileJob(site.id, DESIGN_PROFILE_JOB_KEY);
@@ -1437,13 +1670,15 @@ export async function queueDesignProfileRescanForSite(site, {
 export async function queueDesignProfileRescanForAllSites({
   listAllSites = listSites,
   queueForSite = queueDesignProfileRescanForSite,
+  force = false,
 } = {}) {
   const sites = (await listAllSites()).filter((s) => s.auto_remediation_enabled && s.repo_owner && s.repo_name);
   let queued = 0;
   for (const site of sites) {
-    if (await queueForSite(site)) queued++;
+    // eslint-disable-next-line no-await-in-loop -- sequential enqueue, same as every other fleet loop in this file
+    if (await queueForSite(site, { force })) queued++;
   }
-  if (queued) console.log(`[job] design-agent: queued ${queued} design-profile rescan(s) for sites with a stale profile`);
+  if (queued) console.log(`[job] design-agent: queued ${queued} design-profile rescan(s) for ${force ? 'every site (forced)' : 'sites with a stale profile'}`);
   return { queued };
 }
 
@@ -1552,6 +1787,37 @@ export async function runPrStatusPollForAllSites() {
   return checked;
 }
 
+// Reconciles any recommendation left blocked by config that got fixed while
+// this process was down. Every deploy restarts the process — without this, a
+// config fix (connect-repo, a manual url_file_map edit, the very code fix a
+// deploy is shipping) sits invisible until the next 07:00 local cron tick
+// instead of unblocking the moment the fix is actually running. Real
+// incident (2026-08-27): a deploy that fixed a Design Agent build failure
+// left ~250 already-resolvable recommendations sitting blocked for hours
+// because nothing re-evaluated them until the next scheduled pass.
+//
+// Deliberately NOT gated by DISABLE_CATCHUP, unlike runStartupCatchup below:
+// staging sets DISABLE_CATCHUP=true unconditionally (guarding against
+// re-running ingestion/weekly-doc/email on every redeploy-triggered
+// restart), which meant this reconciliation silently never ran there either
+// — confirmed live on 2026-09-15, ~130 recommendations across 3 sites still
+// carrying a blocked_reason from a build failure that had already succeeded
+// on later runs. Pure read-modify-write on rows that already exist — no
+// ingestion, no email, no PR side effects — so it's safe on every restart
+// regardless of that flag, including a crash-loop.
+export async function reconcileBlockedRecommendationsOnStartup() {
+  try {
+    const [daily, contentGap] = await Promise.all([
+      refreshBlockedRecommendationsForAllSites(),
+      refreshContentGapRecommendationsForAllSites(),
+    ]);
+    const updated = [...daily, ...contentGap].reduce((n, r) => n + (r.updated || 0), 0);
+    if (updated) console.log(`[catchup] blocked-recommendation reconciliation: ${updated} recommendation(s) unblocked/updated.`);
+  } catch (err) {
+    console.error('[catchup] blocked-recommendation reconciliation error:', err.message);
+  }
+}
+
 // One-shot catch-up run on server boot: ingest recent days (backfills anything
 // missed while the machine was off/asleep) and write the weekly doc if it's
 // due, independently for every connected site. Guarded by DISABLE_CATCHUP.
@@ -1574,28 +1840,6 @@ export async function runStartupCatchup() {
       console.error(`[catchup] error for site ${site.id} "${site.name}":`, err.message);
       await noteGoogleAuthOutcome(false, err);
     }
-  }
-
-  // Also reconcile any recommendation left blocked by config that got fixed
-  // while this process was down. Every deploy restarts the process — without
-  // this, a config fix (connect-repo, a manual url_file_map edit, the very
-  // code fix this deploy is shipping) sits invisible until the next 07:00
-  // local cron tick instead of unblocking the moment the fix is actually
-  // running. Real incident (2026-08-27): a deploy that fixed a Design Agent
-  // build failure left ~250 already-resolvable recommendations sitting
-  // blocked for hours because nothing re-evaluated them until the next
-  // scheduled pass. Both the daily and weekly-content-gap passes (see their
-  // own split below) — pure re-evaluation against live gate state, no PR
-  // side effects, safe to run on every restart including a crash-loop.
-  try {
-    const [daily, weekly] = await Promise.all([
-      refreshBlockedRecommendationsForAllSites(),
-      refreshContentGapRecommendationsForAllSites(),
-    ]);
-    const updated = [...daily, ...weekly].reduce((n, r) => n + (r.updated || 0), 0);
-    if (updated) console.log(`[catchup] blocked-recommendation reconciliation: ${updated} recommendation(s) unblocked/updated.`);
-  } catch (err) {
-    console.error('[catchup] blocked-recommendation reconciliation error:', err.message);
   }
 
   console.log('[catchup] done.');

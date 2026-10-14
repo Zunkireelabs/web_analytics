@@ -33,19 +33,35 @@ export function isMeasurableFix(generatorId, pageUrl) {
 // Idempotent on draft_id (unique index): a draft that somehow merges twice
 // updates its pending row rather than accumulating duplicate measurements of
 // the same window. Never overwrites an already-completed measurement.
-export async function scheduleImpactMeasurement(siteId, { draftId, pageUrl, generatorId, mergedAt }) {
+// goalId (migration 172): the goal the shipping recommendation was aligned
+// with at merge time, if any — a fact of this measurement, not recomputed
+// later. Foundation only for now: nothing reads it back yet beyond the row
+// itself (no "Goal Progress" view exists), but scheduling it here means a
+// future one needs zero new plumbing to group already-measured outcomes by
+// goal. Best-effort, same as the rest of this call: a failed goal lookup
+// must never block scheduling the (already real) measurement.
+//
+// deploymentId (migration 175): the same deployments.js row (migration 153)
+// fix-verification.js's live re-check promotes to 'deployed' — see
+// agents/lib/fix-impact.js's measureOne, which consults it before measuring
+// rather than assuming this scheduling call's mergedAt was itself a live
+// deploy. Optional: a row with no deployment tracked (an older merge, or one
+// where recordDeploymentObserved itself failed) measures exactly as before.
+export async function scheduleImpactMeasurement(siteId, { draftId, pageUrl, generatorId, mergedAt, goalId = null, deploymentId = null }) {
   const measurable = isMeasurableFix(generatorId, pageUrl);
   const { rows } = await query(
-    `INSERT INTO fix_impact (site_id, draft_id, page_url, generator_id, merged_at, measure_after, status)
-     VALUES ($1, $2, $3, $4, COALESCE($5, now()), COALESCE($5, now()) + ($6 * interval '1 day'), $7)
+    `INSERT INTO fix_impact (site_id, draft_id, page_url, generator_id, merged_at, measure_after, status, goal_id, deployment_id)
+     VALUES ($1, $2, $3, $4, COALESCE($5, now()), COALESCE($5, now()) + ($6 * interval '1 day'), $7, $8, $9)
      ON CONFLICT (draft_id) DO UPDATE
        SET merged_at = EXCLUDED.merged_at,
            measure_after = EXCLUDED.measure_after,
-           page_url = EXCLUDED.page_url
+           page_url = EXCLUDED.page_url,
+           goal_id = EXCLUDED.goal_id,
+           deployment_id = EXCLUDED.deployment_id
      WHERE fix_impact.status = 'pending'
      RETURNING *`,
     [siteId, draftId, pageUrl || null, generatorId, mergedAt || null, IMPACT_DELAY_DAYS,
-      measurable ? 'pending' : 'unmeasurable']
+      measurable ? 'pending' : 'unmeasurable', goalId || null, deploymentId || null]
   );
   return rows[0] || null;
 }

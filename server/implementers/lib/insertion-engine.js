@@ -1,6 +1,7 @@
 import { ensureMarkers, hasMarker, isHeadScopedField, isLineConventionField } from './marker-merge.js';
 import { detectHeadRegion, isJsxFile } from './structural-detect.js';
 import { getOrDetectStrategy } from './strategy-registry.js';
+import { refineMarkerPlacement } from './expand-placement.js';
 
 // The universal insertion engine's single entry point: "make sure every
 // marker in markerMap exists in fileContent," without the caller
@@ -54,7 +55,13 @@ function ensureHeadRegion(fileContent, filePath) {
 // Returns `{content, unresolved}`. `unresolved` is a per-field list of
 // `{field, markerName, reason, error}` for anything that could not be
 // safely resolved this call.
-export async function resolveInsertion(site, fileContent, filePath, markerMap) {
+//
+// `options.placement` ({ field, beforeRoles }) is the opt-in expand-content
+// placement rule: a marker CREATED IN THIS CALL for that field is moved above
+// the page's trailing FAQ/CTA sections (expand-placement.js). Absent for every
+// other caller and every tenant that has not opted in, in which case nothing
+// here changes.
+export async function resolveInsertion(site, fileContent, filePath, markerMap, options = {}) {
   // Pass 1: today's safe, structural-detection-free self-heals — LINE
   // (front-matter) fields, and HEAD-scoped fields when the HEAD region
   // already exists.
@@ -99,6 +106,14 @@ export async function resolveInsertion(site, fileContent, filePath, markerMap) {
     const result = await ensureBodyMarker(site, content, filePath, markerName);
     if (result.ok) { content = result.content; continue; }
     unresolved.push({ field, markerName, reason: result.reason, error: result.error });
+  }
+
+  const placement = options.placement;
+  if (placement?.field && markerMap[placement.field] && hasMarker(content, markerMap[placement.field])) {
+    const moved = refineMarkerPlacement(content, filePath, markerMap[placement.field], placement.beforeRoles, {
+      markerWasPresent: hasMarker(fileContent, markerMap[placement.field]),
+    });
+    content = moved.content;
   }
 
   return { content, unresolved };

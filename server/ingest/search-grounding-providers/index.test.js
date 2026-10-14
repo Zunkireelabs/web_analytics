@@ -1,4 +1,4 @@
-import { test, describe, mock } from 'node:test';
+import { test, describe, mock, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 // Tavily is the sole search-grounding provider (see index.js's own comment
@@ -39,7 +39,8 @@ mock.module('../competitor-providers/serpapi.js', {
   },
 });
 
-const { searchGroundedSources, groundingProviderConfigured } = await import('./index.js');
+const { searchGroundedSources, groundingProviderConfigured, clearSearchCache } = await import('./index.js');
+beforeEach(() => clearSearchCache()); // results are cached across calls; each test needs its own search
 
 describe('searchGroundedSources', () => {
   test('returns Tavily results when configured', async () => {

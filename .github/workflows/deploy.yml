@@ -49,13 +49,13 @@ jobs:
             # space), silently serving stale code while CI showed green.
             set -eo pipefail
 
-            DIR="/home/zunkireelabs/devprojects/analytics-app-prod"
+            DIR="/home/zunkireelabs/devprojects/websiteprojects/analytics-web"
 
             # First-push bootstrap: create directory and clone if missing
             if [ ! -d "$DIR" ]; then
               echo "First deployment — bootstrapping $DIR"
               mkdir -p "$DIR"
-              git clone -b main git@github.com:${{ github.repository }}.git "$DIR"
+              git clone -b main https://github.com/${{ github.repository }}.git "$DIR"
             fi
 
             cd "$DIR"
@@ -81,6 +81,32 @@ jobs:
             REPORT_MODEL_DAILY=${{ vars.REPORT_MODEL_DAILY }}
             REPORT_MODEL_MONTHLY=${{ vars.REPORT_MODEL_MONTHLY }}
 
+            # ── GitHub App (multi-client credentials) ───────────────────────
+            # Optional. Unset until a GitHub App is registered, at which point
+            # every site carrying a github_app_installation_id authenticates
+            # through it instead of a PAT — which is what lets client #2 onboard
+            # without a new secret, a new line here, and a redeploy.
+            # The key is base64 because this block writes .env in one heredoc
+            # and a PEM's newlines would not survive it.
+            # Same reserved-prefix rule as GITHUB_PAT below: GitHub rejects any
+            # SECRET whose name starts with GITHUB_, so the secrets are named
+            # GH_APP_* and are renamed here to the GITHUB_APP_* env vars the app
+            # actually reads (server/github/app-auth.js).
+            GITHUB_APP_ID=${{ secrets.GH_APP_ID }}
+            GITHUB_APP_PRIVATE_KEY_B64=${{ secrets.GH_APP_PRIVATE_KEY_B64 }}
+            # Chayceproperties (site #8864) has its own distinct App
+            # installation (4894335), not the shared default — fails closed
+            # (no fallback to the shared App/PAT) if this isn't set, per
+            # credentials.js's no-cross-tenant-leakage design.
+            GITHUB_APP_PRIVATE_KEY_B64_CHAYCE=${{ secrets.GH_APP_PRIVATE_KEY_B64_CHAYCE }}
+
+            # ── Sanity CMS write credentials (per-site, opt-in) ──────────────
+            # Named per-site (SANITY_WRITE_TOKEN_<SITE>), never shared — see
+            # server/sanity/credentials.js's own comment on why a shared token
+            # would mean writing tenant A's content into tenant B's CMS.
+            # Admizz Education (site #8862) is the first site using this.
+            SANITY_WRITE_TOKEN_ADMIZZ=${{ secrets.SANITY_WRITE_TOKEN_ADMIZZ }}
+
             # ── Email ────────────────────────────────────────────────────────
             SMTP_HOST=${{ vars.SMTP_HOST }}
             SMTP_PORT=${{ vars.SMTP_PORT }}
@@ -93,6 +119,32 @@ jobs:
             # ── Dashboard auth (production) ─────────────────────────────────
             SESSION_SECRET=${{ secrets.PROD_SESSION_SECRET }}
             COMPANY_SITE_ID=${{ vars.COMPANY_SITE_ID }}
+
+            # ── Action Center GitHub integration ────────────────────────────
+            # Without this, server/github/client.js throws "No GitHub PAT set"
+            # the moment someone pushes/merges a draft from the live
+            # dashboard. The Actions secret itself can't be named GITHUB_PAT —
+            # GitHub reserves any secret name starting with GITHUB_ for its
+            # own auto-provided secrets (e.g. GITHUB_TOKEN) and rejects
+            # creating one — so the secret is named GH_PAT instead, and only
+            # renamed to the GITHUB_PAT env var the app code actually expects
+            # right here.
+            GITHUB_PAT=${{ secrets.GH_PAT }}
+            # Verifies inbound POSTs to /api/webhooks/github really came from
+            # GitHub (server/routes/webhooks.js) — must be the exact same
+            # value entered as the webhook's "Secret" on each site's repo, or
+            # every delivery 401s. Same GITHUB_-prefix restriction as above:
+            # the Actions secret is GH_WEBHOOK_SECRET, renamed here to the
+            # GITHUB_WEBHOOK_SECRET env var the app code expects.
+            GITHUB_WEBHOOK_SECRET=${{ secrets.GH_WEBHOOK_SECRET }}
+            # Same idea, but for the GitHub App's own webhook (installation /
+            # installation_repositories events, server/routes/webhooks.js's
+            # /webhooks/github-app route) — a separate secret from the one
+            # above since it's a different trust boundary (one App-level
+            # webhook covering every client's installation, vs. a per-repo
+            # one). Actions secret is GH_APP_WEBHOOK_SECRET, same
+            # GITHUB_-prefix restriction as every other secret here.
+            GITHUB_APP_WEBHOOK_SECRET=${{ secrets.GH_APP_WEBHOOK_SECRET }}
 
             # ── Site identity ───────────────────────────────────────────────
             SITE_NAME=${{ vars.SITE_NAME }}
@@ -128,9 +180,13 @@ jobs:
 
             docker compose up -d
 
-            # ── data-analyst-agent: sibling Python service, same repo, own
-            # docker-compose.yml (own dedicated Postgres in prod — see that
-            # file's own `db` service — never this app's Neon database).
+            # ── data-analyst-agent: sibling Python service, same repo.
+            # Sadin's explicit call (2026-10-14, after the risk was flagged):
+            # production reads/writes the literal same database as staging
+            # (STAGING_DATA_ANALYST_DATABASE_URL) — no isolated prod DB, not
+            # even a separate database on the same Supabase project. No
+            # dedicated Postgres container here anymore; docker-compose.yml's
+            # own `db` service was removed to match.
             # Reverse-proxied under this app's own domain at /data-agent
             # (routes/data-agent.js) via DATA_ANALYST_AGENT_INTERNAL_URL
             # above, so no separate DNS/Traefik domain is required for it
@@ -139,8 +195,7 @@ jobs:
             cd "$DIR/data-analyst-agent"
 
             cat > .env << 'ENVEOF'
-            DATABASE_URL=postgresql+asyncpg://data_analyst_agent:${{ secrets.DATA_ANALYST_AGENT_POSTGRES_PASSWORD }}@db:5432/data_analyst_agent
-            POSTGRES_PASSWORD=${{ secrets.DATA_ANALYST_AGENT_POSTGRES_PASSWORD }}
+            DATABASE_URL=${{ secrets.STAGING_DATA_ANALYST_DATABASE_URL }}
             DATA_ANALYST_AGENT_DOMAIN=${{ vars.DATA_ANALYST_AGENT_DOMAIN }}
             ROOT_PATH=/data-agent
             TOKEN_ENCRYPTION_KEY=${{ secrets.DATA_ANALYST_AGENT_TOKEN_ENCRYPTION_KEY }}

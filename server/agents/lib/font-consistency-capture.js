@@ -11,6 +11,8 @@
 // font-consistency-repair needs to tell a genuine CSS-class inconsistency
 // (not safely auto-fixable) apart from a one-element inline override (is).
 import { launchBrowser, discoverPages } from '../../design-agent/live-analysis/capture.js';
+import { classifyPageType } from '../../design-agent/live-analysis/schema.js';
+import { extractScopedFontSizeDeclaration } from './font-consistency-analysis.js';
 
 const DEFAULT_MAX_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_MAX_PAGES) || 8;
 const NAV_TIMEOUT_MS = Number(process.env.DESIGN_AGENT_CAPTURE_NAV_TIMEOUT_MS) || 20_000;
@@ -18,31 +20,95 @@ const MAX_PARAGRAPHS_PER_PAGE = 20;
 
 /* eslint-disable no-undef */
 function extractStyleSamplesInPage(maxParagraphs) {
-  function sample(el) {
+  // The nearest ancestor carrying its own class — the real wrapper a
+  // headless-of-its-own-class heading (a bare `<h1>`, styled entirely via
+  // `.some-wrapper h1{...}` rather than a class on the element itself) is
+  // actually scoped by. Needed because font-consistency-analysis.js's
+  // existing class-swap fix has nothing to act on when the element itself
+  // carries no class at all — this is what lets it instead recognize a
+  // SCOPED ancestor-selector fix as safe (see that file's
+  // ancestorClassIsPageUnique/buildScopedFontSizeFix).
+  function nearestAncestorClass(el) {
+    let node = el.parentElement;
+    while (node && node !== document.body) {
+      if (typeof node.className === 'string' && node.className.trim()) {
+        return node.className.trim().split(/\s+/)[0];
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+  // Which page region the element lives in — what keeps a footer h4 and a
+  // card h4 (or a hero paragraph and a caption) from being compared as if
+  // they were the same component (see componentKey in
+  // font-consistency-analysis.js).
+  function landmarkOf(el) {
+    const l = el.closest('header, nav, footer, aside, main, article');
+    return l ? l.tagName.toLowerCase() : '';
+  }
+  // Visually hidden text (sr-only clip pattern, display:none, 0-size) has no
+  // rendered size a visitor sees.
+  function isVisuallyHidden(el, cs) {
+    if (cs.display === 'none' || cs.visibility === 'hidden') return true;
+    const r = el.getBoundingClientRect();
+    return r.width <= 1 || r.height <= 1;
+  }
+  function sample(el, { captureAncestor = false } = {}) {
     if (!el) return null;
     const cs = window.getComputedStyle(el);
+    const classes = (el.className && typeof el.className === 'string') ? el.className.trim().slice(0, 300) : '';
     return {
       tag: el.tagName.toLowerCase(),
-      classes: (el.className && typeof el.className === 'string') ? el.className.trim().slice(0, 300) : '',
+      classes,
       fontSize: cs.fontSize,
       inlineStyle: el.getAttribute('style') || null,
       outerHtml: el.outerHTML,
       text: el.textContent.trim().slice(0, 120),
+      // Only meaningful (and only ever looked up) for an element with no
+      // class of its own — see extractStyleSamplesInPage's caller.
+      ancestorClass: captureAncestor && !classes ? nearestAncestorClass(el) : null,
+      landmark: landmarkOf(el),
+      hidden: isVisuallyHidden(el, cs),
     };
   }
-  const headings = [...document.querySelectorAll('h1, h2, h3, h4')].map(sample).filter(Boolean);
+  const headings = [...document.querySelectorAll('h1, h2, h3, h4')].map((el) => sample(el, { captureAncestor: true })).filter(Boolean);
   const paragraphs = [...document.querySelectorAll('main p, article p, body > p')]
     .slice(0, maxParagraphs)
-    .map(sample)
+    .map((el) => sample(el, { captureAncestor: true }))
     .filter(Boolean);
   return { headings, paragraphs };
 }
 /* eslint-enable no-undef */
 
-export async function captureFontSamplePage(browserPage, url) {
+export async function captureFontSamplePage(browserPage, url, { propertyType } = {}) {
   await browserPage.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   const { headings, paragraphs } = await browserPage.evaluate(extractStyleSamplesInPage, MAX_PARAGRAPHS_PER_PAGE);
-  return { url, headings, paragraphs };
+
+  // The real authored CSS text (e.g. "clamp(40px,6vw,74px)"), never the
+  // browser-resolved pixel number getComputedStyle above already captured —
+  // needed to tell a plain, safely-swappable length apart from a fluid/
+  // responsive expression this platform refuses to flatten (see
+  // font-consistency-analysis.js's isFlatLength). `page.content()` is the
+  // DOM's own live-serialized HTML, not a second network fetch — for this
+  // class of static-site template, an inline <style> block's text content
+  // round-trips through DOM serialization byte-for-byte (no template syntax
+  // survives into rendered output for a plain CSS declaration), so this is
+  // exactly what the real template source also contains.
+  const headingsNeedingRaw = headings.filter((h) => h.ancestorClass);
+  if (headingsNeedingRaw.length) {
+    const html = await browserPage.content();
+    for (const h of headingsNeedingRaw) {
+      h.rawFontSizeDeclaration = extractScopedFontSizeDeclaration(html, h.ancestorClass, h.tag)?.value || null;
+    }
+  }
+
+  // classifyPageType is a pure URL-shape heuristic (design-agent/live-analysis/
+  // schema.js) — the same one the Design Agent's own capture already tags
+  // every page with. Threading it through here is what lets
+  // findFontSizeOutliers judge a template against ITS OWN majority instead of
+  // one flat sitewide majority (see that file) — this site's own real page
+  // shape, never a value carried over from another tenant.
+  return { url, pageType: classifyPageType(url, { propertyType }), headings, paragraphs };
 }
 
 // Orchestrates the whole-site capture for one agent run: discover a
@@ -72,12 +138,15 @@ export async function captureFontSamples(homepageUrl, {
   maxPages = DEFAULT_MAX_PAGES,
   launchBrowserFn = launchBrowser,
   extraUrls = [],
+  // sites.property_type — lets a product site's pricing/features/etc. pages be
+  // judged against their OWN template instead of one blended 'other'.
+  propertyType,
 } = {}) {
   const browser = await launchBrowserFn();
   try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
-    const targets = await discoverPages(page, homepageUrl, { maxPages });
+    const targets = await discoverPages(page, homepageUrl, { maxPages, propertyType });
 
     // Anchors first, then the rotation slice with anchors removed — a URL in
     // both sets must be captured once, not twice: a duplicated page would
@@ -90,7 +159,7 @@ export async function captureFontSamples(homepageUrl, {
     const pages = [];
     for (const url of urls) {
       // eslint-disable-next-line no-await-in-loop
-      const captured = await captureFontSamplePage(page, url).catch((err) => {
+      const captured = await captureFontSamplePage(page, url, { propertyType }).catch((err) => {
         console.warn(`[font-consistency/capture] could not capture ${url}: ${err.message}`);
         return null;
       });

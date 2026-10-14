@@ -1,5 +1,6 @@
 import { getCompetitorProvider } from './competitor-providers/index.js';
 import { getSearchPerformanceRange } from '../store/read.js';
+import { resolveSiteLocations } from '../agents/lib/site-locations.js';
 
 // Bounds weekly API spend — the site's own top real queries by impressions,
 // no new keyword research, no guessing what to track.
@@ -27,8 +28,10 @@ async function fetchWithRetry(provider, query, opts, attempts = 2) {
 export async function fetchCompetitorRankings(site, date, { start, end }) {
   const provider = getCompetitorProvider();
   const ownDomain = hostnameOf(site.gsc_property);
-  const locationCode = Number(process.env.COMPETITOR_LOCATION_CODE || 2840); // 2840 = United States
-  const languageCode = process.env.COMPETITOR_LANGUAGE_CODE || 'en';
+  // This site's own real target market (see migration 159) rather than one
+  // global default for every tenant — the site's primary market when it has
+  // one configured, otherwise the same global default as before.
+  const { locationCode, languageCode } = resolveSiteLocations(site)[0];
 
   const topQueries = await getSearchPerformanceRange(site.id, start, end, 'query', MAX_QUERIES);
 

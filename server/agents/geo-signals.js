@@ -2,45 +2,86 @@ import { getQueriesForPage } from '../store/read.js';
 import { analyzePageUrl, checkLlmsReadiness } from './lib/page-content.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
-import { effortForGenerator, inferSchemaType } from './lib/page-content.js';
+import { effortForGenerator, inferSchemaType, hasComparisonQueryIntent } from './lib/page-content.js';
 
 export const meta = {
   id: 'geo-signals',
   name: 'GEO Signals Agent',
   description: 'Checks ranking pages for Generative Engine Optimization signals (author attribution, content freshness, comparison content, external citations, review schema) that AI engines weigh when deciding what to cite.',
   category: 'geo',
+  requiresCapabilities: ['public-web'],
   version: 1,
   dataSources: [
     { id: 'page-content-fetch', status: 'connected', description: 'Real page HTML fetched and analyzed for GEO signals — deterministic, verifiable checks' },
   ],
 };
 
-const MAX_PAGES = 20;
+// Raised from 20 — see content-gap.js's MAX_PAGES comment for the full
+// reasoning (merge-sync fix + 800+ open recommendations backlog on
+// Zunkiree Labs meant the scan rate, not the ship ceiling, was the real
+// bottleneck). This agent's only per-page cost is a page-content fetch, no
+// external per-page quota to respect.
+const MAX_PAGES = 40;
+export const MAX_CITATION_ACTIONS_PER_RUN = Number(process.env.MAX_CITATION_ACTIONS_PER_RUN || 8);
+// Pages whose external-citations action is held back this run: every page with
+// that signal ranked below the top `max` by impressions. A pure function so
+// the cap is testable without a live run.
+export function citationPagesBeyondCap(pagesWithRecs, max = MAX_CITATION_ACTIONS_PER_RUN) {
+  return new Set(
+    pagesWithRecs
+      .filter((p) => p.recommendations?.some((r) => r.params?.focus === 'external-citations'))
+      .sort((a, b) => b.impressions - a.impressions)
+      .slice(max)
+      .map((p) => p.page),
+  );
+}
 
+
+// A "missing author signal" rule used to live here, routing to
+// expand-content's author-byline focus. Retired platform-wide (2026-09-24,
+// explicit owner decision): that focus no longer drafts a visible "About
+// the Author" section for any site (see expand-content.js), so routing a
+// recommendation there would only ever produce a dead-end, permanently-
+// failing draft. Schema-level author attribution (rel="author",
+// itemprop="author", Article schema's author field) is unaffected — still
+// surfaced separately as an informational gap by
+// page-content.js's summarizeContentGaps, and still fixable via the
+// 'schema' action type — this only removes the visible-section
+// recommendation.
+// Date/citation/review signals are an expectation of article-like content
+// only (a service, contact or legal page has no publish date by design);
+// `analysis.isArticlePage` comes from the page's own og:type/Article schema/
+// URL segment (page-content.js's isArticleLikePage). Comparison content is
+// only "missing" for a page whose real ranking query asks for a comparison —
+// the same query-intent gate content-gap.js uses, not a blanket expectation.
 const GEO_SIGNAL_RULES = [
   {
-    test: (analysis) => !analysis.hasAuthorSignal,
-    label: 'Add author/byline markup (schema author field or visible byline) so AI engines attribute the content.',
-    generatorId: 'expand-content',
-    params: (page, query, schemaTypes) => ({ page, query, focus: 'author-byline' }),
-    effort: 'Low',
+    // Routed to 'schema' (datePublished/dateModified JSON-LD), NOT
+    // expand-content's 'freshness-date' focus — that focus drafts a VISIBLE
+    // "Last Updated" heading + sentence as its own EXPANDEDCONTENT section.
+    // AI engines and Google both read dateModified from structured data or a
+    // real <time>/meta tag just as well as visible prose, so a stray
+    // "Last Updated" block bolted onto the page (confirmed live on site 8864,
+    // chayceproperties.com, 2026-09-20 — shipped on 6+ pages, several with no
+    // styling at all) bought no real GEO/SEO benefit for a very visible cost.
+    // schema.js's DATE_FIELD_RE already auto-fills datePublished/dateModified
+    // with today's real date on every schema draft, so this loses nothing —
+    // it's the same real fact, invisible.
+    test: (analysis) => !!analysis.isArticlePage && !analysis.hasFreshnessSignal,
+    label: 'Add publish or last-updated date via schema (datePublished/dateModified JSON-LD) — invisible structured data, not a visible on-page block.',
+    generatorId: 'schema',
+    params: (page, query, schemaTypes) => ({ page, schemaType: inferSchemaType(page, schemaTypes) }),
+    effort: effortForGenerator('schema'),
   },
   {
-    test: (analysis) => !analysis.hasFreshnessSignal,
-    label: 'Add publish or last-updated date (datePublished/dateModified schema, article meta tag, or visible <time> element).',
-    generatorId: 'expand-content',
-    params: (page, query, schemaTypes) => ({ page, query, focus: 'freshness-date' }),
-    effort: 'Low',
-  },
-  {
-    test: (analysis) => !analysis.hasComparisonContent,
+    test: (analysis, query) => hasComparisonQueryIntent(query) && !analysis.hasComparisonContent,
     label: 'Add comparison, alternatives, or "best of" content — generative engines disproportionately cite this shape.',
     generatorId: 'expand-content',
     params: (page, query, schemaTypes) => ({ page, query, focus: 'comparison-content' }),
     effort: 'Medium',
   },
   {
-    test: (analysis) => !analysis.hasExternalCitations,
+    test: (analysis) => !!analysis.isArticlePage && !analysis.hasExternalCitations,
     label: 'Cite external authoritative sources within the page content — AI assistants favor well-sourced content.',
     generatorId: 'expand-content',
     params: (page, query, schemaTypes) => ({ page, query, focus: 'external-citations' }),
@@ -48,9 +89,9 @@ const GEO_SIGNAL_RULES = [
   },
   {
     // Deliberately informational (generatorId: null), unlike the other four
-    // rules above — those route to expand-content with a `focus` schema.js
-    // can always honestly satisfy (a real date, the site's own configured
-    // author, a grounded external source). Review schema has no equivalent
+    // rules above — those route to 'schema' or expand-content with a `focus`
+    // that generator can always honestly satisfy (a real date, the site's own
+    // configured author, a grounded external source). Review schema has no equivalent
     // safe default: schema.js's Review type needs real ratingValue/
     // reviewCount data that most pages simply never have (a blog post, a
     // careers page), so it can't fill this gap without fabricating and
@@ -67,14 +108,23 @@ const GEO_SIGNAL_RULES = [
     // (page-content.js) already reached this same conclusion for the
     // identical gap ('Missing review/rating schema': null) — this just
     // brings this file's own copy of the same signal in line with it.
-    test: (analysis) => !analysis.hasReviewSchema,
+    test: (analysis) => !!analysis.isArticlePage && !analysis.hasReviewSchema,
     label: 'Add Review or AggregateRating JSON-LD schema so AI assistants can surface social proof — only once this page has real reviews/ratings to mark up.',
     generatorId: null,
     params: () => ({}),
     effort: 'Low',
   },
   {
-    test: (analysis) => analysis.questionHeadingCount === 0,
+    // A visible FAQ (any shape: accordion, h2-h4/<strong> questions, FAQ
+    // section) already supplies the Q&A content this rule asks for. Never a
+    // legal/policy page (terms, privacy, cookies): page-content.js already
+    // exempts those from the "Missing FAQ" gap, and generated Q&A spliced
+    // into a legal document is wrong on its face. Same for a
+    // section index (isListingPage): no prose of its own, and FAQ schema there
+    // matches nothing visible. Confirmed on chayceproperties.com, which got
+    // qa-content recommendations — and shipped drafts — for its Terms,
+    // Privacy and Cookie pages and its /blog/ index.
+    test: (analysis) => analysis.questionHeadingCount === 0 && !analysis.hasVisibleFaqContent && !analysis.isLegalPage && !analysis.isListingPage,
     label: 'Add question-style headings (e.g. "What is...?", "How does...?") with grounded answers — improves featured-snippet and AI-citation eligibility.',
     generatorId: 'qa-content',
     params: (page, query, schemaTypes) => ({ page, query }),
@@ -83,7 +133,7 @@ const GEO_SIGNAL_RULES = [
 ];
 
 export function recommendationsFor(analysis, page, query, schemaTypes) {
-  return GEO_SIGNAL_RULES.filter((r) => r.test(analysis)).map((r) => ({
+  return GEO_SIGNAL_RULES.filter((r) => r.test(analysis, query)).map((r) => ({
     label: r.label,
     generatorId: r.generatorId,
     params: r.params(page, query, schemaTypes),
@@ -129,6 +179,14 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const prioritized = [...pagesWithRecs].sort((a, b) => a.recommendations.length - b.recommendations.length || b.impressions - a.impressions);
   const priorities = priorityByRank(prioritized);
 
+  // Citations are the one GEO action that costs a real search per page. Only
+  // the top pages by impressions get the draftable action each run; the rest
+  // stay as evidence and are offered in a later run once they rank higher or
+  // the top ones are done. The agent-side cap is what bounds Tavily quota —
+  // the generator cannot know how many sibling pages are queued.
+  const deferredCitationPages = citationPagesBeyondCap(pagesWithRecs);
+  const isDeferredCitation = (page, rec) => rec.params?.focus === 'external-citations' && deferredCitationPages.has(page);
+
   const findings = prioritized.flatMap((p, i) => {
     if (!p.recommendations?.length) return [];
     const priority = priorities[i];
@@ -138,7 +196,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       evidence: { page: p.page, impressions: p.impressions, signalCount: p.recommendations.length },
       whyItMatters: `Missing ${p.recommendations.length} GEO signal(s) on this page (${p.impressions} impressions).`,
       priority,
-      recommendedAction: {
+      recommendedAction: isDeferredCitation(p.page, rec) ? null : {
         label: rec.label,
         generatorId: rec.generatorId,
         params: rec.params,

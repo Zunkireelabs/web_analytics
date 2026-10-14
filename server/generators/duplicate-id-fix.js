@@ -25,6 +25,8 @@
 // Apply per draft, same as geo-audit.js's posture, just no longer a dead
 // end when they do.
 
+import { analyzePageUrl } from '../agents/lib/page-content.js';
+
 export const meta = {
   id: 'duplicate-id-fix',
   name: 'Duplicate ID Fix Plan',
@@ -65,4 +67,28 @@ export async function generate({ params }) {
     },
     summary: `${fixPlan.length} duplicate id${fixPlan.length === 1 ? '' : 's'} (${totalOccurrences} total occurrences) on ${page || 'this page'} — fix plan drafted for manual review.`,
   };
+}
+
+// Side-effect-free re-verification (server/generators/lib/verification-layer.js).
+// Re-runs the exact same real check accessibility.js used to detect this
+// (page-content.js's analyzePage, via analyzePageUrl) against the live page
+// right now, rather than trusting the params captured whenever the finding
+// was first detected. already_resolved only once EVERY id this recommendation
+// named is no longer duplicated — a page can pick up a fresh duplicate on the
+// same id count between detection and drafting (a template edit, an A/B
+// variant), which analyzePage would surface as a genuinely different set.
+export async function verifyCurrentState(rec, { site } = {}) {
+  const page = rec.params?.page || rec.page;
+  const namedIds = (rec.params?.duplicateIds || []).map((d) => d.id);
+  if (!page || !namedIds.length) return { decision: 'still_valid', reason: 'missing-params', evidence: null };
+
+  const fetched = await analyzePageUrl(page);
+  if (!fetched.ok) return { decision: 'still_valid', reason: 'unreachable', evidence: { page, error: fetched.error } };
+
+  const stillDuplicated = new Set((fetched.analysis.duplicateIds || []).map((d) => d.id));
+  const remaining = namedIds.filter((id) => stillDuplicated.has(id));
+  if (remaining.length === 0) {
+    return { decision: 'already_resolved', reason: 'no-longer-duplicated', evidence: { page, checked: namedIds } };
+  }
+  return { decision: 'still_valid', reason: 'still-duplicated', evidence: { page, remaining } };
 }

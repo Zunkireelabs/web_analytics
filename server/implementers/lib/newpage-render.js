@@ -1,6 +1,10 @@
 import { projectPageWrapper, projectCta, projectCard } from '../../design-agent/lib/design-profile.js';
 import { projectMarkdownTablesInBody } from '../../generators/lib/markdown-table-render.js';
 import { projectMarkdownProseInBody } from '../../generators/lib/markdown-prose-render.js';
+import { stripFixedHeightClass, isInlineContentPage } from './marker-merge.js';
+import { resolvePageRole, isInlineRole } from './page-role.js';
+import { classifyPageType } from '../../design-agent/live-analysis/schema.js';
+import { slugifyTitle } from './url-file-map.js';
 // Real body-generation for the three net-new-content types (landing-page,
 // blog-outline, translation). Unlike marker-merge.js's splice (which never
 // needs to understand a template's syntax because it only replaces text
@@ -58,12 +62,34 @@ function frontMatter(fields, site) {
 // URL (see url-file-map.js's resolveNewContentUrl) with no second draft, no
 // second PR, and no edit to a sitemap file that in the Eleventy case doesn't
 // exist in the repo at all.
-export function renderLandingPageBody(content, site, { permalink = null, layout = null } = {}) {
+// featuredImage front matter is deliberately opt-IN here, unlike
+// renderBlogOutlineBody's guessed default (imageKey/altKey/creditKey above) —
+// a blog post having a hero image is an established convention this
+// platform can safely assume; a landing page or direct-answer page having
+// one is not (this renderer emitted nothing image-related at all until
+// site-wide Pexels sourcing was requested). So the field is only written
+// when `fieldNames.featuredImage` came from REAL sibling evidence
+// (newcontent-contract.js sampled an existing page in this same directory
+// that already has one) — never a guessed key for a page type with no
+// established image convention on this site.
+function featuredImageFields(content, fieldNames) {
+  if (!fieldNames?.featuredImage || !content.featuredImage?.url) return [];
+  return [
+    [fieldNames.featuredImage, content.featuredImage.url],
+    [fieldNames.featuredImageAlt || 'featuredImageAlt', content.featuredImage.alt],
+    [fieldNames.featuredImageCredit || 'featuredImageCredit', content.featuredImage.photographer
+      ? `Photo by ${content.featuredImage.photographer} on Pexels`
+      : null],
+  ];
+}
+
+export function renderLandingPageBody(content, site, { permalink = null, layout = null, fieldNames = {} } = {}) {
   const front = frontMatter([
     ['layout', layout],
     ['permalink', permalink],
     ['title', content.metaTitle || content.headline],
     ['description', content.metaDescription || content.subheadline],
+    ...featuredImageFields(content, fieldNames),
   ], site);
   const parts = [`# ${content.headline || content.target}`];
   if (content.subheadline) parts.push(content.subheadline);
@@ -73,26 +99,35 @@ export function renderLandingPageBody(content, site, { permalink = null, layout 
   }
   const cta = renderCta(content.cta, site);
   if (cta) parts.push(cta);
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'landing-page' })}\n`;
 }
 
 export function renderBlogOutlineBody(content, site, { permalink = null, layout = null, fieldNames = {} } = {}) {
   // `fieldNames` maps a canonical field onto whatever THIS directory's
   // existing posts call it (newcontent-contract.js). The defaults below are
   // only what gets used when no sibling could be read — they are not a
-  // contract any particular site honours. This mattered: the hardcoded
-  // `image` key meant zunkireelabs.com's blog template, which reads
-  // `featuredImage`, rendered no image on any generated post even though the
-  // Pexels URL was sitting right there in the front matter.
-  const imageKey = fieldNames.featuredImage || 'image';
-  const altKey = fieldNames.featuredImageAlt || 'image_alt';
-  const creditKey = fieldNames.featuredImageCredit || 'image_credit';
+  // contract any particular site honours. This mattered: a hardcoded `image`
+  // key meant zunkireelabs.com's blog template, which reads `featuredImage`,
+  // rendered no image on any generated post even though the Pexels URL was
+  // sitting right there in the front matter. Fixed by defaulting to the exact
+  // same canonical names FIELD_ALIASES itself lists first/most-likely for
+  // each field (newcontent-contract.js) — the no-siblings case should guess
+  // the platform's own best-known name, not an arbitrary lower-priority
+  // alias from that same list.
+  const imageKey = fieldNames.featuredImage || 'featuredImage';
+  const altKey = fieldNames.featuredImageAlt || 'featuredImageAlt';
+  const creditKey = fieldNames.featuredImageCredit || 'featuredImageCredit';
   const front = frontMatter([
     ['layout', layout],
     ['permalink', permalink],
     ['title', content.title || content.topic],
     ['description', content.metaDescription],
     ['date', new Date().toISOString().slice(0, 10)],
+    // Optional single-label category (e.g. 'Insights' for trend posts) —
+    // only when the draft carries one, via blog-outline.js's params.category.
+    // The Eleventy blog already reads front-matter `category` for the card
+    // label and the /blog/insights/ filter.
+    ['category', content.category],
     // Optional — only present when blog-outline.js's Pexels search
     // (generators/lib/pexels-client.js) found a match; omitted otherwise via
     // frontMatter()'s existing null/empty skip, same as every other field
@@ -131,20 +166,82 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
   // markdown rendered HERE, at apply time. Scaffolding introduced during
   // rendering is invisible to every guard by construction — so it has to not be
   // introduced.
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'blog-outline' })}\n`;
+}
+
+// Next.js App Router variant of renderBlogOutlineBody, for a
+// newContentTargets["blog-outline"] configured with `filename` (a
+// directory-per-post framework — see url-file-map.js's resolveNewContentTarget).
+// Deliberately does NOT hand-write JSX around the generated title/body text:
+// a title or paragraph containing a brace, angle bracket, quote or backtick
+// would either break the surrounding TSX as source code or (worse) be
+// silently parsed as a JSX expression instead of literal text. Content is
+// instead serialized with JSON.stringify — a plain, always-valid JS object
+// literal — and handed as props to GeneratedBlogPost, a small shared
+// component this page imports and that owns 100% of the actual markup. The
+// component is written once per site (a real, human-reviewed file in the
+// client's own repo, not generated per post) and can be restyled without
+// regenerating any existing post.
+//
+// `post` is exported (not a private `const`) so a listing page can import
+// title/featuredImage/publishedAt straight out of each generated post's own
+// file at build time — the single source of truth this file already writes,
+// rather than a second sidecar/metadata file that could drift from it. See
+// e.g. Admizz's src/app/blogs/page.tsx, which merges these with its Sanity
+// posts.
+export function renderBlogOutlineBodyTsx(content, site, { canonicalUrl = null } = {}) {
+  const title = content.title || content.topic || 'Untitled';
+  const props = {
+    title,
+    // The post's own identity — same slugifyTitle call resolveNewContentTarget
+    // used to decide this file's own directory name, so GeneratedBlogPost's
+    // "exclude myself from related posts" check can never disagree with the
+    // real URL. featuredImage/categories are optional real facts, never
+    // invented if absent (see blog-outline.js's own fetchRealCategories).
+    slug: slugifyTitle(title),
+    sections: (content.sections || [])
+      .filter((s) => s?.heading)
+      .map((s) => ({ heading: s.heading, body: s.body || '' })),
+    featuredImage: content.featuredImage?.url
+      ? { url: content.featuredImage.url, alt: content.featuredImage.alt || null }
+      : null,
+    categories: Array.isArray(content.categories) ? content.categories : [],
+    publishedAt: new Date().toISOString(),
+  };
+  const metaTitle = content.title || content.topic || 'Untitled';
+  const metaDescription = content.metaDescription || '';
+  const lines = [
+    'import type { Metadata } from "next";',
+    'import GeneratedBlogPost from "@/components/GeneratedBlogPost";',
+    '',
+    `export const post = ${JSON.stringify(props, null, 2)};`,
+    '',
+    'export const metadata: Metadata = {',
+    `  title: ${JSON.stringify(metaTitle)},`,
+    `  description: ${JSON.stringify(metaDescription)},`,
+    ...(canonicalUrl ? [`  alternates: { canonical: ${JSON.stringify(canonicalUrl)} },`] : []),
+    '};',
+    '',
+    'export default function Page() {',
+    '  return <GeneratedBlogPost {...post} />;',
+    '}',
+    '',
+  ];
+  return lines.join('\n');
 }
 
 // The direct-answer paragraph goes immediately after the heading — no
 // filler sections before it — since the whole point of this content type is
 // the AI-citation "answer-first" pattern: a real assistant (or a human
 // skimming) gets the complete answer without scrolling past preamble.
-export function renderDirectAnswerBody(content, site, { permalink = null, layout = null } = {}) {
+export function renderDirectAnswerBody(content, site, { permalink = null, layout = null, fieldNames = {} } = {}) {
   const front = frontMatter([
     ['layout', layout],
     ['permalink', permalink],
     ['title', content.title || content.heading || content.query],
     ['description', content.directAnswer?.slice(0, 155)],
     ['date', new Date().toISOString().slice(0, 10)],
+    ...featuredImageFields(content, fieldNames),
   ], site);
   const parts = [`# ${content.heading || content.query}`, content.directAnswer || ''];
   for (const s of content.supportingSections || []) {
@@ -153,7 +250,52 @@ export function renderDirectAnswerBody(content, site, { permalink = null, layout
   // Same editorial-scaffolding removal as renderBlogOutlineBody above, for the
   // same reason — see the long comment there. Both fields remain on the draft;
   // they just never reach a reader.
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'direct-answer' })}\n`;
+}
+
+// Next.js App Router variant of renderDirectAnswerBody, for a
+// newContentTargets["direct-answer"] configured with `filename` — same
+// directory-per-page framework and same reason as renderBlogOutlineBodyTsx
+// above: this repo's page.tsx files are TypeScript source, not Markdown, so
+// generated text is handed to a shared, human-authored component as a
+// JSON.stringify'd prop object rather than interpolated into JSX (a heading
+// or answer containing a brace/quote/backtick would otherwise break the
+// file or be silently misparsed as a JSX expression). The component name
+// (`GeneratedDirectAnswer`) mirrors GeneratedBlogPost's: written once per
+// site, in the client's own repo, and can be restyled without regenerating
+// any existing answer page.
+export function renderDirectAnswerBodyTsx(content, site, { canonicalUrl = null } = {}) {
+  const heading = content.title || content.heading || content.query || 'Untitled';
+  const props = {
+    heading,
+    directAnswer: content.directAnswer || '',
+    supportingSections: (content.supportingSections || [])
+      .filter((s) => s?.heading)
+      .map((s) => ({ heading: s.heading, body: s.body || '' })),
+    featuredImage: content.featuredImage?.url
+      ? { url: content.featuredImage.url, alt: content.featuredImage.alt || null }
+      : null,
+  };
+  const metaTitle = content.title || content.heading || content.query || 'Untitled';
+  const metaDescription = content.directAnswer?.slice(0, 155) || '';
+  const lines = [
+    'import type { Metadata } from "next";',
+    'import GeneratedDirectAnswer from "@/components/GeneratedDirectAnswer";',
+    '',
+    `export const answer = ${JSON.stringify(props, null, 2)};`,
+    '',
+    'export const metadata: Metadata = {',
+    `  title: ${JSON.stringify(metaTitle)},`,
+    `  description: ${JSON.stringify(metaDescription)},`,
+    ...(canonicalUrl ? [`  alternates: { canonical: ${JSON.stringify(canonicalUrl)} },`] : []),
+    '};',
+    '',
+    'export default function Page() {',
+    '  return <GeneratedDirectAnswer {...answer} />;',
+    '}',
+    '',
+  ];
+  return lines.join('\n');
 }
 
 // The page a dead internal link already pointed at (generators/
@@ -179,7 +321,7 @@ export function renderMissingPageBody(content, site, { permalink = null, layout 
   // justified creating this and which one it was modelled on) — same reason
   // renderBlogOutlineBody withholds its editorial fields, they must never
   // reach a reader.
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'missing-page' })}\n`;
 }
 
 // Deliberately NOT a structural clone of the source page (draft.content only
@@ -194,7 +336,45 @@ export function renderTranslationBody(content, site, { permalink = null, layout 
     ['title', content.translatedTitle || content.sourceTitle],
     ['description', content.translatedMetaDescription || content.sourceMetaDescription],
   ], site);
-  return `${front}\n${wrapInSiteProse(content.translatedContent || '', site)}\n`;
+  return `${front}\n${wrapInSiteProse(content.translatedContent || '', site, permalink, { actionType: 'translation' })}\n`;
+}
+
+// Next.js App Router variant of renderTranslationBody, for a
+// newContentTargets["translation"] configured with `filename`. Same
+// JSON.stringify-as-props approach as the other TSX renderers above, and
+// same reason. No `alternates.canonical` is emitted — deliberately, matching
+// renderTranslationBody's own permalink-less contract (see the long comment
+// on the `actionType === 'translation'` branch in frontend.js: a translation
+// targets a language-suffixed sibling of the source file, with no
+// newContentTargets urlPattern to resolve a canonical URL against, so "the
+// build decides" here too). `content.translatedContent` is a single opaque
+// string (no section splitting exists for translation today), so it is
+// passed through as one `content` field rather than a `sections[]` array.
+export function renderTranslationBodyTsx(content, site) {
+  const title = content.translatedTitle || content.sourceTitle || 'Untitled';
+  const props = {
+    title,
+    content: content.translatedContent || '',
+  };
+  const metaTitle = title;
+  const metaDescription = content.translatedMetaDescription || content.sourceMetaDescription || '';
+  const lines = [
+    'import type { Metadata } from "next";',
+    'import GeneratedTranslation from "@/components/GeneratedTranslation";',
+    '',
+    `export const translation = ${JSON.stringify(props, null, 2)};`,
+    '',
+    'export const metadata: Metadata = {',
+    `  title: ${JSON.stringify(metaTitle)},`,
+    `  description: ${JSON.stringify(metaDescription)},`,
+    '};',
+    '',
+    'export default function Page() {',
+    '  return <GeneratedTranslation {...translation} />;',
+    '}',
+    '',
+  ];
+  return lines.join('\n');
 }
 
 // Only a tiny, deliberately narrow parse of the two fields this codebase's
@@ -256,7 +436,7 @@ function fillContentWrapper(wrapper, body) {
 // real PR. Unchanged fallback: a site with no contentWrapper configured gets
 // the plain markdown body exactly as before, so nothing regresses for a site
 // that hasn't been through the Design Agent yet.
-function wrapInSiteProse(body, site) {
+function wrapInSiteProse(body, site, permalink = null, { actionType = null } = {}) {
   // Any real markdown table in the generated body goes through the same
   // projectTable() call content-integrity-repair.js already uses to rebuild
   // a broken/raw-text table on an EXISTING page — one table pipeline for
@@ -271,7 +451,60 @@ function wrapInSiteProse(body, site) {
   // unstyled <h2>/<p> inside a correctly-padded container is precisely the
   // "generated pages look flat next to the real ones" symptom. Runs after the
   // table pass so already-projected table markup is left alone.
-  const proseProjected = projectMarkdownProseInBody(tableProjected, site?.url_file_map?.siteRoot?.designProfile);
+  //
+  // `inline` (same classifier marker-merge.js's splice path already uses):
+  // a blog post's or legal page's own "## Subheading" is an in-article
+  // subheading, not a real page section — confirmed live (2026-09-24), a
+  // generated blog post's own body headings rendered at hero/section scale
+  // (text-3xl md:text-4xl lg:text-5xl), visibly larger than the site's own
+  // human-written reference post's item-scale (text-2xl) headings for the
+  // exact same markdown. Without a real permalink (some callers, e.g. a
+  // translation of an unclassifiable page) this is simply false, same as
+  // today's behavior.
+  // `permalink` here is a bare path ("/blog/some-post/"), not a full URL —
+  // classifyPageType (via isInlineContentPage) needs one to parse a
+  // pathname from, so a placeholder origin stands in; only the path is ever
+  // read. Malformed/absent permalinks fall through to inline=false, same as
+  // today's behavior for a caller with no permalink at all.
+  let inline = false;
+  // Role is resolved from evidence first (action type, tenant config, the
+  // site's own captured pages) and only then from the URL regex, so a post
+  // under /recursos/ or /articulos/ — which classifyPageType calls 'other' —
+  // still gets article-scale headings. Resolved once here, the single place
+  // this path decides, so the splice path and this one cannot disagree.
+  let regexInline = false;
+  let regexKnown = false;
+  if (permalink) {
+    try {
+      const href = new URL(permalink, 'https://placeholder.invalid').href;
+      regexInline = isInlineContentPage(href);
+      regexKnown = classifyPageType(href, { propertyType: site?.property_type }) !== 'other';
+    } catch { /* both stay false */ }
+  }
+  // Compatibility floor: with no permalink there is nothing to place, so
+  // behaviour is exactly what it was. And where the regex positively
+  // recognises the URL as a non-article page type (a service or landing
+  // path), the action type does not override it — the fix targets the
+  // case the regex is blind to ('other'), not the ones it already knows.
+  if (permalink) {
+    const role = resolvePageRole(site, { permalink, actionType });
+    const actionTypeOverRecognised = role.source === 'action-type' && regexKnown;
+    inline = role.role !== 'unknown' && !actionTypeOverRecognised ? isInlineRole(role.role) : regexInline;
+  }
+  // Per-site opt-out for article pages: `siteRoot.inlineProse: 'layout'` means
+  // this site's blog/legal LAYOUT already styles article prose (site 1's
+  // blog-post.njk wraps the body in Tailwind Typography's `.prose`, which is
+  // why its human-written posts are bare markdown). Projecting the design
+  // profile's page-builder classes onto an article's headings and paragraphs
+  // then OVERRIDES that layout: confirmed live on site 1 (2026-10-02), generated
+  // posts rendered at 30-48px headings and 20px body next to the 28px/18px of
+  // every hand-written post, because `typography.body` is the landing-page body
+  // class (`text-lg md:text-xl max-w-2xl`) and `heading.item` carries
+  // `md:text-3xl`. Opt-in only, so every other tenant's output is unchanged.
+  const layoutStylesProse = inline && site?.url_file_map?.siteRoot?.inlineProse === 'layout';
+  const proseProjected = layoutStylesProse
+    ? tableProjected
+    : projectMarkdownProseInBody(tableProjected, site?.url_file_map?.siteRoot?.designProfile, { inline });
 
   // Configured template first, then a projection from the site's design
   // profile, then bare markdown. That middle step is the change: net-new
@@ -280,7 +513,12 @@ function wrapInSiteProse(body, site) {
   // configured, even on a site whose design language was already known.
   // DEFAULT behaviour (bare body) now only applies to a site with no design
   // knowledge at all.
-  const configured = site?.url_file_map?.siteRoot?.componentTemplates?.contentWrapper?.wrapper;
+  // stripFixedHeightClass: a captured wrapper can carry an incidental fixed
+  // height from whatever instance the Design Agent captured it from (see
+  // marker-merge.js's sanitizeCapturedTemplate for the 2026-09-09 case this
+  // guards against) — catastrophic here specifically, since this wrapper
+  // holds an ENTIRE net-new page body, not one section.
+  const configured = stripFixedHeightClass(site?.url_file_map?.siteRoot?.componentTemplates?.contentWrapper?.wrapper);
   const wrapper = configured?.includes('{{BODY}}')
     ? configured
     : projectPageWrapper(site?.url_file_map?.siteRoot?.designProfile);
@@ -329,5 +567,5 @@ export function renderCompliancePageBody(content, preserved = {}, site, { permal
   for (const s of content.sections || []) {
     if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);
   }
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, preserved.permalink || permalink)}\n`;
 }

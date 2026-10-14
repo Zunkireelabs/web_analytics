@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding, llmsTxtHasValidStructure, titleKeywordConsistency, inferSchemaType, MAX_INLINE_STYLE_COUNT, MIN_GROUNDING_WORDS, hasSufficientGroundingContent, requireGroundedContent } from './page-content.js';
+import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding, llmsTxtHasValidStructure, titleKeywordConsistency, inferSchemaType, MAX_INLINE_STYLE_COUNT, MIN_GROUNDING_WORDS, hasSufficientGroundingContent, requireGroundedContent, rebuildFaqContainerText, isListingPage } from './page-content.js';
 
 // Regression coverage for a real false-positive found in production: a
 // robots.txt that correctly Allow's every real answer-engine crawler while
@@ -235,7 +235,7 @@ describe('contentGapsFor — GEO gap types', () => {
     hasComparisonContent: true, imagesTotal: 0, imagesWithoutAlt: 0, hasCanonical: true,
     canonicalUrl: null, pageHost: null, hasOpenGraph: true, listCount: 1, questionHeadingCount: 1,
     hasAuthorSignal: true, hasFreshnessSignal: true, hasReviewSchema: true,
-    externalCitationDomainCount: 3, hasExternalCitations: true,
+    externalCitationDomainCount: 3, hasExternalCitations: true, isArticlePage: true,
   };
 
   test('no GEO gaps reported when every GEO signal is present', () => {
@@ -322,6 +322,26 @@ describe('contentGapsFor — Keyword consistency gap', () => {
     const analysis = { ...baseAnalysis, title: 'Scuba Diving Equipment Reviews', bodyText: 'This page is actually about hiking trails and camping gear.' };
     const gaps = contentGapsFor(analysis, []).map((g) => g.type);
     assert.ok(gaps.includes('Keyword consistency'));
+  });
+});
+
+// Regression coverage for a real false positive found in production
+// (zunkireelabs.com, 2026-09-12): a nav link written as the full path plus a
+// same-page anchor ("/services/#ai") — not a bare "#ai" — was being crawled
+// and stored as its own page. Every fragment variant then fetches identical
+// HTML, which duplicate-content.js reads as N pages sharing one content
+// hash: a detector artifact, not a real duplicate-content editorial call.
+describe('analyzePage — internalLinks fragment stripping', () => {
+  test('a same-page anchor written as a full path is normalized to the fragment-free URL', () => {
+    const html = '<html><body><a href="/services/#ai">AI</a><a href="/services/#data">Data</a></body></html>';
+    const { internalLinks } = analyzePage(html, 'https://example.com/services/');
+    assert.deepEqual(internalLinks, ['https://example.com/services/', 'https://example.com/services/']);
+  });
+
+  test('a bare same-page anchor ("#ai") is still excluded entirely, not just stripped', () => {
+    const html = '<html><body><a href="#ai">AI</a></body></html>';
+    const { internalLinks } = analyzePage(html, 'https://example.com/services/');
+    assert.deepEqual(internalLinks, []);
   });
 });
 
@@ -513,6 +533,35 @@ describe('analyzePage — imagesMissingAlt (alt-text.js grounding)', () => {
     assert.equal(images[0].src, '');
     assert.ok(images[0].originalTag.includes('srcset='));
   });
+
+  // Regression, real production bug (Zunkiree Labs, drafts 1608/2387/2422/
+  // 2950, confirmed 2026-09-22): a purely decorative image with alt="" AND
+  // aria-hidden="true" is NOT missing alt text — that pairing is the
+  // correct, complete accessibility treatment (assistive tech already skips
+  // it). alt-text.js kept drafting real captions for a decorative hero image
+  // shared across multiple service pages, and the apply-time safety check
+  // correctly refused every one (it wasn't the page's own registered hero)
+  // — the real fix is never treating an aria-hidden image as needing a
+  // caption in the first place.
+  test('a decorative image (alt="" + aria-hidden="true") is excluded, not flagged as missing alt text', () => {
+    const html = '<html><body><img src="/decor.webp" alt="" aria-hidden="true" class="absolute inset-0"></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    assert.deepEqual(a.imagesMissingAlt, []);
+    assert.equal(a.imagesWithoutAlt, 0);
+  });
+
+  test('aria-hidden alone (with alt already present) is unaffected — still excluded from missing, same as before', () => {
+    const html = '<html><body><img src="/decor.webp" alt="Decorative background" aria-hidden="true"></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    assert.deepEqual(a.imagesMissingAlt, []);
+  });
+
+  test('aria-hidden="false" (explicitly not hidden) still gets flagged if alt is missing', () => {
+    const html = '<html><body><img src="/real.jpg" aria-hidden="false"></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    assert.equal(a.imagesMissingAlt.length, 1);
+    assert.equal(a.imagesWithoutAlt, 1);
+  });
 });
 
 // Regression coverage: page-content.js used to only COUNT malformed JSON-LD
@@ -550,6 +599,62 @@ describe('analyzePage — structured-data repair signals', () => {
     assert.equal(a.malformedJsonLdBlocks, 0);
     assert.deepEqual(a.malformedSchemaBlocks, []);
     assert.deepEqual(a.duplicateSchemaTypes, []);
+  });
+});
+
+// Regression coverage for a real production bug: a comparison table shipped
+// as raw pipe-delimited text still failed content-integrity-repair.js's
+// raw-text-table fix whenever the table shared its <p> with an ordinary
+// lead-in sentence ("...here's a breakdown: | Feature | ...") — a real,
+// common shape a writer/LLM produces — because the old `clean` check
+// required the ENTIRE block to be table-shaped, no prose at all.
+describe('analyzePage — rawTextTableBlocks (raw-text-table detection)', () => {
+  const PAGE_URL = 'https://example.com/resources/report';
+
+  test('a pure pipe-table block (no prose) is still clean, with no before/after text', () => {
+    const html = '<html><body><p>Feature | Plan A | Plan B\nPrice | $10 | $20\nSupport | Email | Phone</p></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    const block = a.rawTextTableBlocks[0];
+    assert.equal(block.clean, true);
+    assert.equal(block.beforeText, null);
+    assert.equal(block.afterText, null);
+    assert.deepEqual(block.rows[0], ['Feature', 'Plan A', 'Plan B']);
+  });
+
+  test('a lead-in sentence sharing the paragraph with the table is extracted, not treated as irregular', () => {
+    const html = '<html><body><p>Here is a breakdown of the key differences:\n'
+      + '| Feature | AI-Native Search | Traditional Keyword Search |\n'
+      + '|---|---|---|\n'
+      + '| User Intent | Understands intent | Matches terms |\n'
+      + '| Response Type | Direct answers | Ranked links |'
+      + '</p></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    const block = a.rawTextTableBlocks[0];
+    assert.equal(block.clean, true);
+    assert.equal(block.beforeText, 'Here is a breakdown of the key differences:');
+    assert.equal(block.afterText, null);
+    assert.deepEqual(block.rows[0], ['Feature', 'AI-Native Search', 'Traditional Keyword Search']);
+    assert.deepEqual(block.rows[1], ['User Intent', 'Understands intent', 'Matches terms']);
+  });
+
+  test('trailing prose after the table is captured as afterText', () => {
+    const html = '<html><body><p>'
+      + '| Feature | Plan A | Plan B |\n'
+      + '| Price | $10 | $20 |\n'
+      + '| Support | Email | Phone |\n'
+      + 'Contact sales for enterprise pricing.'
+      + '</p></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    const block = a.rawTextTableBlocks[0];
+    assert.equal(block.clean, true);
+    assert.equal(block.beforeText, null);
+    assert.equal(block.afterText, 'Contact sales for enterprise pricing.');
+  });
+
+  test('prose interleaved BETWEEN table rows (not just around them) stays irregular', () => {
+    const html = '<html><body><p>Some prose here.\nFeature | Plan A | Extra\nMore prose in between.\nPrice | $10 | $20\nSupport | Email | Phone</p></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    assert.equal(a.rawTextTableBlocks.find((b) => b.clean), undefined);
   });
 });
 
@@ -600,10 +705,224 @@ describe('inferSchemaType', () => {
   });
 });
 
+describe('analyzePage — faqContainerHtml (content-integrity-repair anchor)', () => {
+  test('captures the one qualifying FAQ container\'s exact outerHTML', () => {
+    const html = '<html><body><div id="faq"><button>What is X?</button><button>How does Y work?</button></div></body></html>';
+    const a = analyzePage(html, 'https://example.com/x');
+    assert.equal(a.faqContainerHtml, '<div id="faq"><button>What is X?</button><button>How does Y work?</button></div>');
+  });
+
+  test('stays null when there are two qualifying FAQ containers — no single unambiguous anchor', () => {
+    const html = '<html><body>'
+      + '<div class="faq-a"><button>What is X?</button><button>How does Y work?</button></div>'
+      + '<div id="faq-b"><button>What is Z?</button><button>Who does W?</button></div>'
+      + '</body></html>';
+    const a = analyzePage(html, 'https://example.com/x');
+    assert.equal(a.faqContainerHtml, null);
+  });
+
+  test('stays null when no FAQ-marked container qualifies at all', () => {
+    const a = analyzePage('<html><body><p>No FAQ here.</p></body></html>', 'https://example.com/x');
+    assert.equal(a.faqContainerHtml, null);
+  });
+});
+
+describe('rebuildFaqContainerText', () => {
+  test('swaps question/answer text via aria-controls, leaving every other byte of the container untouched', () => {
+    const container = '<div id="faq"><button aria-controls="a1">Old question?</button><div id="a1">Old answer.</div></div>';
+    const out = rebuildFaqContainerText(container, [{ question: 'New question?', answer: 'New answer.' }]);
+    assert.equal(out, '<div id="faq"><button aria-controls="a1">New question?</button><div id="a1">New answer.</div></div>');
+  });
+
+  test('swaps question/answer text via a dt/dd pair', () => {
+    const container = '<dl><dt>Old question?</dt><dd>Old answer.</dd></dl>';
+    const out = rebuildFaqContainerText(container, [{ question: 'New question?', answer: 'New answer.' }]);
+    assert.equal(out, '<dl><dt>New question?</dt><dd>New answer.</dd></dl>');
+  });
+
+  test('refuses (returns null) when the item count does not match the container\'s real question count', () => {
+    const container = '<div id="faq"><button aria-controls="a1">Q1?</button><div id="a1">A1.</div><button aria-controls="a2">Q2?</button><div id="a2">A2.</div></div>';
+    assert.equal(rebuildFaqContainerText(container, [{ question: 'Only one?', answer: 'One answer.' }]), null);
+  });
+
+  test('refuses (returns null) for an unsupported answer shape (details/summary) rather than risk destroying nested markup', () => {
+    const container = '<details><summary>Old question?</summary><p>Old <strong>answer</strong>.</p></details>';
+    assert.equal(rebuildFaqContainerText(container, [{ question: 'New question?', answer: 'New answer.' }]), null);
+  });
+
+  test('refuses (returns null) rather than overwrite a question element that has real nested markup', () => {
+    const container = '<div id="faq"><button aria-controls="a1"><em>Old</em> question?</button><div id="a1">Old answer.</div></div>';
+    assert.equal(rebuildFaqContainerText(container, [{ question: 'New question?', answer: 'New answer.' }]), null);
+  });
+});
+
 describe('analyzePage openGraphType', () => {
   test('captures the page\'s own og:type declaration, null when absent', () => {
     const withOg = '<html><head><meta property="og:type" content="product"></head><body></body></html>';
     assert.equal(analyzePage(withOg, 'https://example.com/x').openGraphType, 'product');
     assert.equal(analyzePage('<html><head></head><body></body></html>', 'https://example.com/x').openGraphType, null);
+  });
+});
+
+// Detector false-positive fixes (2026-10 audit): every case below was a real
+// live-site shape the old detector misread.
+const faqSchema = (n) => `<script type="application/ld+json">${JSON.stringify({
+  '@context': 'https://schema.org', '@type': 'FAQPage',
+  mainEntity: Array.from({ length: n }, (_, i) => ({ '@type': 'Question', name: `Q${i}?`, acceptedAnswer: { '@type': 'Answer', text: 'A' } })),
+})}</script>`;
+
+describe('analyzePage — faqSchemaWithoutVisible abstains on any visible FAQ shape', () => {
+  const wrap = (body, head = faqSchema(2)) => `<html><head>${head}</head><body>${body}</body></html>`;
+
+  test('asserts zero only when no FAQ-shaped content exists at all', () => {
+    const a = analyzePage(wrap('<h1>Hi</h1><p>Plain page text.</p>'), 'https://example.com/x');
+    assert.equal(a.faqSchemaWithoutVisible, true);
+  });
+
+  test('h3 questions with <p> answers (platform FAQ output) count as a visible FAQ', () => {
+    const a = analyzePage(wrap('<h2>Questions</h2><h3>What is it?</h3><p>Thing.</p><h3>How much?</h3><p>Little.</p>'), 'https://example.com/x');
+    assert.equal(a.faqSchemaWithoutVisible, false);
+  });
+
+  test('<p><strong>Question?</strong> pairs count as a visible FAQ', () => {
+    const a = analyzePage(wrap('<p><strong>Do you ship?</strong></p><p>Yes.</p>'), 'https://example.com/x');
+    assert.equal(a.faqSchemaWithoutVisible, false);
+  });
+
+  test('a visible "Frequently asked questions" heading counts even without ?-terminated questions', () => {
+    const a = analyzePage(wrap('<h2>Frequently asked questions</h2><div>Answer blocks</div>'), 'https://example.com/x');
+    assert.equal(a.faqSchemaWithoutVisible, false);
+  });
+
+  test('<summary>Q?<span>+</span> — decorative child text no longer breaks the "?" check', () => {
+    const a = analyzePage(wrap('<details><summary>What is it?<span>+</span></summary>It is a thing.</details><details><summary>Why?<span class="icon">▾</span></summary>Because.</details>'), 'https://example.com/x');
+    assert.equal(a.faqVisibleQuestionCount, 2);
+    assert.equal(a.faqSchemaWithoutVisible, false);
+    assert.equal(a.faqVisibleItems[0].question, 'What is it?');
+  });
+});
+
+describe('analyzePage — multiple FAQPage blocks', () => {
+  test('compares against each block: a second block that disagrees is a mismatch', () => {
+    const body = '<h2>FAQ</h2><details><summary>A?</summary>a</details><details><summary>B?</summary>b</details>';
+    const a = analyzePage(`<html><head>${faqSchema(2)}${faqSchema(5)}</head><body>${body}</body></html>`, 'https://example.com/x');
+    assert.equal(a.faqPageBlockCount, 2);
+    assert.deepEqual(a.faqSchemaBlockCounts, [2, 5]);
+    assert.equal(a.faqCountMismatch, true);
+    assert.equal(a.faqSchemaSimple, false, 'two blocks: never offer the single-block auto-resync');
+  });
+
+  test('one matching block is not a mismatch', () => {
+    const body = '<details><summary>A?</summary>a</details><details><summary>B?</summary>b</details>';
+    const a = analyzePage(`<html><head>${faqSchema(2)}</head><body>${body}</body></html>`, 'https://example.com/x');
+    assert.equal(a.faqCountMismatch, false);
+  });
+});
+
+describe('analyzePage — empty-interactive accessibility names', () => {
+  const count = (body) => analyzePage(`<html><body>${body}</body></html>`, 'https://example.com/').emptyInteractiveElements;
+  test('truly empty button and link are counted', () => {
+    assert.equal(count('<button></button><a href="/x"></a>'), 2);
+  });
+  test('framework-bound names (x-text, :aria-label, v-text, {{ }}) are named', () => {
+    assert.equal(count('<button x-text="label"></button><button :aria-label="l"></button><a href="/x" v-text="t"></a><button>{{ count }}</button>'), 0);
+  });
+  test('an id\'d, empty control is JS-populated and skipped', () => {
+    assert.equal(count('<button id="cart-count"></button><a href="/c" id="cart"></a>'), 0);
+  });
+});
+
+describe('analyzePage — viewportBlocksZoom parses maximum-scale numerically', () => {
+  const blocks = (content) => analyzePage(`<html><head><meta name="viewport" content="${content}"></head><body></body></html>`, 'https://example.com/').viewportBlocksZoom;
+  test('maximum-scale=1.5 does not block zoom', () => assert.equal(blocks('width=device-width, maximum-scale=1.5'), false));
+  test('maximum-scale=5 does not block zoom', () => assert.equal(blocks('width=device-width, maximum-scale=5'), false));
+  test('maximum-scale=1 and 1.0 and 0.5 block zoom', () => {
+    assert.equal(blocks('width=device-width, maximum-scale=1'), true);
+    assert.equal(blocks('width=device-width, maximum-scale=1.0'), true);
+    assert.equal(blocks('width=device-width, maximum-scale=0.5'), true);
+  });
+  test('user-scalable=no still blocks zoom', () => assert.equal(blocks('width=device-width, user-scalable=no'), true));
+});
+
+describe('contentGapsFor — false-positive gates', () => {
+  const base = {
+    title: 'A perfectly good title for this page', metaDescription: 'A'.repeat(80),
+    hasMetaDescription: true, hasFaq: true, hasSchema: true, h1Count: 1, h2Count: 1,
+    hasComparisonContent: true, imagesTotal: 0, imagesWithoutAlt: 0, hasCanonical: true,
+    canonicalUrl: null, pageHost: null, hasOpenGraph: true, listCount: 1, questionHeadingCount: 1,
+    hasAuthorSignal: true, hasFreshnessSignal: true, hasReviewSchema: true,
+    externalCitationDomainCount: 3, hasExternalCitations: true, isRootPage: true,
+  };
+  const types = (a, q = []) => contentGapsFor(a, q).map((g) => g.type);
+
+  test('canonical www vs apex is not a different domain', () => {
+    const t = types({ ...base, canonicalUrl: 'https://example.com/p', pageHost: 'www.example.com' });
+    assert.ok(!t.includes('Canonical points to a different domain'));
+  });
+  test('a genuinely different canonical domain is still flagged', () => {
+    const t = types({ ...base, canonicalUrl: 'https://other.com/p', pageHost: 'www.example.com' });
+    assert.ok(t.includes('Canonical points to a different domain'));
+  });
+  test('a page that 3xx\'d is skipped for the cross-domain canonical check', () => {
+    const t = types({ ...base, canonicalUrl: 'https://other.com/p', pageHost: 'example.com', wasRedirected: true });
+    assert.ok(!t.includes('Canonical points to a different domain'));
+  });
+  test('keyword consistency: skipped when bodyText is a narrow sub-container pick', () => {
+    const a = { ...base, title: 'Scuba Diving Equipment Reviews', bodyText: 'Totally unrelated narrow sidebar block.', mainContentSelector: 'article' };
+    assert.ok(!types(a).includes('Keyword consistency'));
+  });
+  test('keyword consistency: tested against the full-text result when provided', () => {
+    const covered = { ...base, title: 'Scuba Diving Equipment Reviews', bodyText: 'narrow', mainContentSelector: 'main', keywordConsistency: titleKeywordConsistency('Scuba Diving Equipment Reviews', 'scuba diving equipment reviews everywhere') };
+    assert.ok(!types(covered).includes('Keyword consistency'));
+  });
+  test('analyzePage computes keyword consistency over the full text, not the first container', () => {
+    const filler = 'lorem ipsum dolor sit amet '.repeat(12);
+    const html = `<html><head><title>Scuba Diving Equipment Reviews</title></head><body><main>${filler}</main><section><h2>Scuba diving equipment reviews</h2></section></body></html>`;
+    const a = analyzePage(html, 'https://example.com/x');
+    assert.equal(a.mainContentSelector, 'main');
+    assert.ok(a.keywordConsistency.ratio >= 0.5);
+  });
+  test('Missing FAQ is not asked of a legal page, or a page with a visible FAQ', () => {
+    assert.ok(!types({ ...base, hasFaq: false, isLegalPage: true }).includes('Missing FAQ'));
+    assert.ok(!types({ ...base, hasFaq: false, hasVisibleFaqContent: true }).includes('Missing FAQ'));
+    assert.ok(types({ ...base, hasFaq: false }).includes('Missing FAQ'));
+  });
+  test('author/freshness/review/citation gaps only on article pages', () => {
+    const missing = { ...base, hasAuthorSignal: false, hasFreshnessSignal: false, hasReviewSchema: false, hasExternalCitations: false, externalCitationDomainCount: 0 };
+    const geo = (t) => t.filter((x) => /author|freshness|review|citations/.test(x));
+    assert.deepEqual(geo(types({ ...missing, isArticlePage: false })), []);
+    assert.equal(geo(types({ ...missing, isArticlePage: true })).length, 4);
+  });
+  test('analyzePage marks a /blog/ post article-like and a service page not', () => {
+    assert.equal(analyzePage('<html><body></body></html>', 'https://example.com/blog/my-post').isArticlePage, true);
+    assert.equal(analyzePage('<html><body></body></html>', 'https://example.com/services/web').isArticlePage, false);
+    assert.equal(analyzePage('<html><body></body></html>', 'https://example.com/privacy').isLegalPage, true);
+  });
+});
+
+describe('isListingPage', () => {
+  const kids = (n, base = 'https://e.com/blog') => Array.from({ length: n }, (_, i) => `${base}/post-${i}/`);
+  test('true for a section index linking to 5+ distinct child pages', () => {
+    assert.equal(isListingPage('/blog/', kids(5)), true);
+  });
+  test('false below the threshold, for the root, and for unrelated links', () => {
+    assert.equal(isListingPage('/blog/', kids(4)), false);
+    assert.equal(isListingPage('/', kids(9, 'https://e.com')), false);
+    assert.equal(isListingPage('/blog/', kids(9, 'https://e.com/other')), false);
+  });
+  test('duplicate links to one child count once', () => {
+    assert.equal(isListingPage('/blog/', Array(9).fill('https://e.com/blog/one/')), false);
+  });
+});
+
+describe('inferSchemaType — listing pages', () => {
+  test('a section index is a CollectionPage, not Article, despite the /blog/ path hint', () => {
+    assert.equal(inferSchemaType('https://e.com/blog/', [], { isListingPage: true, openGraphType: 'website' }), 'CollectionPage');
+  });
+  test('a real page under /blog/ is still Article', () => {
+    assert.equal(inferSchemaType('https://e.com/blog/post/', [], { isListingPage: false }), 'Article');
+  });
+  test('an existing real type still wins over the listing inference', () => {
+    assert.equal(inferSchemaType('https://e.com/blog/', ['Blog'], { isListingPage: true }), 'Blog');
   });
 });

@@ -20,6 +20,25 @@ export function knownDomain(site) {
   return site.website_domain.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '');
 }
 
+// The public origin a site's live pages are served from — the anchor for
+// site-level checks (/llms.txt, /robots.txt, /sitemap.xml, the shared
+// layout template) that have no per-page URL of their own. Returns null
+// rather than guessing when a site has no domain configured, which callers
+// (verificationMethodFor, generators' own verifyCurrentState) turn into an
+// explicit 'unverifiable'/no-checkable-target answer instead of a
+// fabricated check. Moved here (from routes/action-center.js, its original
+// caller) so generators can reuse it without statically importing that
+// route file's much heavier dependency graph.
+export function siteOriginFor(site) {
+  const raw = site?.website_domain || site?.gsc_property?.replace(/^sc-domain:/, '') || null;
+  if (!raw) return null;
+  try {
+    return new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).origin;
+  } catch {
+    return null;
+  }
+}
+
 export async function resolveOwnDomain(site, siteId, start, end) {
   const known = knownDomain(site);
   if (known) return known;

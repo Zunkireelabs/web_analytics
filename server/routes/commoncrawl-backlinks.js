@@ -2,29 +2,48 @@ import { Router } from 'express';
 import { requireAuth, requirePlatformRole } from './login.js';
 import { fetchDomainSummary } from '../providers/backlinks/commoncrawl.js';
 import { hasCompletedGraphRelease } from '../store/commoncrawl-backlinks.js';
+import { getLatestAuthoritySnapshot } from '../store/authority.js';
 
-// Exposes Common Crawl backlink summaries (server/providers/backlinks/
-// commoncrawl.js, populated by server/scripts/refresh-commoncrawl-graph.js)
-// over the API. Internal-only, same gate as Command Center/Site Audit — this
-// is company-side backlink/authority-adjacent infra, not a client-facing
-// feature yet. Deliberately its own router, importing only the Common Crawl
-// provider — never server/ingest/dataforseo-backlinks.js or authority.js —
-// so this stays independent of DataForSEO and the Authority Score both in
-// behavior and in what happens if either is unconfigured or down.
+// Exposes a real referring-domain summary for this site's own domain,
+// preferring the already-paid-for DataForSEO backlink data that
+// authority.js's monthly Authority Score run already fetched and stored in
+// authority_snapshots (migration 035) — no extra paid API call needed here,
+// just a read of what that agent already computed. Common Crawl (server/
+// providers/backlinks/commoncrawl.js, populated by server/scripts/
+// refresh-commoncrawl-graph.js) is now only a fallback for a site where
+// DataForSEO isn't configured, or hasn't produced a snapshot yet — it used
+// to be the only source this route would ever use, which meant a
+// DataForSEO-paying tenant still saw this card sit empty while their own
+// Authority Score (same underlying data) worked fine.
 const router = Router();
 router.use(requireAuth, requirePlatformRole('platform_admin'));
 
 // GET /commoncrawl-backlinks/summary?domain=example.com
 // Always 200 with a structured `status` — 'ok' when this domain has real
-// imported data, 'insufficient-data' otherwise (missing/unknown domain, or
-// the ETL never having completed a release yet) — never a fabricated
-// summary and never a 404/500 for "no data", consistent with the agent
-// framework's own status:'insufficient-data' convention (see
-// server/agents/types.js).
+// data (DataForSEO via authority_snapshots, or Common Crawl), 'insufficient-
+// data' otherwise (missing/unknown domain, or the Common Crawl ETL never
+// having completed a release yet) — never a fabricated summary and never a
+// 404/500 for "no data", consistent with the agent framework's own
+// status:'insufficient-data' convention (see server/agents/types.js).
 router.get('/commoncrawl-backlinks/summary', async (req, res, next) => {
   try {
     const domain = String(req.query.domain || '').trim();
     if (!domain) return res.status(400).json({ error: 'domain query parameter is required' });
+
+    if (req.siteId) {
+      const snapshot = await getLatestAuthoritySnapshot(req.siteId);
+      if (snapshot?.data_source === 'dataforseo' && snapshot.referring_domains != null) {
+        return res.json({
+          status: 'ok',
+          source: 'dataforseo',
+          domain,
+          referringDomains: snapshot.referring_domains,
+          graphRank: null,
+          graphRelease: null,
+          updatedAt: snapshot.snapshot_date,
+        });
+      }
+    }
 
     const summary = await fetchDomainSummary(domain);
     if (summary) {

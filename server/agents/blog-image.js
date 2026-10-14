@@ -4,6 +4,7 @@ import { configured as imagesConfigured, pexelsPhotoIdFromUrl } from '../generat
 import {
   extractTitle, extractImageUrl, hasImageField, listPostPaths,
 } from '../generators/lib/blog-frontmatter.js';
+import { featuredImageWanted, extractCategory } from '../generators/lib/blog-image-policy.js';
 import { makeFinding } from './lib/findings.js';
 import { effortForGenerator } from './lib/page-content.js';
 
@@ -23,6 +24,7 @@ export const meta = {
   name: 'Blog Image Agent',
   description: 'Finds existing blog posts published with no featured image at all, sharing their featured image with another post, or pointing at a local asset file that was never actually committed.',
   category: 'content',
+  requiresCapabilities: ['public-web'],
   version: 1,
 };
 
@@ -65,7 +67,12 @@ async function defaultFindPostsNeedingImage(site, target) {
     if (!raw) continue;
     const title = extractTitle(raw);
     if (!title) continue;
-    if (!hasImageField(raw)) { missing.push({ filePath, title }); continue; }
+    if (!hasImageField(raw)) {
+      // A site restricted to Insights-only images wants its other posts to stay
+      // image-less (the blog's gradient card) — not a defect to repair.
+      if (featuredImageWanted(target, { category: extractCategory(raw) })) missing.push({ filePath, title });
+      continue;
+    }
     const url = extractImageUrl(raw);
     if (!localAssetExists(url, files)) { broken.push({ filePath, title }); continue; }
     const photoId = pexelsPhotoIdFromUrl(url);

@@ -92,6 +92,28 @@ describe('blog-image agent', () => {
     assert.equal(result.facts.findings[0].evidence.title, 'A Post With No Image');
   });
 
+  test("with featuredImage 'insights-only', only Insights posts are flagged for a missing image", async () => {
+    siteFixture.url_file_map.newContentTargets['blog-outline'].featuredImage = 'insights-only';
+    treeFiles = ['src/blog/regular.md', 'src/blog/insight.md', 'src/blog/quoted-other.md'];
+    filesByPath = {
+      'src/blog/regular.md': post('Regular Post'),
+      'src/blog/insight.md': '---\ntitle: "Trend Post"\ncategory: Insights\n---\n\nBody.',
+      'src/blog/quoted-other.md': '---\ntitle: "Other"\ncategory: "Business"\n---\n\nBody.',
+    };
+    const result = await run({ siteId: 1 });
+    assert.deepEqual(result.facts.findings.map((f) => f.evidence.title), ['Trend Post']);
+  });
+
+  test('without that setting every image-less post is still flagged (default for other tenants)', async () => {
+    treeFiles = ['src/blog/regular.md', 'src/blog/insight.md'];
+    filesByPath = {
+      'src/blog/regular.md': post('Regular Post'),
+      'src/blog/insight.md': '---\ntitle: "Trend Post"\ncategory: Insights\n---\n\nBody.',
+    };
+    const result = await run({ siteId: 1 });
+    assert.equal(result.facts.findings.length, 2);
+  });
+
   test('never flags a post that already has an image', async () => {
     treeFiles = ['src/blog/has-image.md'];
     filesByPath = { 'src/blog/has-image.md': post('Already Imaged', { image: true }) };

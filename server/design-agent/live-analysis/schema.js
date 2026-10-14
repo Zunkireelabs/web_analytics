@@ -15,22 +15,77 @@
 // patterns) generators can draw on for content/voice grounding
 // (server/implementers/lib/marker-merge.js, newpage-render.js), on top of
 // the flat design-system vocabulary the projectors already consume.
+//
+// `lastCheckedAt` (ISO string, live-analysis-handler.js /
+// design-drift.js's refreshDesignProfileCheckedAt) is separate from
+// `derivedAt` (design-profile.js's stampDesignProfile): `derivedAt` only
+// moves when the profile's CONTENT was actually re-derived from an LLM
+// call; `lastCheckedAt` moves every time the weekly rescan's fresh capture
+// was compared against this profile and found no meaningful drift, so a
+// profile can show it was verified current far more recently than it was
+// last (re)derived.
 export const DESIGN_PROFILE_VERSION = 2;
+
+// Page types only a PRODUCT site (sites.property_type = 'product') is
+// classified into — see classifyPageType's `propertyType` option. A SaaS
+// product's marketing site is built from pricing / features / how-it-works /
+// demo / case-study pages that a services site doesn't have, and lumping them
+// into 'other' meant one blended pattern for visually unrelated pages.
+export const PRODUCT_PAGE_TYPES = Object.freeze([
+  'pricing', 'features', 'how-it-works', 'demo', 'case-study',
+]);
 
 export const PAGE_TYPES = Object.freeze([
   'homepage', 'service', 'location', 'landing', 'faq',
   'blog-listing', 'blog-article', 'legal', 'other',
+  ...PRODUCT_PAGE_TYPES,
 ]);
 
 // URL-shape heuristics only — there is no pageType concept anywhere else in
 // this repo (url_file_map, discover-content-target.js) to defer to. Ordered
 // most-specific first; falls through to 'other' rather than guessing.
-export function classifyPageType(url) {
+//
+// 'resources'/'guides'/'insights'/'learn' are grouped with blog/articles/news
+// rather than left to fall through to 'other': these are the same long-form,
+// single-column prose page as a blog post, just filed under a different
+// content-hub segment a given tenant happens to use (confirmed live on site 1
+// — zunkireelabs.com publishes long-form articles under /resources/<slug>/).
+// 'other' deliberately still means "assume a real full-bleed section page"
+// (marker-merge.js's isInlineContentPage) — About/Team/Contact-style pages —
+// so a genuine content-hub prefix has to be named here, not lumped into
+// 'other' by omission, or its articles ship with unstripped section-scale
+// markup exactly like a homepage/landing section would (the 2026-09-23 defect
+// this comment documents: an expand-content/qa-content block spliced into
+// /resources/ai-search-stack-guide/ rendered with full section-headline-scale
+// heading classes and no card structure because this page type wasn't
+// recognized as inline prose).
+const BLOG_LISTING_RE = /\/(blog|articles?|news|resources?|guides?|insights?|learn)\/?$/;
+const BLOG_ARTICLE_RE = /\/(blog|articles?|news|resources?|guides?|insights?|learn)\/.+/;
+// Product-site URL shapes, checked ONLY for propertyType === 'product' and
+// BEFORE the blog/article rules below: a product site files its case studies
+// under /resources/ or /case-studies/, which BLOG_ARTICLE_RE would otherwise
+// swallow as a blog post. Not applied to website tenants — their /products/*
+// stays 'service' and their /resources/*-case-study stays 'blog-article', so
+// every stored design profile and page template for them is unaffected.
+const PRODUCT_PAGE_RULES = Object.freeze([
+  ['pricing', /\/(pricing|plans?|packages?)\/?$/],
+  ['how-it-works', /\/how-it-works\b/],
+  ['demo', /\/(demo|book-a-demo|request-demo|get-started|free-trial|trial)\b/],
+  ['case-study', /(\/(case-stud(y|ies)|customers?|success-stor(y|ies))(\/|$)|-case-study\/?$)/],
+  ['features', /\/(features?|capabilities)(\/|$)/],
+]);
+
+// `propertyType` is optional and defaults to the original website behaviour,
+// so every existing caller keeps its exact result.
+export function classifyPageType(url, { propertyType } = {}) {
   let path = '/';
   try { path = new URL(url).pathname.toLowerCase(); } catch { return 'other'; }
   if (path === '/' || path === '') return 'homepage';
-  if (/\/(blog|articles?|news)\/?$/.test(path)) return 'blog-listing';
-  if (/\/(blog|articles?|news)\/.+/.test(path)) return 'blog-article';
+  if (propertyType === 'product') {
+    for (const [type, re] of PRODUCT_PAGE_RULES) if (re.test(path)) return type;
+  }
+  if (BLOG_LISTING_RE.test(path)) return 'blog-listing';
+  if (BLOG_ARTICLE_RE.test(path)) return 'blog-article';
   if (/\/(faq|faqs|help|support)\b/.test(path)) return 'faq';
   if (/\/(terms|privacy|cookies?|legal)\b/.test(path)) return 'legal';
   if (/\/(services?|solutions?|products?)\b/.test(path)) return 'service';

@@ -7,6 +7,7 @@
 // source.
 import { callLLMForJson } from '../../llm.js';
 import { DESIGN_PROFILE_VERSION } from './schema.js';
+import { maxTextPx, isFixedHeightOnly } from '../../lib/text-scale.js';
 
 const SYSTEM_PROMPT = `You are analyzing structural facts already extracted from a real, live website's rendered pages — real HTML class attributes, real computed text styles, real section ordering. You are NOT reading source code and you must NEVER invent a class name, color, or pattern that isn't present in the data you're given.
 
@@ -17,7 +18,7 @@ Respond with ONLY a JSON object matching this exact shape (all string values mus
   "styling": "tailwind" | "css-modules" | "plain-css" | "unknown",
   "framework": string | null,
   "typography": {
-    "heading": { "section": string|null, "item": string|null },
+    "heading": { "section": string|null, "item": string|null, "page": { "hero": string|null, "standard": string|null } },
     "body": string|null,
     "link": string|null
   },
@@ -38,7 +39,7 @@ Respond with ONLY a JSON object matching this exact shape (all string values mus
     "footer": { "sectionRoles": string[], "notes": string }
   },
   "pageTypePatterns": {
-    "<pageType>": { "sectionOrder": string[], "textHierarchy": [{"role": string, "styleNotes": string}], "notes": string }
+    "<pageType>": { "sectionOrder": string[], "textHierarchy": [{"role": string, "classes": string|null, "styleNotes": string}], "notes": string }
   },
   "evidence": { "pagesAnalyzed": string[], "notes": string }
 }`;
@@ -152,6 +153,31 @@ function pickCentralClass(samples) {
     .sort((a, b) => b.meanDf - a.meanDf || b.count - a.count || a.size - b.size)[0].classes;
 }
 
+// Real measured px for a sample's `style.fontSize` (capture.js always writes
+// this as a real computed-style string, e.g. '36px') — the notation-free
+// alternative to parsing a class NAME for a size.
+function samplePx(sample) {
+  const m = /^([\d.]+)px$/.exec(String(sample?.style?.fontSize || '').trim());
+  return m ? parseFloat(m[1]) : null;
+}
+
+// The MEDIAN measured size across every sample this site actually captured
+// for a role, not one element's incidental size. Why this exists at all: a
+// site that names classes semantically (`home-h2`, `sectionHeading` — real,
+// confirmed on chayceproperties.com) carries no parseable size in the class
+// string the way `text-[42px]` does, so any check reading the class NAME
+// (this file's own maxTextPx-based comparison, or marker-merge.js's render-
+// time strip) is silently inert on it. The real computed pixel size was
+// already captured alongside every sample regardless of naming convention —
+// this reads THAT instead, so the item-vs-section hierarchy check below
+// holds for a Tailwind site and a semantic-CSS site identically.
+function medianSamplePx(samples) {
+  const values = (samples || []).map(samplePx).filter((n) => n != null).sort((a, b) => a - b);
+  if (!values.length) return null;
+  const mid = Math.floor(values.length / 2);
+  return values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
+}
+
 // typography.link is meant to be the site's INLINE link style — what a link
 // inside a sentence or a related-links list looks like. When it comes back
 // byte-identical to components.button.primary, it is not that: capture.js used
@@ -203,7 +229,16 @@ export function headingSamplesByLevel(segmentedPages) {
 // h2 is the authority for a section heading and h3 for a repeating item
 // heading (an FAQ question), falling back to h2 when a site has no h3. A level
 // with no samples leaves the model's pick alone: no evidence is not a defect.
-export function correctHeadingTypography(chosen = {}, byLevel) {
+//
+// `pageHeadingSamples` (headingPageSamplesByContext below) splits real <h1>
+// samples by whether their own section is a hero — this site's own real
+// evidence, per context, never a rule imported from another site. A site
+// that genuinely runs a bigger h1 in a hero than on an interior page gets
+// BOTH values recorded (heading.page.hero / heading.page.standard) instead
+// of being forced into one flat number, which is what let a real per-
+// template design decision get misread as drift. Either slot with no
+// samples is left null — no evidence is not a defect here either.
+export function correctHeadingTypography(chosen = {}, byLevel, pageHeadingSamples = { hero: [], standard: [] }) {
   const out = { ...chosen };
   const corrected = [];
 
@@ -219,7 +254,169 @@ export function correctHeadingTypography(chosen = {}, byLevel) {
     if (best !== chosen.item) { out.item = best; corrected.push('item'); }
   }
 
+  // A repeating ITEM heading (an FAQ question, a card title) can never
+  // legitimately render LARGER than the section heading it sits beneath —
+  // that inverts the site's own hierarchy, and an FAQ question set at page-
+  // title scale is exactly what it looks like on the page. This is a
+  // self-consistency rule, not an imported design opinion: both values are
+  // this site's own real captured evidence, and the check only asks whether
+  // they agree with each other.
+  //
+  // It fires when a site has no h3 samples at all and `item` had to fall back
+  // to the same h2 pool as `section` (above), but the two central picks
+  // landed on different h2 treatments — one a genuine section heading, one an
+  // oversized display heading. Confirmed live on admizzeducation.com, which
+  // derived item at 50px against a 42px section heading, then shipped FAQ
+  // questions bigger than the section title above them.
+  //
+  // The repair is deliberately to reuse `section` rather than invent a
+  // smaller class: a step-down size this site never actually uses would be a
+  // guess, while the section heading is real, live, and known to render
+  // correctly. Equal-size is a mild hierarchy flattening; larger is a visible
+  // defect.
+  //
+  // Judged by REAL measured pixels from the samples themselves first
+  // (medianSamplePx), falling back to parsing the chosen class NAME
+  // (maxTextPx) only when no samples were passed in (e.g. a caller checking
+  // two already-stored profile values with no capture evidence at hand).
+  // The samples-based reading is what makes this hold on a semantic-CSS site
+  // (`home-h2`, `sectionHeading` — no parseable size in the class name at
+  // all) exactly as it does on a Tailwind site — confirmed necessary on
+  // chayceproperties.com, whose typography is entirely semantic classes.
+  const itemPx = medianSamplePx(itemSamples) ?? maxTextPx(out.item);
+  const sectionPx = medianSamplePx(sectionSamples) ?? maxTextPx(out.section);
+  if (itemPx != null && sectionPx != null && itemPx > sectionPx) {
+    out.item = out.section;
+    corrected.push('item:capped-to-section');
+  }
+
+  const page = { ...(chosen.page || {}) };
+  if (pageHeadingSamples.hero?.length) {
+    const best = pickCentralClass(pageHeadingSamples.hero);
+    if (best !== page.hero) { page.hero = best; corrected.push('page.hero'); }
+  }
+  if (pageHeadingSamples.standard?.length) {
+    const best = pickCentralClass(pageHeadingSamples.standard);
+    if (best !== page.standard) { page.standard = best; corrected.push('page.standard'); }
+  }
+  out.page = page;
+
   return { heading: out, corrected };
+}
+
+// spacing.section describes a section's VERTICAL RHYTHM — the padding/margin
+// that separates it from what's around it. A fixed height (`h-[70px]`,
+// `h-16`) is never that: it is the measured height of whatever single element
+// the capture happened to read (very often the site's own fixed-height
+// navbar), and applying it to a wrapper holding arbitrary-length drafted
+// content clips or overlaps that content.
+//
+// Confirmed live on admizzeducation.com, whose profile stored
+// `spacing.section: "h-[70px]"` — its navbar height — which then composed
+// into every projected component wrapper, including the `<dl>` holding six
+// Q&A pairs. marker-merge.js already strips a fixed height at RENDER time,
+// so this is the same rule one stage earlier, at the point the value would be
+// stored as a site convention: a measurement mistake should not be persisted
+// as design knowledge and then repeatedly stripped by every consumer that
+// remembers to.
+//
+// Dropped to null rather than replaced with a guessed padding — null means
+// "this site has no recorded section rhythm", which every consumer already
+// handles, while an invented `py-16` would be a cross-site default of exactly
+// the kind this platform never applies.
+export function correctSpacing(spacing, siteId = null) {
+  const out = { ...(spacing || {}) };
+  for (const field of ['section', 'itemGap']) {
+    if (out[field] && isFixedHeightOnly(out[field])) {
+      if (siteId != null) {
+        console.warn(
+          `[design-agent] site ${siteId}: spacing.${field} was "${out[field]}" — a fixed height, not spacing. Dropped.`,
+        );
+      }
+      out[field] = null;
+    }
+  }
+  return out;
+}
+
+// Real <h1> samples, split by whether their own section is a hero — the only
+// per-site signal that reliably tells a hero title apart from an interior
+// page's title (a section.role, already produced by segment.js, not a guess
+// made here). Excludes site chrome and label-styled text, same as
+// headingSamplesByLevel.
+export function headingPageSamplesByContext(segmentedPages) {
+  const hero = [];
+  const standard = [];
+  for (const page of segmentedPages || []) {
+    for (const section of page.sections || []) {
+      if (CHROME_ROLES.has(section.role)) continue;
+      for (const item of section.textHierarchy || []) {
+        if (item.tag !== 'h1' || !item.classes) continue;
+        if (isLabelStyle(item.style)) continue;
+        (section.role === 'hero' ? hero : standard).push(item);
+      }
+    }
+  }
+  return { hero, standard };
+}
+
+// Real 'subheading' textHierarchy samples (role assigned by segment.js's
+// textHierarchyOf: any non-h1 heading), grouped by pageType — the same
+// per-page real-class evidence compactPageForPrompt already hands the model,
+// just re-grouped here for cross-checking the model's OWN pageTypePatterns
+// summary against it. Excludes chrome and label-styled text, same as
+// headingSamplesByLevel above.
+function subheadingSamplesByPageType(segmentedPages) {
+  const byType = new Map();
+  for (const page of segmentedPages || []) {
+    for (const section of page.sections || []) {
+      if (CHROME_ROLES.has(section.role)) continue;
+      for (const item of section.textHierarchy || []) {
+        if (item.role !== 'subheading' || !item.classes) continue;
+        if (isLabelStyle(item.style)) continue;
+        if (!byType.has(page.pageType)) byType.set(page.pageType, []);
+        byType.get(page.pageType).push(item);
+      }
+    }
+  }
+  return byType;
+}
+
+// pageTypePatterns.textHierarchy is a MODEL SUMMARY across a page type's own
+// pages, not a direct per-page capture — same distance from ground truth
+// that made typography.body/heading need their own correction pass above.
+// Left unchecked, the model regularly returned this shape with 'subheading'
+// entries carrying only a prose styleNotes and no classes at all (or, worse,
+// an unobserved/invented one), which is exactly why
+// marker-merge.js's groundedInlineHeadingClass — the one consumer of this
+// field — could never find a real class to restyle an inline (blog/article)
+// page's stripped section heading with, and shipped a bare, unstyled <h2>
+// instead. Same discipline as correctBodyTypography: a `classes` value only
+// stands when it is actually OBSERVED for that exact (pageType, role) pair;
+// otherwise it is replaced with the real central class for that pair, or
+// left null when there is no evidence at all — never invented.
+export function correctPageTypeTextHierarchy(patterns, segmentedPages) {
+  const samplesByType = subheadingSamplesByPageType(segmentedPages);
+  const out = {};
+  const corrected = [];
+
+  for (const [pageType, pattern] of Object.entries(patterns || {})) {
+    const samples = samplesByType.get(pageType) || [];
+    const textHierarchy = (pattern.textHierarchy || []).map((entry) => {
+      if (entry.role !== 'subheading') return entry;
+      if (!samples.length) return entry.classes ? { ...entry, classes: null } : entry;
+
+      const matching = samples.filter((s) => normalizeClasses(s.classes) === normalizeClasses(entry.classes || ''));
+      if (entry.classes && matching.length) return entry;
+
+      const best = pickCentralClass(samples);
+      if (best !== entry.classes) corrected.push(pageType);
+      return { ...entry, classes: best };
+    });
+    out[pageType] = { ...pattern, textHierarchy };
+  }
+
+  return { pageTypePatterns: out, corrected };
 }
 
 function normalizeClasses(classes) {
@@ -243,12 +440,58 @@ function compactPageForPrompt(page) {
   };
 }
 
+// OpenAI's per-minute limit counts the whole request. Staging measured the
+// uncapped prompt at 43k-76k tokens against a 30k TPM limit, so every
+// extraction 429'd and retrying the same oversized request could never help.
+// The system prompt (~4k tokens) and the 4000-token completion cap come out of
+// the same budget, leaving ~20k; 48k chars of compact JSON (~3 chars/token for
+// class-heavy data) stays well under that.
+export const PROMPT_PAGES_CHAR_BUDGET = 48000;
+
+// Pick the pages that go to the model. One page per pageType first (so
+// pageTypePatterns still sees every kind of page), then the rest; sections
+// identical to one already included (site chrome repeated on every page) are
+// dropped; stops at the budget. Compact JSON, no indentation.
+export function buildPromptPages(segmentedPages, budgetChars = PROMPT_PAGES_CHAR_BUDGET) {
+  const all = segmentedPages || [];
+  const seenTypes = new Set();
+  const leaders = all.filter((p) => !seenTypes.has(p.pageType) && seenTypes.add(p.pageType));
+  const ordered = [...leaders, ...all.filter((p) => !leaders.includes(p))];
+  const seenSections = new Set();
+  const out = [];
+  let used = 0;
+  for (const page of ordered) {
+    const compact = compactPageForPrompt(page);
+    compact.sections = compact.sections.filter((s) => {
+      const key = JSON.stringify(s);
+      if (seenSections.has(key)) return false;
+      seenSections.add(key);
+      return true;
+    });
+    // Trim sections to fit rather than skipping a page-type's only page.
+    while (compact.sections.length && used + JSON.stringify(compact).length > budgetChars) {
+      compact.sections.pop();
+    }
+    if (!compact.sections.length) continue;
+    used += JSON.stringify(compact).length;
+    out.push(compact);
+  }
+  return out;
+}
+
 // segmentedPages: segment.js's segmentSite() output. Returns a Design
 // Profile v2 object, NOT yet stamped/validated — design-drift.js's
 // persistDesignProfile does both, the same as the v1 pipeline always did.
-export async function extractDesignProfile(segmentedPages, { siteId, generatorId = 'design-agent-live' } = {}) {
-  const pages = (segmentedPages || []).map(compactPageForPrompt);
-  const userPrompt = `Here is the structural data extracted from ${pages.length} real page(s) of this site:\n\n${JSON.stringify(pages, null, 2)}`;
+export async function extractDesignProfile(segmentedPages, {
+  siteId, generatorId = 'design-agent-live', responsiveMeasured = null, designKnowledge = '',
+} = {}) {
+  // designKnowledge rides in the same request, so it comes out of the page
+  // budget (floor keeps a few pages even if the knowledge block is large).
+  const pages = buildPromptPages(
+    segmentedPages, Math.max(12000, PROMPT_PAGES_CHAR_BUDGET - (designKnowledge || '').length),
+  );
+  const userPrompt = `Here is the structural data extracted from ${pages.length} real page(s) of this site:\n\n${JSON.stringify(pages)}`
+    + (designKnowledge ? `\n\n${designKnowledge}` : '');
 
   const extracted = await callLLMForJson(SYSTEM_PROMPT, userPrompt, {
     tier: 'monthly', maxTokens: 4000, generatorId, siteId,
@@ -264,12 +507,25 @@ export async function extractDesignProfile(segmentedPages, { siteId, generatorId
   }
 
   const { heading, corrected: headingsCorrected } = correctHeadingTypography(
-    typography.heading || {}, headingSamplesByLevel(segmentedPages),
+    typography.heading || {}, headingSamplesByLevel(segmentedPages), headingPageSamplesByContext(segmentedPages),
   );
+  const HEADING_SLOT_LABEL = { section: 'h2', item: 'h3', 'page.hero': 'h1 (hero section)', 'page.standard': 'h1 (non-hero)' };
   for (const slot of headingsCorrected) {
+    const value = slot.startsWith('page.') ? heading.page[slot.split('.')[1]] : heading[slot];
     console.warn(
       `[design-agent] site ${siteId}: typography.heading.${slot} was not the class this site uses on its `
-      + `${slot === 'section' ? 'h2' : 'h3'} elements — corrected to "${heading[slot]}".`,
+      + `${HEADING_SLOT_LABEL[slot] || slot} elements — corrected to "${value}".`,
+    );
+  }
+
+  const { pageTypePatterns, corrected: pageTypesCorrected } = correctPageTypeTextHierarchy(
+    extracted.pageTypePatterns || {}, segmentedPages,
+  );
+  if (pageTypesCorrected.length) {
+    console.warn(
+      `[design-agent] site ${siteId}: pageTypePatterns subheading class(es) for page type(s) `
+      + `${[...new Set(pageTypesCorrected)].join(', ')} were not grounded in this page type's own real `
+      + `sections — corrected against observed evidence.`,
     );
   }
 
@@ -289,13 +545,21 @@ export async function extractDesignProfile(segmentedPages, { siteId, generatorId
     framework: extracted.framework || null,
     typography: { ...typography, body, heading, link },
     color: extracted.color || {},
-    spacing: extracted.spacing || {},
+    spacing: correctSpacing(extracted.spacing, siteId),
     layout: extracted.layout || {},
     components,
-    responsive: extracted.responsive || { breakpoints: [] },
+    // `breakpoints` stays exactly what it always was: the class PREFIXES the
+    // model reported seeing. `measured` is the other half and is never
+    // model-derived — it is arithmetic over real rendered geometry at real
+    // device widths (responsive-analysis.js), so it cannot be hallucinated
+    // and needs no correction pass the way typography does. Additive: a
+    // profile derived before responsive probing existed, or by a caller that
+    // skipped it, simply has `measured: null` and every existing reader of
+    // `responsive.breakpoints` is unaffected.
+    responsive: { ...(extracted.responsive || { breakpoints: [] }), measured: responsiveMeasured },
     navigation: extracted.navigation || {},
     pages: (segmentedPages || []).map((p) => ({ url: p.url, pageType: p.pageType, sections: p.sections })),
-    pageTypePatterns: extracted.pageTypePatterns || {},
+    pageTypePatterns,
     evidence: extracted.evidence || { pagesAnalyzed: pages.map((p) => p.url), notes: '' },
   };
 }

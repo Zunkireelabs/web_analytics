@@ -1,11 +1,11 @@
-import { listOpenRecommendations, closeRecommendation } from '../../store/recommendations.js';
-import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, countDraftsBySourceToday, markDraftAbandoned, recordMergeFailure } from '../../store/drafts.js';
+import { listOpenRecommendations, closeRecommendation, blockRecommendation } from '../../store/recommendations.js';
+import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, markDraftAbandoned, recordMergeFailure } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr, pushDraftBranch, openDraftPr } from '../../routes/action-center.js';
-import { batchBranchName, beginBatchPush } from '../../implementers/lib/github-ops.js';
+import { batchBranchName, beginBatchPush, pushDraftBranch as pushFileEditsOntoBatch } from '../../implementers/lib/github-ops.js';
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
-import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
+import { getLearnedConfidenceMap, recordOutcome, PROBATION_COOLDOWN_MS } from './generator-learning.js';
 import { maybeEscalateToCodeRepair } from './code-self-repair.js';
 import { isOnboardingAnalysisPending } from '../../implementers/lib/onboarding-readiness.js';
 import { applyPacing, applyConvergenceCap, applyRefusalCap } from './ship-pacing.js';
@@ -17,8 +17,19 @@ import { buildPageMetrics } from './growth-scoring.js';
 import { classifyShipFailure, failureFamilyKey, FAILURE_KIND, SYSTEMIC_FAILURE_LIMIT, FAMILY_FAILURE_LIMIT } from './failure-policy.js';
 import { getQueryPageMetrics } from '../../store/read.js';
 import { draftShipState, SHIP_STATE } from '../../lib/draft-ship-state.js';
+import { classifyAbandonReason, RETRY_POLICY } from '../../lib/attempt-classification.js';
 import { NO_FILE_MAPPING_FRAGMENT, NO_MARKERS_CONFIGURED_FRAGMENT, UNVERIFIED_PLACEHOLDER_FRAGMENT } from '../../lib/draft-failure-phrases.js';
 import { recordAutoRemediationRun } from '../../store/auto-remediation-runs.js';
+import { laneBudgets, ANALYST_MAX, AUTONOMOUS_DRAFT_SOURCES } from '../../lib/autonomous-quota.js';
+import { countDraftsBySourcesToday } from '../../store/drafts.js';
+import { listByState as listQueueItemsByState, markShipped as markQueueItemShipped, releaseItem as releaseQueueItem, countShippedFileEditsToday, QUEUE_STATES } from '../../store/shipping-queue.js';
+import { recordFixOutcome } from '../../agent-memory.js';
+import { getProtectedPageSet } from '../../store/protected-pages.js';
+import { getSuppressionSet, isSuppressed, isSuppressionEnforcing } from '../../store/fix-suppressions.js';
+import { checkPreconditions, isPreconditionsEnforcing } from './preconditions.js';
+import { splitProtectedQueueItems, splitProtectedFileEdits, protectedFilePaths } from './protected-pages.js';
+import { sanitizeForCustomer } from '../../lib/errors.js';
+import { verifyRecommendation, VERIFICATION_DECISION } from '../../generators/lib/verification-layer.js';
 
 const SOURCE = 'auto-remediation';
 
@@ -49,6 +60,17 @@ const SOURCE = 'auto-remediation';
 // operator those mean opposite things. One says the system is broken; this
 // one says the system is working and correctly has nothing to say.
 const CONSECUTIVE_REFUSAL_LIMIT = 8;
+
+// The credential-resolution failures worth one automatic in-run retry before
+// they become a real outcome — see shipDraftForRecommendation's own comment
+// for the incident this answers. Matches client.js's authHeaders messages for
+// all three credential paths (App, per-site PAT, code-search PAT), since any
+// of them failing once and then resolving is the same "unexplained blip"
+// shape, and one retry distinguishes that from a genuinely absent credential.
+const CREDENTIAL_FAILURE_PATTERN = /GitHub App is not configured|No GitHub PAT set in env var|No classic PAT with .*scope set for code search/i;
+// Env-overridable purely so tests don't pay the real wait; same pattern as
+// the budget constants below.
+const CREDENTIAL_RETRY_DELAY_MS = Number(process.env.CREDENTIAL_RETRY_DELAY_MS ?? 2000);
 
 // Stage 3-4 of Generate -> Validate -> Auto-fix -> Validate again -> Action
 // Center: closes the loop risk-tiers.js opened. A 'safe'-tier recommendation
@@ -99,30 +121,15 @@ const CONSECUTIVE_REFUSAL_LIMIT = 8;
 // findings and an ANALYST lane for forward-looking growth and prevention, and
 // they are counted separately so each stays observable on its own.
 //
-//   Analytics: targets ANALYTICS_TARGET (60) and may stretch to
-//              ANALYTICS_MAX (100) when enough valid, high-quality work
-//              exists. When fewer than the target exist, the day simply
-//              ships every valid finding there is — the target is an
-//              intention, never a quota, and nothing is ever manufactured or
-//              quality-relaxed to reach it.
-//   Analyst:   up to ANALYST_MAX (20), and NOT expected to fill. Only items
-//              that clear the evidence bar take these slots; an empty analyst
-//              lane on a quiet day is the system working, not underperforming.
-//
-// Both lanes draw from what is genuinely eligible, so the real composition
-// follows the work: 100+20, 80+20, 40+20, 10+15, or 0+12 are all valid days.
-// COMBINED_MAX (120) is the only hard stop.
-//
-// Why a hard stop at all: every shipped item costs several GitHub API calls
-// against a 5,000/hour token budget that is SHARED across sites, and rate
-// limiting is already the single largest abandon cause in the live drafts
-// table. github/client.js reads the real headers and auto-remediation stops
-// the run when the remaining budget falls under RATE_LIMIT_RESERVE, so the
-// ceiling is a second belt on top of a working brace — not the only defence.
-const ANALYTICS_TARGET = Number(process.env.AUTO_REMEDIATION_ANALYTICS_TARGET) || 60;
-const ANALYTICS_MAX = Number(process.env.AUTO_REMEDIATION_ANALYTICS_MAX) || 100;
-const ANALYST_MAX = Number(process.env.AUTO_REMEDIATION_ANALYST_MAX) || 20;
-const COMBINED_MAX = Number(process.env.AUTO_REMEDIATION_COMBINED_MAX) || 120;
+// The actual sizing arithmetic lives in lib/autonomous-quota.js — a single,
+// pure, unit-tested module shared by every autonomous producer (see that
+// file's own header for the full numbers and why 100 is an absolute ceiling
+// across both lanes AND every autonomous source, not per-lane). This module
+// used to own its own copy of these constants (ANALYTICS_MAX=100,
+// COMBINED_MAX=120), which made "100 + 20 = 120" a documented, intentional
+// possibility — directly contradicting "100 is the absolute hard ceiling
+// across ALL autonomous sources." laneBudgets() below is what makes that
+// combination structurally unreachable instead of merely undocumented.
 
 export async function autoRemediateSafeRecommendations(siteId, {
   globalRemaining = Infinity,
@@ -132,6 +139,12 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // No site row to attribute a run log to (auto_remediation_runs.site_id is a
   // real FK) — nothing to record, same 'disabled' outcome as the flag being off.
   if (!site) return { attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'disabled' };
+
+  // Human-facing label for this run's log lines. client_number is the small
+  // sequential onboarding number (1, 2, 3...) shown to people; the real
+  // sites.id primary key (e.g. 8862) is never sequential and isn't what
+  // anyone reading these logs is trying to track a site by.
+  const clientLabel = site.client_number ? `client #${site.client_number}` : `site ${siteId}`;
 
   const startedAt = new Date();
   // Every exit below goes through this so `auto_remediation_runs` always has
@@ -156,18 +169,61 @@ export async function autoRemediateSafeRecommendations(siteId, {
     return finish({ attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'onboarding-analysis-pending' });
   }
 
-  const [rows, draftedFindingIds, pendingDraftFilePaths, spentToday, learnedMap] = await Promise.all([
+  // No day-level gate here on purpose: a still-open, unmerged PR from a
+  // previous day's batch must never stop today's batch from running (each
+  // calendar day gets its own batchBranchName/PR regardless of yesterday's
+  // review status). What that old gate actually protected against — two
+  // days' batches independently touching the same file and silently
+  // colliding once the delayed PR merges (confirmed live: site 1,
+  // 2026-09-08, PR #86/#87) — is handled below at file granularity instead:
+  // pendingDraftFilePaths excludes any recommendation whose target file
+  // already has an earlier, still-open PR sitting on it, so today's batch
+  // only ever touches files no unresolved prior batch has claimed.
+  // getOrInitBatchBranch's own sync-corruption check (github-ops.js) is the
+  // second line of defense at the git level for anything that still slips
+  // through.
+  // Read once per run, same shape and cost as getLearnedConfidenceMap below.
+  // Enforcement is flag-gated: suppressions are always WRITTEN by the impact
+  // sweep so real evidence accumulates, and only consulted here once
+  // FIX_SUPPRESSION_ENABLED is on.
+  const suppressionsEnforced = isSuppressionEnforcing();
+  // Read once per run rather than per item: the answer cannot change
+  // mid-run, and the per-item check below is already the expensive part.
+  const preconditionsEnforced = isPreconditionsEnforcing();
+  const [rows, draftedFindingIds, pendingDraftFilePaths, draftsSpentToday, fileEditsSpentToday, learnedMap, protectedPages, suppressions] = await Promise.all([
     listOpenRecommendations(siteId),
     getDraftedFindingIds(siteId),
     getPendingDraftFilePaths(siteId),
-    countDraftsBySourceToday(siteId, SOURCE, site.timezone || 'UTC'),
+    // Counted across EVERY autonomous shipping lane that ends in a real
+    // `drafts` row (auto-remediation, analyst-keyword-gap, learned-repair,
+    // design-agent — see AUTONOMOUS_DRAFT_SOURCES). Two lanes each measuring
+    // only their own spend against the shared ceiling is exactly how "100
+    // total" used to become "100 + 20" in practice.
+    countDraftsBySourcesToday(siteId, AUTONOMOUS_DRAFT_SOURCES, site.timezone || 'UTC'),
+    // content-repair and template-capability-repair ship file edits straight
+    // through shipping_queue (kind: 'file-edits') and never create a `drafts`
+    // row at all — countDraftsBySourcesToday above is structurally blind to
+    // them. countShippedFileEditsToday is the queue's own count of exactly
+    // that slice, and only that slice: `kind: 'draft'` queue items
+    // (learned-repair) are deliberately excluded here because they already
+    // land in draftsSpentToday once shipped, and summing both counts would
+    // count the same fix twice.
+    countShippedFileEditsToday(siteId, site.timezone || 'UTC'),
     // Phase 5: real outcome history for this site, read once per run. A
     // generator whose recent real attempts have repeatedly failed or been
     // rejected is excluded here — not just reported differently elsewhere —
     // which is what makes learning actually change behavior rather than
     // only change what gets displayed.
     getLearnedConfidenceMap(siteId).catch(() => new Map()),
+    // Pages that earn clicks / rank near the top: a title, canonical, redirect
+    // or content change there is never unattended (protected-pages.js).
+    getProtectedPageSet(siteId),
+    suppressionsEnforced ? getSuppressionSet(siteId).catch(() => new Set()) : Promise.resolve(new Set()),
   ]);
+  // The shared ceiling's real spend for today: every autonomous fix shipped
+  // by ANY source, whether it produced a `drafts` row or a file-edits queue
+  // row, counted exactly once each (see the two comments above).
+  const spentToday = draftsSpentToday + fileEditsSpentToday;
   // blocked_reason is checked HERE rather than trusted to be reflected in
   // risk_tier. The previous comment argued the check was redundant because
   // recommendation-coordinator.js demotes every blocked recommendation to
@@ -194,9 +250,48 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // branch every day regardless of whether yesterday's PR merged, so without
   // this a second day's run silently regenerates the same file from stale
   // content and clobbers/reverts the first day's still-pending draft).
-  const eligible = rows.filter((r) => classifyRecommendation(r, learnedMap).decision === AUTONOMY_DECISION.SAFE_TO_AUTO_EXECUTE
-    && r.finding_ids.every((fid) => !draftedFindingIds.has(fid))
-    && !pendingDraftFilePaths.has(resolveFile(site, r.page)));
+  // Probation: a demoted generator is excluded from SAFE_TO_AUTO_EXECUTE
+  // above, which means nothing here ever attempts it again — the exact
+  // deadlock that left site 8864's schema/qa-content generators demoted for
+  // three days on evidence from BEFORE their real bug fix landed, because
+  // being demoted is what stopped them from ever re-proving themselves. See
+  // generator-learning.js's PROBATION_COOLDOWN_MS doc comment for the full
+  // incident. One recommendation per idle-long-enough demoted generator is
+  // let through per run — enough for a real fix to clear itself the moment
+  // it's tried again, capped at one so a still-genuinely-broken generator
+  // costs at most one wasted attempt per cooldown, not a renewed flood.
+  const now = Date.now();
+  const probedGeneratorIds = new Set();
+  const isProbationProbe = (r) => {
+    const learned = learnedMap.get(r.recommendation_type);
+    if (!learned?.demote) return false;
+    if (probedGeneratorIds.has(r.recommendation_type)) return false;
+    const idleMs = learned.lastAttemptAt ? now - new Date(learned.lastAttemptAt).getTime() : Infinity;
+    if (idleMs < PROBATION_COOLDOWN_MS) return false;
+    probedGeneratorIds.add(r.recommendation_type);
+    return true;
+  };
+
+  const eligible = rows.filter((r) => {
+    if (r.finding_ids.some((fid) => draftedFindingIds.has(fid))) return false;
+    if (pendingDraftFilePaths.has(resolveFile(site, r.page))) return false;
+    // A fix measured to have made THIS page worse (fix_impact -> migration
+    // 182). learnedMap below is site-wide per generator and structurally
+    // cannot express this, which is why a harmful-but-successful fix used to
+    // come straight back on its next detection. Checked before
+    // classifyRecommendation so a suppressed page is excluded even when it
+    // would otherwise be a probation probe — re-proving a generator must
+    // happen somewhere it has not already been measured doing harm.
+    if (suppressionsEnforced && isSuppressed(suppressions, {
+      scope: 'page', scopeKey: r.params?.page || r.page, generatorId: r.recommendation_type,
+    })) return false;
+    const decision = classifyRecommendation(r, learnedMap, protectedPages).decision;
+    if (decision === AUTONOMY_DECISION.SAFE_TO_AUTO_EXECUTE) return true;
+    return isProbationProbe(r);
+  });
+  for (const generatorId of probedGeneratorIds) {
+    console.log(`[auto-remediation] ${clientLabel}: ${generatorId} is demoted with no attempt in ${(PROBATION_COOLDOWN_MS / 3600000).toFixed(0)}h — granting one probation probe this run.`);
+  }
 
   // Publishing cadence, applied BEFORE the daily budget so a paced generator
   // can't consume budget slots it isn't due for.
@@ -210,21 +305,21 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // worth of blog content at once. Both paths now share this via
   // ship-pacing.js.
   const { paced, notes: pacingNotes } = await applyPacing(site, eligible);
-  for (const note of pacingNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
+  for (const note of pacingNotes) console.log(`[auto-remediation] ${clientLabel}: ${note}`);
 
   // Convergence cap: a finding that has already failed this many times for an
   // item-specific reason stops being auto-drafted. It stays open and fully
   // visible — what stops is spending a model call per run to reach the same
   // error. See ship-pacing.js for the measured churn this ends.
   const { converged, notes: convergenceNotes } = await applyConvergenceCap(site, paced);
-  for (const note of convergenceNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
+  for (const note of convergenceNotes) console.log(`[auto-remediation] ${clientLabel}: ${note}`);
 
   // Refusal cap: the convergence cap above counts abandoned DRAFTS, and a
   // refusal never creates one, so a permanently-refusing item slipped past
   // both it and the learned score. See applyRefusalCap for the live case (one
   // item refused 22 times, re-attempted hourly).
   const { kept: candidates, notes: refusalNotes } = await applyRefusalCap(site, converged);
-  for (const note of refusalNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
+  for (const note of refusalNotes) console.log(`[auto-remediation] ${clientLabel}: ${note}`);
 
   // Daily budget. `remaining` can go negative if the limit was lowered
   // mid-day after work was already done — Math.max keeps that a clean "no
@@ -249,7 +344,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // simply runs a normal 60 day — the same posture the metrics fetch below
   // already takes.
   const { declines, siteWide } = await loadDeclines(siteId, { timezone: site.timezone || 'UTC' }).catch((err) => {
-    console.warn(`[auto-remediation] site ${siteId}: decline detection unavailable (${err.message}) — running a baseline day with no analyst lane.`);
+    console.warn(`[auto-remediation] ${clientLabel}: decline detection unavailable (${err.message}) — running a baseline day with no analyst lane.`);
     return { declines: new Map(), siteWide: null };
   });
 
@@ -278,54 +373,63 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // measures every page RELATIVE to this site-wide move, so a uniform fall
     // marks no individual page — which is correct: no page edit fixes an
     // algorithm update, and opening 80 PRs at one would add risk, not traffic.
-    console.warn(`[auto-remediation] site ${siteId}: SITE-WIDE impressions down ${Math.abs(Math.round(siteWide.impressionsChangePct * 100))}% (${siteWide.priorImpressions} -> ${siteWide.currentImpressions}) — per-page declines are measured net of this, so only pages falling faster than the site are escalated.`);
+    console.warn(`[auto-remediation] ${clientLabel}: SITE-WIDE impressions down ${Math.abs(Math.round(siteWide.impressionsChangePct * 100))}% (${siteWide.priorImpressions} -> ${siteWide.currentImpressions}) — per-page declines are measured net of this, so only pages falling faster than the site are escalated.`);
   }
 
-  // Lane sizing. `site.auto_remediation_daily_limit` is honoured as an
-  // explicit per-site override of the Analytics target when set, so an
-  // operator can still hold one tenant lower without touching this logic.
-  //
-  // The override caps the SURGE ceiling too, not just the target — an
-  // operator setting daily_limit=3 (or 0, to pause a tenant entirely) means
-  // "never more than this for this site," and Math.max(analyticsTarget,
-  // ANALYTICS_MAX) used to silently ignore that: any override below 100
-  // still let the day surge to the GLOBAL 100-item max whenever enough
-  // candidates existed, which defeated the one thing an explicit override
-  // exists to do. Only the unset (default) case gets the global surge
-  // ceiling; an explicit override IS the ceiling.
-  const dailyLimitOverride = site.auto_remediation_daily_limit;
-  const analyticsTarget = dailyLimitOverride ?? ANALYTICS_TARGET;
-  const analyticsMax = dailyLimitOverride != null ? dailyLimitOverride : ANALYTICS_MAX;
+  // Lane sizing — delegated entirely to lib/autonomous-quota.js's
+  // laneBudgets(), the single place both numbers (60/20 normal, 100 hard
+  // ceiling across every autonomous source) are decided. `site.
+  // auto_remediation_daily_limit` still works as an explicit per-site
+  // override (laneBudgets' siteLimitOverride) — it can only ever TIGHTEN the
+  // day, never raise it past the platform's hard ceiling, which is what
+  // makes an operator's override actually mean "never more than this."
+  // Fetched here, BEFORE budget sizing, so their demand is real input to
+  // laneBudgets — not an afterthought squeezed into whatever headroom
+  // happened to survive ordinary analytics selection. Without this, a day
+  // with zero open recommendations but real queued learned-repair/
+  // file-edits work computed remaining=0 from analyticsCandidates=0 alone
+  // and returned before the drain code below ever ran, silently leaving
+  // genuinely prepared, already-validated work unshipped.
+  const learnedRepairAll = (await listQueueItemsByState(siteId, QUEUE_STATES.QUEUED)).filter((r) => r.source === 'learned-repair');
+  // The shared queue's lanes never pass through classifyRecommendation, so the
+  // protected-page rule is applied where they are drained (protected-pages.js).
+  const { kept: learnedRepairQueueItems, held: learnedRepairHeld } = splitProtectedQueueItems(learnedRepairAll, protectedPages);
+  if (learnedRepairHeld.length) {
+    console.log(`[auto-remediation] ${clientLabel}: ${learnedRepairHeld.length} learned-repair item(s) target a page that earns clicks / ranks near the top — held for a person, not shipped.`);
+  }
+  // Every producer that queues its own PRE-COMPUTED, already-validated file
+  // edits rather than a draft — content-repair (repair-site-content-live.js)
+  // and template-capability-repair (repair-template-capability.js). Both
+  // share the identical shape (params.edits, params.commitMessage) and the
+  // identical drain treatment below, so they are not distinguished by
+  // source here — only by `kind`.
+  const fileEditsAll = (await listQueueItemsByState(siteId, QUEUE_STATES.PREPARED)).filter((r) => r.kind === 'file-edits');
+  const { items: fileEditsQueueItems, held: fileEditsHeld } = splitProtectedFileEdits(
+    fileEditsAll, protectedFilePaths(site, protectedPages, resolveFile), { unknown: protectedPages.unknown },
+  );
+  for (const h of fileEditsHeld) {
+    console.log(`[auto-remediation] ${clientLabel}: file-edits item ${h.itemId} — held ${h.paths.length} edit(s) on ranking page file(s) for a person: ${h.paths.slice(0, 5).join(', ')}.`);
+  }
+  const sharedQueueDemand = learnedRepairQueueItems.length + fileEditsQueueItems.length;
 
-  // The analyst lane never exceeds the evidence available for it. Sized from
-  // real candidates, so it is empty on a day with nothing forward-looking to
-  // do rather than being padded from the analytics backlog.
-  const analystLane = Math.min(ANALYST_MAX, decliningCandidates.length);
-
-  // Analytics stretches toward its max only on genuinely eligible work — the
-  // count here is post-pacing, post-convergence, post-refusal, so "enough
-  // valid work" means exactly that.
-  const analyticsCandidates = candidates.length - decliningCandidates.length;
-  const analyticsLane = Math.min(analyticsMax, Math.max(0, analyticsCandidates));
-
-  // COMBINED_MAX is applied to the TOTAL, and the analyst lane is protected
-  // when the two together would breach it: analytics backlog is effectively
-  // unbounded (236 eligible expand-content items alone), so letting it absorb
-  // the ceiling first would silently close the analyst lane on exactly the
-  // busy days prevention matters most.
-  const analystBudget = Math.min(analystLane, COMBINED_MAX);
-  const analyticsBudget = Math.min(analyticsLane, COMBINED_MAX - analystBudget);
-  const dailyLimit = analyticsBudget + analystBudget;
+  const analyticsCandidates = candidates.length - decliningCandidates.length + sharedQueueDemand;
+  const { analyticsBudget, analystBudget, dailyLimit, remaining, ceiling, target } = laneBudgets({
+    analyticsCandidates,
+    analystCandidates: decliningCandidates.length,
+    siteLimitOverride: site.auto_remediation_daily_limit,
+    spentToday,
+    globalRemaining,
+  });
 
   console.log(
-    `[auto-remediation] site ${siteId}: capacity — analytics ${analyticsBudget}/${analyticsMax} `
-    + `(target ${analyticsTarget}, ${analyticsCandidates} eligible), analyst ${analystBudget}/${ANALYST_MAX} `
-    + `(${decliningCandidates.length} evidenced), total ${dailyLimit}/${COMBINED_MAX}.`
+    `[auto-remediation] ${clientLabel}: capacity — analytics ${analyticsBudget} `
+    + `(${analyticsCandidates} eligible), analyst ${analystBudget}/${ANALYST_MAX} `
+    + `(${decliningCandidates.length} evidenced), total ${dailyLimit}/${ceiling} (spent today across every `
+    + `autonomous lane: ${spentToday}).`
   );
-  if (analyticsCandidates < analyticsTarget) {
-    console.log(`[auto-remediation] site ${siteId}: only ${analyticsCandidates} valid analytics finding(s) available — shipping all of them rather than padding to the ${analyticsTarget} target.`);
+  if (dailyLimit < target) {
+    console.log(`[auto-remediation] ${clientLabel}: only ${dailyLimit} genuinely eligible item(s) available against the ${target} normal target — shipping all of them rather than padding to reach it.`);
   }
-  const remaining = Math.max(0, Math.min(dailyLimit - spentToday, globalRemaining));
   if (remaining === 0) {
     // A dailyLimit of 0 from zero genuinely eligible candidates is not the
     // same fact as a real budget cap being reached — nothing was ever
@@ -336,7 +440,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // ineligibility path in this function already honors) so a caller can't
     // mistake an empty queue for a stopped run.
     const reason = candidates.length === 0 ? null : (spentToday >= dailyLimit ? 'budget-exhausted' : 'global-ceiling-reached');
-    console.log(`[auto-remediation] site ${siteId} has no budget left this run (${spentToday}/${dailyLimit} site budget used${globalRemaining < Infinity ? `, ${globalRemaining} left in the platform-wide ceiling` : ''}) — nothing attempted.`);
+    console.log(`[auto-remediation] ${clientLabel} has no budget left this run (${spentToday}/${dailyLimit} site budget used${globalRemaining < Infinity ? `, ${globalRemaining} left in the platform-wide ceiling` : ''}) — nothing attempted.`);
     return finish({ attempted: 0, shipped: 0, failed: 0, skipped: candidates.length, spentToday, dailyLimit, stoppedReason: reason });
   }
 
@@ -365,25 +469,25 @@ export async function autoRemediateSafeRecommendations(siteId, {
   const pageMetrics = await getQueryPageMetrics(siteId, iso(metricsStart), iso(metricsEnd), { minImpressions: 1 })
     .then(buildPageMetrics)
     .catch((err) => {
-      console.warn(`[auto-remediation] site ${siteId}: GSC metrics unavailable for scoring (${err.message}) — ranking on severity/breadth/confidence only.`);
+      console.warn(`[auto-remediation] ${clientLabel}: GSC metrics unavailable for scoring (${err.message}) — ranking on severity/breadth/confidence only.`);
       return new Map();
     });
 
   const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap, declines, analystBudget, analystFindingIds, baselineBudget: Math.max(0, analyticsBudget - spentToday) });
   const budgeted = queue.map((item) => item.rec);
   const scoreById = new Map(queue.map((item) => [item.rec.id, item]));
-  for (const note of selection.groupNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
+  for (const note of selection.groupNotes) console.log(`[auto-remediation] ${clientLabel}: ${note}`);
   console.log(
-    `[auto-remediation] site ${siteId}: queue built — ${selection.eligible} eligible, ${selection.selected} selected of ${remaining} budget. `
+    `[auto-remediation] ${clientLabel}: queue built — ${selection.eligible} eligible, ${selection.selected} selected of ${remaining} budget. `
     + `By lane: ${JSON.stringify(selection.byLane)}. By tier: ${JSON.stringify(selection.byTier)}. By generator: ${JSON.stringify(selection.byGenerator)}.`
   );
   for (const top of selection.topSelected.slice(0, 5)) {
-    console.log(`[auto-remediation] site ${siteId}:   #${top.id} ${top.type} score=${top.score} [${top.tier}] ${top.factors.join(', ')}`);
+    console.log(`[auto-remediation] ${clientLabel}:   #${top.id} ${top.type} score=${top.score} [${top.tier}] ${top.factors.join(', ')}`);
   }
   // Never silently truncate: a run that ships 30 of 41 open issues must say
   // so, or the Action Center looks like it simply found fewer problems.
   if (budgeted.length < candidates.length) {
-    console.log(`[auto-remediation] site ${siteId}: ${candidates.length} eligible, taking ${budgeted.length} within today's budget (${spentToday}/${dailyLimit} already used); ${candidates.length - budgeted.length} deferred to tomorrow.`);
+    console.log(`[auto-remediation] ${clientLabel}: ${candidates.length} eligible, taking ${budgeted.length} within today's budget (${spentToday}/${dailyLimit} already used); ${candidates.length - budgeted.length} deferred to tomorrow.`);
   }
 
   let shipped = 0;
@@ -392,6 +496,16 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // declined three items honestly is not read as three things going wrong.
   let refused = 0;
   let quarantined = 0;
+  // Closed pre-flight, before ever calling generateDraft — the shared
+  // verification layer's own live/repo re-check confirmed the
+  // recommendation's premise is already gone (see verifyRecommendation).
+  // Disjoint from `shipped`/`failed`: nothing was drafted at all.
+  let resolved = 0;
+  // Blocked pre-flight — verifyRecommendation found a genuine conflict it
+  // has no safe basis to resolve automatically. Also disjoint from
+  // `shipped`/`failed`: nothing was drafted, and unlike `resolved` this
+  // recommendation stays open (blocked, not closed) for a human.
+  let conflicted = 0;
   let consecutiveSystemicFailures = 0;
   let consecutiveRefusals = 0;
   let stoppedReason = null;
@@ -455,9 +569,25 @@ export async function autoRemediateSafeRecommendations(siteId, {
     return null;
   };
 
-  const batching = queue.length > 0 || backfillPool.length > 0;
+  // SHARED QUEUE DRAIN — the other autonomous producers that no longer open
+  // their own PR (learned-repair.js, repair-site-content-live.js). Their
+  // work was already decided/prepared earlier in the day (see
+  // store/shipping-queue.js) and fetched above (feeding laneBudgets, so a
+  // day with real queued work but zero ordinary recommendations still gets a
+  // nonzero budget); this run's job is only to fold whatever fits in today's
+  // remaining headroom into THIS SAME batch, so the platform still produces
+  // exactly one PR. How many actually get DRAINED is capped by real
+  // remaining headroom computed AFTER the main loop below (`remaining -
+  // attempted`), since backfill can consume budget unpredictably up to
+  // `remaining` and headroom must never be over-estimated before that's known.
+  const batching = queue.length > 0 || backfillPool.length > 0 || learnedRepairQueueItems.length > 0 || fileEditsQueueItems.length > 0;
   if (batching) beginBatchPush(site, branchName);
   const pending = []; // { rec, draft }
+  // Non-draft-backed batch members — content-repair's file-edits. Tracked
+  // separately from `pending` because finalizeBatchPr's draftIds must be
+  // real `drafts` table rows (it feeds pending[0].draft.id to openDraftPr);
+  // these never create one.
+  const shippedFileEditsQueueIds = [];
   let prUrl = null;
   // A mutable work queue: quarantine backfilling appends to it in place, so
   // the loop below stays a single straightforward pass over `workQueue`
@@ -481,14 +611,95 @@ export async function autoRemediateSafeRecommendations(siteId, {
       continue;
     }
 
+    // "Is the requested outcome already true?" — a safe, side-effect-free
+    // re-check of live/repo reality, run BEFORE spending a generation
+    // attempt (an LLM call, a GitHub read) on a recommendation whose premise
+    // may already be gone by the time its turn in today's queue comes up.
+    // Only generators with a real verifyCurrentState (see
+    // server/generators/lib/verification-layer.js) can answer this —
+    // everything else falls through unaffected, exactly as before this
+    // existed. Same "skip without spending an attempt, backfill the freed
+    // slot" shape as the quarantine check just above, since nothing was
+    // actually attempted here either.
+    const preflight = await verifyRecommendation(rec, { site });
+    if (preflight.decision === VERIFICATION_DECISION.ALREADY_RESOLVED) {
+      await closeRecommendation(rec.id).catch(() => {});
+      resolved++;
+      console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) closed before drafting — already resolved (${preflight.reason})`);
+      if (attempted < remaining) {
+        const backfill = nextBackfillCandidate();
+        if (backfill) workQueue.push(backfill);
+      }
+      continue;
+    }
+    // A genuine conflict — the generator's own re-check found the stored
+    // params contradicted by current live evidence in a way it has no safe
+    // basis to resolve itself (e.g. canonical.js: two detecting agents
+    // silently overwrote each other's canonicalTarget in recommendations.
+    // params, and the surviving one no longer matches the live content).
+    // Drafting from contradicted params would be worse than not drafting at
+    // all, so this blocks for a human rather than proceeding — the one
+    // "genuinely cannot safely determine the action" case #10 of the
+    // framework's design calls for, not a generic catch-all.
+    if (preflight.decision === VERIFICATION_DECISION.CONFLICT) {
+      await blockRecommendation(
+        rec.id,
+        `Pre-flight verification found a conflict (${preflight.reason}) that can't be safely resolved automatically — needs a human to pick the right outcome.`,
+      ).catch(() => {});
+      conflicted++;
+      console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) blocked before drafting — conflict (${preflight.reason})`);
+      if (attempted < remaining) {
+        const backfill = nextBackfillCandidate();
+        if (backfill) workQueue.push(backfill);
+      }
+      continue;
+    }
+
+    // "Can this work succeed at all?" — a different question from
+    // verifyRecommendation's "is the outcome already true?", and the one
+    // that accounts for the real waste: the 116 abandoned Admizz drafts each
+    // paid for a generation and then failed at APPLY time against a
+    // condition knowable before a single token was produced. See
+    // agents/lib/preconditions.js for the tri-state contract, in particular
+    // why "could not check" never refuses.
+    //
+    // Flagged, and placed here rather than earlier so it runs only for items
+    // that have actually reached their turn in the queue — the checks are
+    // repo reads, and running them for the whole backlog would cost more than
+    // it saves. Same skip-and-backfill shape as the two checks above, since
+    // nothing was attempted here either.
+    if (preconditionsEnforced) {
+      const pre = await checkPreconditions({
+        site, siteId, actionType: rec.recommendation_type, generatorId: rec.recommendation_type,
+        params: rec.params || {}, pageUrl: rec.params?.page || rec.page || null,
+      }).catch(() => ({ ok: true, failures: [] }));
+
+      if (pre.advisories?.length) {
+        console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) proceeding with advisories — ${pre.advisories.map((a) => a.reason).join(', ')}`);
+      }
+      if (!pre.ok) {
+        await blockRecommendation(
+          rec.id,
+          `Precondition check refused this before drafting (${pre.reason}): ${pre.detail}`,
+        ).catch(() => {});
+        conflicted++;
+        console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) blocked before drafting — precondition ${pre.failures.map((f) => f.reason).join(', ')}`);
+        if (attempted < remaining) {
+          const backfill = nextBackfillCandidate();
+          if (backfill) workQueue.push(backfill);
+        }
+        continue;
+      }
+    }
+
     if (consecutiveSystemicFailures >= SYSTEMIC_FAILURE_LIMIT) {
       stoppedReason = 'circuit-breaker-systemic';
-      console.error(`[auto-remediation] site ${siteId}: ${SYSTEMIC_FAILURE_LIMIT} consecutive SYSTEMIC failures (infrastructure, not individual items) — stopping this site's run. ${workQueue.length - cursor} candidate(s) left untouched and still open.`);
+      console.error(`[auto-remediation] ${clientLabel}: ${SYSTEMIC_FAILURE_LIMIT} consecutive SYSTEMIC failures (infrastructure, not individual items) — stopping this site's run. ${workQueue.length - cursor} candidate(s) left untouched and still open.`);
       break;
     }
     if (consecutiveRefusals >= CONSECUTIVE_REFUSAL_LIMIT) {
       stoppedReason = 'refusal-streak';
-      console.log(`[auto-remediation] site ${siteId}: ${CONSECUTIVE_REFUSAL_LIMIT} consecutive honest refusals — nothing here can be drafted without fabricating, so stopping rather than spending the rest of the budget proving it. ${workQueue.length - cursor} candidate(s) left untouched and still open. This is not a fault.`);
+      console.log(`[auto-remediation] ${clientLabel}: ${CONSECUTIVE_REFUSAL_LIMIT} consecutive honest refusals — nothing here can be drafted without fabricating, so stopping rather than spending the rest of the budget proving it. ${workQueue.length - cursor} candidate(s) left untouched and still open. This is not a fault.`);
       break;
     }
     // Stop STARTING new items once GitHub's remaining budget is under the
@@ -498,9 +709,9 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // to notice is before the attempt. The items left here stay open and
     // untouched for the next pass — nothing is consumed, so this costs one
     // deferred day at worst, against the whole-run collapse it prevents.
-    if (getLastKnownRateLimit().low) {
+    if (getLastKnownRateLimit(site).low) {
       stoppedReason = 'github-rate-limited';
-      console.warn(`[auto-remediation] site ${siteId}: GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${workQueue.length - cursor} candidate(s) left untouched and still open; they will be re-attempted next run.`);
+      console.warn(`[auto-remediation] ${clientLabel}: GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${workQueue.length - cursor} candidate(s) left untouched and still open; they will be re-attempted next run.`);
       break;
     }
     if (attempted >= remaining) break; // backfill can grow workQueue past the budget's raw length
@@ -584,7 +795,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
       const shipFailure = classifyShipFailure(err, { isRefusal: false });
       if (shipFailure.kind === FAILURE_KIND.RATE_LIMIT) {
         stoppedReason = 'github-rate-limited';
-        console.warn(`[auto-remediation] site ${siteId}: GitHub rate limit hit on recommendation ${rec.id} (${rec.recommendation_type}) — stopping this run. ${workQueue.length - cursor - 1} candidate(s) left untouched; this item and they stay open and will be re-attempted next run. Not a fault.`);
+        console.warn(`[auto-remediation] ${clientLabel}: GitHub rate limit hit on recommendation ${rec.id} (${rec.recommendation_type}) — stopping this run. ${workQueue.length - cursor - 1} candidate(s) left untouched; this item and they stay open and will be re-attempted next run. Not a fault.`);
         break;
       }
       failed++;
@@ -653,7 +864,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
 
         if (shipFailure.kind === FAILURE_KIND.SYSTEMIC) {
           consecutiveSystemicFailures++;
-          console.error(`[auto-remediation] site ${siteId}: SYSTEMIC failure on recommendation ${rec.id} (${rec.recommendation_type}) — ${shipFailure.reason} (${consecutiveSystemicFailures}/${SYSTEMIC_FAILURE_LIMIT} consecutive).`);
+          console.error(`[auto-remediation] ${clientLabel}: SYSTEMIC failure on recommendation ${rec.id} (${rec.recommendation_type}) — ${shipFailure.reason} (${consecutiveSystemicFailures}/${SYSTEMIC_FAILURE_LIMIT} consecutive).`);
         } else {
           // An INDIVIDUAL item failure never touches the systemic streak —
           // a bad locations.js entry says nothing about GitHub or the
@@ -672,11 +883,105 @@ export async function autoRemediateSafeRecommendations(siteId, {
             quarantinedGenerators.set(rec.recommendation_type, familyKey);
             const note = `${rec.recommendation_type}: quarantined for the rest of this run after ${count} failures matching "${familyKey}" — other generators keep using the remaining budget; retried next run.`;
             quarantineNotes.push(note);
-            console.warn(`[auto-remediation] site ${siteId}: ${note}`);
+            console.warn(`[auto-remediation] ${clientLabel}: ${note}`);
           }
         }
       }
-      console.warn(`[auto-remediation] site ${siteId} ${isRefusal ? 'declined to draft' : 'could not auto-fix'} recommendation ${rec.id} (${rec.recommendation_type}), leaving it open:`, err.message);
+      console.warn(`[auto-remediation] ${clientLabel} ${isRefusal ? 'declined to draft' : 'could not auto-fix'} recommendation ${rec.id} (${rec.recommendation_type}), leaving it open:`, err.message);
+    }
+  }
+
+  // SHARED QUEUE DRAIN, continued: fold whatever real headroom is left after
+  // the ordinary analytics/analyst loop above into THIS SAME batch. Headroom
+  // is computed here, not before the loop, because backfill can consume
+  // budget unpredictably up to `remaining` — only after the loop finishes is
+  // "how much is actually left today" a real number.
+  let queueHeadroom = Math.max(0, remaining - attempted);
+
+  // learned-repair: a queued INTENT, not yet generated. This run doubles as
+  // both preparation and shipping for this lane (see learned-repair.js's own
+  // module comment) — generation happens right here, through the exact same
+  // shipDraftForRecommendation pipeline every ordinary item in this run
+  // already used, so a borrowed repair gets the same Quality Gate,
+  // design-verification and failure handling as anything else.
+  for (const item of learnedRepairQueueItems) {
+    if (queueHeadroom <= 0) break;
+    queueHeadroom--;
+    attempted++;
+    try {
+      const approved = await shipDraftForRecommendation(siteId, {
+        generatorId: item.generator_id, params: item.params, findingId: item.finding_id,
+        source: SOURCE, findingOrigin: 'learned-repair', memoryRefId: item.memory_ref_id,
+        waitForDesignAgent: true, deferPr: true, batchBranch: branchName,
+      });
+      if (approved.alreadyShipped) {
+        // A prior run's commit for this same finding already reached
+        // 'branch_pushed'/beyond — nothing new to ship, but the queue row
+        // must still leave 'queued' or it would sit there forever.
+        await markQueueItemShipped(item.id).catch(() => {});
+        continue;
+      }
+      pending.push({
+        rec: { id: null, recommendation_type: item.generator_id, finding_ids: [item.finding_id] },
+        draft: approved,
+        learnedRepairQueueId: item.id,
+        memoryRefId: item.memory_ref_id,
+      });
+    } catch (err) {
+      failed++;
+      console.warn(`[auto-remediation] ${clientLabel}: learned-repair queue item ${item.id} (${item.generator_id}) could not be prepared, leaving it for the Action Center:`, err.message);
+      // ITEM-STATE refusals say nothing about whether the borrowed repair
+      // itself is portable — see learned-repair.js's identical prior
+      // reasoning, preserved here since this is now where that ship attempt
+      // actually happens.
+      const isItemStateRefusal = err.reason === 'awaiting-human-review' || err.reason === 'draft-reset';
+      await releaseQueueItem(item.id, { retryable: isItemStateRefusal, error: String(err.message || '').slice(0, 500) }).catch(() => {});
+      if (!isItemStateRefusal) {
+        await recordFixOutcome({
+          memoryRefId: item.memory_ref_id, outcome: 'failure', agentId: 'learned-repair',
+          generatorId: item.generator_id, siteId,
+          notes: `cross-client repair failed: ${sanitizeForCustomer(err.message, '(internal error — see server logs)')}`,
+        }).catch(() => {});
+      }
+    }
+  }
+
+  // FILE-EDITS lanes (content-repair, template-capability-repair): edits
+  // already computed and validated by their own producer — nothing left to
+  // generate, only to push onto the same batch commit chain. Not gated by
+  // queueHeadroom in the same per-slot sense as generator-produced work (both
+  // are small, fixed-volume correctness/unblocking repairs — see their own
+  // high fixed `score` at enqueue time) but still count toward
+  // `attempted`/the shared ceiling like every other autonomous item, so a
+  // pathological day can't use them to bypass the 100-item hard stop.
+  // Whether the batch branch already has a real ref on GitHub. pushDraftBranch
+  // creates it for real (not deferred — only the FINAL ref move at
+  // endBatchPush is deferred) the first time `exists` is false; every push
+  // after that first one, in this run, MUST pass exists:true or it tries to
+  // re-create an already-existing branch. `pending.length > 0` here already
+  // reflects every earlier real push this run (the ordinary analytics/
+  // analyst loop and the learned-repair drain above), so it is the correct
+  // starting value.
+  let branchExistsOnGithub = pending.length > 0;
+  for (const item of fileEditsQueueItems) {
+    if (queueHeadroom <= 0) break;
+    queueHeadroom--;
+    attempted++;
+    try {
+      const files = (item.params?.edits || []).map(({ path, content }) => ({ path, content }));
+      const pushed = await pushFileEditsOntoBatch(
+        site,
+        { id: `${item.source}-${item.id}`, action_type: item.source },
+        files,
+        { branchName, exists: branchExistsOnGithub },
+      );
+      if (!pushed.ok) throw new Error(pushed.error || `${item.source} push failed`);
+      branchExistsOnGithub = true;
+      shippedFileEditsQueueIds.push(item.id);
+    } catch (err) {
+      failed++;
+      console.warn(`[auto-remediation] ${clientLabel}: ${item.source} queue item ${item.id} could not be pushed onto the batch, leaving it for the next run:`, err.message);
+      await releaseQueueItem(item.id, { retryable: true, error: String(err.message || '').slice(0, 500) }).catch(() => {});
     }
   }
 
@@ -708,15 +1013,59 @@ export async function autoRemediateSafeRecommendations(siteId, {
       // counted as shipped that wasn't: these drafts' commits never reached
       // GitHub (the batch overlay holds them locally until the push that
       // just failed), and they stay visibly unshipped either way.
-      const transient = finalization.rateLimited === true;
+      // What counts as transient is decided by the SAME classifier the
+      // reconciler and the attempt record already use (lib/attempt-
+      // classification.js), not by the single `rateLimited` boolean this used
+      // to read. `rateLimited` is still honoured first because it is direct
+      // evidence from the response headers rather than an inference from
+      // prose, but it was far too narrow on its own:
+      //
+      //   - "Batch push/PR failed: This pull request could not be opened right
+      //     now" — 80 abandoned drafts on this instance. finalizeBatchPr
+      //     sanitizes the underlying error, so a rate limit that surfaced at
+      //     the PR-open step arrived with `rateLimited` unset and the text
+      //     stripped of any evidence it was transient.
+      //   - "...batch branch has diverged from main" — a further 45. Self-
+      //     healing by construction: tomorrow's branch forks fresh.
+      //
+      // Every one of those had a real, Quality-Gate-passed commit built and
+      // threw it away for a failure that says nothing about the item. The
+      // classifier already encodes exactly this ("fails every pending item at
+      // once regardless of content") — it simply was not being asked.
+      //
+      // Classified on the UNDERLYING error, never on the "Batch push/PR
+      // failed:" prefix. Classifying the prefixed string instead looks
+      // tempting (that rule exists, and returns RETRY) but it swallows the
+      // cause whole: every batch failure would come back retryable, including
+      // `No GitHub PAT set in env var "GITHUB_PAT"` — 40 real drafts here,
+      // a config gap that cannot resolve itself and would be re-attempted
+      // every run forever. So a cause that classifies as definitively
+      // non-retryable (needs_human / already_resolved / a human's own
+      // decision) is honoured as such and still ends in abandonment.
+      //
+      // An UNRECOGNISED batch failure is treated as transient, which is the
+      // 2026-09-01 lesson: this call fails every pending item at once by
+      // construction, so an unattributable failure says nothing about any
+      // individual item's content, and abandoning discards a real
+      // Quality-Gate-passed commit that would ship on the next pass.
+      const underlying = classifyAbandonReason(finalization.error);
+      const permanent = underlying.retryPolicy === RETRY_POLICY.NEEDS_HUMAN
+        || underlying.retryPolicy === RETRY_POLICY.ALREADY_RESOLVED
+        || underlying.retryPolicy === RETRY_POLICY.NEVER;
+      const transient = finalization.rateLimited === true || !permanent;
       if (pending.length > 0) {
         const disposition = transient
           ? `${pending.length} item(s) left re-attemptable for the next run`
           : `${pending.length} item(s) reverted to failed`;
-        console.error(`[auto-remediation] site ${siteId}: batch push/PR failed for ${branchName}: ${finalization.error} — ${disposition}.`);
+        console.error(`[auto-remediation] ${clientLabel}: batch push/PR failed for ${branchName}: ${finalization.error} — ${disposition}.`);
       }
-      if (transient) stoppedReason = 'github-rate-limited';
-      await Promise.all(pending.map(async ({ rec, draft }) => {
+      // Only claim a rate limit when the response headers actually said so.
+      // Now that other transient classes reach this branch too, reusing the
+      // rate-limit label for all of them would put a cause in the run summary
+      // (and in every operator-facing log line that reads it) that the
+      // evidence does not support.
+      if (transient) stoppedReason = finalization.rateLimited === true ? 'github-rate-limited' : 'batch-push-failed-transient';
+      await Promise.all(pending.map(async ({ rec, draft, learnedRepairQueueId, memoryRefId }) => {
         // A transient failure is not scored against the generator either:
         // generator-learning.js reads these outcomes to decide what to trust,
         // and a rate limit says nothing about whether this generator's output
@@ -731,30 +1080,50 @@ export async function autoRemediateSafeRecommendations(siteId, {
         await record.catch((recordErr) => {
           console.error(`[auto-remediation] could not ${transient ? 'mark retryable' : 'abandon'} draft ${draft.id} after batch push/PR failure:`, recordErr.message);
         });
+        if (learnedRepairQueueId) {
+          await releaseQueueItem(learnedRepairQueueId, { retryable: transient, error: finalization.error }).catch(() => {});
+          if (!transient) {
+            recordFixOutcome({
+              memoryRefId, outcome: 'failure', agentId: 'learned-repair', generatorId: rec.recommendation_type, siteId,
+              notes: `batch push/PR failed: ${sanitizeForCustomer(finalization.error, '(internal error — see server logs)')}`,
+            }).catch(() => {});
+          }
+        }
       }));
-    } else if (pending.length > 0) {
+      if (shippedFileEditsQueueIds.length) {
+        await Promise.all(shippedFileEditsQueueIds.map((id) => releaseQueueItem(id, { retryable: transient, error: finalization.error }).catch(() => {})));
+      }
+    } else if (pending.length > 0 || shippedFileEditsQueueIds.length > 0) {
       prUrl = finalization.prUrl;
-      for (const { rec, draft } of pending) {
+      for (const { rec, draft, learnedRepairQueueId, memoryRefId } of pending) {
         shipped++;
         // Phase 5: best-effort, never awaited into the failure path — a
         // logging problem must not turn a real shipped fix into a reported
         // failure. recordOutcome already swallows its own errors internally.
         recordOutcome(siteId, rec.recommendation_type, 'shipped', { recommendationId: rec.id, draftId: draft.id }).catch(() => {});
+        if (learnedRepairQueueId) {
+          markQueueItemShipped(learnedRepairQueueId).catch(() => {});
+          recordFixOutcome({ memoryRefId, outcome: 'success', agentId: 'learned-repair', generatorId: rec.recommendation_type, siteId }).catch(() => {});
+        }
       }
-      console.log(`[auto-remediation] site ${siteId}: batch pushed and PR opened: ${finalization.prUrl} (${finalization.pushed} commit(s), ${pending.length} recommendation(s)).`);
+      for (const id of shippedFileEditsQueueIds) {
+        shipped++;
+        markQueueItemShipped(id).catch(() => {});
+      }
+      console.log(`[auto-remediation] ${clientLabel}: batch pushed and PR opened: ${finalization.prUrl} (${finalization.pushed} commit(s), ${pending.length} recommendation(s), ${shippedFileEditsQueueIds.length} file-edits item(s)).`);
     }
   }
 
   if (quarantineNotes.length) {
-    console.log(`[auto-remediation] site ${siteId}: ${quarantineNotes.length} generator(s) quarantined this run: ${[...quarantinedGenerators.keys()].join(', ')}.`);
+    console.log(`[auto-remediation] ${clientLabel}: ${quarantineNotes.length} generator(s) quarantined this run: ${[...quarantinedGenerators.keys()].join(', ')}.`);
   }
   console.log(
-    `[auto-remediation] site ${siteId}: run complete — attempted ${attempted}, shipped ${shipped}, failed ${failed}, `
-    + `refused ${refused}, quarantined ${quarantined}${stoppedReason ? `, stopped: ${stoppedReason}` : ''}.`
+    `[auto-remediation] ${clientLabel}: run complete — attempted ${attempted}, shipped ${shipped}, failed ${failed}, `
+    + `refused ${refused}, quarantined ${quarantined}, resolved ${resolved}, conflicted ${conflicted}${stoppedReason ? `, stopped: ${stoppedReason}` : ''}.`
   );
 
   return finish({
-    attempted, shipped, failed, refused, quarantined,
+    attempted, shipped, failed, refused, quarantined, resolved, conflicted,
     skipped: candidates.length - attempted,
     spentToday, dailyLimit, stoppedReason, prUrl,
     // Full selection reasoning — eligible/selected/skipped counts, per-tier
@@ -887,7 +1256,39 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
     throw err;
   }
 
-  const approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null, deferPr });
+  let approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null, deferPr });
+
+  // A credential failure gets exactly ONE immediate in-run retry before it is
+  // allowed to become a real outcome.
+  //
+  // Why, given credentials don't normally fluctuate: on 2026-09-07 a single
+  // ship attempt failed with "GitHub App is not configured" while two sibling
+  // items in the SAME process, seconds apart, authenticated fine — and the
+  // credential resolved cleanly on every subsequent check. No code path
+  // explains that (index.js loads dotenv before any other import, nothing
+  // outside tests ever mutates these vars, and appConfigured() is a pure
+  // synchronous env read), so there is no root cause to fix here. What CAN be
+  // fixed is the consequence: without this, one unexplained blip abandons a
+  // draft and parks the recommendation at NEEDS_HUMAN — deliberately not
+  // auto-retryable, since a genuinely absent credential must not be retried
+  // forever — meaning a human has to notice and requeue it by hand.
+  //
+  // One retry costs one API call and settles it either way: it succeeds (the
+  // blip was real and transient, and the item ships normally), or it fails
+  // identically (the credential is genuinely missing, and the existing
+  // NEEDS_HUMAN classification is correct and now better evidenced).
+  if (!approved.branch_name && CREDENTIAL_FAILURE_PATTERN.test(approved.apply_error || '')) {
+    // No `site` row fetched in this function (unlike autoRemediateSafeRecommendations's
+    // own clientLabel, which needs site.client_number) — `siteId` alone is
+    // enough for a log line here.
+    console.warn(`[auto-remediation] site ${siteId} draft ${draft.id}: credential resolution failed ("${approved.apply_error}") — retrying once before treating it as a real outcome.`);
+    await new Promise((r) => setTimeout(r, CREDENTIAL_RETRY_DELAY_MS));
+    approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null, deferPr });
+    if (approved.branch_name) {
+      console.warn(`[auto-remediation] site ${siteId} draft ${draft.id}: credential retry SUCCEEDED — the first failure was transient, not a real configuration gap.`);
+    }
+  }
+
   if (!approved.branch_name) {
     const message = approved.apply_error || 'Approved but no branch was pushed';
     const err = new Error(message);

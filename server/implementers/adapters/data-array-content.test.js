@@ -211,6 +211,83 @@ describe('data-array-content computeScalarFieldChange — designProfile plumbing
   });
 });
 
+// Regression for the 2026-09-10 incident (PR #92, 7 zunkireelabs.com blog
+// posts): this adapter's scalarValuesFromDraft/computeScalarFieldChange
+// computed `page` from the draft but never passed it into buildMergeValues,
+// so marker-merge.js's blog-context sanitization (isBlogPage/
+// sanitizeCapturedTemplate — added 2026-09-09 for exactly this class of
+// defect) silently never ran for ANY page generated through this
+// data-array adapter (i.e. every pagination-generated page, blog posts
+// included) — only the marker-splice path (backend.js) ever threaded page
+// through. A site's captured section-scale componentTemplates.faq (real
+// homepage markup, container + section-headline heading) shipped verbatim
+// into blog article body copy as a result.
+describe('data-array-content computeScalarFieldChange — blog page context reaches buildMergeValues', () => {
+  const sectionScaleFaqTemplate = {
+    wrapper: '<dl class="container-custom py-12 md:py-20">\n{{ROWS}}\n</dl>',
+    row: '  <dt class="text-2xl md:text-3xl font-normal text-gray-900">{{QUESTION}}</dt>\n  <dd class="text-lg text-gray-600">{{ANSWER}}</dd>',
+  };
+  const blogJsonFixture = JSON.stringify([
+    { id: 'exploring-the-best-it-companies-in-nepal' },
+    { id: 'some-guide' },
+  ]);
+  const fetchBlogPosts = async () => ({ content: blogJsonFixture });
+  // `fields` (a plain string field holding rendered HTML), same shape as the
+  // existing designProfile-plumbing test's `qaContent: 'qaHtml'` above —
+  // this is the actual code path (computeScalarFieldChange ->
+  // scalarValuesFromDraft -> buildMergeValues) the 2026-09-10 incident went
+  // through. An `itemsField` config (raw question/answer items, no rendered
+  // HTML/componentTemplates involved at all) never touches buildMergeValues
+  // and isn't the shape that broke.
+  const tenantBlogFaq = {
+    id: 1,
+    url_file_map: {
+      siteRoot: { componentTemplates: { faq: sectionScaleFaqTemplate } },
+      patterns: [
+        { match: '^/blog/([^/]+)/?$', adapters: { faq: { id: 'data-array-content', format: 'json-array', dataFile: 'src/_data/blog.json', idField: 'id', fields: { faq: 'faqHtml' } } } },
+      ],
+    },
+  };
+
+  test('a blog-post draft strips the captured template\'s section-container/heading-scale classes', async () => {
+    const r = await computeChange(tenantBlogFaq, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/blog/exploring-the-best-it-companies-in-nepal/', items: [{ question: 'Q?', answer: 'A' }] },
+    }, fetchBlogPosts);
+    assert.equal(r.ok, true);
+    const written = r.changedRegions.find((c) => c.field === 'faq');
+    assert.ok(written, 'expected the faqHtml field to be written');
+    assert.doesNotMatch(written.after, /container-custom/, 'blog post must not get the section-level container');
+    assert.doesNotMatch(written.after, /md:text-3xl/, 'blog post must not get the section-headline-scale heading');
+  });
+
+  test('a page type this site conventionally builds AS its own section (a service page) keeps the site\'s real captured styling untouched', async () => {
+    const tenantNonBlogFaq = {
+      ...tenantBlogFaq,
+      url_file_map: {
+        ...tenantBlogFaq.url_file_map,
+        // Same adapter/template/data file, but a /services/ route — per
+        // classifyPageType this is a page type sites conventionally build
+        // with their own dedicated, section-scale FAQ block (same
+        // established behavior marker-merge.test.js's 2026-09-09 regression
+        // coverage already locks in for /services/), so the real captured
+        // styling should ship unmodified here.
+        patterns: [
+          { match: '^/services/([^/]+)/?$', adapters: { faq: { id: 'data-array-content', format: 'json-array', dataFile: 'src/_data/blog.json', idField: 'id', fields: { faq: 'faqHtml' } } } },
+        ],
+      },
+    };
+    const r = await computeChange(tenantNonBlogFaq, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/services/some-guide/', items: [{ question: 'Q?', answer: 'A' }] },
+    }, fetchBlogPosts);
+    assert.equal(r.ok, true);
+    const written = r.changedRegions.find((c) => c.field === 'faq');
+    assert.match(written.after, /container-custom/);
+    assert.match(written.after, /md:text-3xl/);
+  });
+});
+
 // nestedField — location × service pages (e.g. /locations/kathmandu/aeo-seo/),
 // where the real content lives at services.<serviceId> on the location
 // object: a plain KEYED object, not another id-matched array entry. Real
@@ -308,6 +385,162 @@ describe('data-array-content isDataReady — pre-flight check mirrors computeCha
   test('URL too short to have both segments -> not ready', async () => {
     const ready = await isDataReady(tenantAWithNestedServices, 'https://zunkireelabs.com/locations/kathmandu/', config, fetchLocations);
     assert.equal(ready, false);
+  });
+});
+
+// itemsParentField — web-zenly's Feature pages, where the FAQ-like content
+// ("objections") sits at a FIXED key one level under each matched entry
+// (objections.items), unlike solutions.json's own faq array which is
+// already top-level. Distinct from nestedField above: there is only ONE id
+// here (the feature slug from the URL's last segment) — objections is not
+// derived from a second URL segment, it's the same fixed key on every entry.
+const tenantWithNestedObjections = {
+  id: 5,
+  url_file_map: {
+    patterns: [
+      {
+        match: '^/features/([^/]+)/?$',
+        adapters: {
+          faq: { id: 'data-array-content', format: 'json-array', dataFile: 'src/_data/features.json', idField: 'slug', itemsParentField: 'objections', itemsField: 'items' },
+        },
+      },
+    ],
+  },
+};
+const featuresFixture = JSON.stringify([
+  {
+    slug: 'booking',
+    name: 'Booking',
+    metaDescription: 'Existing description, untouched.',
+    objections: { headline: 'Things we get asked.', items: [{ question: 'Existing objection?', answer: 'Existing answer.' }] },
+  },
+  { slug: 'reports', name: 'Reports', objections: { headline: 'Questions.' } },
+  { slug: 'payment-tracking', name: 'Payment Tracking' },
+]);
+const fetchFeatures = async () => ({ content: featuresFixture });
+
+describe('data-array-content computeChange — itemsParentField (Feature-page objections.items)', () => {
+  test('appends into the real nested objections.items array, existing item and sibling fields untouched', async () => {
+    const r = await computeChange(tenantWithNestedObjections, {
+      action_type: 'faq',
+      content: { page: 'https://zennly.example.com/features/booking/', items: [{ question: 'What booking software fits a multi-branch spa?', answer: 'Zennly.' }] },
+    }, fetchFeatures);
+    assert.equal(r.ok, true);
+    const parsed = JSON.parse(r.newContent);
+    const booking = parsed.find((f) => f.slug === 'booking');
+    assert.equal(booking.objections.items.length, 2);
+    assert.ok(booking.objections.items.some((i) => i.question === 'Existing objection?'));
+    assert.ok(booking.objections.items.some((i) => i.question === 'What booking software fits a multi-branch spa?'));
+    // sibling top-level fields on the same entry, and other entries entirely, untouched
+    assert.equal(booking.metaDescription, 'Existing description, untouched.');
+    assert.equal(booking.objections.headline, 'Things we get asked.');
+    assert.equal(parsed.find((f) => f.slug === 'reports').objections.headline, 'Questions.');
+  });
+
+  test('creates a brand-new items array when objections exists but items does not', async () => {
+    const r = await computeChange(tenantWithNestedObjections, {
+      action_type: 'faq',
+      content: { page: 'https://zennly.example.com/features/reports/', items: [{ question: 'Q?', answer: 'A.' }] },
+    }, fetchFeatures);
+    assert.equal(r.ok, true);
+    const parsed = JSON.parse(r.newContent);
+    const reports = parsed.find((f) => f.slug === 'reports');
+    assert.equal(reports.objections.items.length, 1);
+    assert.equal(reports.objections.headline, 'Questions.'); // sibling field on the same nested object untouched
+  });
+
+  test('an entry with no objections object at all -> honest no-insertion-marker, not a guess', async () => {
+    const r = await computeChange(tenantWithNestedObjections, {
+      action_type: 'faq',
+      content: { page: 'https://zennly.example.com/features/payment-tracking/', items: [{ question: 'Q?', answer: 'A.' }] },
+    }, fetchFeatures);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-insertion-marker');
+    assert.match(r.error, /objections/);
+  });
+
+  test('a slug that does not exist in the data file at all -> honest no-insertion-marker', async () => {
+    const r = await computeChange(tenantWithNestedObjections, {
+      action_type: 'faq',
+      content: { page: 'https://zennly.example.com/features/not-a-real-feature/', items: [{ question: 'Q?', answer: 'A.' }] },
+    }, fetchFeatures);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-insertion-marker');
+  });
+});
+
+describe('data-array-content isDataReady — itemsParentField mirrors computeChange exactly', () => {
+  const config = tenantWithNestedObjections.url_file_map.patterns[0].adapters.faq;
+
+  test('a real feature with objections.items already present -> ready', async () => {
+    assert.equal(await isDataReady(tenantWithNestedObjections, 'https://zennly.example.com/features/booking/', config, fetchFeatures), true);
+  });
+
+  test('a real feature with objections but no items yet -> still ready (objections object exists)', async () => {
+    assert.equal(await isDataReady(tenantWithNestedObjections, 'https://zennly.example.com/features/reports/', config, fetchFeatures), true);
+  });
+
+  test('a real feature with no objections object at all -> not ready', async () => {
+    assert.equal(await isDataReady(tenantWithNestedObjections, 'https://zennly.example.com/features/payment-tracking/', config, fetchFeatures), false);
+  });
+
+  test('a slug that does not exist at all -> not ready', async () => {
+    assert.equal(await isDataReady(tenantWithNestedObjections, 'https://zennly.example.com/features/not-a-real-feature/', config, fetchFeatures), false);
+  });
+});
+
+// 'location-service-bootstrap' is the SAFE_RECOVERY write path
+// (agents/lib/location-service-gap.js decides WHETHER to authorize it;
+// this only tests what actually gets written once authorized) — it creates
+// the missing EMPTY services.<id> container, never any content, so the same
+// generators exercised above can then write real fields into it exactly the
+// way they already do for kathmandu's real services.
+describe('data-array-content computeChange — location-service-bootstrap (structural recovery)', () => {
+  const baseConfig = tenantAWithNestedServices.url_file_map.patterns[0].adapters['meta-title'];
+
+  test('location has no services object at all -> creates services AND the nested entry, both empty', async () => {
+    const r = await computeChange(tenantAWithNestedServices, {
+      action_type: 'location-service-bootstrap',
+      content: { page: 'https://zunkireelabs.com/locations/pokhara/aeo-seo/', baseConfig },
+    }, fetchLocations);
+    assert.equal(r.ok, true);
+    assert.equal(r.bootstrap, true);
+    assert.match(r.newContent, /id:\s*"pokhara"[\s\S]*?services:\s*\{\s*["']?aeo-seo["']?:\s*\{\s*\}/);
+    // sibling location's real content untouched
+    assert.match(r.newContent, /title: "AI Development Services in Kathmandu"/);
+  });
+
+  test('location already has a services object but not this service -> adds only the new key, siblings untouched', async () => {
+    const r = await computeChange(tenantAWithNestedServices, {
+      action_type: 'location-service-bootstrap',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/quantum-computing/', baseConfig },
+    }, fetchLocations);
+    assert.equal(r.ok, true);
+    assert.match(r.newContent, /["']?quantum-computing["']?:\s*\{\s*\}/);
+    assert.match(r.newContent, /"ai-development":\s*\{/); // untouched sibling
+  });
+
+  test('entry already exists -> refuses rather than overwriting real content', async () => {
+    const r = await computeChange(tenantAWithNestedServices, {
+      action_type: 'location-service-bootstrap',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/aeo-seo/', baseConfig },
+    }, fetchLocations);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'already-exists');
+  });
+
+  test('the newly-created container is then a normal, ready insertion point for a real generator', async () => {
+    const bootstrapped = await computeChange(tenantAWithNestedServices, {
+      action_type: 'location-service-bootstrap',
+      content: { page: 'https://zunkireelabs.com/locations/pokhara/aeo-seo/', baseConfig },
+    }, fetchLocations);
+    const fetchBootstrapped = async () => ({ content: bootstrapped.newContent });
+    const r = await computeChange(tenantAWithNestedServices, {
+      action_type: 'meta-title',
+      content: { page: 'https://zunkireelabs.com/locations/pokhara/aeo-seo/', selectedTitle: 'SEO & AEO in Pokhara' },
+    }, fetchBootstrapped);
+    assert.equal(r.ok, true);
+    assert.match(r.newContent, /title: "SEO & AEO in Pokhara"/);
   });
 });
 
@@ -617,5 +850,110 @@ describe('data-array-content computeChange — cross-generator batch sequencing 
     assert.equal(second.ok, true);
     assert.match(second.newContent, /Kathmandu Q\?/);
     assert.match(second.newContent, /Pokhara Q\?/);
+  });
+});
+
+describe('data-array-content computeChange — content-integrity-repair (data-array-generated pages)', () => {
+  const widgetA = '<table><tbody></tbody></table>';
+  const widgetB = '<table><tbody></tbody></table>'; // identical markup on a SIBLING entry, on purpose
+  const fixture = `export default [
+  { id: "widget-a", name: "Widget A", content: "intro text ${widgetA} more text" },
+  { id: "widget-b", name: "Widget B", content: "intro text ${widgetB} more text" },
+];
+`;
+  const tenantE = {
+    id: 5,
+    url_file_map: {
+      patterns: [{
+        match: '^/products/([^/]+)$',
+        adapters: { 'content-integrity-repair': { id: 'data-array-content', format: 'js-export-array', dataFile: 'src/_data/products.js', idField: 'id' } },
+      }],
+    },
+  };
+  const fetchProducts = async () => ({ content: fixture });
+
+  test('removes a broken table anchor scoped to the matched entry only — the identical anchor on a sibling entry is untouched', async () => {
+    const r = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/widget-a/', fixType: 'malformed-table', anchorHtml: widgetA, replacement: '' },
+    }, fetchProducts);
+    assert.equal(r.ok, true);
+    assert.equal(r.filePath, 'src/_data/products.js');
+    // widget-a's own table is gone...
+    assert.doesNotMatch(r.newContent.split('widget-b')[0], /<table>/);
+    // ...but widget-b's byte-identical table survives — scoping to the
+    // matched object's own range is what makes this safe despite the two
+    // entries sharing identical markup.
+    assert.match(r.newContent.split('widget-b')[1], /<table>/);
+  });
+
+  test('faq-schema-mismatch anchors on originalRaw and writes the new JSON-LD verbatim', async () => {
+    const schemaFixture = `export default [
+  { id: "widget-a", name: "Widget A", schema: '{"old":"data"}' },
+];
+`;
+    const r = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: {
+        page: 'https://example.com/products/widget-a/', fixType: 'faq-schema-mismatch',
+        originalRaw: '{"old":"data"}', jsonLd: { '@type': 'FAQPage', mainEntity: [] },
+      },
+    }, async () => ({ content: schemaFixture }));
+    assert.equal(r.ok, true);
+    assert.match(r.newContent, /"@type":"FAQPage"/);
+    assert.doesNotMatch(r.newContent, /"old":"data"/);
+  });
+
+  test('anchor no longer found verbatim (source changed since detection) -> honest source-anchor-not-found, never a guess', async () => {
+    const r = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/widget-a/', fixType: 'malformed-table', anchorHtml: '<table><tbody><tr><td>real row</td></tr></tbody></table>', replacement: '' },
+    }, fetchProducts);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'source-anchor-not-found');
+  });
+
+  test('unknown fixType -> honest draft-not-ready, never a silent no-op', async () => {
+    const r = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/widget-a/', fixType: 'not-a-real-fixtype' },
+    }, fetchProducts);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'draft-not-ready');
+  });
+
+  test('no entry matches this id -> honest no-insertion-marker', async () => {
+    const r = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/does-not-exist/', fixType: 'malformed-table', anchorHtml: widgetA, replacement: '' },
+    }, fetchProducts);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-insertion-marker');
+  });
+
+  test('no adapter configured for content-integrity-repair on this route -> honest no-file-mapping, not a crash', async () => {
+    const tenantNoAdapter = {
+      id: 6,
+      url_file_map: { patterns: [{ match: '^/products/([^/]+)$', adapters: {} }] },
+    };
+    const r = await computeChange(tenantNoAdapter, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/widget-a/', fixType: 'malformed-table', anchorHtml: widgetA, replacement: '' },
+    }, fetchProducts);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-file-mapping');
+  });
+
+  test('a fresh computeChange re-parse of the result succeeds — the write is valid JS', async () => {
+    const r = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/widget-a/', fixType: 'malformed-table', anchorHtml: widgetA, replacement: '' },
+    }, fetchProducts);
+    assert.equal(r.ok, true);
+    const reread = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/widget-b/', fixType: 'malformed-table', anchorHtml: widgetB, replacement: '' },
+    }, async () => ({ content: r.newContent }));
+    assert.equal(reread.ok, true);
   });
 });

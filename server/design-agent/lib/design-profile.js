@@ -49,7 +49,7 @@ export const DESIGN_PROFILE_VERSION = 2;
 // `class="py-12 md:py-20 py-12 md:py-20"` and `class="... gap-3 gap-3"` into
 // real customer pages. First occurrence wins, so fragment order still decides
 // precedence for any framework that resolves conflicts by source order.
-function cx(...parts) {
+export function cx(...parts) {
   const seen = new Set();
   const out = [];
   for (const part of parts) {
@@ -185,6 +185,75 @@ function projectExpandContent(profile) {
     wrapper: `<div${attr(wrapperCls)}>\n{{ROWS}}\n</div>`,
     row: `  <section${attr(profile.spacing?.itemGap)}>\n    <h2${attr(t.heading.section || t.heading.item)}>{{HEADING}}</h2>\n    <div${attr(t.body)}>{{BODY}}</div>\n  </section>`,
   };
+}
+
+// Same content as projectExpandContent, but for a page whose OWN sections are
+// built from the site's card component (a portfolio/case-study grid, e.g.
+// zunkireelabs.com/projects/) rather than the plain editorial pages
+// projectExpandContent's bare heading+paragraph rows match fine. Injecting
+// that bare row onto a card-heavy page reads as unstyled, bolted-on text next
+// to real cards — not because the typography is wrong (it's the same
+// verified typography every other projection uses), but because the page
+// around it has visual weight this row never picks up.
+//
+// Deliberately NOT a PROJECTORS entry / real action type: this is a variant
+// of 'expand-content' selected per-page by the caller (marker-merge.js),
+// never its own actionType — there is no separate generator, gate, or
+// COMPONENT_TEMPLATE_KEY concept for it. Returns null exactly when the site
+// has no real captured card component, so a caller can fall through to
+// projectExpandContent — never invents a card look for a site that doesn't
+// have one.
+export function projectExpandContentCard(profile) {
+  if (!isProfileUsable(profile)) return null;
+  const card = profile.components?.card;
+  if (!card?.wrapper) return null;
+  const t = profile.typography;
+  const wrapperCls = cx(profile.layout?.container, profile.spacing?.section);
+  const rowCls = cx(card.wrapper, profile.spacing?.itemGap);
+  const inner = card.body
+    ? [
+      `    <div${attr(card.body)}>`,
+      `      <h2${attr(t.heading.section || t.heading.item)}>{{HEADING}}</h2>`,
+      `      <div${attr(t.body)}>{{BODY}}</div>`,
+      '    </div>',
+    ].join('\n')
+    : [
+      `    <h2${attr(t.heading.section || t.heading.item)}>{{HEADING}}</h2>`,
+      `    <div${attr(t.body)}>{{BODY}}</div>`,
+    ].join('\n');
+  return {
+    wrapper: `<div${attr(wrapperCls)}>\n{{ROWS}}\n</div>`,
+    row: `  <div${attr(rowCls)}>\n${inner}\n  </div>`,
+  };
+}
+
+function normalizedPath(url) {
+  try { return new URL(url).pathname.replace(/\/+$/, '') || '/'; } catch { return url; }
+}
+
+// Whether THIS SPECIFIC captured page (not the site in general) is built from
+// repeating card sections — schema.js's pages[].sections[].components, the
+// same evidence componentsOf()/segment.js already derives from capture.js's
+// cardLike/cardClasses. Requires at least two card sections, not one: a
+// single incidental card (a lone testimonial, a pricing callout) does not
+// make a page "card-heavy" the way a portfolio/case-study grid is — one
+// misclassified page shouldn't flip every future generated section on it
+// into card styling.
+//
+// Returns false (never throws) for a page the capture pass never visited —
+// that is the common case (capture is a handful of representative pages, not
+// a full crawl) and the caller's correct fallback is the plain projection,
+// not an error.
+export function pageUsesCardSections(profile, pageUrl) {
+  const pages = profile?.pages;
+  if (!Array.isArray(pages) || !pageUrl) return false;
+  const target = normalizedPath(pageUrl);
+  const page = pages.find((p) => p?.url && normalizedPath(p.url) === target);
+  if (!page) return false;
+  const cardSections = (page.sections || []).filter(
+    (s) => Array.isArray(s.components) && s.components.some((c) => c?.type === 'card'),
+  );
+  return cardSections.length >= 2;
 }
 
 // A list of links. Uses the site's real list pattern and link colour so

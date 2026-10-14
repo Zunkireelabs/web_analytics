@@ -31,54 +31,58 @@ jobs:
     needs: checks
     environment: staging
     steps:
-      - name: Deploy via SSH
+      # Split into four SSH steps (2026-09-08): the single combined script
+      # below this point used to run bootstrap + both .env writes + the
+      # build/deploy/cron logic as one `script:` block. GitHub Actions
+      # compiles a string containing multiple ${{ }} substitutions into one
+      # composite expression, and that block's ~25.7k characters exceeded
+      # the platform's 21000-character max expression length — every push
+      # to stage failed at parse time with "Exceeded max expression length
+      # 21000" before any job even started. Splitting the script across
+      # steps keeps each step's composite expression well under the cap,
+      # with margin for future growth. Each step is its own SSH session, so
+      # anything that depends on being inside $DIR (git state, cwd) must
+      # re-`cd` at the top of the next step — it does not carry over from
+      # the previous one. `command_timeout: 35m` only needs to live on the
+      # build/deploy step — it's the only one that runs anything slow.
+      - name: Bootstrap checkout
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          # 20m was enough for a warm-cache build. A cold cache (e.g. right
-          # after a disk-space `docker system prune` on the VPS) reinstalls
-          # data-analyst-agent's Python ML dependencies (scikit-learn,
-          # transformers, sentence-transformers) from scratch with no cached
-          # layers — a real deploy on 2026-08-13 got through git pull, image
-          # build, and dependency install, then died on "exporting layers" at
-          # the 20m mark, one step from finishing. 35m covers a full cold
-          # build with headroom; a normal warm-cache deploy still finishes in
-          # its usual few minutes and never gets close to this ceiling.
-          command_timeout: 35m
           script: |
-            # Without this, a failed step (e.g. `docker compose build` running
-            # out of disk space) doesn't stop the script — it falls through to
-            # `up -d`, which happily recreates the container from whatever
-            # image already exists locally (the OLD one), passes its health
-            # check, and the whole job reports success even though nothing
-            # new was actually deployed. Confirmed real: a real deploy did
-            # exactly this on 2026-07-22 (VPS out of disk space), silently
-            # serving stale code while CI showed green.
             set -eo pipefail
 
-            DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
+            DIR="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web"
 
             # First-push bootstrap: create directory and clone if missing
             if [ ! -d "$DIR" ]; then
               echo "First deployment — bootstrapping $DIR"
               mkdir -p "$DIR"
-              git clone -b stage git@github.com:${{ github.repository }}.git "$DIR"
+              git clone -b stage https://github.com/${{ github.repository }}.git "$DIR"
             fi
 
             cd "$DIR"
-            # Force the remote back to SSH every deploy: a previous deploy
-            # (2026-08-13) set origin to an HTTPS+PAT URL, which persists in
-            # this checkout's .git/config across deploys since the bootstrap
-            # clone above only runs once. Without this line, reverting the
-            # script's own clone command back to SSH silently did nothing —
-            # the existing checkout kept using the stale HTTPS remote and
-            # kept 403'ing.
-            git remote set-url origin git@github.com:${{ github.repository }}.git
+            # Force the remote to anonymous HTTPS every deploy: an existing checkout's
+            # .git/config may still point at the old SSH remote, which has no deploy
+            # key on this box (the repo is public, so anonymous HTTPS clones fine) —
+            # the bootstrap clone above only runs once, so without this line an
+            # existing checkout would keep using the stale SSH remote and fail.
+            git remote set-url origin https://github.com/${{ github.repository }}.git
             git fetch origin
             git checkout stage
             git pull origin stage
+
+      - name: Write app .env
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            DIR="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web"
+            cd "$DIR"
 
             cat > .env << 'ENVEOF'
             # ── Database (staging) ──────────────────────────────────────────
@@ -111,6 +115,22 @@ jobs:
             # actually reads (server/github/app-auth.js).
             GITHUB_APP_ID=${{ secrets.GH_APP_ID }}
             GITHUB_APP_PRIVATE_KEY_B64=${{ secrets.GH_APP_PRIVATE_KEY_B64 }}
+            # Chayceproperties (site #8864) has its own distinct App
+            # installation (4894335), not the shared default — fails closed
+            # (no fallback to the shared App/PAT) if this isn't set, per
+            # credentials.js's no-cross-tenant-leakage design.
+            GITHUB_APP_PRIVATE_KEY_B64_CHAYCE=${{ secrets.GH_APP_PRIVATE_KEY_B64_CHAYCE }}
+
+            # ── Sanity CMS write credentials (per-site, opt-in) ──────────────
+            # Named per-site (SANITY_WRITE_TOKEN_<SITE>), never shared — a
+            # Sanity token is scoped to one project/dataset, so a shared token
+            # would mean writing tenant A's generated content into tenant B's
+            # CMS (see server/sanity/credentials.js's own comment on this).
+            # Admizz Education (site #8862) is the first site using this;
+            # sites.sanity_write_token_env_var names which env var a given
+            # site reads, so adding a second site's token is just one more
+            # line here plus that column, no code change.
+            SANITY_WRITE_TOKEN_ADMIZZ=${{ secrets.SANITY_WRITE_TOKEN_ADMIZZ }}
 
             # ── AI Recommendation Agent (opt-in, real costed OpenAI probes) ──
             # Shares OPENAI_API_KEY above but requires this separate flag
@@ -250,6 +270,14 @@ jobs:
             # the Actions secret is GH_WEBHOOK_SECRET, renamed here to the
             # GITHUB_WEBHOOK_SECRET env var the app code expects.
             GITHUB_WEBHOOK_SECRET=${{ secrets.GH_WEBHOOK_SECRET }}
+            # Same idea, but for the GitHub App's own webhook (installation /
+            # installation_repositories events, server/routes/webhooks.js's
+            # /webhooks/github-app route) — a separate secret from the one
+            # above since it's a different trust boundary (one App-level
+            # webhook covering every client's installation, vs. a per-repo
+            # one). Actions secret is GH_APP_WEBHOOK_SECRET, same
+            # GITHUB_-prefix restriction as every other secret here.
+            GITHUB_APP_WEBHOOK_SECRET=${{ secrets.GH_APP_WEBHOOK_SECRET }}
 
             # ── Site identity ───────────────────────────────────────────────
             SITE_NAME=${{ vars.SITE_NAME }}
@@ -298,6 +326,16 @@ jobs:
             DATA_ANALYST_AGENT_ADMIN_KEY=${{ secrets.DATA_ANALYST_AGENT_ADMIN_KEY }}
             ENVEOF
 
+      - name: Write data-analyst-agent .env
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            DIR="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web"
+            cd "$DIR"
+
             # ── Data Analyst Agent's own .env (data-analyst-agent/) ──────────
             # Staging points this service straight at the same shared Neon
             # database as the main app (see data-analyst-agent/docker-compose.dev.yml)
@@ -339,22 +377,65 @@ jobs:
             ANALYSIS_SCHEDULE_ENABLED=false
             DAAENVEOF
 
-            # design-agent-worker gets --no-cache: a real deploy on 2026-08-26
-            # showed its `COPY package*.json ./` / `RUN npm ci --omit=dev`
-            # layers reported CACHED across multiple independent deploy
-            # attempts spanning 30+ minutes, even though package-lock.json's
-            # content had genuinely changed on disk (git-level verified —
-            # the VPS's checkout was confirmed at the exact commit carrying
-            # the fix). BuildKit's COPY caching is supposed to be content-
-            # hashed, so a stale hit like that shouldn't be possible; rather
-            # than chase a persisted daemon-cache bug on this host with no
-            # SSH access to inspect it live, force this one image to always
-            # rebuild the dependency-install layer from scratch. The other
-            # two images don't have this problem (nothing in their build
-            # fails from a stale npm ci) and keep normal caching so most
-            # deploys stay fast.
-            docker compose -f docker-compose.dev.yml build --no-cache design-agent-worker
-            docker compose -f docker-compose.dev.yml build analytics analytics-mcp
+      - name: Build, deploy, and install cron
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          # 20m was enough for a warm-cache build. A cold cache (e.g. right
+          # after a disk-space `docker system prune` on the VPS) reinstalls
+          # data-analyst-agent's Python ML dependencies (scikit-learn,
+          # transformers, sentence-transformers) from scratch with no cached
+          # layers — a real deploy on 2026-08-13 got through git pull, image
+          # build, and dependency install, then died on "exporting layers" at
+          # the 20m mark, one step from finishing. 35m was raised to cover
+          # that with headroom, but a real cold-cache deploy on 2026-09-16
+          # still hit it — this step's pip install alone (scipy, tokenizers,
+          # transformers, sentence-transformers, plus the design-agent-worker
+          # and analytics/analytics-mcp builds ahead of it) ran past 35m and
+          # was killed by this timeout mid-download, one `docker compose ...
+          # build` short of finishing. 50m covers a full cold build with
+          # headroom again; a normal warm-cache deploy still finishes in its
+          # usual few minutes and never gets close to this ceiling.
+          command_timeout: 50m
+          script: |
+            # Without this, a failed step (e.g. `docker compose build` running
+            # out of disk space) doesn't stop the script — it falls through to
+            # `up -d`, which happily recreates the container from whatever
+            # image already exists locally (the OLD one), passes its health
+            # check, and the whole job reports success even though nothing
+            # new was actually deployed. Confirmed real: a real deploy did
+            # exactly this on 2026-07-22 (VPS out of disk space), silently
+            # serving stale code while CI showed green.
+            set -eo pipefail
+
+            DIR="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web"
+            cd "$DIR"
+
+            # Disk guard: a build that runs out of space mid-`npm ci` fails with
+            # a misleading ENOSPC deep in an image layer (the 2026-10-01 and
+            # 2026-10-08 deploys), so check first. Dangling images and build
+            # cache older than a day are safe to drop — nothing running uses
+            # them — and are reclaimed before giving up.
+            free_gb() { df -BG --output=avail / | tail -1 | tr -dc '0-9'; }
+            if [ "$(free_gb)" -lt 8 ]; then
+              echo "Only $(free_gb)G free — pruning dangling images and old build cache before building..."
+              docker image prune -f
+              docker builder prune -f --filter "until=24h"
+            fi
+            if [ "$(free_gb)" -lt 6 ]; then
+              echo "::error::Only $(free_gb)G free on the VPS after pruning — refusing to build. Free disk space, then re-run."
+              exit 1
+            fi
+
+            # ONE image for the app, the MCP server and the design worker (see
+            # docker-compose.dev.yml): only `analytics` has a build, the other
+            # two reuse its tag. This replaces three builds, including a
+            # `--no-cache` design-agent-worker build that wrote a fresh set of
+            # layers on every deploy and was a main source of the disk pressure
+            # that kept failing the deploy. Normal layer caching applies.
+            docker compose -f docker-compose.dev.yml build analytics
             docker compose -f data-analyst-agent/docker-compose.dev.yml build
 
             echo "Applying database migrations..."
@@ -383,6 +464,12 @@ jobs:
                 exit 1
               fi
             done
+
+            # Every deploy re-tags analytics-stage-app:latest, leaving the previous
+            # build untagged. Drop those (dangling only — never an image a
+            # container uses) and stale build cache so images don't pile up.
+            docker image prune -f
+            docker builder prune -f --filter "until=72h"
 
             # ── Data Analyst Agent nightly pipeline ──────────────────────────
             # The container's CMD only starts uvicorn, so the API serves fine
@@ -430,6 +517,116 @@ jobs:
             ((crontab -l 2>/dev/null || true) | (grep -v -e 'run_nightly_pipeline' -e '^CRON_TZ=UTC$' || true); echo "CRON_TZ=UTC"; echo "0 22 * * * $NIGHTLY_CMD") | crontab -
             echo "Data Analyst nightly pipeline scheduled (22:00 UTC daily, ahead of the 01:30 UTC morning run):"
             crontab -l | grep run_nightly_pipeline
+
+            # ── Common Crawl referring-domains ETL (monthly) ─────────────────
+            # server/scripts/refresh-commoncrawl-graph.js populates the
+            # Referring Domains card (server/routes/commoncrawl-backlinks.js) —
+            # deliberately independent of DataForSEO, so getting a DataForSEO
+            # account does not fill this in; only this ETL does. It downloads
+            # one Common Crawl domain-level Web Graph release (tens of GB,
+            # billions of rows), so it runs on the VPS's own disk via the
+            # already-deployed container (which already has this run's
+            # DATABASE_URL/STAGING_DATABASE_URL in its env), never on an
+            # ephemeral GitHub-hosted runner. Common Crawl ships a new release
+            # roughly monthly, so 1st-of-month is enough to stay current.
+            # Scheduled at 03:00 UTC to land clear of both the 22:00 UTC
+            # analyst pipeline above and the 01:30 UTC daily growth run
+            # (server/cron.js) — this is a read-heavy, long-running import,
+            # not something that should race either.
+            echo "Installing Common Crawl referring-domains ETL cron..."
+            CC_CMD="cd $DIR && docker compose -f docker-compose.dev.yml exec -T analytics npm run refresh-commoncrawl-graph >> /var/log/commoncrawl-refresh.log 2>&1"
+            ((crontab -l 2>/dev/null || true) | (grep -v -e 'refresh-commoncrawl-graph' || true); echo "0 3 1 * * $CC_CMD") | crontab -
+            echo "Common Crawl referring-domains ETL scheduled (03:00 UTC on the 1st of each month):"
+            crontab -l | grep refresh-commoncrawl-graph
+
+            # One-time immediate kickoff so Referring Domains doesn't sit
+            # empty until the 1st of next month. Guarded by a marker file so
+            # a later redeploy never re-triggers this multi-hour job — only
+            # the monthly cron above runs it again after this. Detached with
+            # nohup/disown so it survives this SSH session ending; the
+            # workflow does not wait on it (the download alone can run for
+            # hours), it just gets the first import moving in the background.
+            #
+            # The marker is written by the backgrounded command itself, only
+            # after `npm run refresh-commoncrawl-graph` actually exits 0 —
+            # never unconditionally right after launching it. Writing it
+            # unconditionally meant a same-deploy failure (bad container
+            # name, a transient network error scraping Common Crawl's release
+            # listing, a DB hiccup) still permanently marked the "first run"
+            # as done, silently killing the only retry until the 1st of next
+            # month's cron — which is exactly what left Referring Domains
+            # empty even after this kickoff was deployed.
+            MARKER="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web/.commoncrawl-graph-first-run-done"
+            if [ ! -f "$MARKER" ]; then
+              echo "Kicking off one-time initial Common Crawl ETL run in the background..."
+              cd "$DIR"
+              nohup bash -c "docker compose -f docker-compose.dev.yml exec -T analytics npm run refresh-commoncrawl-graph >> /var/log/commoncrawl-refresh.log 2>&1 && touch '$MARKER'" >> /var/log/commoncrawl-refresh.log 2>&1 &
+              disown
+              echo "Started — check progress with: tail -f /var/log/commoncrawl-refresh.log"
+              echo "Marker will only be written on success — rerun this deploy to retry if it fails."
+            else
+              echo "Initial Common Crawl ETL run already completed successfully; relying on the monthly cron from here."
+            fi
+
+            # ── One-time design-profile rescan after a derivation-logic fix ──
+            # 2026-09-16: fixed several bugs in HOW a design profile is
+            # DERIVED (arbitrary-value Tailwind sizes were invisible to the
+            # heading-size guard, an item heading could end up larger than
+            # its own section heading, a fixed height could be stored as
+            # section spacing, and the structural check was being wrongly
+            # applied to brand-new projected templates). Every EXISTING
+            # profile was derived under the old, buggy logic, and the normal
+            # weekly rescan (queueDesignProfileRescanForAllSites) only
+            # refreshes a profile once it's 7 days stale — so without this,
+            # every current site keeps shipping from the old, unfixed
+            # derivation for up to a week after this deploy.
+            #
+            # Marker-gated exactly like the Common Crawl kickoff above: fires
+            # once, queues (not runs inline) a real rescan job per site for
+            # the existing worker/cron pipeline to pick up, then never fires
+            # again — routine weekly staleness-based rescans take over from
+            # there. Delete the marker file to force it to run again (e.g.
+            # after a future derivation-logic fix of the same kind).
+            RESCAN_MARKER="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web/.design-profile-rescan-2026-09-16-done"
+            if [ ! -f "$RESCAN_MARKER" ]; then
+              echo "Queuing one-time design-profile rescan for all sites (derivation-logic fix)..."
+              if docker compose -f docker-compose.dev.yml exec -T analytics npm run force-design-profile-rescan; then
+                touch "$RESCAN_MARKER"
+                echo "Rescan(s) queued — the design-agent worker will process them; routine weekly staleness rescans resume after this."
+              else
+                echo "Could not queue the rescan — marker NOT written, will retry on the next deploy."
+              fi
+            else
+              echo "One-time post-fix design-profile rescan already queued; relying on the weekly cron from here."
+            fi
+
+            # ── One-time site-discovery catch-up (page_inventory) ──────────
+            # Same reasoning as the design-profile rescan directly above, for
+            # a different pipeline: page_inventory (the page list every
+            # finding-generating agent — selectCandidatePages — scans for
+            # issues to fix) is refreshed weekly from each site's sitemap +
+            # a real crawl, but only if that week's run hasn't happened yet.
+            # It has no way to notice a site's OWN sitemap changed since
+            # then. Confirmed on chayceproperties.com: its real sitemap.xml
+            # lists /news/, but every stored page_inventory row is tagged
+            # 'crawl', never 'sitemap' — that fetch never landed, so /news/
+            # has been invisible to every page-level agent regardless of how
+            # long it waits. This runs it once, synchronously (unlike the
+            # design-profile rescan, this reads/writes fast HTTP fetches, no
+            # LLM or slow browser render, so there's no need to background
+            # it), then never fires again.
+            DISCOVERY_MARKER="/home/zunkireelabs/devprojects/websiteprojects/stage-analytics-web/.site-discovery-2026-09-17-done"
+            if [ ! -f "$DISCOVERY_MARKER" ]; then
+              echo "Running one-time site-discovery catch-up for all connected sites..."
+              if docker compose -f docker-compose.dev.yml exec -T analytics npm run force-site-discovery; then
+                touch "$DISCOVERY_MARKER"
+                echo "Site discovery complete — page_inventory is now current; routine weekly discovery resumes from here."
+              else
+                echo "Site discovery run failed — marker NOT written, will retry on the next deploy."
+              fi
+            else
+              echo "One-time post-fix site-discovery catch-up already run; relying on the weekly cron from here."
+            fi
 
       - name: Verify Health
         run: |

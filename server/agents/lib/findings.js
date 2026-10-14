@@ -45,9 +45,11 @@ export const impactFromPriority = (priority) => PRIORITY_TO_IMPACT_LABEL[priorit
 
 export function makeFinding({
   id, evidence, whyItMatters, priority, recommendedAction = null, expectedImpact,
-  reportOnly = null,
+  reportOnly = null, verification = null,
 }) {
-  return { id, evidence, whyItMatters, priority, recommendedAction, expectedImpact, reportOnly };
+  // `verification` ({verdict, method, reason}, see verdict.js) is opt-in: null
+  // means a legacy detector that has not declared how it proved the defect.
+  return { id, evidence, whyItMatters, priority, recommendedAction, expectedImpact, reportOnly, verification };
 }
 
 // For a check whose failure is usually one shared, sitewide root cause (a
@@ -66,6 +68,18 @@ export function makeFinding({
 export function aggregateSystemicFinding({
   id, affected, checkedCount, getPage, getImpressions = () => 0,
   whyItMatters, extraEvidence, recommendedAction, pickRepresentative, samplesCap = 5,
+  // Optional, same shape as font-consistency.js's own inline reportOnly
+  // object ({kind, label, page, whyBlocked}) — a real, informational row
+  // for the Action Center to show even when `recommendedAction` above
+  // resolved to null for every affected item (e.g. every failing element
+  // is genuinely ambiguous/shared-CSS, ruled out by the caller's own
+  // per-item safety check, not merely undetected). Called with the same
+  // `representative` used for recommendedAction (or the highest-impression
+  // item when recommendedAction itself yielded nothing to represent), so
+  // the row still points somewhere real. Never invoked when
+  // recommendedAction resolved to a real action — a finding is either
+  // draftable or informational, never both.
+  reportOnly,
 }) {
   if (!affected.length) return null;
   const affectedCount = affected.length;
@@ -80,12 +94,14 @@ export function aggregateSystemicFinding({
   const representative = recommendedAction
     ? (pickRepresentative ? pickRepresentative(affected) : byImpressionsDesc[0])
     : null;
+  const resolvedAction = representative ? recommendedAction(representative) : null;
   const finding = makeFinding({
     id,
     evidence: { affectedCount, checkedCount, samplePages, ...(extraEvidence ? extraEvidence(affected) : {}) },
     whyItMatters: whyItMatters(affectedCount, checkedCount),
     priority,
-    recommendedAction: representative ? recommendedAction(representative) : null,
+    recommendedAction: resolvedAction,
+    reportOnly: !resolvedAction && reportOnly ? reportOnly(pickRepresentative ? pickRepresentative(affected) : byImpressionsDesc[0]) : null,
     expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: sumImpressions },
   });
   // Internal-only, stripped before persistence (server/agents/lib/bulk-audit.js's

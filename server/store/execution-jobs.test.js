@@ -67,4 +67,19 @@ describe('reclaimStaleExecutingJobs', () => {
     const { rows } = await query('SELECT status FROM execution_jobs WHERE id = $1', [queuedJob.id]);
     assert.equal(rows[0].status, 'queued');
   });
+
+  test('fails a job instead of requeueing it once it has already been reclaimed maxReclaims times (a job that keeps killing its worker)', async () => {
+    const siteId = await makeSite();
+    const jobId = await makeExecutingJob(siteId, { startedAgoMs: 60 * 60 * 1000 });
+    const prior = [1, 2].map((n) => ({ at: new Date().toISOString(), message: `Reclaimed: stuck in 'executing' (attempt ${n})` }));
+    await query('UPDATE execution_jobs SET logs = logs || $2::jsonb WHERE id = $1', [jobId, JSON.stringify(prior)]);
+
+    const reclaimed = await reclaimStaleExecutingJobs({ olderThanMs: 30 * 60 * 1000, maxReclaims: 2 });
+    assert.equal(reclaimed.find((r) => r.id === jobId)?.status, 'failed');
+
+    const { rows } = await query('SELECT status, finished_at, result FROM execution_jobs WHERE id = $1', [jobId]);
+    assert.equal(rows[0].status, 'failed');
+    assert.ok(rows[0].finished_at, 'a failed job needs a finished_at');
+    assert.equal(rows[0].result.failure.stage, 'worker_crash');
+  });
 });

@@ -79,6 +79,55 @@ describe('appConfigured', () => {
   });
 });
 
+// Per-client App credentials (migration 154) — a tenant with their own
+// registered App, so their shipping run draws against its own rate-limit
+// budget instead of the shared default App's.
+describe('per-site App credentials', () => {
+  const ownKeyB64 = Buffer.from(PEM).toString('base64');
+
+  test('appConfigured is true for an explicit credentials pair, independent of the env-configured default App', () => {
+    setEnv({ GITHUB_APP_ID: null, GITHUB_APP_PRIVATE_KEY_B64: null });
+    assert.equal(appConfigured(), false, 'sanity: the default App really is unconfigured here');
+    assert.equal(appConfigured({ appId: 999, privateKeyB64: ownKeyB64 }), true);
+  });
+
+  test('appConfigured is false for a credentials pair missing its key — never falls back to the default App\'s key', () => {
+    assert.equal(appConfigured(), true, 'sanity: the default App IS configured here');
+    assert.equal(appConfigured({ appId: 999, privateKeyB64: null }), false);
+  });
+
+  test('createAppJwt signs with the explicit App id and key, not the env-configured default', () => {
+    const jwt = createAppJwt(Date.now(), { appId: 999, privateKeyB64: ownKeyB64 });
+    const [header, payload, signature] = jwt.split('.');
+
+    const verifier = createVerify('RSA-SHA256');
+    verifier.update(`${header}.${payload}`);
+    assert.equal(verifier.verify(publicKey, Buffer.from(signature, 'base64url')), true);
+    assert.equal(decode(payload).iss, 999);
+  });
+
+  test('createAppJwt names the App id it failed to find credentials for', () => {
+    assert.throws(
+      () => createAppJwt(Date.now(), { appId: 999, privateKeyB64: null }),
+      /GitHub App 999 is not configured/
+    );
+  });
+
+  test('getInstallationToken signs the mint request with the explicit credentials, not the default App', async () => {
+    const calls = [];
+    const fetchImpl = async (url, opts) => {
+      calls.push(opts.headers.Authorization);
+      return { ok: true, status: 201, json: async () => ({ token: 'ghs_own_app', expires_at: new Date(Date.now() + 3600_000).toISOString() }) };
+    };
+
+    const token = await getInstallationToken(555, { fetchImpl, credentials: { appId: 999, privateKeyB64: ownKeyB64 } });
+
+    assert.equal(token, 'ghs_own_app');
+    const jwt = calls[0].replace(/^Bearer /, '');
+    assert.equal(decode(jwt.split('.')[1]).iss, 999);
+  });
+});
+
 describe('getInstallationToken', () => {
   function fakeGitHub({ token = 'ghs_installation_token', expiresInMs = 3600_000, status = 201, calls = [] } = {}) {
     return async (url, opts) => {

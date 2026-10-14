@@ -36,14 +36,24 @@
 //     lib/draft-ship-state.js already treats them as untouchable and the
 //     lifecycle derivation surfaces them as 'blocked' so they are visible
 //     rather than reclaimed out from under the reviewer.
-//   - It never asks GitHub anything. PR truth already has an owner —
+//   - It never POLLS GitHub for PR truth. That already has an owner —
 //     checkDraftPrStatus, driven by the webhook and the :20 hourly poll. A
 //     second poller would double the API spend against the same rate limit
 //     that already abandoned 113 drafts in one hour on 2026-09-01.
+//     Pass 0 (recoverUnopenedBatchPrs, added 2026-09-08) is the one deliberate
+//     exception and is not a poller: it reads a branch only when this site
+//     actually holds drafts stuck at 'branch_pushed' with no PR — i.e. only
+//     when there is specific work to finish — and it asks the one question no
+//     existing owner answers, "are these commits really on GitHub?", because
+//     the alternative was throwing away pushed work on a guess. It skips
+//     itself entirely while the credential's budget is low, so it can never
+//     be the thing that exhausts it.
 import { query } from '../db.js';
 import { markDraftAbandoned, countFailedAttemptsByFinding, getDraftByFindingId } from '../store/drafts.js';
 import { reopenRecommendation, blockRecommendation, closeRecommendation, listOpenRecommendations } from '../store/recommendations.js';
-import { recordAttempt, countRecoveryCyclesByFinding } from '../store/recommendation-attempts.js';
+import { recordAttempt, countRecoveryCyclesByFinding, countRefusalRecoveryCyclesByRecommendation } from '../store/recommendation-attempts.js';
+import { countRefusalsByRecommendation } from '../agents/lib/generator-learning.js';
+import { getSiteById } from '../store/read.js';
 import { classifyAbandonReason, RETRY_POLICY } from './attempt-classification.js';
 import { logInternal } from './errors.js';
 // Reused rather than re-defined: one formula decides both "stop auto-drafting
@@ -52,14 +62,32 @@ import { logInternal } from './errors.js';
 // autonomous-recovery pass below) — the same question asked from two call
 // sites must get the same answer, or one silently excludes a finding the
 // other still considers eligible.
-import { MAX_RECOVERY_CYCLES, effectiveConvergenceCap } from '../agents/lib/ship-pacing.js';
+import { MAX_RECOVERY_CYCLES, effectiveConvergenceCap, MAX_REFUSAL_RECOVERY_CYCLES, effectiveRefusalCap } from '../agents/lib/ship-pacing.js';
 // recheckRecommendation is the ONE existing entry point that re-runs a
 // finding's detecting agent against LIVE content for a single recommendation
 // (originally built for the manual "Re-check now" button) — reused here with
 // its refreshEvidence option rather than duplicating re-detection logic. See
 // its own doc comment in recommendation-coordinator.js for why this, and not
 // a second live-content reader, is the right thing to call from here.
-import { recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
+import { recheckRecommendation, CAPABILITY_GAP_BLOCK_PREFIX } from '../agents/lib/recommendation-coordinator.js';
+import { verifyRecommendation, VERIFICATION_DECISION } from '../generators/lib/verification-layer.js';
+import { getGenerator } from '../generators/registry.js';
+import { recoverUnopenedBatchPrs } from './batch-pr-recovery.js';
+// capabilityGapDetector was previously exercised only via
+// scripts/shadow-test-capability-gap-recovery.js in shadow mode (a stubbed
+// decisionEngineFn that never writes to the `decisions` table). Calling the
+// real singleton here is what makes it a real, first production caller of
+// decision-engine.js's decide() too, not just this file's own pass.
+import { capabilityGapDetector } from '../agents/lib/capability-gap-detector.js';
+// setDecisionOutcome had zero callers anywhere in the codebase before this
+// (see store/decisions.js's own header comment) — decision-engine.js's
+// decide() was recording Situation->Evidence->Hypothesis->Decision->Action,
+// but nothing ever closed the loop with the actual outcome. surfaceCapabilityGaps
+// below is the first real call site: it already knows, synchronously, whether
+// the investigation's decision led anywhere (blocked N recommendations for a
+// human) or not, so it can record that outcome the same moment it acts,
+// without needing a new decision_id column anywhere to trace it later.
+import { setDecisionOutcome } from '../store/decisions.js';
 
 // How long a draft may sit without progress before its recommendation is
 // taken back. Long enough that nothing in flight is disturbed — a normal
@@ -317,6 +345,83 @@ async function classifyUnrecordedFailures(siteId, { apply, log }) {
   return result;
 }
 
+// Pass 3b — capability-gap clustering. Same-site ITEM_DEFECT failures that
+// share one generalized failure shape are a single broken/missing capability
+// on the generator itself, not N independent per-item defects — retrying
+// each one blindly (passes 1-3 above) never converges because the resolver
+// is what's broken, not the individual page. capability-gap-detector.js
+// (already built and validated against a real incident — see its own header
+// comment) does the clustering + investigation; this pass is what actually
+// ACTS on a detected gap for the first time, instead of leaving it as a
+// shadow-only report. It never repairs anything itself (no automated code
+// change is safe to make blind) — it blocks every open recommendation the
+// cluster touches ONCE, with the shared diagnosis, so a human sees "one
+// capability problem affecting N items" instead of N separate stuck cards,
+// and so driveAutonomousRecovery below (whose own guard is
+// `if (rec.blocked_reason) continue`) stops spending recovery cycles
+// re-detecting the same items against content that was never the real
+// problem.
+//
+// Runs after classifyUnrecordedFailures (which only ever blocks on
+// NEEDS_HUMAN, never on ITEM_DEFECT) and before driveAutonomousRecovery, so
+// the block lands before recovery would otherwise burn a cycle on it.
+async function surfaceCapabilityGaps(siteId, { apply, log }) {
+  const result = { gapsDetected: 0, recommendationsBlocked: 0, gaps: [] };
+  const gaps = await capabilityGapDetector.detectCapabilityGaps(siteId);
+  if (!gaps.length) return result;
+  result.gapsDetected = gaps.length;
+
+  for (const gap of gaps) {
+    result.gaps.push({ generatorId: gap.generatorId, summary: gap.summary, affectedCount: gap.affectedCount });
+    if (!apply) continue;
+
+    const { rows: findingRows } = await query(
+      `SELECT DISTINCT finding_id FROM drafts WHERE site_id = $1 AND id = ANY($2) AND finding_id IS NOT NULL`,
+      [siteId, gap.affectedIds],
+    );
+    // The investigation's own rationale is the best available diagnosis for
+    // the generic-fallback bucket (two genuinely distinct root causes can
+    // hide under one cluster — see capability-gap-detector.js); a cluster
+    // that already matched a real RULES entry has no investigation to quote,
+    // so its own summary already IS the diagnosis.
+    const diagnosis = gap.investigation?.rationale
+      || `${gap.affectedCount} attempt(s) on generator "${gap.generatorId}" all failed with the same underlying defect (${gap.summary}) — a shared capability gap, not ${gap.affectedCount} independent per-item problems.`;
+
+    const blockedRecIds = [];
+    for (const { finding_id: findingId } of findingRows) {
+      const rec = await findRecommendationForFinding(siteId, findingId);
+      if (!rec || rec.status !== 'open' || rec.blocked_reason) continue;
+      await blockRecommendation(
+        rec.id,
+        `${CAPABILITY_GAP_BLOCK_PREFIX}${gap.generatorId}" affecting ${gap.affectedCount} item(s): ${diagnosis}`,
+      );
+      result.recommendationsBlocked += 1;
+      blockedRecIds.push(rec.id);
+    }
+
+    // Close the experience-memory loop for gaps that were actually
+    // investigated (only the generic-fallback bucket ever calls
+    // decisionEngine.decide() — see capability-gap-detector.js). The
+    // decision's own action ('investigate_further', typically) did not
+    // resolve this autonomously — it was escalated to a human instead, with
+    // no execution ever attempted. That is not a verified failure, so the
+    // status stays 'decided' ("open question, not learning yet" — see
+    // decision-evidence.js's DECISION_OUTCOME_KNOWN_STATUSES, which
+    // correctly excludes 'decided' from past-decision evidence). Recording
+    // outcome_ref still links the decision to the blocked recommendations it
+    // produced, without misrepresenting "escalated" as "attempted and
+    // failed".
+    if (gap.investigation?.id && blockedRecIds.length > 0) {
+      await setDecisionOutcome(gap.investigation.id, {
+        status: 'decided',
+        outcomeRef: `recommendations:${blockedRecIds.join(',')}`,
+      });
+    }
+    log?.(`[reconciler] site ${siteId}: capability gap detected on "${gap.generatorId}" (${gap.summary}) — ${gap.affectedCount} affected draft(s), blocked ${result.recommendationsBlocked} open recommendation(s) so far`);
+  }
+  return result;
+}
+
 // Pass 4 — autonomous recovery for open recommendations already past the
 // convergence cap. This is where the live 71-recommendation bug actually
 // was: classifyUnrecordedFailures above only ever looks at abandoned drafts
@@ -423,16 +528,25 @@ async function driveAutonomousRecovery(siteId, { apply, log }) {
       log?.(`[reconciler] site ${siteId}: rec ${rec.id} resolved on re-check — closed, no longer needs a fix`);
       continue;
     }
-    if (!recheck.refreshed) {
+    if (!recheck.refreshed && !recheck.recheckedLive) {
       // Still detected but nothing to refresh (no structured params came
       // back from re-detection) — also not evidence either way. Leave it for
       // the next pass rather than spending a recovery cycle on a no-op.
+      //
+      // `recheckedLive` (set by recheckRecommendation's broken-link-fix
+      // branch) is the exception: that type has no params to refresh even
+      // on a genuine live re-check, so treating only `refreshed` as evidence
+      // would mean a permanently-dead external citation (DNS failure,
+      // expired cert) never accumulates a recovery cycle and never reaches
+      // blockRecommendation — it would loop here forever instead of ever
+      // escalating to a human.
       continue;
     }
 
-    // Fresh params are on the recommendation now. Abandon any draft still
-    // sitting against this finding so the next generation attempt is
-    // guaranteed to read them, not a draft built from the old ones.
+    // The recommendation now reflects a genuine live re-check (fresh params,
+    // when there were any to refresh). Abandon any draft still sitting
+    // against this finding so the next generation attempt is guaranteed to
+    // build from current evidence, not a draft built from the old attempt.
     const findingId = findingIds[0];
     const liveDraft = findingId ? await getDraftByFindingId(siteId, findingId) : null;
     if (liveDraft) {
@@ -452,10 +566,130 @@ async function driveAutonomousRecovery(siteId, { apply, log }) {
       // recovery is the opposite claim: the prior failures don't count
       // against the fresh evidence this attempt now has.
       retryPolicy: RETRY_POLICY.RETRY,
-      reason: `Re-analyzed against live content after ${attempts} failed attempt(s) on stale evidence; recommendation params refreshed for a fresh attempt.`,
+      reason: recheck.refreshed
+        ? `Re-analyzed against live content after ${attempts} failed attempt(s) on stale evidence; recommendation params refreshed for a fresh attempt.`
+        : `Re-checked live after ${attempts} failed attempt(s) — still confirmed the same issue against current content; no params to refresh, but this counts as a fresh recovery cycle.`,
     });
     result.recovered += 1;
-    log?.(`[reconciler] site ${siteId}: rec ${rec.id} recovered — re-detected live, params refreshed (recovery cycle ${cycles + 1}/${MAX_RECOVERY_CYCLES})`);
+    log?.(`[reconciler] site ${siteId}: rec ${rec.id} recovered — re-detected live${recheck.refreshed ? ', params refreshed' : ' (no params to refresh)'} (recovery cycle ${cycles + 1}/${MAX_RECOVERY_CYCLES})`);
+  }
+  return result;
+}
+
+// The refusal-cap counterpart to driveAutonomousRecovery above — same
+// "spend a recovery cycle on fresh evidence, or hand it to a human once
+// exhausted" shape, applied to ship-pacing.js's applyRefusalCap
+// (MAX_REFUSALS) instead of applyConvergenceCap. Built from a real,
+// verified case on site 1 (2026-09-17): 20 broken-link-fix recommendations
+// held after 5 refusals each, most of which were actually caused by GitHub
+// rate limiting during the exact runs that produced them — re-checking one
+// by hand once the rate limit cleared found it genuinely fixable, but
+// nothing autonomous would ever have re-tried it; applyRefusalCap filters a
+// held item out of every future candidate list before the generate/push
+// loop can see it again, so a refusal caused by a since-resolved transient
+// condition sat re-classified as a permanent defect forever, identically to
+// a genuinely unfixable one.
+//
+// Deliberately does NOT ship anything itself — same discipline
+// learned-repair.js was fixed to follow (see its own comment: shipping
+// directly from a second autonomous entry point bypasses the daily ceiling
+// and the "one shared batch PR" rule every other producer respects). This
+// only re-verifies, READ-ONLY, and records a recovery cycle (raising the
+// effective cap) or closes the recommendation outright when the
+// implementer's own check proves the finding is stale — the next
+// scheduled auto-remediation.js run is what actually attempts the ship,
+// through the normal shared pipeline, with the daily ceiling and pacing it
+// already respects.
+//
+// Applies to every generator that exposes a `verifyCurrentState` (see
+// server/generators/lib/verification-layer.js) — currently broken-link-fix
+// and redirect-fix, the two generators whose implementer computation
+// (backend.js) exposes a real, read-only "would this succeed right now"
+// check with no side effects. A generator with no verifier is left exactly
+// as before it existed (still permanently held once its refusal cap is
+// reached) — a real, honest scope limit, not a silent gap: extending this
+// to another generator means giving IT an equivalent read-only
+// re-verification first (its own `verifyCurrentState`), not looping it in
+// here blind.
+async function driveAutonomousRefusalRecovery(siteId, { apply, log }) {
+  const counts = await countRefusalsByRecommendation(siteId);
+  const result = { recovered: 0, resolved: 0, blocked: 0, recommendations: [] };
+  if (counts.size === 0) return result;
+
+  const recoveries = await countRefusalRecoveryCyclesByRecommendation(siteId);
+  const openRecs = await listOpenRecommendations(siteId);
+  // Same real scope limit as before, just generalized: a recommendation only
+  // enters this pass at all if ITS OWN generator has a verifier — a held
+  // type with none is left exactly as if this pass didn't exist for it, not
+  // merely skipped-and-counted.
+  const candidates = [];
+  for (const rec of openRecs) {
+    if (rec.blocked_reason) continue;
+    const generator = await getGenerator(rec.recommendation_type);
+    if (typeof generator?.verifyCurrentState === 'function') candidates.push(rec);
+  }
+  if (!candidates.length) return result;
+
+  let site = null;
+  for (const rec of candidates) {
+    const refusals = counts.get(rec.id) || 0;
+    const cycles = recoveries.get(rec.id) || 0;
+    if (refusals < effectiveRefusalCap(cycles)) continue;
+
+    result.recommendations.push({ id: rec.id, refusals, cycles });
+    if (!apply) continue;
+
+    if (cycles >= MAX_REFUSAL_RECOVERY_CYCLES) {
+      await blockRecommendation(
+        rec.id,
+        `This has been refused ${refusals} times across ${cycles} autonomous re-checks, each against freshly re-fetched live/repo content. It needs a human to look at it directly.`,
+      );
+      result.blocked += 1;
+      log?.(`[reconciler] site ${siteId}: rec ${rec.id} blocked — ${cycles} refusal-recovery cycles exhausted, ${refusals} total refusals`);
+      continue;
+    }
+
+    site = site ?? await getSiteById(siteId);
+    if (!site) continue; // no evidence to re-check against — leave for next pass
+
+    const verification = await verifyRecommendation(rec, { site });
+    if (verification.reason === 'verification-error') {
+      // A transient error re-checking (rate limit, network) is not evidence
+      // about the finding — must not consume a recovery cycle, same
+      // reasoning driveAutonomousRecovery's own re-detection-failure catch
+      // uses above. verifyRecommendation itself never throws (it catches
+      // internally and reports this reason instead), so this checks the
+      // reported reason rather than a try/catch.
+      log?.(`[reconciler] site ${siteId}: rec ${rec.id} refusal-recovery re-check failed (${verification.evidence?.error}) — will retry next run`);
+      continue;
+    }
+
+    if (verification.decision === VERIFICATION_DECISION.ALREADY_RESOLVED) {
+      // The generator's own live/repo re-check confirms this recommendation's
+      // premise is genuinely gone now — nothing left to fix, same as
+      // driveAutonomousRecovery's "resolved on re-check" case.
+      await closeRecommendation(rec.id);
+      result.resolved += 1;
+      log?.(`[reconciler] site ${siteId}: rec ${rec.id} resolved on refusal-recovery re-check — confirmed gone (${verification.reason}), closed`);
+      continue;
+    }
+
+    // Whether the fix is now genuinely fixable (the next scheduled ship run
+    // will pick it up and actually apply it, through the normal shared
+    // pipeline) or still blocked for a real, current reason, fresh evidence
+    // was gathered either way. Recording the cycle now is what raises the
+    // effective cap so applyRefusalCap stops filtering this candidate out of
+    // tomorrow's queue.
+    const nowFixable = verification.reason === 'fixable-now';
+    await recordAttempt(siteId, {
+      recommendationId: rec.id, findingId: null, draftId: null,
+      outcome: 'recovered', retryPolicy: RETRY_POLICY.RETRY,
+      reason: nowFixable
+        ? `Re-checked live after ${refusals} refusal(s) — no longer blocked by what was blocking it before; this counts as a fresh refusal-recovery cycle and will be re-attempted on the next scheduled run.`
+        : `Re-checked live after ${refusals} refusal(s) — still confirmed the same issue against current live/repo content (${verification.reason}); this counts as a fresh refusal-recovery cycle.`,
+    });
+    result.recovered += 1;
+    log?.(`[reconciler] site ${siteId}: rec ${rec.id} refusal-recovery cycle spent — ${nowFixable ? 'now fixable, queued for next ship run' : 'still refuses'} (cycle ${cycles + 1}/${MAX_REFUSAL_RECOVERY_CYCLES})`);
   }
   return result;
 }
@@ -464,11 +698,33 @@ async function driveAutonomousRecovery(siteId, { apply, log }) {
 // exactly what it would do and writes nothing, which is how this gets
 // verified against production data before being trusted to run unattended.
 export async function reconcileSite(siteId, { idleHours = IDLE_RECLAIM_HOURS, apply = true, log = console.log } = {}) {
+  // Pass 0 — finish work that is ALREADY on GitHub before any later pass is
+  // allowed to throw it away. Ordering is the whole point: pass 2 below
+  // reclaims a 'branch_pushed' draft purely on lack of progress, and a batch
+  // whose commits landed but whose PR call failed looks identical to one that
+  // never pushed at all. Running the reclaim first meant every such batch was
+  // abandoned and regenerated from scratch the next day, forever — the commits
+  // discarded, the model spend repeated, and the recommendation's card
+  // reporting "tried 7 times". lib/batch-pr-recovery.js settles which of the
+  // two it is against GitHub and opens the one missing PR, so pass 2 only
+  // ever sees genuinely dead work.
+  //
+  // openDraftPr is injected rather than imported: it lives in the Express
+  // route module, which imports far more of the app than a janitor should
+  // pull in, and a static import here would make routes/action-center.js and
+  // this file a cycle.
+  const prRecovery = await recoverUnopenedBatchPrs(siteId, {
+    apply,
+    log,
+    openPr: async (id, draftId) => (await import('../routes/action-center.js')).openDraftPr(id, draftId),
+  });
   const itemDefects = await reconcileStuckApprovedDrafts(siteId, { apply, log });
   const stalled = await reclaimStalledDrafts(siteId, { idleHours, apply, log });
   const failures = await classifyUnrecordedFailures(siteId, { apply, log });
+  const capabilityGaps = await surfaceCapabilityGaps(siteId, { apply, log });
   const recovery = await driveAutonomousRecovery(siteId, { apply, log });
-  return { siteId, stalled, failures, itemDefects, recovery };
+  const refusalRecovery = await driveAutonomousRefusalRecovery(siteId, { apply, log });
+  return { siteId, prRecovery, stalled, failures, itemDefects, capabilityGaps, recovery, refusalRecovery };
 }
 
 // Every site, one at a time. Sequential on purpose: this shares a connection
@@ -476,9 +732,10 @@ export async function reconcileSite(siteId, { idleHours = IDLE_RECLAIM_HOURS, ap
 // every site buys nothing here — the work is small per site and never
 // latency-critical.
 export async function reconcileAllSites({ idleHours = IDLE_RECLAIM_HOURS, apply = true, log = console.log } = {}) {
-  const { rows: sites } = await query('SELECT id FROM sites ORDER BY id');
+  const { rows: sites } = await query('SELECT id, client_number FROM sites ORDER BY id');
   const results = [];
   for (const site of sites) {
+    const clientLabel = site.client_number ? `client #${site.client_number}` : `site ${site.id}`;
     try {
       results.push(await reconcileSite(site.id, { idleHours, apply, log }));
     } catch (err) {
@@ -493,17 +750,18 @@ export async function reconcileAllSites({ idleHours = IDLE_RECLAIM_HOURS, apply 
       // module's CLI prints it to stdout, and a future caller could store it
       // on an execution_job — so it must never carry raw exception text.
       const id = logInternal(`action-center-reconciler site ${site.id}`, err);
-      log?.(`[reconciler] site ${site.id} failed (ref: ${id})`);
+      log?.(`[reconciler] ${clientLabel} failed (ref: ${id})`);
     }
   }
   const totals = results.reduce((acc, r) => ({
     reclaimed: acc.reclaimed + r.stalled.reclaimed,
     reopened: acc.reopened + r.stalled.reopened,
     classified: acc.classified + r.failures.classified,
-    blocked: acc.blocked + r.failures.blocked + r.recovery.blocked,
-    resolved: acc.resolved + r.failures.resolved + r.recovery.resolved,
+    blocked: acc.blocked + r.failures.blocked + r.recovery.blocked + r.refusalRecovery.blocked + r.capabilityGaps.recommendationsBlocked,
+    resolved: acc.resolved + r.failures.resolved + r.recovery.resolved + r.refusalRecovery.resolved,
     abandonedForRetry: acc.abandonedForRetry + r.itemDefects.abandoned,
-    recovered: acc.recovered + r.recovery.recovered,
-  }), { reclaimed: 0, reopened: 0, classified: 0, blocked: 0, resolved: 0, abandonedForRetry: 0, recovered: 0 });
+    recovered: acc.recovered + r.recovery.recovered + r.refusalRecovery.recovered,
+    capabilityGapsDetected: acc.capabilityGapsDetected + r.capabilityGaps.gapsDetected,
+  }), { reclaimed: 0, reopened: 0, classified: 0, blocked: 0, resolved: 0, abandonedForRetry: 0, recovered: 0, capabilityGapsDetected: 0 });
   return { results, totals };
 }

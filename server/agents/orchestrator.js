@@ -3,12 +3,19 @@ import { runAgent } from './runner.js';
 import { callLLM } from '../llm.js';
 import { createPageCache } from './lib/fetch-cache.js';
 import { safeMessage } from '../lib/errors.js';
+import { tenantContextTextForSiteId } from '../lib/tenant-context.js';
 
 // The one shared place that knows how to run N specialist agents and combine
 // their structured findings into one answer. Executive Report, Action
 // Center's refresh, and any future AI Chat / notifier are all thin,
 // differently-configured callers of this — none of them re-implements its
 // own fan-out + synthesis loop. See agents/types.js OrchestratorInput/Output.
+
+// Agents the default "run everything" fan-out must skip: executive-report is
+// the caller itself, and trend-radar has its own monthly cadence (job.js's
+// runTrendRadarIfDue) — running it here would add feed fetches and an LLM call
+// to every executive report / refresh.
+const EXCLUDED_FROM_DEFAULT_FANOUT = new Set(['executive-report', 'trend-radar']);
 
 export const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 
@@ -44,10 +51,19 @@ const QUESTION_SYSTEM = 'You are a senior growth analyst answering a specific qu
 // surface serves both platform admins and site owners — a client must not be
 // answered in internal vocabulary (agent ids, risk tiers, draft states).
 // Every other caller passes nothing and keeps the existing behaviour exactly.
-export async function synthesizeFindings(findings, perAgent, question, systemOverride = null) {
+// `tenantContext` (lib/tenant-context.js) is what this business actually is
+// and is trying to achieve. The briefing is the one prompt every agent's
+// output passes through, so stating the goals here is the cheapest way to
+// make the synthesis prioritise against them rather than against raw
+// finding severity — a position drop on a page that serves no active goal
+// and one on the page that does are indistinguishable without it. Passed in
+// rather than loaded here so this function stays free of a database read,
+// and '' for every tenant until the flag is on.
+export async function synthesizeFindings(findings, perAgent, question, systemOverride = null, { tenantContext = '' } = {}) {
   if (!findings.length) return null;
   const system = systemOverride || (question ? QUESTION_SYSTEM : BRIEFING_SYSTEM);
   const user = (question ? `Question: ${question}\n` : '') +
+    (tenantContext ? `${tenantContext}\n\n` : '') +
     `Findings: ${JSON.stringify(findings)}\nAgent statuses: ${JSON.stringify(perAgent)}`;
   return callLLM(system, user, { maxTokens: 450 })
     .catch((err) => { console.warn('[orchestrator] synthesis failed:', err.message); return null; });
@@ -137,7 +153,7 @@ export async function runOrchestration({
 } = {}) {
   const ids = agentIds?.length
     ? agentIds
-    : (await listAgentMeta()).map((m) => m.id).filter((id) => id !== 'executive-report');
+    : (await listAgentMeta()).map((m) => m.id).filter((id) => !EXCLUDED_FROM_DEFAULT_FANOUT.has(id));
 
   // One fetch cache shared by every agent in this run — see lib/fetch-cache.js
   // for why this needs no special handling to stay out of persisted history.
@@ -148,7 +164,8 @@ export async function runOrchestration({
   ));
 
   const { findings, perAgent } = summarizeAgentRuns(ran);
-  const narrative = await synthesizeFindings(findings, perAgent, question, personaPrompt);
+  const tenantContext = await tenantContextTextForSiteId(siteId, { sections: ['business', 'goals', 'product'] });
+  const narrative = await synthesizeFindings(findings, perAgent, question, personaPrompt, { tenantContext });
 
   return { ranAgentIds: ids, generatedAt: new Date().toISOString(), findings, perAgent, narrative };
 }

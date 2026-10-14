@@ -206,3 +206,61 @@ describe('applyRefusalCap', () => {
     assert.equal(notes.length, 0);
   });
 });
+
+describe('applyPacing — trend blog lane', () => {
+  const trend = (id) => ({ id, recommendation_type: 'blog-outline', finding_ids: [`t${id}`], params: { topic: `trend ${id}`, category: 'Insights' } });
+  const keyword = (id) => ({ id, recommendation_type: 'blog-outline', finding_ids: [`k${id}`], params: { topic: `keyword ${id}` } });
+
+  // A recentDraftCheck stand-in that honours the lane filter, with a ledger of
+  // which lanes have published recently.
+  const history = ({ trendRecent = false, otherRecent = false }) => async (siteId, type, days, tz, filter = {}) => {
+    if (filter.contentCategory === 'Insights') return trendRecent;
+    if (filter.excludeContentCategory === 'Insights') return otherRecent;
+    return trendRecent || otherRecent;
+  };
+
+  test('a trend post and a keyword blog BOTH ship in one run — they no longer share a slot', async () => {
+    const { paced } = await applyPacing(site, [trend(1), keyword(2)], { recentDraftCheck: never });
+    assert.deepEqual(paced.map((r) => r.id).sort(), [1, 2]);
+  });
+
+  test("a recent keyword blog does not hold a trend post back, and the reverse", async () => {
+    const heldOther = await applyPacing(site, [trend(1), keyword(2)], { recentDraftCheck: history({ otherRecent: true }) });
+    assert.deepEqual(heldOther.paced.map((r) => r.id), [1]);
+
+    const heldTrend = await applyPacing(site, [trend(1), keyword(2)], { recentDraftCheck: history({ trendRecent: true }) });
+    assert.deepEqual(heldTrend.paced.map((r) => r.id), [2]);
+  });
+
+  test('within the trend lane it is still one per run, highest priority first', async () => {
+    const { paced, notes } = await applyPacing(site, [trend(1), trend(2), trend(3), trend(4), trend(5)], { recentDraftCheck: never });
+    assert.deepEqual(paced.map((r) => r.id), [1]);
+    assert.match(notes[0], /blog-outline \(trend\): taking 1 of 5/);
+  });
+
+  test('the trend lane uses its own 3-day gap, the other lane the site\'s own', async () => {
+    const seen = [];
+    await applyPacing({ ...site, blog_min_gap_days: 7 }, [trend(1), keyword(2)], {
+      recentDraftCheck: async (id, type, days, tz, filter) => { seen.push([filter.contentCategory ?? `not-${filter.excludeContentCategory}`, days]); return false; },
+    });
+    assert.deepEqual(seen, [['Insights', 3], ['not-Insights', 7]]);
+  });
+
+  test('five trend posts fit a fortnight: slots on days 0,3,6,9,12', () => {
+    // 14 days / 3-day gap: the fifth post at day 12 is the last that fits.
+    const slots = []; for (let d = 0; d < 14; d += 3) slots.push(d);
+    assert.deepEqual(slots, [0, 3, 6, 9, 12]);
+  });
+
+  test('a site with no trend candidates is paced exactly as before', async () => {
+    const { paced, notes } = await applyPacing(site, [keyword(1), keyword(2), keyword(3)], { recentDraftCheck: never });
+    assert.deepEqual(paced.map((r) => r.id), [1]);
+    assert.match(notes[0], /^blog-outline: taking 1 of 3/);
+  });
+
+  test('a client-requested topic still jumps its own lane\'s cadence gap', async () => {
+    const asked = { ...keyword(9), params: { topic: 'asked', clientRequested: true } };
+    const { paced } = await applyPacing(site, [keyword(1), asked], { recentDraftCheck: async () => true });
+    assert.deepEqual(paced.map((r) => r.id), [9]);
+  });
+});

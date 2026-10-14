@@ -7,6 +7,7 @@ import GrowthTrendCard from '../components/GrowthTrendCard.jsx';
 import GrowthProjectionCard from '../components/GrowthProjectionCard.jsx';
 import SiteAuditSummaryCard from '../components/SiteAuditSummaryCard.jsx';
 import GrowthPlanNarrativeCard from '../components/GrowthPlanNarrativeCard.jsx';
+import BaselineReportCard from '../components/BaselineReportCard.jsx';
 
 // Client-facing "how much have we actually grown you" view — real data
 // only, strictly anchored to the site's real onboarding baseline (see
@@ -25,6 +26,15 @@ export default function GrowthReport({ isInternal = false }) {
   const [error, setError] = useState(false);
   const [clients, setClients] = useState([]);
   const [selectedSiteId, setSelectedSiteId] = useState(null); // null = admin's own site (default)
+  const [baselineReport, setBaselineReport] = useState(null); // null = loading
+
+  const loadBaselineReport = () => {
+    const requestedSiteId = selectedSiteId;
+    return api.baselineReport(requestedSiteId || undefined)
+      .then((result) => { if (requestedSiteId === selectedSiteId) setBaselineReport(result); })
+      .catch(() => { if (requestedSiteId === selectedSiteId) setBaselineReport({ available: false, message: 'Unable to load your baseline report right now.' }); });
+  };
+  useEffect(() => { setBaselineReport(null); loadBaselineReport(); }, [selectedSiteId]);
 
   const load = () => {
     const requestedSiteId = selectedSiteId;
@@ -134,6 +144,9 @@ export default function GrowthReport({ isInternal = false }) {
               </div>
             </div>
           </div>
+
+          <BaselineReportCard report={baselineReport} siteId={isInternal ? selectedSiteId : undefined}
+            isInternal={isInternal} onGenerated={loadBaselineReport} />
 
           {/* Section 1: Where You Stand Today */}
           <div className="space-y-3">

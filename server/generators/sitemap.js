@@ -1,4 +1,5 @@
 import { getSiteById } from '../store/read.js';
+import { getFileContent, defaultBranchName } from '../github/client.js';
 import { listPageInventory, listOrphanedPages } from '../store/page-inventory.js';
 import { discoverSitemapEntries } from '../agents/lib/site-discovery.js';
 
@@ -27,6 +28,23 @@ export const meta = {
 
 function escapeXml(str) {
   return String(str).replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
+}
+
+// This generator is only meant to write a hand-maintained, fully static
+// sitemap.xml (see server/implementers/types.js's "Sitemap regeneration"
+// comment) — never a template source (Eleventy/Nunjucks/Liquid/Handlebars/
+// EJS, ...) that a static-site build renders into sitemap.xml itself. A
+// straight overwrite of a templated source with the rendered-XML body this
+// generator builds silently deletes the front matter (e.g. Eleventy's
+// `permalink: /sitemap.xml`) and the loop that keeps it current — exactly
+// what happened to zunkireelabs-web's src/sitemap.njk (Action Center drafts
+// #180/#1095), which took the site's live /sitemap.xml offline (404) until
+// the front matter was restored by hand.
+const TEMPLATE_SOURCE_PATTERN = /^---\r?\n|\{%[-\s]|\{\{[-\s]|<%[-=]?/;
+
+// Exported for tests.
+export function looksLikeTemplateSource(raw) {
+  return TEMPLATE_SOURCE_PATTERN.test(raw.slice(0, 2000));
 }
 
 // Exported for tests. `addedLastmod` is the one real, non-fabricated fact
@@ -64,6 +82,18 @@ export async function generate({ siteId, params }) {
     ), { status: 400 });
   }
 
+  const ref = defaultBranchName(site);
+  const file = await getFileContent(site, sitemapPath, ref);
+  const raw = typeof file === 'string' ? file : file?.content;
+  if (raw && looksLikeTemplateSource(raw)) {
+    throw Object.assign(new Error(
+      `${sitemapPath} is a template source (front matter or templating syntax found), not a static sitemap.xml — ` +
+      'this generator only overwrites a hand-maintained static file. The site\'s own build already regenerates ' +
+      'its sitemap from this template, so url_file_map.siteRoot.sitemap should not be set for it at all — unset ' +
+      'it via `npm run connect-repo` rather than generating a draft here.'
+    ), { status: 400, userFacing: true });
+  }
+
   const [existingEntries, inventory, orphanedPages] = await Promise.all([
     discoverSitemapEntries(site),
     listPageInventory(siteId),
@@ -88,4 +118,39 @@ export async function generate({ siteId, params }) {
     : `No missing URLs found for ${sitemapPath} — sitemap is already up to date.`;
 
   return { content, summary };
+}
+
+// Side-effect-free re-verification (server/generators/lib/verification-layer.js).
+// Re-runs the exact same real-data recompute generate() itself does
+// (discoverSitemapEntries + page_inventory, diffed the same way) rather than
+// trusting a `missingUrls` param captured whenever the finding was first
+// detected — a URL added to the live sitemap by some other means since then
+// (a prior draft, a manual edit) must not get a second, now-empty-diff draft.
+export async function verifyCurrentState(rec, { site } = {}) {
+  if (!site) return { decision: 'still_valid', reason: 'no-site-context', evidence: null };
+  const sitemapPath = site?.url_file_map?.siteRoot?.sitemap;
+  if (!sitemapPath) return { decision: 'still_valid', reason: 'no-file-mapping', evidence: null };
+
+  const siteId = rec.site_id ?? site.id;
+  let existingEntries;
+  let inventory;
+  try {
+    [existingEntries, inventory] = await Promise.all([
+      discoverSitemapEntries(site),
+      listPageInventory(siteId),
+    ]);
+  } catch (err) {
+    return { decision: 'still_valid', reason: 'unreachable', evidence: { error: err.message } };
+  }
+
+  const existingUrlSet = new Set(existingEntries.map((e) => e.loc));
+  const candidates = Array.isArray(rec.params?.missingUrls) && rec.params.missingUrls.length
+    ? rec.params.missingUrls
+    : [...new Set(inventory.map((r) => r.page))];
+  const missingUrls = [...new Set(candidates)].filter((url) => !existingUrlSet.has(url));
+
+  if (missingUrls.length === 0) {
+    return { decision: 'already_resolved', reason: 'sitemap-already-up-to-date', evidence: { sitemapPath } };
+  }
+  return { decision: 'still_valid', reason: 'missing-urls-remain', evidence: { sitemapPath, missingCount: missingUrls.length } };
 }

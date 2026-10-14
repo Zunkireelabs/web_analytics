@@ -16,6 +16,7 @@ const Reports = lazy(() => import('./pages/Reports.jsx'));
 const GrowthReport = lazy(() => import('./pages/GrowthReport.jsx'));
 const AiGrowth = lazy(() => import('./pages/AiGrowth.jsx'));
 const ActionCenter = lazy(() => import('./pages/ActionCenter.jsx'));
+const Demand = lazy(() => import('./pages/Demand.jsx'));
 const ClientOnboarding = lazy(() => import('./pages/ClientOnboarding.jsx'));
 const DesignReview = lazy(() => import('./pages/DesignReview.jsx'));
 const Analyst = lazy(() => import('./pages/Analyst.jsx'));
@@ -154,6 +155,11 @@ export default function App() {
                   migrated into this page instead of duplicating it. */}
               <Route path="/ai-orchestration" element={<AiGrowth isInternal={isInternal} />} />
               <Route path="/action-center" element={<ActionCenter />} />
+              {/* Universal Product Growth mode's one new page — reachable by
+                  URL for any session (server-scoped to its own siteId, same
+                  as every route above), but Sidebar.jsx only links to it
+                  when the session's own site has property_type 'product'. */}
+              <Route path="/demand" element={<Demand siteId={siteId} />} />
               {/* Every account, not internal-only — same session's own password either way. */}
               <Route path="/settings" element={<Settings />} />
               {/* Staff-only — operates across every client's site, not just this

@@ -1,4 +1,6 @@
-import { projectComponentTemplate } from '../../design-agent/lib/design-profile.js';
+import { projectComponentTemplate, projectExpandContentCard, pageUsesCardSections, cx, projectTable } from '../../design-agent/lib/design-profile.js';
+import { classifyPageType } from '../../design-agent/live-analysis/schema.js';
+import { isSectionScaleTextClass, isFixedHeightClass } from '../../lib/text-scale.js';
 // Marker-based splice — the only merge strategy this codebase uses for
 // editing an EXISTING page's real template file, because it never requires
 // parsing or understanding an unknown site's real templating syntax
@@ -79,10 +81,79 @@ export function hasMarker(fileContent, name) {
   return !!findMarker(fileContent, name);
 }
 
+// Every marker token (LINE or BLOCK/JSX, any name) appearing anywhere in a
+// file, regardless of convention — the generic union of lineRegex/blockRegex/
+// jsxBlockRegex's marker syntax above, used only to COUNT occurrences rather
+// than to capture a value for replacement.
+const ANY_MARKER_TOKEN_RE = /#\s*SEOAI:([A-Za-z0-9_-]+)(?::(START|END))?|<!--\s*SEOAI:([A-Za-z0-9_-]+)(?::(START|END))?\s*-->|\{\/\*\s*SEOAI:([A-Za-z0-9_-]+)(?::(START|END))?\s*\*\/\}/g;
+
+// Detects a marker left in a structurally invalid state: a LINE marker
+// (title's `field: "value" # SEOAI:NAME` convention) appearing more than
+// once, or a BLOCK/JSX marker whose START and END counts don't match (or
+// exceed one each) — real content, never just a false-positive substring
+// match, since every SEOAI: token this codebase ever writes is unique by
+// construction (spliceMarkers/ensureMarkers only ever touch an existing
+// marker in place or insert a genuinely missing one).
+//
+// Exists because of one concrete failure mode: getOrInitBatchBranch
+// (github-ops.js) syncs a shared per-day batch branch by merging the site's
+// default branch INTO it via GitHub's server-side merge endpoint. A REAL
+// same-line conflict (both branches edited the identical line differently)
+// correctly comes back 409 and is already handled. But two commits that
+// each replaced the SAME marker's line independently — one applied straight
+// to main, one applied to the batch branch, starting from the same original
+// line — can diff to non-overlapping hunks that git's merge algorithm
+// resolves cleanly, KEEPING BOTH lines: a duplicated `title:` key that's
+// invalid YAML, breaking every downstream build. Confirmed on
+// zunkireelabs-web PR #87 (2026-09-08): two independent meta-title drafts
+// (#1287 landed on `main`, #1430 landed on the batch branch) collided this
+// way — GitHub's merge returned 201 (no conflict reported), yet the
+// resulting front matter had two `title:` lines and broke Eleventy/CI. A
+// git-level "clean" merge is therefore not sufficient evidence the sync is
+// actually safe; this function is the content-level check that catches what
+// git's line-based diff cannot.
+export function findMarkerCorruption(fileContent) {
+  const lineCounts = new Map();
+  const blockCounts = new Map();
+  let m;
+  ANY_MARKER_TOKEN_RE.lastIndex = 0;
+  while ((m = ANY_MARKER_TOKEN_RE.exec(fileContent))) {
+    const name = m[1] ?? m[3] ?? m[5];
+    const kind = m[2] ?? m[4] ?? m[6]; // 'START' | 'END' | undefined (LINE marker)
+    if (!kind) {
+      lineCounts.set(name, (lineCounts.get(name) || 0) + 1);
+    } else {
+      const counts = blockCounts.get(name) || { start: 0, end: 0 };
+      counts[kind === 'START' ? 'start' : 'end'] += 1;
+      blockCounts.set(name, counts);
+    }
+  }
+
+  const corrupted = [];
+  for (const [name, count] of lineCounts) {
+    if (count > 1) corrupted.push(name);
+  }
+  for (const [name, { start, end }] of blockCounts) {
+    if (start > 1 || end > 1 || start !== end) corrupted.push(name);
+  }
+  return corrupted;
+}
+
 // Fields using the LINE convention (a single quoted front-matter value) —
 // established by this codebase's only real precedent, meta-title's `title`
 // field (see module comment above). Everything else is a BLOCK marker.
-const LINE_CONVENTION_FIELDS = new Set(['title']);
+//
+// `description` (meta-title's other real field) belongs here too, not in
+// HEAD_SCOPED_FIELDS below: this platform's target SSGs (Eleventy/Jekyll/
+// Hugo/11ty) render meta description from a front-matter LINE field, the
+// same as title, never from a nested <head> region a page template embeds
+// directly — see url-file-map.js's PLATFORM_DEFAULT_MARKERS['meta-title']
+// for the full history of what went wrong before this field was wired in at
+// all (it fell through every branch below to the BLOCK/EOF default, which
+// would have spliced the description as VISIBLE body text at the end of the
+// file — worse than canonical/open-graph's merely SEO-invisible failure mode
+// that HEAD_SCOPED_FIELDS exists to prevent).
+const LINE_CONVENTION_FIELDS = new Set(['title', 'description']);
 
 // Fields whose real HTML context is <head> specifically (canonical, Open
 // Graph tags, and any future head-metadata generator — meta description,
@@ -111,6 +182,32 @@ export const ANALYTICS_PROVIDER_FIELDS = { ga4: 'analyticsScriptGa4', 'facebook-
 
 const HEAD_SCOPED_FIELDS = new Set(['canonical', 'openGraph', ...Object.values(ANALYTICS_PROVIDER_FIELDS)]);
 const HEAD_MARKER_NAME = 'HEAD';
+
+// Fields that, when no nested SEOAI:HEAD region can be found or created in
+// the page's own file, can fall back to a front-matter LINE value instead —
+// the site's shared layout renders it into <head> itself. This is the common
+// case on a shared-layout SSG (Eleventy/Hugo/Jekyll/11ty, ...), where <head>
+// exists only once, in one shared layout file, never in the individual page
+// file a canonical/open-graph draft actually targets — so the nested-HEAD
+// convention above can never apply there, the same way meta-title's `title`
+// field already relies on a front-matter value the layout reads
+// (`{{ title }}`), not an HTML <title> tag spliced into the page file.
+// Confirmed real, not hypothetical: chayceproperties.com (Eleventy, one
+// shared src/_includes/base.njk) — every page's own file is a body fragment
+// with no literal <head>, so canonical/open-graph were fatally blocked on
+// every single page until this fallback existed.
+//
+// Maps the generator's field name to the literal front-matter KEY this
+// fallback writes — a new key (not reusing the field name), a real,
+// one-time template variable a human wires into the layout once, same
+// one-time step the SEOAI:HEAD region itself already is.
+//
+// open-graph is deliberately NOT here yet: it emits several composite
+// values (og:title/description/image, twitter:*) under one field, which
+// would need several distinct front-matter keys and matching generator
+// changes to support the same way — a real, separate follow-up, not a
+// quick addition alongside canonical's single-URL case.
+const LINE_HEAD_FALLBACK_KEY = { canonical: 'canonicalUrl' };
 
 // Exposed so callers (backend.js's computeMarkerMerge) can give a more
 // specific "marker not found" error for a head-scoped field — pointing at
@@ -176,9 +273,14 @@ export function classifyMarkerGap(field, filePath, fileContent, detectors = {}) 
     return frontMatterLength(fileContent) != null ? 'self-heals' : 'fatal-no-front-matter';
   }
   if (HEAD_SCOPED_FIELDS.has(field)) {
-    if (blockRegex(HEAD_MARKER_NAME).test(fileContent)) return 'self-heals';
-    if (!detectors.detectHead) return 'fatal-no-head-region';
-    return detectors.detectHead(fileContent).ok ? 'self-heals' : 'fatal-no-head-region';
+    const headRegex = isJsxFile(filePath) ? jsxBlockRegex(HEAD_MARKER_NAME) : blockRegex(HEAD_MARKER_NAME);
+    if (headRegex.test(fileContent)) return 'self-heals';
+    if (detectors.detectHead && detectors.detectHead(fileContent).ok) return 'self-heals';
+    // Front-matter fallback (LINE_HEAD_FALLBACK_KEY above) — only reachable
+    // once a real <head> is confirmed absent from this file, never preferred
+    // over a genuine nested-HEAD region.
+    if (LINE_HEAD_FALLBACK_KEY[field] && frontMatterLength(fileContent) != null) return 'self-heals';
+    return 'fatal-no-head-region';
   }
   if (isPlainMarkdownFile(filePath)) return 'self-heals';
   if (!detectors.detectBody) return 'fatal-no-safe-anchor';
@@ -200,17 +302,82 @@ function isPlainMarkdownFile(filePath) {
 }
 
 // Auto-creates a head-scoped field's own empty marker, nested inside the
-// site's already-placed <!-- SEOAI:HEAD:START/END --> region — never at
-// EOF. Returns null when that region doesn't exist yet (an onboarding step
-// the operator hasn't done for this template), leaving spliceMarkers'
-// existing "marker not found" failure as the honest outcome, same
-// discipline as insertLineMarker's null-on-unsafe return below.
-function insertHeadScopedMarker(fileContent, markerName) {
-  const match = blockRegex(HEAD_MARKER_NAME).exec(fileContent);
+// site's already-placed SEOAI:HEAD region — never at EOF. Returns null when
+// that region doesn't exist yet (an onboarding step the operator hasn't done
+// for this template), leaving spliceMarkers' existing "marker not found"
+// failure as the honest outcome, same discipline as insertLineMarker's
+// null-on-unsafe return below.
+//
+// `filePath`-aware on both sides: the HEAD region itself may exist in either
+// convention (a `.jsx`/`.tsx` file gets one via ensureHeadRegion's own
+// isJsxFile check, insertion-engine.js), so this must match whichever form
+// is actually present — and the nested marker it creates must match that
+// SAME form, never assume HTML-comment. Confirmed real: admizz-web-dev
+// (Next.js App Router) shipped a raw `<!-- SEOAI:HEAD:START -->` into
+// layout.tsx and broke the build (`Expected '</', got '!'`) — JSX has no
+// HTML-comment syntax, so that text is parsed as markup, not a comment.
+function insertHeadScopedMarker(fileContent, markerName, filePath) {
+  const jsx = isJsxFile(filePath);
+  const regex = jsx ? jsxBlockRegex(HEAD_MARKER_NAME) : blockRegex(HEAD_MARKER_NAME);
+  const match = regex.exec(fileContent);
   if (!match) return null;
   const [full, start, inner, end] = match;
-  const newInner = `${inner}\n<!-- SEOAI:${markerName}:START --><!-- SEOAI:${markerName}:END -->`;
+  // Matches the outer HEAD marker's own line indentation — see lineIndent's
+  // comment: on chayceproperties.com (Eleventy), the whole SEOAI:HEAD region
+  // for src/index.njk lives inside a `headExtra: |` YAML block-scalar
+  // front-matter value, indented 2 spaces. Nesting this new marker at column
+  // 0 (the previous behavior) put a less-indented line inside that block
+  // scalar, which YAML treats as ending the scalar right there — the very
+  // next real front-matter key (`footScripts: |`) then gets misparsed as
+  // stray content instead of a mapping key. Confirmed real: PR #17 on
+  // web-chayce-properties failed Eleventy's build this exact way.
+  const indent = lineIndent(fileContent, match.index);
+  const nested = jsx
+    ? `{/* SEOAI:${markerName}:START */}{/* SEOAI:${markerName}:END */}`
+    : `<!-- SEOAI:${markerName}:START --><!-- SEOAI:${markerName}:END -->`;
+  const newInner = `${inner}\n${indent}${nested}`;
   return fileContent.slice(0, match.index) + start + newInner + end + fileContent.slice(match.index + full.length);
+}
+
+// The leading whitespace on the source line containing `index`, but only
+// when everything from that line's start up to `index` is whitespace —
+// i.e. `index` really is the start of the line's visible content, not
+// partway through other text. Returns '' otherwise (safe no-op default).
+// Used wherever this module splices multi-line content at a marker's
+// position, so the splice preserves whatever indentation that marker's own
+// line already had instead of always starting subsequent lines at column 0
+// (see insertHeadScopedMarker and applyMarker's BLOCK path above/below).
+function lineIndent(fileContent, index) {
+  const lineStart = fileContent.lastIndexOf('\n', index - 1) + 1;
+  const prefix = fileContent.slice(lineStart, index);
+  return /^[ \t]*$/.test(prefix) ? prefix : '';
+}
+
+// Re-applies `indent` to every line after the first in `text` — a no-op for
+// single-line text or when there's no indent to preserve.
+function reindentContinuationLines(text, indent) {
+  if (!indent) return text;
+  return String(text).split('\n').join(`\n${indent}`);
+}
+
+// LINE_HEAD_FALLBACK_KEY's own insertion: adds a brand-new front-matter key
+// (never one that already exists — insertLineMarker below only ever
+// annotates an EXISTING line, by design, so it can't be reused here) just
+// before the closing `---` fence, with an empty placeholder value and the
+// field's marker comment already attached. Purely additive to the front
+// matter block, so it can never misinterpret or disturb an existing key —
+// unlike insertLineMarker's escaping concerns, there is no existing value
+// here to preserve. spliceMarkers' normal LINE-marker splice (applyMarker)
+// then fills in the real value the same way it fills in `title`'s.
+function insertNewFrontMatterField(fileContent, key, markerName) {
+  const fmLen = frontMatterLength(fileContent);
+  if (fmLen == null) return null;
+  const frontMatter = fileContent.slice(0, fmLen);
+  const rest = fileContent.slice(fmLen);
+  const closing = /^([\s\S]*?)(---\r?\n)$/.exec(frontMatter);
+  if (!closing) return null;
+  const newFrontMatter = `${closing[1]}${key}: "" # SEOAI:${markerName}\n${closing[2]}`;
+  return newFrontMatter + rest;
 }
 
 // The front-matter block only, `---\n...\n---\n` at the very start of the
@@ -302,7 +469,9 @@ export function ensureMarkers(fileContent, markerMap, filePath) {
       continue;
     }
     if (HEAD_SCOPED_FIELDS.has(field)) {
-      const updated = insertHeadScopedMarker(content, markerName);
+      const fallbackKey = LINE_HEAD_FALLBACK_KEY[field];
+      const updated = insertHeadScopedMarker(content, markerName, filePath)
+        ?? (fallbackKey ? insertNewFrontMatterField(content, fallbackKey, markerName) : null);
       if (updated) { content = updated; inserted.push(markerName); }
       continue; // no EOF fallback — an honest "marker not found" is correct here
     }
@@ -341,8 +510,17 @@ function jsxSafeWrap(rawHtml) {
 
 function applyMarker(fileContent, name, newValue) {
   const block = blockRegex(name);
-  if (block.test(fileContent)) {
-    return fileContent.replace(block, (_m, start, _old, end) => `${start}${newValue}${end}`);
+  const blockMatch = block.exec(fileContent);
+  if (blockMatch) {
+    // Same indentation hazard as insertHeadScopedMarker above: `newValue`
+    // (e.g. open-graph.js's multi-line og:/twitter: meta tags, joined by
+    // '\n') must keep the marker's own line indentation on every line, not
+    // just the first, or it can break a YAML block-scalar front-matter
+    // value this marker happens to be nested inside.
+    const indent = lineIndent(fileContent, blockMatch.index);
+    const indented = reindentContinuationLines(newValue, indent);
+    return fileContent.slice(0, blockMatch.index) + blockMatch[1] + indented + blockMatch[3]
+      + fileContent.slice(blockMatch.index + blockMatch[0].length);
   }
   const jsx = jsxBlockRegex(name);
   if (jsx.test(fileContent)) {
@@ -373,7 +551,24 @@ export function spliceMarkers(fileContent, markerMap, values) {
     if (!(field in values)) continue; // this draft type doesn't set this field
     const found = findMarker(fileContent, markerName);
     if (!found) { missingMarkers.push(markerName); continue; }
-    changedRegions.push({ field, markerName, before: found.old, after: values[field] });
+    // A field with a LINE_HEAD_FALLBACK_KEY (currently just `canonical`)
+    // carries TWO real representations of the same content — a full HTML
+    // tag for the nested-HEAD-region convention, a bare value for the
+    // front-matter LINE convention — because buildMergeValues is computed
+    // before it's known which convention this file's marker actually ended
+    // up using (ensureMarkers/resolveInsertion decide that, at insertion
+    // time). `found.kind` (from the SAME findMarker call above, against the
+    // SAME already-resolved file) is the one place that answer is already
+    // known, so it picks the matching representation here rather than
+    // guessing earlier. Every other field's value is still a plain string,
+    // unchanged — this only ever applies to values buildMergeValues built as
+    // `{block, line}` on purpose.
+    let after = values[field];
+    if (after && typeof after === 'object' && !Array.isArray(after)) {
+      after = found.kind === 'line' ? after.line : after.block;
+      if (after == null) { missingMarkers.push(markerName); continue; }
+    }
+    changedRegions.push({ field, markerName, before: found.old, after });
   }
 
   if (missingMarkers.length) return { ok: false, missingMarkers };
@@ -423,6 +618,240 @@ const DEFAULT_FAQ_TEMPLATE = {
   wrapper: '<dl class="faq">\n{{ROWS}}\n</dl>',
   row: '  <dt>{{QUESTION}}</dt>\n  <dd>{{ANSWER}}</dd>',
 };
+
+// A captured componentTemplate carries whatever Tailwind classes the Design
+// Agent found literally on the site's real FAQ/Q&A element (design-drift.js).
+// Those classes were observed on a specific instance of the component, in a
+// specific container — verification only proves each class is LIVE in the
+// site's CSS (classExistsInCss), never that it is safe to reuse verbatim on
+// arbitrary future content or inside a different container. Two classes of
+// captured class break that assumption and are stripped before every render:
+//
+// A fixed pixel/number height on the element wrapping drafted Q&A text is
+// never valid regardless of where it's injected — it was the on-page height
+// of whatever question happened to be captured, not a real constraint, and
+// clips or overlaps any question/answer of different length. This is the
+// defect reported 2026-09-09: site 8862's captured faq/qaContent wrapper
+// carried `h-[70px]`, and a longer real question broke out of it.
+// Shared with the profile derivation via lib/text-scale.js's
+// isFixedHeightClass, so a fixed height is rejected at the point it would be
+// STORED as a spacing convention, not only stripped at render time.
+
+// Page-level section-container sizing (the site's own FAQ section width,
+// centering, and outer padding) is only correct when the component is
+// injected as its own full-bleed section, e.g. on a landing page. A blog
+// post's FAQ/Q&A block is nested inside the post body's own, already-
+// constrained content column — reapplying the site's wider section
+// container on top of that stretches/misaligns the block against the
+// column around it, which is the same 2026-09-09 defect (site 8862's
+// wrapper also carried `max-w-7xl mx-auto px-4 sm:px-6 lg:px-8`). The
+// WRAPPER is stripped of these; row-level weight/color still carry over so
+// the questions/answers still look like the rest of the site, just flowing
+// in the post's own column instead of fighting it for width. Row-level
+// font-SIZE gets its own, narrower strip below (BLOG_UNSAFE_HEADING_SIZE_RE)
+// — a section-headline-scale heading is exactly as wrong nested in an
+// article as a full-bleed section container is.
+const BLOG_UNSAFE_WRAPPER_CLASS_RE = /^(container(-\w+)?|max-w-\S+|mx-auto)$/;
+
+// A captured row heading (an FAQ question, e.g.) carries whatever font-size
+// utility the source element had — correct when that source was itself a
+// section headline (a homepage FAQ block's question IS the section's visual
+// anchor), wrong when the same markup is spliced inline into a blog post's
+// body copy, where a section-headline-scale heading reads as an oversized,
+// out-of-place H1 sitting in the middle of a paragraph flow (2026-09-10:
+// site 1's captured componentTemplates.faq/qaContent row carried
+// `text-2xl md:text-3xl`, rendering as an H1-sized heading inside every
+// blog post it was spliced into). Same reasoning as BLOG_UNSAFE_WRAPPER_CLASS_RE
+// above, applied to the row instead of the wrapper — text-3xl and up is
+// section-headline scale in virtually every real Tailwind config; text-2xl
+// and below is ordinary in-article subheading scale and is left alone.
+// Responsive variants (`md:text-3xl`) carry the same prefix.
+//
+// Now notation-agnostic (lib/text-scale.js). This was a bare regex over NAMED
+// scales only, which meant a site expressing type in arbitrary values —
+// `text-[50px]`, `md:text-[3.5rem]` — matched nothing and got no protection at
+// all. Confirmed live: admizzeducation.com's FAQ questions shipped at
+// `md:text-[50px]` (larger than that site's own 42px section headings) with
+// this strip running over them and finding nothing to strip.
+const isBlogUnsafeHeadingSize = isSectionScaleTextClass;
+
+// Section-scale VERTICAL RHYTHM, stripped from the wrapper for the same
+// reason BLOG_UNSAFE_WRAPPER_CLASS_RE strips section-scale width: a
+// standalone section on a page of its own earns `py-12 md:py-20`, but the
+// same markup spliced into the middle of an article opens a visible gap that
+// reads as a different page breaking into the copy — the exact complaint
+// this was reported as. Only py/my at 10+ (2.5rem+) qualifies as section
+// scale; ordinary in-flow spacing (py-4, mb-6, ...) is left alone, since
+// SOME breathing room is correct for an inserted block. Responsive variants
+// carry the same prefix convention as the size rule above.
+const BLOG_UNSAFE_SECTION_SPACING_RE = /^(?:[\w-]+:)?(?:py|my)-(?:1[0-9]|[2-9][0-9])$/;
+
+// Generalized beyond "blog" (2026-09-10): the real question was never
+// specifically about /blog/ — it's whether the TARGET page is one where an
+// inserted component is a small addition to an established page (an
+// article, a legal page, a location/service page, ...) versus a page type
+// this site conventionally builds AS a full-bleed section/page (a
+// homepage, a landing page, a dedicated FAQ page, a blog LISTING).
+// classifyPageType (design-agent/live-analysis/schema.js) is the same
+// classifier the rest of the platform already uses for page-type-aware
+// guidance (page-templates.js) — reusing it here means a legal page, a
+// location page, or any future client's equivalent all get the same
+// protection a blog post did, not just URLs containing "/blog/".
+// Deliberately NOT 'service'/'location' (or 'homepage'/'landing'/'faq'):
+// those page types conventionally have their OWN dedicated, section-scale
+// FAQ/CTA block as part of the page's normal design (the 2026-09-09 fix's
+// own regression coverage treats a /services/ page's real section sizing as
+// correct, not a defect to strip). 'blog-article' and 'legal' are pure prose
+// flow with no section-building convention at all.
+//
+// 'other' is NOT included, even though it's unclassified — confirmed live on
+// site 1 (2026-09-17, PR #103): classifyPageType has no dedicated case for
+// /about/ (or /team/, /contact/, /careers/, /customers/, /pricing/, a
+// products index, ...), so every one of those genuinely full-section pages
+// fell into 'other' and got treated as inline prose. expand-content's
+// external-citations draft then had its wrapper's `container-custom py-12
+// md:py-20` stripped to nothing and its heading shrunk from
+// `text-3xl md:text-4xl lg:text-5xl` to `text-2xl`, breaking the entire
+// About page's layout (no container = no width constraint, no padding) on
+// a page that was never inline prose to begin with. Treating a genuinely
+// unknown page type as "assume the riskier of the two guesses" was the
+// wrong default — a false-narrow classification (missing the strip on a
+// truly inline unclassified page) just means captured section markup keeps
+// its normal section scale, which still looks like it belongs on the site;
+// a false-wide one (this incident) breaks the page outright.
+const INLINE_CONTENT_PAGE_TYPES = new Set(['blog-article', 'legal']);
+
+export function isInlineContentPage(pageUrl) {
+  if (typeof pageUrl !== 'string' || !pageUrl) return false;
+  return INLINE_CONTENT_PAGE_TYPES.has(classifyPageType(pageUrl));
+}
+
+// When the site's OWN design profile has real, live-observed typography for
+// a SUBHEADING role on this exact page type (profile.pageTypePatterns —
+// same evidence page-templates.js's canonical page templates already draw
+// on), that is a strictly better correction than blindly stripping the
+// captured template's oversized class down to nothing: it's the real class
+// this site already uses for an in-page subheading on THIS page type, not a
+// guess. Only 'subheading' counts — 'heading' is the page's own H1/top-level
+// anchor, never the right role for an inserted FAQ question or similar.
+// Falls back to null (never invents a class) only when the site has NEITHER
+// piece of real evidence — no page-type-specific subheading class AND no
+// site-wide section-heading class. That floor matters because
+// pageTypePatterns[type].textHierarchy is a page-TYPE-specific summary a
+// site only has once the Design Agent has actually seen a page of that
+// type; a site mid-rollout (freshly onboarded, or a page type the weekly
+// rescan hasn't covered yet) can easily have neither. Rather than stripping
+// straight to an unstyled tag in that gap, typography.heading.section is
+// used instead — the site's own real h2/section-heading class, already
+// cross-checked against live evidence by correctHeadingTypography
+// (profile-extract.js), just not specific to this exact page type. Still
+// 100% grounded in something this site's own pages actually use, never a
+// guess, same discipline as every other slot here.
+// Whatever class is chosen here is about to be applied to a heading nested
+// INSIDE an article's body copy, so it can never be allowed to carry a
+// section-headline size — that is the exact defect the caller is correcting.
+// Filtering the chosen class rather than trusting its source is what makes
+// this safe for both branches below: a page-type-specific subheading class is
+// real evidence but still comes from a page where that role may render at
+// section scale, and typography.heading.item is a site-wide item scale that
+// legitimately includes `md:text-3xl` on some sites (site 1's does).
+function inlineSafeHeadingClass(classes) {
+  const kept = String(classes || '').split(/\s+/).filter((c) => c && !isBlogUnsafeHeadingSize(c));
+  return kept.length ? kept.join(' ') : null;
+}
+
+function groundedInlineHeadingClass(designProfile, pageUrl) {
+  const pageType = typeof pageUrl === 'string' ? classifyPageType(pageUrl) : null;
+  const hierarchy = pageType && designProfile?.pageTypePatterns?.[pageType]?.textHierarchy;
+  const entry = Array.isArray(hierarchy) && hierarchy.find((h) => h?.role === 'subheading' && h.classes);
+  // typography.heading.ITEM, not .section. The old fallback here was
+  // .section — the site's own page/section HEADLINE class — which made this
+  // function INFLATE the very heading it exists to shrink whenever a site had
+  // no page-type-specific evidence (confirmed live on site 1: every block
+  // spliced into a blog post rendered at `text-3xl md:text-4xl lg:text-5xl`,
+  // because pageTypePatterns had no 'blog-article' entry to draw on — see
+  // design-agent/live-analysis/capture.js's DEEPER_SAMPLE_TYPES for why that
+  // entry was systematically missing). .item is the site's own repeating-item
+  // scale, which is what an in-article subheading actually is. Falling through
+  // to null (leave the stripped heading unsized, inheriting the article's own
+  // copy) is strictly better than restoring a hero size.
+  const candidate = entry ? entry.classes : designProfile?.typography?.heading?.item;
+  return candidate ? inlineSafeHeadingClass(candidate) : null;
+}
+
+function stripClassesMatching(html, predicate) {
+  if (!html) return html;
+  return html.replace(/class="([^"]*)"/g, (full, list) => {
+    const kept = list.split(/\s+/).filter((c) => c && !predicate(c));
+    return kept.length ? `class="${kept.join(' ')}"` : '';
+  });
+}
+
+// Exported standalone (not just through sanitizeCapturedTemplate below) for
+// newpage-render.js's contentWrapper — that one wraps a WHOLE net-new page
+// body, not a section nested inside an existing page, so the BLOG_UNSAFE
+// container-sizing strip below never applies to it (a page's own top-level
+// layout container is correct there by definition); only a fixed height
+// is unconditionally wrong on any element holding arbitrary-length body copy.
+//
+// Skips <svg> elements: an icon's fixed h-N (paired with w-N, e.g. an arrow
+// glyph next to a link) is a completely different case from a fixed height
+// on a text-flow wrapper — an SVG scales its own fixed viewBox, it never
+// holds arbitrary-length body copy that a height could clip or overlap.
+// Confirmed live: zunkireelabs.com's related-resources link row carries a
+// `w-4 h-4` arrow icon, and stripping only the h-4 (leaving w-4) rendered the
+// icon at browser-default intrinsic height instead of its real square size.
+export function stripFixedHeightClass(html) {
+  if (!html) return html;
+  return html.replace(/(<(svg|[a-zA-Z][\w-]*)\b[^>]*\sclass=")([^"]*)(")/g, (full, prefix, tag, list, suffix) => {
+    if (tag.toLowerCase() === 'svg') return full;
+    const kept = list.split(/\s+/).filter((c) => c && !isFixedHeightClass(c));
+    return kept.length ? `${prefix}${kept.join(' ')}${suffix}` : `${prefix}${suffix}`;
+  });
+}
+
+// Applied to every captured template right before render — DEFAULT_* templates
+// carry no classes at all, so this is a no-op for them. `inline` replaces
+// the old blog-only `blog` flag (see isInlineContentPage above);
+// `groundedHeadingClass`, when the site's own design profile has real
+// evidence for this exact page type, REPLACES the stripped heading-size
+// class with the site's own real subheading class instead of leaving the
+// row with no size class at all — a grounded correction, not just removal.
+export function sanitizeCapturedTemplate(template, { inline = false, groundedHeadingClass = null } = {}) {
+  if (!template) return template;
+  const strippedRow = stripClassesMatching(stripFixedHeightClass(template.row),
+    (c) => inline && isBlogUnsafeHeadingSize(c));
+  return {
+    ...template,
+    wrapper: stripClassesMatching(stripFixedHeightClass(template.wrapper),
+      (c) => inline && (BLOG_UNSAFE_WRAPPER_CLASS_RE.test(c) || BLOG_UNSAFE_SECTION_SPACING_RE.test(c))),
+    row: (inline && groundedHeadingClass && strippedRow !== template.row)
+      ? applyHeadingClass(strippedRow, groundedHeadingClass)
+      : strippedRow,
+  };
+}
+
+// The replacement class belongs on the HEADING the size was just stripped
+// from, not on whatever element happens to carry the row's first class
+// attribute. Those are frequently not the same element: expand-content's row
+// opens with a <section> wrapper and only then the <h2>, so the old
+// first-class-attribute replace put a heading class on the section (where it
+// cascades onto every child) and left the real <h2> with no size at all —
+// visible live on site 1 as an oversized block whose own heading was unstyled.
+// Falls back to the previous behaviour only when the row has no heading tag
+// at all, so a template shape this doesn't understand degrades rather than
+// silently dropping the correction.
+const HEADING_WITH_CLASS_RE = /(<h[1-6]\b[^>]*?\sclass=")([^"]*)(")/i;
+const HEADING_WITHOUT_CLASS_RE = /(<h[1-6])(\s|>)/i;
+function applyHeadingClass(row, headingClass) {
+  if (HEADING_WITH_CLASS_RE.test(row)) {
+    return row.replace(HEADING_WITH_CLASS_RE, (full, open, list, close) => `${open}${cx(list, headingClass)}${close}`);
+  }
+  if (HEADING_WITHOUT_CLASS_RE.test(row)) {
+    return row.replace(HEADING_WITHOUT_CLASS_RE, (full, tag, after) => `${tag} class="${headingClass}"${after}`);
+  }
+  return row.replace(/class="([^"]*)"/, (full, list) => `class="${cx(list, headingClass)}"`);
+}
 
 // The JSON-LD itself (content.schemaJsonLd) is already a deterministic
 // transform of the same approved items (server/generators/faq.js), reused
@@ -524,9 +953,9 @@ const DEFAULT_EXPAND_TEMPLATE = {
 // prompt no longer asks for placeholder citation links, but this is the
 // last line of defense against ever publishing a dead anchor to a live
 // site.
-function markdownInline(text) {
+function markdownInline(text, linkClass) {
   return text
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (m, label, href) => `<a href="${href}"${attrIf(linkClass)}>${label}</a>`)
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
@@ -557,7 +986,17 @@ function splitTableRow(line) {
 // through to the plain-paragraph case and shipped as one long line of
 // literal pipes and dashes straight to a live page (confirmed live:
 // zunkireelabs.com/locations/kathmandu/, PR #64 on zunkireelabs-web).
-function markdownTable(lines, startIndex) {
+// `style` is the SAME per-tenant table convention renderComparisonTable
+// below already applies (componentTemplates.table, captured from a real
+// table in the tenant's own repo). Without it, a comparison table the model
+// happened to write as MARKDOWN shipped as a bare, class-less <table> —
+// no borders, no padding, no header contrast — sitting directly beside a
+// STRUCTURED table on the same page that did carry the site's real classes.
+// On a Tailwind site that is a visibly foreign block, and it reached live
+// pages autonomously: the styling was threaded to the structured path and
+// silently not to this one, even though the same prompt produces both
+// shapes interchangeably.
+function markdownTable(lines, startIndex, style = {}) {
   const header = splitTableRow(lines[startIndex]);
   const rows = [];
   let i = startIndex + 2; // skip the header row and its separator row
@@ -565,9 +1004,36 @@ function markdownTable(lines, startIndex) {
     rows.push(splitTableRow(lines[i]));
     i++;
   }
-  const th = header.map((c) => `<th>${markdownInline(c)}</th>`).join('');
-  const body = rows.map((r) => `<tr>${r.map((c) => `<td>${markdownInline(c)}</td>`).join('')}</tr>`).join('');
-  return { html: `<table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`, nextIndex: i };
+  const th = header.map((c) => `<th${attrIf(style.th)}>${markdownInline(c, style.linkClass)}</th>`).join('');
+  const body = rows.map((r) => `<tr${attrIf(style.tr)}>${r.map((c, idx) => (
+    `<td${attrIf(idx === 0 ? (style.tdFirst || style.td) : style.td)}>${markdownInline(c, style.linkClass)}</td>`
+  )).join('')}</tr>`).join('');
+  const html = `<table${attrIf(style.table)}><thead${attrIf(style.thead)}><tr>${th}</tr></thead>`
+    + `<tbody${attrIf(style.tbody)}>${body}</tbody></table>`;
+  return { html: style.wrapper ? `<div class="${style.wrapper}">${html}</div>` : html, nextIndex: i };
+}
+
+// A table whose row breaks were lost, arriving as ONE line:
+// `| Feature | A | B | |---|---|---| | Row | x | y |`. The line-based
+// detection above cannot see it — there is no next line to test for a
+// separator row — so it fell through to the plain-paragraph branch and
+// shipped as literal pipes and dashes on a live page, exactly the failure
+// markdownTable itself was added to stop (see its comment above).
+//
+// The only place two pipes appear with nothing but spaces/tabs between them
+// in a well-formed pipe table is a row boundary: the previous row's closing
+// pipe followed by the next row's opening pipe (an interior cell separator
+// always has real content on at least one side). Newlines are deliberately
+// NOT matched, so an already-correct multi-line table is never touched.
+const COLLAPSED_TABLE_LINE_RE = /\|[ \t]*:?-{2,}/;
+const ROW_BOUNDARY_RE = /\|([ \t]+)\|/g;
+
+function reflowCollapsedTableRows(line) {
+  // Only a line carrying a separator run INSIDE it is treated as collapsed.
+  // A normal single row with an empty middle cell ("| A |  | C |") also has
+  // two pipes separated by spaces, and must never be split on that alone.
+  if (!COLLAPSED_TABLE_LINE_RE.test(line)) return [line];
+  return line.replace(ROW_BOUNDARY_RE, '|\n|').split('\n');
 }
 
 // generators/expand-content.js's SYSTEM_COMPARISON prompt asks for "a
@@ -582,7 +1048,16 @@ function markdownTable(lines, startIndex) {
 // verbatim instead of being escaped and reparsed as prose.
 const HTML_BLOCK_RE = /^\s*<(table|div|section|ul|ol)\b/i;
 
-function markdownToHtml(text) {
+// `style` carries both this platform's table classes (table/th/tr/td/
+// wrapper — see tableStyleFor below) and its real paragraph/list/link
+// typography (bodyClass/linkClass/listWrapperClass/listItemClass — see
+// proseStyleFor). Applying the site's OWN typography here, not just a
+// wrapper around the whole block, is what markdown-prose-render.js's own
+// comment identifies as the actual fix for "generated text looks flat next
+// to the real ones" — that module already does this for whole-new-page
+// bodies; this brings the same real classes to expand-content/faq prose,
+// the one rendering path that was still shipping bare <p>/<ul>.
+function markdownToHtml(text, style = {}) {
   if (HTML_BLOCK_RE.test(text)) return text.trim();
   const escaped = escapeHtml(text);
   const parts = [];
@@ -590,24 +1065,27 @@ function markdownToHtml(text) {
   let textLines = [];
   const flushText = () => {
     if (textLines.length) {
-      parts.push(`<p>${textLines.map((line) => markdownInline(line)).join('\n')}</p>`);
+      parts.push(`<p${attrIf(style.bodyClass)}>${textLines.map((line) => markdownInline(line, style.linkClass)).join('\n')}</p>`);
       textLines = [];
     }
   };
   const flushList = () => {
     if (listItems.length) {
-      parts.push(`<ul>${listItems.map((item) => `<li>${markdownInline(item)}</li>`).join('')}</ul>`);
+      parts.push(`<ul${attrIf(style.listWrapperClass)}>${listItems.map((item) => `<li${attrIf(style.listItemClass)}>${markdownInline(item, style.linkClass)}</li>`).join('')}</ul>`);
       listItems = [];
     }
   };
-  const lines = escaped.split('\n');
+  // Split on real newlines first, then restore the row breaks of any table
+  // that arrived collapsed onto one line (reflowCollapsedTableRows) — after
+  // this, both shapes look identical to the line-based detection below.
+  const lines = escaped.split('\n').flatMap(reflowCollapsedTableRows);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const bullet = /^-\s+(.*)$/.exec(line);
     if (TABLE_ROW_RE.test(line) && TABLE_SEPARATOR_RE.test(lines[i + 1] || '')) {
       flushText();
       flushList();
-      const { html, nextIndex } = markdownTable(lines, i);
+      const { html, nextIndex } = markdownTable(lines, i, style);
       parts.push(html);
       i = nextIndex - 1; // for-loop's own i++ advances past the last consumed row
     } else if (bullet) {
@@ -646,30 +1124,61 @@ function toTitleCase(key) {
 // field name. Returns '' (not a stray empty <table>) for anything
 // malformed, so a caller can always safely concatenate this after body
 // prose.
-// `style` is the site's own table convention, stored per tenant as
-// componentTemplates.table (a class map, captured from a real table in the
-// tenant's repo — see scripts/capture-component-template.js). Without it this
-// emitted a bare <table> with no classes at all, which on a Tailwind site
-// means no borders, no padding, no header contrast: a generated comparison
-// table was visibly not part of the page it sat on. Every slot falls back to
-// '' so a site with no captured table renders exactly the bare markup it did
-// before, rather than borrowing another tenant's look.
+// `style` is the site's own table convention. Best case, it's a real
+// captured tenant table (componentTemplates.table, a class map captured from
+// a real table in the tenant's repo — see scripts/capture-component-
+// template.js). When no site has ever captured one — the common case, since
+// nothing prompts a table capture the way faq/expand-content are captured on
+// first use — tableStyleFor falls back to design-profile.js's projectTable(),
+// the site's own real typography/color tokens composed into a table, the
+// same grounded fallback markdown-table-render.js's buildTableHtml already
+// gives every OTHER generated table on this platform. Only a site with
+// NEITHER a captured table nor any usable typography/color evidence at all
+// gets the bare '' fallback every slot below still has.
 function attrIf(cls) {
   return cls ? ` class="${cls}"` : '';
 }
+
+function styleAttrIf(inline) {
+  return inline ? ` style="${inline}"` : '';
+}
+
+// A tenant with no captured componentTemplates.table (and no captured card
+// style to project one from — confirmed live on Chayce Properties, which has
+// neither) previously fell straight through to a completely bare <table>:
+// no width, no padding, no borders, no header contrast. A bare <table> is
+// NOT "reasonably styled" by default the way DEFAULT_QA_TEMPLATE's native
+// <details> is — browsers give it no sensible layout at all, so it shrinks
+// to its content width and sits in the page next to a large dead gap where
+// the rest of the row should be (the reported Chayce Properties defect: a
+// comparison table only filling half its row). Deliberately inline CSS, not
+// a class, and deliberately colorless (currentColor / a neutral gray-alpha
+// border) rather than any brand choice — the same "never borrow another
+// tenant's look" rule the class-based styling above already follows, just
+// extended to cover the case where there's no captured class-based style to
+// fall back to either.
+const DEFAULT_TABLE_STYLE = {
+  table: 'width:100%;border-collapse:collapse',
+  th: 'text-align:left;padding:0.5em 0.75em;border-bottom:2px solid currentColor;opacity:0.85',
+  td: 'padding:0.5em 0.75em;border-bottom:1px solid rgba(128,128,128,0.25)',
+  tdFirst: 'padding:0.5em 0.75em;border-bottom:1px solid rgba(128,128,128,0.25);font-weight:600',
+};
 
 function renderComparisonTable(table, style = {}) {
   if (!Array.isArray(table) || !table.length) return '';
   const columns = Object.keys(table[0]);
   if (!columns.length) return '';
-  const th = columns.map((c) => `<th${attrIf(style.th)}>${escapeHtml(toTitleCase(c))}</th>`).join('');
-  const body = table.map((row) => `<tr>${columns.map((c, i) => (
+  const hasCapturedStyle = Boolean(style.table || style.th || style.td || style.tdFirst || style.thead || style.tbody);
+  const resolved = hasCapturedStyle ? style : DEFAULT_TABLE_STYLE;
+  const attr = hasCapturedStyle ? attrIf : styleAttrIf;
+  const th = columns.map((c) => `<th${attr(resolved.th)}>${escapeHtml(toTitleCase(c))}</th>`).join('');
+  const body = table.map((row) => `<tr${attr(resolved.tr)}>${columns.map((c, i) => (
     // The first column is the row label on every comparison table this renders,
     // and the site's own tables give it more weight than the values beside it.
-    `<td${attrIf(i === 0 ? (style.tdFirst || style.td) : style.td)}>${escapeHtml(String(row?.[c] ?? ''))}</td>`
+    `<td${attr(i === 0 ? (resolved.tdFirst || resolved.td) : resolved.td)}>${escapeHtml(String(row?.[c] ?? ''))}</td>`
   )).join('')}</tr>`).join('');
-  const html = `<table${attrIf(style.table)}><thead${attrIf(style.thead)}><tr>${th}</tr></thead>`
-    + `<tbody${attrIf(style.tbody)}>${body}</tbody></table>`;
+  const html = `<table${attr(resolved.table)}><thead${attr(resolved.thead)}><tr>${th}</tr></thead>`
+    + `<tbody${attr(resolved.tbody)}>${body}</tbody></table>`;
   // The wrapper carries the border/rounding on the sites that use one, and
   // keeps a wide table scrollable instead of overflowing its column.
   return style.wrapper ? `<div class="${style.wrapper}">${html}</div>` : html;
@@ -701,9 +1210,37 @@ function blockSafeRow(rowTemplate, body, slot) {
   return rowTemplate.replace(re, (m, attrs, inner) => `<div${attrs || ''}>${inner}</div>`);
 }
 
-export function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE, tableStyle = {}) {
+// A focus whose content is a single short line (author-byline: "By the X
+// Team") gets the exact same full section-level padding as a multi-row
+// comparison table when both are wrapped with the plain expand-content
+// template — confirmed live on chayceproperties.com, where the wrapper's
+// own .seoai-content-section rule (56px vertical padding, added so an
+// injected section reads as a real page section rather than flat text —
+// see that site's src/css/seoai-content.css) gives a one-sentence byline the
+// same footprint as a whole comparison block. Appending this modifier class
+// alongside — never replacing — the wrapper's own classes lets a site opt
+// into a lighter treatment for exactly this case by defining
+// `.seoai-content-section--compact` in its own stylesheet; a site with no
+// such rule (i.e. every site but the ones that need it) gets an inert,
+// unused class name and nothing else changes.
+const COMPACT_EXPAND_FOCUSES = new Set(['author-byline']);
+
+function appendWrapperClass(wrapperTemplate, extraClass) {
+  if (!wrapperTemplate) return wrapperTemplate;
+  const classAttr = wrapperTemplate.match(/^(<div\s+class=")([^"]*)("[^>]*>)/);
+  if (classAttr) {
+    return `${classAttr[1]}${classAttr[2]} ${extraClass}${classAttr[3]}${wrapperTemplate.slice(classAttr[0].length)}`;
+  }
+  const bareDiv = wrapperTemplate.match(/^(<div)(\s|>)/);
+  if (bareDiv) {
+    return `${bareDiv[1]} class="${extraClass}"${bareDiv[2]}${wrapperTemplate.slice(bareDiv[0].length)}`;
+  }
+  return wrapperTemplate;
+}
+
+export function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE, style = {}) {
   const rows = sections.map((s) => {
-    const body = markdownToHtml(s.body) + renderComparisonTable(s.table, tableStyle);
+    const body = markdownToHtml(s.body, style) + renderComparisonTable(s.table, style);
     return fillTemplate(blockSafeRow(template.row, body, 'BODY'), {
       HEADING: escapeHtml(s.heading), BODY: body,
     });
@@ -742,26 +1279,117 @@ export function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE,
 // site's. A projection is the site's own typography, spacing and component
 // conventions. DEFAULT_* now only applies to a site with no design knowledge
 // at all.
-export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null, { suppressSchema = false } = {}) {
+// Adapts design-profile.js's projectTable() output shape ({tableClass,
+// headerCellClass, rowClass, cellClass}) onto the flat {table, th, tr, td,
+// wrapper} shape markdownTable/renderComparisonTable consume — the exact
+// same real, grounded classes markdown-table-render.js's buildTableHtml
+// already uses for every OTHER generated table on this platform (content-
+// integrity-repair, whole-new-page bodies), just mapped onto this renderer's
+// field names instead of leaving expand-content as a second table pipeline
+// with no grounding of its own. No real per-tenant wrapper evidence exists
+// for a PROJECTED table (only a captured componentTemplates.table has one),
+// so buildTableHtml's own structural default — a horizontal-scroll wrapper —
+// applies here too; that is a layout safety net, not a style choice.
+function projectedTableStyle(designProfile) {
+  const projected = projectTable(designProfile);
+  if (!projected) return null;
+  return {
+    table: projected.tableClass, th: projected.headerCellClass, td: projected.cellClass, tr: projected.rowClass,
+    wrapper: 'overflow-x-auto',
+  };
+}
+
+// A real captured tenant table (componentTemplates.table) always wins when
+// present; a projection from the site's own typography/color tokens is the
+// grounded fallback — same "configured || projected || bare" precedence
+// every other component template here already follows (see templateFor) —
+// so a site with no captured table markup no longer ships one with zero
+// classes at all.
+function tableStyleFor(componentTemplates, designProfile) {
+  return componentTemplates.table || projectedTableStyle(designProfile) || {};
+}
+
+// The site's own real paragraph/list/link typography — the same source
+// markdown-prose-render.js's projectMarkdownProseInBody already applies to
+// whole-new-page bodies. Wired in here too so expand-content/faq prose
+// doesn't stay the one rendering path still shipping bare, unstyled <p>/
+// <ul> — see that module's own comment on why a wrapper alone never fixes
+// this ("the wrapper is not what styles a heading").
+export function proseStyleFor(designProfile) {
+  const typography = designProfile?.typography;
+  if (!typography) return {};
+  return {
+    bodyClass: typography.body || null,
+    linkClass: typography.link || null,
+    listWrapperClass: designProfile?.components?.list?.wrapper || null,
+    listItemClass: designProfile?.components?.list?.item || null,
+  };
+}
+
+export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null, { suppressSchema = false, page = null, fileContent = null } = {}) {
   // Resolved per call rather than precomputed: only the branch that actually
   // renders visible HTML for this action type ever needs one.
-  const templateFor = (actionType_, configured, fallback) =>
+  // sanitizeCapturedTemplate runs here, once, for every actionType that
+  // resolves a componentTemplate — not just faq/qa-content — so a bug like
+  // 2026-09-09's (one site's Design Agent capture stamping `h-[70px]` onto
+  // EVERY component wrapper: faq, qaContent, expandContent, internalLinks,
+  // contentWrapper alike) can't ship on any of them, present or future.
+  const inline = isInlineContentPage(page);
+  const groundedHeadingClass = inline ? groundedInlineHeadingClass(designProfile, page) : null;
+  const templateFor = (actionType_, configured, fallback) => sanitizeCapturedTemplate(
     configured
     || (designProfile ? projectComponentTemplate(designProfile, actionType_) : null)
-    || fallback;
+    || fallback,
+    { inline, groundedHeadingClass },
+  );
+
+  // expand-content only: a page whose OWN sections are built from the site's
+  // card component (a portfolio/case-study grid — see
+  // pageUsesCardSections/projectExpandContentCard) gets the card-wrapped
+  // variant instead of the plain heading+paragraph row every other page uses.
+  // `componentTemplates.expandContentCard` is a captured/verified override,
+  // same precedence as every other slot here; falls through to a live
+  // projection, then to the plain template exactly as before for a page (or
+  // site) with no card evidence — never invents a card look.
+  const expandContentTemplate = () => {
+    if (page && pageUsesCardSections(designProfile, page)) {
+      const chosen = componentTemplates.expandContentCard
+        || (designProfile ? projectExpandContentCard(designProfile) : null);
+      if (chosen) return sanitizeCapturedTemplate(chosen, { inline, groundedHeadingClass });
+    }
+    return templateFor('expand-content', componentTemplates.expandContent, DEFAULT_EXPAND_TEMPLATE);
+  };
   if (actionType === 'meta-title') {
     if (mode === 'schema-only') return { ok: false, error: '"meta-title" has no schema-only representation.' };
     if (!content.selectedTitle) {
       return { ok: false, error: 'No title selected yet — pick one of the candidate titles (Draft Preview → "Use this") before this can be applied.' };
     }
     const values = { title: content.selectedTitle };
-    if (content.metaDescription) values.metaDescription = content.metaDescription;
+    // Marker-map field is `description` (matching the real front-matter key
+    // this platform's target SSGs use), not the generator's own
+    // `metaDescription` content field name — see LINE_CONVENTION_FIELDS'
+    // and PLATFORM_DEFAULT_MARKERS['meta-title']'s comments for why the
+    // names must differ here.
+    if (content.metaDescription) values.description = content.metaDescription;
     return { ok: true, values };
   }
 
   if (actionType === 'faq') {
     if (!content.items?.length) return { ok: false, error: 'This FAQ draft has no items.' };
-    const visible = renderFaqHtml(content.items, templateFor('faq', componentTemplates.faq, DEFAULT_FAQ_TEMPLATE));
+    // A blog/article/legal page (isInlineContentPage — same classifier
+    // sanitizeCapturedTemplate's stripping above uses) gets the site's
+    // captured inline Q&A treatment instead of its section-scale accordion,
+    // same "different page type, different real component" precedent as
+    // expandContentTemplate's card variant above. componentTemplates.faqInline
+    // is authored to already match the page's own body typography (see
+    // scripts/store-inline-faq-template.js), so it only needs the fixed-
+    // height strip every captured template gets, not the blog-unsafe one.
+    // Falls back to the ordinary faq template/projection when no inline
+    // variant has been captured yet — never invents a look.
+    const faqTemplate = inline && componentTemplates.faqInline
+      ? sanitizeCapturedTemplate(componentTemplates.faqInline)
+      : templateFor('faq', componentTemplates.faq, DEFAULT_FAQ_TEMPLATE);
+    const visible = renderFaqHtml(content.items, faqTemplate);
     // suppressSchema: the page already carries an FAQPage schema from the
     // OTHER FAQ/Q&A slot (qa-content) — see backend.js's hasExistingFaqSchema
     // check. 'faq' and 'qa-content' are independent marker fields, so
@@ -810,7 +1438,19 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
   if (actionType === 'canonical') {
     if (mode === 'schema-only') return { ok: false, error: '"canonical" has no schema-only representation.' };
     if (!content.canonicalUrl) return { ok: false, error: 'This canonical draft has no URL.' };
-    return { ok: true, values: { canonical: `<link rel="canonical" href="${escapeHtml(content.canonicalUrl)}">` } };
+    // Object-shaped, not a plain string — see LINE_HEAD_FALLBACK_KEY and
+    // spliceMarkers' own comment above for why: this same draft can land
+    // either as a nested-HEAD-region <link> tag or a front-matter value,
+    // and which one wins isn't known yet at this point in the pipeline.
+    return {
+      ok: true,
+      values: {
+        canonical: {
+          block: `<link rel="canonical" href="${escapeHtml(content.canonicalUrl)}">`,
+          line: content.canonicalUrl,
+        },
+      },
+    };
   }
 
   if (actionType === 'open-graph') {
@@ -835,19 +1475,80 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     return { ok: true, values: { openGraph: tags } };
   }
 
-  if (actionType === 'expand-content') {
-    if (mode === 'schema-only') return { ok: false, error: '"expand-content" has no schema-only representation.' };
-    if (!content.sections?.length) return { ok: false, error: 'This content-expansion draft has no sections.' };
-    return {
-      ok: true,
-      values: {
-        expandedContent: renderExpandedHtml(
-          content.sections,
-          templateFor('expand-content', componentTemplates.expandContent, DEFAULT_EXPAND_TEMPLATE),
-          componentTemplates.table || {},
-        ),
-      },
-    };
+  if (actionType === 'expand-content' || actionType === 'refresh-content') {
+    if (mode === 'schema-only') return { ok: false, error: `"${actionType}" has no schema-only representation.` };
+    if (!content.sections?.length) return { ok: false, error: `This ${actionType === 'refresh-content' ? 'content-refresh' : 'content-expansion'} draft has no sections.` };
+    // refresh-content deliberately shares expand-content's real, per-site
+    // 'expandedContent' marker/template — see refresh-content.js's own
+    // comment: a second marker would need every onboarded site re-onboarded
+    // before this could ever ship.
+    const baseTemplate = expandContentTemplate();
+    const template = COMPACT_EXPAND_FOCUSES.has(content.focus)
+      ? { ...baseTemplate, wrapper: appendWrapperClass(baseTemplate.wrapper, 'seoai-content-section--compact') }
+      : baseTemplate;
+    const newHtml = renderExpandedHtml(
+      content.sections,
+      template,
+      { ...tableStyleFor(componentTemplates, designProfile), ...proseStyleFor(designProfile) },
+    );
+    // A different FOCUS (comparison-content, author-byline, freshness-date,
+    // external-citations, ...) is each its own recommendation/draft, but
+    // they all share this one marker. Blindly overwriting it with only this
+    // draft's own section(s) silently deleted whatever an earlier,
+    // different-focus draft had already shipped there — confirmed live on
+    // site 1 (2026-09-18): an author-byline/freshness-date draft for
+    // src/pages/services/saas-development.njk would have deleted an already
+    // -shipped comparison-content section's <table>, correctly caught by
+    // section-preservation-gate.js. Preserving the marker's current content
+    // ahead of the new render means the gate sees an ADD, not a swap.
+    // The marker's real on-file name is 'EXPANDEDCONTENT' (url-file-map.js's
+    // MARKER_NAME_BY_ACTION_TYPE), not the 'expandedContent' field name used
+    // everywhere else in this function.
+    //
+    // Every block is tagged with an invisible `<!-- SEOAI:FOCUS:x --> `
+    // comment naming which focus produced it — the ONLY reliable way to
+    // recognise "this focus already has a section here" on a retry. The old
+    // dedup signal was matching the NEW draft's heading TEXT against the
+    // existing HTML, which only works when a retry reproduces the exact same
+    // wording. comparison-content's heading is LLM-written and varies draft
+    // to draft ("Comparison of Moving Services" one day, "Comparison of Home
+    // Moving Services" the next) — confirmed live on site 8864
+    // (chayceproperties.com, 2026-09-20): two separate comparison-content
+    // drafts for /our-services/, three days apart, both had genuinely
+    // different heading text, so the text check never recognised the second
+    // as a repeat and appended it alongside the first instead of replacing
+    // it. The focus marker sidesteps wording entirely.
+    const existing = fileContent ? getMarkerContent(fileContent, 'EXPANDEDCONTENT') : null;
+    const focusMarker = content.focus ? `<!-- SEOAI:FOCUS:${content.focus} -->` : null;
+    const taggedHtml = focusMarker ? `${focusMarker}${newHtml}` : newHtml;
+
+    let html;
+    if (!existing || !existing.trim()) {
+      html = taggedHtml;
+    } else if (focusMarker && existing.includes(focusMarker)) {
+      // A genuine retry of the SAME focus — replace only ITS OWN previously
+      // tagged block (up to the next focus marker, or the end of the
+      // region), leaving every OTHER focus's already-shipped content
+      // untouched. Unlike the old text-based check, this never wipes a
+      // sibling focus's section just because this retry's own heading text
+      // happens to also appear somewhere in the marker.
+      const startIdx = existing.indexOf(focusMarker);
+      const nextIdx = existing.indexOf('<!-- SEOAI:FOCUS:', startIdx + focusMarker.length);
+      const before = existing.slice(0, startIdx);
+      const after = nextIdx === -1 ? '' : existing.slice(nextIdx);
+      html = `${before}${taggedHtml}${after}`.trim();
+    } else if (content.sections.some((s) => existing.includes(escapeHtml(s.heading)))) {
+      // Fallback for content that shipped before focus markers existed (no
+      // tag to match against yet) — the old exact-heading-text signal still
+      // catches an identical-wording retry and replaces the whole marker,
+      // same as before this fix.
+      html = taggedHtml;
+    } else {
+      // A genuinely new, not-yet-seen focus (or an unmarked legacy focus
+      // whose wording changed) — add alongside what's already there.
+      html = `${existing.trim()}\n${taggedHtml}`;
+    }
+    return { ok: true, values: { expandedContent: html } };
   }
 
   if (actionType === 'qa-content') {
@@ -913,6 +1614,7 @@ const PROBE_CONTENT_BY_ACTION_TYPE = {
   canonical: { canonicalUrl: 'https://example.invalid/x' },
   'open-graph': { ogTitle: 'x' },
   'expand-content': { sections: [{ heading: 'h', body: 'b' }] },
+  'refresh-content': { sections: [{ heading: 'h', body: 'b' }] },
   'qa-content': { items: [{ question: 'q', answer: 'a' }] },
 };
 

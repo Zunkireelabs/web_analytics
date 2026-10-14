@@ -1,4 +1,10 @@
 import { callLLMForJson } from '../llm.js';
+import { getSiteById } from '../store/read.js';
+import { pageStructureGuidance } from './lib/design-aware-composer.js';
+import { loadProductFactsFor } from './lib/product-facts.js';
+import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
+import { usedPhotoIds } from './lib/blog-image-usage.js';
+import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
 
 export const meta = {
   id: 'landing-page',
@@ -9,7 +15,7 @@ export const meta = {
 
 // params: { market?: string, city?: string, topic?: string, context?: string (real supporting data, e.g. session growth) }
 export async function generate({ siteId, params }) {
-  const { market, city, topic, context } = params;
+  const { market, city, topic, context, designCorrections } = params;
   const target = city ? `${city}${market ? `, ${market}` : ''}` : (market || topic);
   if (!target) throw Object.assign(new Error('market, city, or topic is required'), { status: 400 });
 
@@ -18,13 +24,62 @@ export async function generate({ siteId, params }) {
     'business beyond what\'s given in context. Do not invent specific claims (pricing, awards, client counts) not ' +
     'present in the given context. Respond with ONLY a JSON object: {"headline": "...", "subheadline": "...", ' +
     '"sections": [{"heading": "...", "body": "..."}], "cta": "...", "metaTitle": "...", "metaDescription": "..."}';
-  const user = `Target: ${target}${context ? `\nSupporting data: ${context}` : ''}`;
+  // DESIGN CONTEXT REACHES GENERATION HERE, not just rendering. Before this,
+  // newpage-render.js's projectCta/projectCard/projectPageWrapper already
+  // restyled whatever generic shape the LLM invented into the site's real
+  // button/card classes — but the STRUCTURE (section count, ordering, which
+  // text roles appear) was invented from nothing, identical for every site.
+  // pageStructureGuidance (lib/design-aware-composer.js) is the shared
+  // composer: it turns this site's own real, live-observed page-type
+  // patterns into grounded structural guidance, falling back to 'service'
+  // then 'homepage' patterns for a target-type never seen before (a
+  // genuinely NEW page type on this site still gets guided by the closest
+  // real precedent rather than inventing a structure unrelated to the rest
+  // of the site). Null (no profile yet, or this site has shown no page even
+  // remotely like this) leaves the prompt exactly as it was before this
+  // existed — never a fabricated fallback.
+  let site = null;
+  try {
+    site = siteId != null ? await getSiteById(siteId) : null;
+  } catch {
+    site = null;
+  }
+  const guidance = pageStructureGuidance(site, 'landing', { fallbackPageTypes: ['service', 'homepage'] });
+  // Verified product knowledge (product sites only; '' for every website
+  // tenant, whose prompt is unchanged). Gives the model the product's real
+  // features / flow / pricing / proof to write from, so it has nothing to invent.
+  const productFacts = await loadProductFactsFor(site);
+  // designCorrections is appended last so it is the most recent instruction
+  // the model reads — a previous attempt at THIS draft was checked against
+  // the site's own design and something didn't match. See
+  // generators/lib/design-repair-feedback.js and generateDraft's repair loop.
+  const user = `Target: ${target}${context ? `\nSupporting data: ${context}` : ''}`
+    + (productFacts
+      ? `\n\nVERIFIED PRODUCT FACTS — describe the product ONLY with these; never invent a feature, step, price, or proof point not listed:\n${productFacts}`
+      : '')
+    + `${guidance ? `\n\n${guidance}` : ''}`
+    + (designCorrections ? `\n\n${designCorrections}` : '');
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
   } catch {
     throw Object.assign(new Error('Landing page generation failed: model did not return valid JSON'), { status: 400 });
   }
+
+  // Best-effort, same reasoning as blog-outline.js's own image search: a
+  // failed/disabled/no-result search must never block an otherwise complete
+  // landing-page draft. newpage-render.js's renderLandingPageBody only ever
+  // WRITES this into front matter when the target directory's real sibling
+  // pages already have a featured-image field of their own (fieldNames from
+  // newcontent-contract.js) — so on a directory with no such convention,
+  // this fetch simply goes unused rather than inventing a look the site's
+  // own landing pages don't have.
+  const excludePhotoIds = imagesConfigured() ? await usedPhotoIds(site) : undefined;
+  const { fallback } = await imageQueryContextFor(site);
+  const featuredImage = await searchImage(
+    buildImageQueries({ title: target, topic: target, fallback }),
+    { excludePhotoIds, perPage: IMAGE_CANDIDATE_POOL },
+  );
 
   const content = {
     target,
@@ -34,6 +89,13 @@ export async function generate({ siteId, params }) {
     cta: parsed.cta || '',
     metaTitle: parsed.metaTitle || '',
     metaDescription: parsed.metaDescription || '',
+    ...(featuredImage ? { featuredImage } : {}),
+    // The exact real supporting data this draft was grounded in — same
+    // convention as compliance-draft.js's `content.factsUsed` — so
+    // claim-grounding-guard.js (quality-gate.js) can check "is this claim
+    // actually backed by something real" without re-deriving or guessing
+    // at what the model was given.
+    groundingContext: [context, productFacts].filter(Boolean).join('\n\n'),
   };
   return { content, summary: `Landing page draft for "${target}"` };
 }

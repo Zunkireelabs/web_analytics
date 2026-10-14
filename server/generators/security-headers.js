@@ -5,6 +5,9 @@
 // `# SEOAI:SECURITY-HEADERS:START/END` marker pair inside the site's real
 // nginx server {} block — this generator never decides *where* it goes.
 
+import { fetchResponseHeaders } from '../agents/lib/page-content.js';
+import { siteOriginFor } from '../agents/lib/site-domain.js';
+
 export const meta = {
   id: 'security-headers',
   name: 'Security Headers Generator',
@@ -54,4 +57,29 @@ export async function generate({ params }) {
     content: { headersIncluded, nginxBlock, missingHeaders: params?.missingHeaders || [] },
     summary: `Security-headers nginx block for ${headersIncluded.length} missing header(s): ${headersIncluded.join(', ')}.`,
   };
+}
+
+// Side-effect-free re-verification (server/generators/lib/verification-layer.js).
+// Headers are site-wide (nginx server {} block), so the site's own public
+// origin is the checkable target — same fallback fix-verification.js's own
+// RESPONSE_HEADER check already uses for this generator (`target = page ||
+// siteOrigin`). already_resolved only once every header this recommendation
+// named is now actually present in a live response — re-fetches rather than
+// trusting the params captured at detection time.
+export async function verifyCurrentState(rec, { site } = {}) {
+  if (!site) return { decision: 'still_valid', reason: 'no-site-context', evidence: null };
+  const target = rec.params?.page || rec.page || siteOriginFor(site);
+  if (!target) return { decision: 'still_valid', reason: 'no-checkable-target', evidence: null };
+
+  const wanted = Array.isArray(rec.params?.missingHeaders) && rec.params.missingHeaders.length
+    ? rec.params.missingHeaders
+    : ALL_KEYS;
+  const res = await fetchResponseHeaders(target);
+  if (!res.ok) return { decision: 'still_valid', reason: 'unreachable', evidence: { target, error: res.error } };
+
+  const stillMissing = wanted.filter((name) => !res.headers.get(name));
+  if (stillMissing.length === 0) {
+    return { decision: 'already_resolved', reason: 'headers-already-present', evidence: { target, checked: wanted } };
+  }
+  return { decision: 'still_valid', reason: 'headers-still-missing', evidence: { target, stillMissing } };
 }

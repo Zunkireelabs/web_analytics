@@ -18,6 +18,11 @@ export const ctrAtPosition = (p) => CTR_BY_POSITION[Math.round(p)] ?? CTR_TAIL;
 // an unrealistic #1).
 export const TARGET_POSITION = 3;
 
+// `basis` value every surface of estimatedTrafficGain must carry (findings'
+// expectedImpact.basis, each opportunity row, the Analyst page) so the number
+// is never read as a measurement.
+export const TRAFFIC_GAIN_BASIS = 'estimate';
+
 export const TRAFFIC_GAIN_NOTE =
   `estimatedTrafficGain assumes the query reaches position ${TARGET_POSITION} and applies an ` +
   'approximate industry-average CTR-by-position curve — an estimate, not a guarantee, not measured for this site.';

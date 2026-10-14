@@ -1,5 +1,8 @@
 import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget } from '../../implementers/lib/url-file-map.js';
-import { componentTemplateVerification, componentTemplateActionTypeFor } from '../../implementers/lib/design-drift.js';
+import { hasExistingFaqSchema, INSPECTABLE_ACTION_TYPES } from '../../implementers/lib/render-inspector.js';
+import { templateRendersItemsField } from '../../implementers/lib/faq-render-mode.js';
+import { componentTemplateVerification, componentTemplateActionTypeFor, getDesignProfile } from '../../implementers/lib/design-drift.js';
+import { projectComponentTemplate } from '../../design-agent/lib/design-profile.js';
 import { getDesignAgentStatus } from '../../implementers/lib/design-agent-status.js';
 import { isDataReady } from '../../implementers/adapters/data-array-content.js';
 import { fetchSoftNotFoundFingerprint, isSoftNotFound } from './technical-seo-analysis.js';
@@ -10,6 +13,10 @@ import { autoHealFileMapping, buildPermalinkIndex } from '../../implementers/lib
 import { autoHealNewContentTarget } from '../../implementers/lib/discover-content-target.js';
 import { discoverPaginationRoutes, matchPaginationRoute, paginationBlockedReason, paginationHeadTagAutoHandled } from '../../implementers/lib/pagination-routes.js';
 import { healPaginationAdapter } from '../../implementers/lib/pagination-adapter-discovery.js';
+import { nestedIdsFromPageUrl } from '../../implementers/adapters/data-array-content.js';
+import { evaluateLocationServiceGap, GAP_CLASS } from './location-service-gap.js';
+import { getCachedGapEvaluation, saveGapEvaluation } from '../../store/location-service-gaps.js';
+import { findOpenRecommendation, insertRecommendation } from '../../store/recommendations.js';
 
 // The gates that decide whether a candidate recommendation is real, and
 // whether it may enter the unattended chain.
@@ -45,6 +52,33 @@ import { healPaginationAdapter } from '../../implementers/lib/pagination-adapter
 // read per unique file, and one soft-404 fingerprint per pass, no matter how
 // many findings share them.
 
+// Can this generator render in THIS site's own design language right now?
+//
+// Asks the question the apply path actually answers, rather than the stricter
+// "is a template stored and stamped" one. Two ways to say yes, matching
+// marker-merge.js's real precedence (configured -> projected -> DEFAULT_*):
+//
+//   1. a verified stored component template exists, or
+//   2. the site's design profile can project one for this action type — the
+//      projection IS the site's own typography/spacing/components, so a fix
+//      built on it is design-consistent even though nothing was stored.
+//
+// projectComponentTemplate is a pure function that already returns null for
+// an unusable profile or a non-projectable action type, so calling it is both
+// the check and the proof — no separate isProfileUsable/isProjectable pair to
+// drift out of step with it. Only when neither holds does the render path
+// reach the generic DEFAULT_* markup, and only then is this genuinely blocked.
+export function designContextAvailability(site, generatorId) {
+  const actionType = componentTemplateActionTypeFor(generatorId);
+  const verdict = componentTemplateVerification(site, actionType);
+  if (verdict.ok) return verdict;
+
+  if (projectComponentTemplate(getDesignProfile(site), actionType)) {
+    return { ...verdict, ok: true, reason: 'projectable-from-profile' };
+  }
+  return verdict;
+}
+
 export function createRecommendationGates(siteId, initialSite, deps = {}) {
   const {
     fetchTree = getRepoTree,
@@ -57,6 +91,14 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     checkSoftNotFound = isSoftNotFound,
     designAgentStatus = getDesignAgentStatus,
     log = console,
+    // Injectable purely for tests — real defaults exercise the actual
+    // evidence check (DataForSEO + repo content) and the actual
+    // recommendations store.
+    resolveGap = evaluateLocationServiceGap,
+    getCachedGap = getCachedGapEvaluation,
+    saveGap = saveGapEvaluation,
+    findOpenRec = findOpenRecommendation,
+    insertRec = insertRecommendation,
   } = deps;
 
   // Reassignable: healing persists newly-discovered url_file_map entries and
@@ -272,6 +314,69 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
   // Runs every gate for one candidate, in the order that produces the most
   // useful answer: cheap config checks first, network evidence only when
   // something is actually about to be reported.
+  // Deduped per (dataFile, locationId, serviceId) for this whole pass — many
+  // findings across a sync can reference the very same missing container
+  // (e.g. a schema AND a meta-title recommendation for the identical page).
+  const gapAttempted = new Set();
+
+  // A missing location×service entry used to be a permanent, unattended
+  // dead end: `drop: 'adapter-data-not-ready'` closed the finding as if the
+  // site were healthy, with no path back except a human manually editing the
+  // tenant's data file. This is the one place that changes: real, verified
+  // evidence (agents/lib/location-service-gap.js) can now justify creating
+  // the EMPTY container automatically, after which the very same generator
+  // that hit this gate drafts the real content on its own next run — no
+  // content is invented here or by this function.
+  //
+  // Ensuring the recovery recommendation exists is a narrow, deliberate
+  // exception to recommendation-coordinator.js's "only the coordinator
+  // writes recommendations" convention (see that file's own header comment):
+  // this still only ever runs from inside a gate the coordinator itself
+  // invoked, uses the SAME store functions and the SAME (site_id, page,
+  // recommendation_type) dedup constraint every other writer relies on, and
+  // exists specifically because the gate is the one place that already has
+  // the resolved adapter config this recovery needs — re-deriving it a
+  // second time inside the coordinator's own findings loop would duplicate
+  // resolveAdapter's page-pattern matching for no benefit.
+  async function ensureLocationServiceRecovery(page, adapterConfig) {
+    const { id: locationId, nestedId: serviceId } = nestedIdsFromPageUrl(page);
+    if (!locationId || !serviceId) return false;
+
+    const dedupeKey = `${adapterConfig.dataFile}::${locationId}::${serviceId}`;
+    if (gapAttempted.has(dedupeKey)) {
+      const cached = await getCachedGap(siteId, adapterConfig.dataFile, locationId, serviceId).catch(() => null);
+      return cached?.verdict === GAP_CLASS.SAFE_RECOVERY;
+    }
+    gapAttempted.add(dedupeKey);
+
+    let cached = await getCachedGap(siteId, adapterConfig.dataFile, locationId, serviceId).catch(() => null);
+    if (!cached) {
+      const verdict = await resolveGap(site, page, adapterConfig, { fetchFile: cachedFetchFile }).catch((err) => {
+        log.warn(`[recommendation-gates] site ${siteId}: location-service gap evaluation failed for ${page}: ${err.message}`);
+        return { verdict: GAP_CLASS.INSUFFICIENT_DATA, reason: 'evaluation-failed' };
+      });
+      cached = await saveGap(siteId, adapterConfig.dataFile, locationId, serviceId, verdict).catch(() => verdict);
+    }
+    if (cached.verdict !== GAP_CLASS.SAFE_RECOVERY) return false;
+
+    const existing = await findOpenRec(siteId, page, 'location-service-bootstrap').catch(() => null);
+    if (!existing) {
+      await insertRec(siteId, {
+        page, recommendationType: 'location-service-bootstrap',
+        issue: `Missing content container for "${serviceId}" in "${locationId}"`,
+        reason: 'Real search demand and a tenant-declared expansion location justify creating the missing content container automatically.',
+        params: { page, baseConfig: adapterConfig },
+        findingId: `location-service-gap:${dedupeKey}`,
+        detectingAgent: 'location-service-gap-resolver',
+        priority: 'medium',
+        riskTier: 'safe',
+      }).catch((err) => {
+        log.warn(`[recommendation-gates] site ${siteId}: could not create location-service-bootstrap recommendation for ${page}: ${err.message}`);
+      });
+    }
+    return true;
+  }
+
   async function evaluate(generatorId, params) {
     if (!site) return { drop: null, blockedReason: null };
     const page = params?.page;
@@ -371,8 +476,26 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
       const filePath = resolveFile(site, page);
       if (filePath) {
         const ref = baseBranch(site);
-        const exists = await cachedFetchFile(site, filePath, ref);
-        if (!exists && !unverifiableFiles.has(`${filePath}@${ref}`)) return { drop: 'file-missing', blockedReason: null };
+        const file = await cachedFetchFile(site, filePath, ref);
+        if (!file && !unverifiableFiles.has(`${filePath}@${ref}`)) return { drop: 'file-missing', blockedReason: null };
+
+        // A file that already carries an FAQPage schema block can never take
+        // a faq/qa-content draft: render-mode inspection (render-inspector.js)
+        // treats an existing schema as 'strong' evidence and forces
+        // schema-only mode, and marker-merge.js's suppressSchema then finds
+        // nothing left to publish — a guaranteed, permanent failure, not a
+        // transient one. This is the /resources/?type=report vs ?type=ebook
+        // vs ?type=webinar shape (see faq-render-mode.js's own comment): three
+        // distinct GSC URLs that all resolve to the SAME file (resolveFile
+        // matches on pathname only, ignoring the query string), so the first
+        // one to ship its schema poisons the other two forever. Dropped here,
+        // before an LLM draft is even generated, instead of discovering the
+        // same dead end at apply time — see store/drafts.js's redraft-churn
+        // comment (24 attempts across 6 findings historically for exactly
+        // this failure).
+        if (file && INSPECTABLE_ACTION_TYPES.includes(generatorId) && hasExistingFaqSchema(file.content)) {
+          return { drop: 'faq-schema-already-present', blockedReason: null };
+        }
       }
     }
 
@@ -387,7 +510,55 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
       const adapterConfig = resolveAdapter(site, page, generatorId);
       if (adapterConfig?.id === 'data-array-content'
         && !(await isDataReady(site, page, adapterConfig, cachedFetchFile, baseBranch(site)))) {
+        // Nested (location×service) gaps get one more, real chance before
+        // being dropped as unfixable — see ensureLocationServiceRecovery
+        // above. A flat (non-nested) adapter gap has no equivalent recovery
+        // path (there's no "container" to bootstrap, the id itself would
+        // have to be invented) and keeps the original, unchanged behavior.
+        if (adapterConfig.nestedField && await ensureLocationServiceRecovery(page, adapterConfig)) {
+          return {
+            drop: null,
+            blockedReason: 'The required location/service content container hasn\'t been derived yet — generating it automatically before this can be applied.',
+          };
+        }
         return { drop: 'adapter-data-not-ready', blockedReason: null };
+      }
+
+      // A pagination/data-array 'faq' route (e.g. /compare/*) has no
+      // per-page template file — its adapter's dataFile just holds the
+      // content, not the render mechanism. Before this can ever safely
+      // resolve visible-vs-schema-only (faq-render-mode.js's
+      // resolveFaqRenderMode), the SHARED layout that actually renders every
+      // entry has to genuinely loop over the adapter's own itemsField —
+      // otherwise a shipped draft would be written but permanently invisible
+      // on the live page. Checked here, not only at draft/apply time, so
+      // this stays a normal, auto-re-evaluated blocked_reason (the exact
+      // same daily refresh pass every other gate here uses) rather than a
+      // human-facing "render-mode-uncertain" stop: this isn't ambiguous or
+      // unsafe, it's a real, named dependency (a specific template change)
+      // that either exists or doesn't, and clears itself the moment that
+      // template change ships — no human judgment involved either way.
+      if (generatorId === 'faq' && adapterConfig?.id === 'data-array-content'
+        && adapterConfig?.itemsField && !resolveFile(site, page)) {
+        if (!adapterConfig.templateFile) {
+          return {
+            drop: null,
+            blockedReason: `No "templateFile" is configured on this route's faq adapter, so there's no way to confirm the shared layout renders "${adapterConfig.itemsField}" before drafting. Add one via 'npm run connect-repo' before this can ship.`,
+          };
+        }
+        const template = await cachedFetchFile(site, adapterConfig.templateFile, baseBranch(site));
+        if (!template) {
+          return {
+            drop: null,
+            blockedReason: `${adapterConfig.templateFile} does not exist on this site's default branch — cannot confirm it renders "${adapterConfig.itemsField}".`,
+          };
+        }
+        if (!templateRendersItemsField(template.content, adapterConfig.itemsField)) {
+          return {
+            drop: null,
+            blockedReason: `Waiting on a template capability: ${adapterConfig.templateFile} does not yet render "${adapterConfig.itemsField}" — a drafted FAQ would be written but invisible on the live page until that template change ships. This will clear automatically once it does, no human decision needed.`,
+          };
+        }
       }
     }
 
@@ -395,11 +566,25 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     // the gates that drop), this one does NOT drop — a blocked item is a real,
     // correctly-detected issue we simply aren't allowed to auto-fix yet, so
     // dropping it would lose a genuine finding and let the recommendation
-    // close out as "resolved" when nothing was resolved. The real hard block
-    // (a 422) lives in generateDraft — this is the honest UI half of it, so a
-    // user sees "blocked, here's why" instead of clicking Generate and getting
-    // an error. Pure in-memory check against the already-loaded `site` row.
-    const designCheck = componentTemplateVerification(site, componentTemplateActionTypeFor(generatorId));
+    // close out as "resolved" when nothing was resolved.
+    //
+    // This gate used to mirror a hard 422 in generateDraft. That 422 is GONE
+    // (routes/action-center.js now only warns and generates with whatever the
+    // render path can produce), so mirroring it here demoted real, shippable
+    // faq/expand-content/internal-links/qa-content work to 'manual' on behalf
+    // of a block that no longer exists — the single largest suppressor of
+    // autonomous volume this system had.
+    //
+    // What replaces it is the question the apply path actually asks, and the
+    // same rule contentWrapperAvailability (design-drift.js) already applies
+    // to net-new pages: marker-merge.js's precedence is
+    //   configured template -> projection from the design profile -> DEFAULT_*
+    // so a site with a usable design profile renders in ITS OWN typography,
+    // spacing and components even with no stored template. Only a site where
+    // BOTH are missing would fall through to the generic DEFAULT_* markup —
+    // a visual language that is nobody's — and only that case is still
+    // blocked. Pure in-memory check against the already-loaded `site` row.
+    const designCheck = designContextAvailability(site, generatorId);
 
     // Enrich a blocked design-check with the REAL, persisted Design Agent
     // job status (implementers/lib/design-agent-status.js) instead of

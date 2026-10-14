@@ -76,6 +76,11 @@ export const api = {
     req('/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
   verifyPassword: (password) => req('/verify-password', { method: 'POST', body: JSON.stringify({ password }) }),
   sites: () => req('/sites'),
+  demand: {
+    prospects: () => req('/demand/prospects'),
+    approve: (id) => req(`/demand/prospects/${id}/approve`, { method: 'POST' }),
+    trialSignups: () => req('/demand/trial-signups'),
+  },
   agents: () => req('/agents'),
   agentsStatus: () => req('/agents/status'),
   agentsActivity: (limit = 12) => req(`/agents/activity?limit=${limit}`),
@@ -90,6 +95,15 @@ export const api = {
   // other caller (and every non-internal user) omits it and hits the plain
   // session-scoped route exactly as before.
   growthReport: (siteId) => (siteId ? req(`/internal/growth-report/${siteId}`) : req('/growth-report')),
+  // The client-facing "day 0" document — same client/internal pair pattern
+  // as growthReport above. downloadUrl is a plain href (not fetched via
+  // req()) since it needs to trigger a browser file download, not a JSON
+  // response; session cookies cover auth the same way any other same-origin
+  // GET does.
+  baselineReport: (siteId) => (siteId ? req(`/internal/baseline-report/${siteId}`) : req('/baseline-report')),
+  baselineReportDownloadUrl: (siteId) =>
+    `${import.meta.env.BASE_URL}api${siteId ? `/internal/baseline-report/${siteId}/download` : '/baseline-report/download'}`,
+  generateBaselineReport: (siteId) => req(`/internal/baseline-report/${siteId}/generate`, { method: 'POST' }),
   growthTargets: {
     set: (body) => req('/growth-targets', { method: 'POST', body: JSON.stringify(body) }),
     setBatch: (targets) => req('/growth-targets/batch', { method: 'POST', body: JSON.stringify({ targets }) }),
@@ -150,6 +164,26 @@ export const api = {
     setOauthPolicy: (id, oauthMaxPermissionLevel) => req(`/internal/clients/${id}/oauth-policy`, { method: 'POST', body: JSON.stringify({ oauthMaxPermissionLevel }) }),
     setVisibleFaqCap: (id, visibleFaqCap) => req(`/internal/clients/${id}/visible-faq-cap`, { method: 'POST', body: JSON.stringify({ visibleFaqCap }) }),
     setAutoRemediation: (id, enabled, dailyLimit) => req(`/internal/clients/${id}/auto-remediation`, { method: 'POST', body: JSON.stringify({ enabled, dailyLimit }) }),
+    setAnalyticsIds: (id, ga4MeasurementId, facebookPixelId) => req(`/internal/clients/${id}/analytics-ids`, { method: 'POST', body: JSON.stringify({ ga4MeasurementId, facebookPixelId }) }),
+    productGrowthConfig: {
+      get: (id) => req(`/internal/clients/${id}/product-growth-config`),
+      save: (id, body) => req(`/internal/clients/${id}/product-growth-config`, { method: 'POST', body: JSON.stringify(body) }),
+      setProspectDiscovery: (id, enabled) => req(`/internal/clients/${id}/prospect-discovery`, { method: 'POST', body: JSON.stringify({ enabled }) }),
+      issueCrmWebhookToken: (id) => req(`/internal/clients/${id}/crm-webhook-token`, { method: 'POST' }),
+    },
+    // Business Goals — Stage 2 UI for server/agents/lib/goal-alignment.js.
+    goals: {
+      list: (id) => req(`/internal/clients/${id}/goals`),
+      create: (id, body) => req(`/internal/clients/${id}/goals`, { method: 'POST', body: JSON.stringify(body) }),
+      update: (id, goalId, body) => req(`/internal/clients/${id}/goals/${goalId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+      setStatus: (id, goalId, status) => req(`/internal/clients/${id}/goals/${goalId}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
+      // Structures a free-text custom goal via LLM — never saves. The
+      // returned proposal is shown for the user to review/edit and explicitly
+      // confirm before the real create() above fires.
+      // Product sites only (404 for a website tenant): funnel counts read from prospects / trial_signups.
+      progress: (id, days) => req(`/internal/clients/${id}/goals/progress${days ? `?days=${days}` : ''}`),
+      structurePreview: (id, description) => req(`/internal/clients/${id}/goals/structure-preview`, { method: 'POST', body: JSON.stringify({ description }) }),
+    },
     // Design-integrity gate: what the design agent found on this site's real
     // pages and what it would write, plus the current sign-off state
     // (server/agents/lib/design-review.js's buildDesignReviewReport).
@@ -229,6 +263,10 @@ export const api = {
       req(`/internal/keywords/${siteId}/clusters${clusterType ? `?cluster_type=${clusterType}` : ''}`),
     gaps: (siteId, status) =>
       req(`/internal/keywords/${siteId}/gaps${status ? `?status=${status}` : ''}`),
+    // { translations: { [term]: { language, english } } } for the non-English
+    // terms only — see server/agents/lib/keyword-translation.js.
+    translate: (siteId, terms) =>
+      req(`/internal/keywords/${siteId}/translate`, { method: 'POST', body: JSON.stringify({ terms }) }),
     // A keyword the user typed on the Analyst page as a growth target — queued
     // as a normal pending gap, then approved through updateGapStatus like any
     // machine-found one.
@@ -257,8 +295,12 @@ export const api = {
     narrative: (siteId) => req(`/internal/keywords/${siteId}/narrative`),
     // Product Understanding Layer (migration 111) — this site's OWN verified
     // capabilities, not topics it merely ranks for.
-    capabilities: (siteId, status) =>
-      req(`/internal/keywords/${siteId}/capabilities${status ? `?status=${status}` : ''}`),
+    // `kind` (migration 176): omitted = capabilities only (what every existing
+    // caller has always received); 'all' = every kind of product knowledge.
+    capabilities: (siteId, status, kind) => {
+      const qs = [status && `status=${status}`, kind && `kind=${kind}`].filter(Boolean).join('&');
+      return req(`/internal/keywords/${siteId}/capabilities${qs ? `?${qs}` : ''}`);
+    },
     addCapability: (siteId, capability) =>
       req(`/internal/keywords/${siteId}/capabilities`, { method: 'POST', body: JSON.stringify(capability) }),
     updateCapabilityStatus: (siteId, capabilityId, status) =>
@@ -321,6 +363,11 @@ export const api = {
     generators: (siteId) => req(withSite('/action-center/generators', siteId)),
     generate: (generatorId, params, source, findingId, siteId) => req(withSite('/action-center/generate', siteId), { method: 'POST', body: JSON.stringify({ generatorId, params, source, findingId }) }),
     drafts: (filters = {}, siteId) => req(withSite(`/action-center/drafts?${new URLSearchParams(filters)}`, siteId)),
+    // Exact tab-badge counts (total/nonImplemented/implemented/abandoned/
+    // submittedForApproval/implementedThisWeek) — independent of drafts()'s
+    // own cap on the unfiltered board load, so a badge is never wrong just
+    // because the list underneath it was capped.
+    draftCounts: (siteId) => req(withSite('/action-center/drafts/counts', siteId)),
     draft: (id, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId)),
     saveDraft: (id, content, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId), { method: 'PUT', body: JSON.stringify({ content }) }),
     deleteDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId), { method: 'DELETE' }),

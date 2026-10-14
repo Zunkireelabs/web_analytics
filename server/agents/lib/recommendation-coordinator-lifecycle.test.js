@@ -75,3 +75,144 @@ describe('syncFromGrounded — droppedRecommendations reach markRecommendationsU
     assert.equal(markedUnfixable, null);
   });
 });
+
+// The tracking-ID staleness bug (2026-09-08): analytics-install's finding id
+// (`trust-compliance:ga4:missing`) is deterministic and stays IDENTICAL every
+// day the tracker remains uninstalled, so re-detecting the exact same finding
+// used to early-return before ever calling mergeIntoRecommendation — the only
+// place params get refreshed. A recommendation created before the site's real
+// GA4 ID was configured in the database therefore never picked that ID up
+// through ordinary daily sync; only the failure-triggered recovery path
+// (action-center-reconciler.js, gated behind MAX_FAILED_ATTEMPTS) eventually
+// forced a refresh. Confirmed live: recommendation #47 on site 1 carried no
+// trackingId for 17 days and 15 failed drafts before that recovery path
+// finally set it. syncFromGrounded must merge fresh params on EVERY sync,
+// whether or not the finding id changed.
+describe('syncFromGrounded — repeat-finding params refresh (tracking-ID staleness fix)', () => {
+  test('a recommendation with an unchanged finding id still gets fresh params merged', async () => {
+    openRecommendation = {
+      id: 47,
+      finding_ids: ['trust-compliance:ga4:missing'],
+      detecting_agents: ['trust-compliance'],
+      supporting_agents: [],
+      blocked_reason: null,
+      risk_tier: 'safe',
+    };
+
+    await syncFromGrounded(1, {
+      items: [{
+        id: 'trust-compliance:ga4:missing',
+        generatorId: 'analytics-install',
+        source: 'trust-compliance',
+        reason: 'No Google Analytics detected',
+        // The whole point: trackingId is now populated because the site's
+        // real config was read fresh this sync, even though the finding id
+        // itself is identical to yesterday's.
+        params: { provider: 'ga4', page: 'https://zunkireelabs.com/', trackingId: 'G-2ZQRDS0D14' },
+        priority: 'medium',
+      }],
+      detectedKeys: new Set(['trust-compliance:ga4:missing']),
+    });
+
+    assert.equal(merged.length, 1, 'mergeIntoRecommendation must be called even for an already-seen finding id');
+    assert.equal(merged[0].id, 47);
+    assert.deepEqual(merged[0].params, { provider: 'ga4', page: 'https://zunkireelabs.com/', trackingId: 'G-2ZQRDS0D14' });
+    assert.equal(refreshed.length, 0, 'the old block-state-only refresh path is fully replaced by the merge, not run twice');
+  });
+
+  test('a genuinely new finding id on an existing recommendation still merges (unchanged behavior)', async () => {
+    openRecommendation = {
+      id: 9,
+      finding_ids: ['expand-content:/blog/a/:thin'],
+      detecting_agents: ['content-gap'],
+      supporting_agents: [],
+      blocked_reason: null,
+      risk_tier: 'safe',
+    };
+
+    await syncFromGrounded(1, {
+      items: [{
+        id: 'expand-content:/blog/a/:thin-v2',
+        generatorId: 'expand-content',
+        source: 'content-gap',
+        reason: 'still thin',
+        params: { page: '/blog/a/' },
+        priority: 'low',
+      }],
+      detectedKeys: new Set(['expand-content:/blog/a/:thin-v2']),
+    });
+
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].findingId, 'expand-content:/blog/a/:thin-v2');
+  });
+});
+
+// Regression coverage for a real report on site 1 (recommendations #42 and
+// #5994): recommendation-gates.js's evaluate() deliberately never rules on
+// broken-link-fix (computeBrokenLinkFixMerge has its own code-search
+// fallback instead), so item.blockedReason is always null for it, no matter
+// what happened at ship time. Before this fix, syncFromGrounded's "refresh
+// the block both directions every sync" rule (correct for every OTHER
+// generator, whose blockedReason IS a live gate re-check) treated that null
+// as "verified clear" and silently wiped out the real needs_human block
+// action-center.js had set after a genuine failed ship attempt — the
+// recommendation flapped blocked -> unblocked -> retried -> failed
+// identically -> blocked again, forever, and never converged.
+describe('syncFromGrounded — broken-link-fix preserves a ship-time block (gates has no opinion on it)', () => {
+  test('an existing needs_human block survives a re-detection with no gate signal', async () => {
+    openRecommendation = {
+      id: 5994,
+      finding_ids: ['technical-seo:invalid-citation:https://zunkireelabs.com/contact/?source=newsletter:https://twitter.com/zunkiree'],
+      detecting_agents: ['technical-seo'],
+      supporting_agents: [],
+      blocked_reason: 'The file containing this link could not be located in the site’s repository.',
+      risk_tier: 'manual',
+    };
+
+    await syncFromGrounded(1, {
+      items: [{
+        id: 'technical-seo:invalid-citation:https://zunkireelabs.com/contact/?source=newsletter:https://twitter.com/zunkiree',
+        generatorId: 'broken-link-fix',
+        source: 'technical-seo',
+        reason: 'A cited external source (https://twitter.com/zunkiree, on 1 page(s)) now returns HTTP 404 — the citation is dead.',
+        // technical-seo.js never sets blockedReason for this finding type —
+        // this is the realistic shape of every nightly re-detection.
+        params: { href: 'https://twitter.com/zunkiree', page: 'https://zunkireelabs.com/contact/?source=newsletter' },
+        priority: 'medium',
+      }],
+      detectedKeys: new Set(['technical-seo:invalid-citation:https://zunkireelabs.com/contact/?source=newsletter:https://twitter.com/zunkiree']),
+    });
+
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].id, 5994);
+    assert.equal(merged[0].blockedReason, 'The file containing this link could not be located in the site’s repository.');
+    assert.equal(merged[0].riskTier, 'manual');
+  });
+
+  test('a broken-link-fix recommendation with no prior block still opens unblocked (unchanged behavior)', async () => {
+    openRecommendation = {
+      id: 6001,
+      finding_ids: ['technical-seo:invalid-citation:https://zunkireelabs.com/:https://example.com'],
+      detecting_agents: ['technical-seo'],
+      supporting_agents: [],
+      blocked_reason: null,
+      risk_tier: 'safe',
+    };
+
+    await syncFromGrounded(1, {
+      items: [{
+        id: 'technical-seo:invalid-citation:https://zunkireelabs.com/:https://example.com',
+        generatorId: 'broken-link-fix',
+        source: 'technical-seo',
+        reason: 'A cited external source (https://example.com, on 1 page(s)) now returns HTTP 404 — the citation is dead.',
+        params: { href: 'https://example.com', page: 'https://zunkireelabs.com/' },
+        priority: 'medium',
+      }],
+      detectedKeys: new Set(['technical-seo:invalid-citation:https://zunkireelabs.com/:https://example.com']),
+    });
+
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].blockedReason, null);
+    assert.equal(merged[0].riskTier, 'safe');
+  });
+});

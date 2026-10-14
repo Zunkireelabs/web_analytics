@@ -4,7 +4,7 @@ import { createNativeCapabilityRepairHandler } from './native-repair-handler.js'
 import { safeMessage } from '../lib/errors.js';
 import { classifyFailure, shouldRetry } from '../lib/failure-classification.js';
 import { getSiteById } from '../store/read.js';
-import { persistDerivedComponentTemplates, persistDesignProfile } from '../implementers/lib/design-drift.js';
+import { persistDerivedComponentTemplates, persistDesignProfile, refreshDesignProfileCheckedAt } from '../implementers/lib/design-drift.js';
 import { persistConsistencyFindings } from '../agents/lib/design-consistency.js';
 import { isDesignAgentQuietHours } from '../lib/design-agent-window.js';
 
@@ -100,6 +100,7 @@ export async function processOneJob({
   getSiteByIdFn = getSiteById,
   persistTemplates = persistDerivedComponentTemplates,
   persistProfile = persistDesignProfile,
+  refreshProfileCheckedAt = refreshDesignProfileCheckedAt,
   persistConsistency = persistConsistencyFindings,
   maxAttempts = 3,
   sleep = defaultSleep,
@@ -139,9 +140,17 @@ export async function processOneJob({
     if (job.params?.mode === 'design-profile' && outcome?.designProfile) {
       const site = await getSiteByIdFn(job.site_id);
       if (!site) throw new Error(`site ${job.site_id} no longer exists — cannot save the derived design profile`);
-      const saved = await persistProfile(site, outcome.designProfile, { jobId: job.id });
-      if (!saved.ok) throw new Error(`Design Agent returned an unusable design profile — ${saved.reason}`);
-      await appendJobLog(job.id, `Derived design profile; projected ${Object.keys(saved.projected).length} component template(s).`);
+      // The fresh capture matched the stored profile (no meaningful drift) —
+      // the handler already skipped the LLM resynthesis, so this only bumps
+      // lastCheckedAt, never re-projects templates from an unchanged profile.
+      if (outcome.skippedProfileDerivation) {
+        await refreshProfileCheckedAt(site, outcome.designProfile);
+        await appendJobLog(job.id, 'No structural drift vs. the stored design profile — skipped LLM re-derivation, refreshed lastCheckedAt.');
+      } else {
+        const saved = await persistProfile(site, outcome.designProfile, { jobId: job.id });
+        if (!saved.ok) throw new Error(`Design Agent returned an unusable design profile — ${saved.reason}`);
+        await appendJobLog(job.id, `Derived design profile; projected ${Object.keys(saved.projected).length} component template(s).`);
+      }
     }
 
     if (job.params?.mode === 'component-templates' && outcome?.componentTemplates) {
@@ -163,7 +172,7 @@ export async function processOneJob({
     // persister decide" shape as the two branches above.
     if (job.params?.mode === 'consistency-scan' && outcome?.consistencyFindings) {
       const result = await persistConsistency(job.site_id, outcome.consistencyFindings);
-      await appendJobLog(job.id, `Consistency scan: ${outcome.pagesScanned} page(s) scanned, ${outcome.consistencyFindings.length} finding(s) across ${result.pagesWithFindings} page(s), ${result.created} recommendation(s) created (${result.skipped} already open).`);
+      await appendJobLog(job.id, `Consistency scan: ${outcome.pagesScanned} page(s) scanned, ${result.totalFindings} finding(s) across ${result.pagesWithFindings} page(s) — ${result.automatable} routed to a generator (content-integrity-repair), ${result.manualCreated} new manual-review recommendation(s) created (${result.manualSkipped} already open).`);
     }
 
     await appendJobLog(job.id, 'Job completed');
@@ -246,7 +255,10 @@ export function createWorker({
     lastReclaimAt = Date.now();
     try {
       const reclaimed = await reclaim();
-      if (reclaimed.length) console.warn(`[design-agent-worker] reclaimed ${reclaimed.length} stale 'executing' job(s) back to 'queued': ${reclaimed.map((j) => `#${j.id}`).join(', ')}`);
+      const requeued = reclaimed.filter((j) => j.status !== 'failed');
+      const gaveUp = reclaimed.filter((j) => j.status === 'failed');
+      if (requeued.length) console.warn(`[design-agent-worker] reclaimed ${requeued.length} stale 'executing' job(s) back to 'queued': ${requeued.map((j) => `#${j.id}`).join(', ')}`);
+      if (gaveUp.length) console.error(`[design-agent-worker] FAILED ${gaveUp.length} job(s) that kept stranding the worker, not requeued: ${gaveUp.map((j) => `#${j.id}`).join(', ')}`);
       if (onReclaim) onReclaim(reclaimed);
     } catch (err) {
       console.error('[design-agent-worker] stale-job reclaim failed:', err.message);
@@ -306,9 +318,8 @@ function installShutdownHandlers(worker) {
 // (server/design-agent/native-repair/), same job shape (job.params.payload)
 // the old OpenHands dispatcher already expected. code-self-repair.js's
 // default handler was migrated the same way (see that file). openhands-
-// handler.js and design_task.py are left in place, but unreferenced by any
-// active path, until both migrations are verified on staging — see
-// project memory / the plan this was built from for the deletion step.
+// handler.js and design_task.py themselves were deleted once both
+// migrations were verified on staging (see e94953d).
 export function createDispatchingHandler(options = {}) {
   const liveAnalysisHandler = createLiveDesignAnalysisHandler(options);
   const capabilityRepairHandler = createNativeCapabilityRepairHandler(options);

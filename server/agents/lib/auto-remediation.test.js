@@ -11,13 +11,19 @@ import assert from 'node:assert/strict';
 // location.
 const resolve = (p) => new URL(p, import.meta.url).href;
 
+// The credential-failure retry's real 2s wait would be paid by every test
+// that exercises it — set before the module under test is imported below, so
+// its constant picks this up.
+process.env.CREDENTIAL_RETRY_DELAY_MS = '0';
+
 let recommendations;
 let draftedFindingIds;
 let pendingDraftFilePaths;
 let site;
 let spentToday;
+let fileEditsSpentToday; // countShippedFileEditsToday's return — the file-edits-only slice of spentToday
 let recentDraftTypes; // action_types with a draft inside the pacing window
-const calls = { generated: [], approved: [], prsOpened: [], closed: [], findingOrigins: [], batchFinalizeCalls: [], abandoned: [] };
+const calls = { generated: [], approved: [], prsOpened: [], closed: [], blocked: [], findingOrigins: [], batchFinalizeCalls: [], abandoned: [] };
 // When set, submitDraftForApproval refuses (as it really does for any status
 // outside 'draft'/'edited') and getDraft reports this status — the shape a
 // draft left stranded by an earlier failed apply() actually has.
@@ -28,6 +34,7 @@ let stuckDraftBranch;
 let failedAttempts; // Map(finding_id -> prior failed attempts), for the convergence cap
 let finalizeBatchFails; // simulates the batch's one shared push/PR (finalizeBatchPr) failing
 let finalizeBatchRateLimited; // ...and whether that failure was a transient GitHub rate limit
+let finalizeBatchError; // ...and the text it failed with, which decides transient vs permanent
 let failOn; // (recommendationType) => boolean — simulates a step throwing
 let refuseOn; // (recommendationType) => boolean — simulates a generator's principled 4xx refusal
 let staleOn; // (recommendationType) => boolean — simulates a refusal that also proves the recommendation's premise is gone (schema.js's `stale: true`)
@@ -43,6 +50,10 @@ let approveOpensPr; // whether approveAndPublishDraft already opened the PR (the
 let recordedOutcomes; // Phase 5: [{generatorId, outcome}] recorded via the mocked recordOutcome below
 let learnedMap; // Phase 5: generatorId -> {demote, ...} fed to classifyRecommendation via the mocked getLearnedConfidenceMap
 let onboardingPending; // two-stage onboarding: whether the whole-site analysis job is still in flight
+let learnedRepairQueueItems; // rows store/shipping-queue.js's listByState(QUEUED) would return, filtered to source='learned-repair' by the code under test
+let contentRepairQueueItems; // rows store/shipping-queue.js's listByState(PREPARED) would return, filtered to source='content-repair'/kind='file-edits'
+let contentRepairPushOn; // (queueId) => boolean — simulates a specific content-repair item's pushDraftBranch call failing
+let preflightImpl; // (rec, ctx) => verification result — simulates verifyRecommendation's pre-flight "already resolved?" check
 
 function reset() {
   site = { id: 1, timezone: 'Asia/Kolkata', auto_remediation_enabled: true, auto_remediation_daily_limit: 30 };
@@ -51,11 +62,13 @@ function reset() {
   draftedFindingIds = new Set();
   pendingDraftFilePaths = new Set();
   spentToday = 0;
+  fileEditsSpentToday = 0;
   recentDraftTypes = new Set();
   calls.generated = [];
   calls.approved = [];
   calls.prsOpened = [];
   calls.closed = [];
+  calls.blocked = [];
   calls.findingOrigins = [];
   calls.batchFinalizeCalls = [];
   calls.abandoned = [];
@@ -66,6 +79,7 @@ function reset() {
   failedAttempts = new Map();
   finalizeBatchFails = false;
   finalizeBatchRateLimited = false;
+  finalizeBatchError = 'simulated batch push/PR failure';
   failOn = () => false;
   rateLimitOn = () => false;
   refuseOn = () => false;
@@ -76,6 +90,13 @@ function reset() {
   approveOpensPr = false;
   recordedOutcomes = [];
   learnedMap = new Map();
+  learnedRepairQueueItems = [];
+  contentRepairQueueItems = [];
+  contentRepairPushOn = () => false;
+  calls.queueShipped = [];
+  calls.queueReleased = [];
+  calls.fixOutcomes = [];
+  preflightImpl = async () => ({ decision: 'still_valid', reason: 'no-verifier-available', evidence: null });
 }
 let generateAttempts;
 reset();
@@ -87,10 +108,17 @@ function rec(id, { riskTier = 'safe', type = 'meta-title', detectingAgents = ['o
   };
 }
 
+// protected-pages.js's lookup reads GSC from the real DB; these tests exercise
+// the loop itself, so nothing is protected (the guard has its own tests in
+// protected-pages.test.js).
+mock.module(resolve('../../store/protected-pages.js'), {
+  namedExports: { getProtectedPageSet: async () => ({ pages: new Set(), unknown: false }) },
+});
 mock.module(resolve('../../store/recommendations.js'), {
   namedExports: {
     listOpenRecommendations: async () => recommendations,
     closeRecommendation: async (id) => { calls.closed.push(id); },
+    blockRecommendation: async (id, reason) => { calls.blocked.push({ id, reason }); },
   },
 });
 mock.module(resolve('../../store/drafts.js'), {
@@ -98,6 +126,7 @@ mock.module(resolve('../../store/drafts.js'), {
     getDraftedFindingIds: async () => draftedFindingIds,
     getPendingDraftFilePaths: async () => pendingDraftFilePaths,
     countDraftsBySourceToday: async () => spentToday,
+    countDraftsBySourcesToday: async () => spentToday,
     hasRecentDraftOfType: async (siteId, actionType, days) => days > 0 && recentDraftTypes.has(actionType),
     submitDraftForApproval: async (siteId, draftId) => (stuckDraftStatus ? null : { id: draftId }),
     getDraft: async (siteId, draftId) => ({ id: draftId, status: stuckDraftStatus || 'draft', branch_name: stuckDraftBranch }),
@@ -131,6 +160,10 @@ mock.module(resolve('./generator-learning.js'), {
     // other two exports above. generator-learning.test.js covers the real
     // query/classification logic against a real database.
     countRefusalsByRecommendation: async () => new Map(),
+    // Real value, not mocked away: the probation-probe tests below set a
+    // learned map with an old/null lastAttemptAt and rely on the real
+    // cooldown threshold to decide whether a probe fires.
+    PROBATION_COOLDOWN_MS: 24 * 60 * 60 * 1000,
   },
 });
 // The real implementation (implementers/lib/onboarding-readiness.js) hits a
@@ -141,6 +174,77 @@ mock.module(resolve('./generator-learning.js'), {
 // below flips `onboardingPending` to exercise the gate itself.
 mock.module(resolve('../../implementers/lib/onboarding-readiness.js'), {
   namedExports: { isOnboardingAnalysisPending: async () => onboardingPending },
+});
+// batchBranchName/beginBatchPush are left real (pure/synchronous, no
+// network) — only pushDraftBranch (imported in auto-remediation.js under
+// the alias pushFileEditsOntoBatch) is faked here, for the file-edits queue
+// drain's own push. draftLike.id is `${source}-${queueId}`
+// (auto-remediation.js's own format), so the numeric id is whatever trails
+// the LAST hyphen.
+const realGithubOps = await import(resolve('../../implementers/lib/github-ops.js'));
+mock.module(resolve('../../implementers/lib/github-ops.js'), {
+  namedExports: {
+    ...realGithubOps,
+    pushDraftBranch: async (site, draftLike, files, target) => {
+      const queueId = Number(String(draftLike.id).split('-').pop());
+      calls.branchPushRetries.push(draftLike.id);
+      if (contentRepairPushOn(queueId)) return { ok: false, error: `simulated push failure for file-edits item ${queueId}` };
+      return { ok: true, branchName: target.branchName };
+    },
+  },
+});
+// The shared shipping queue's other lanes — learned-repair's queued intents
+// and content-repair's already-prepared file edits (see store/shipping-queue.js,
+// migration 148). This module's own real logic (dedupe, state transitions)
+// is covered directly by store/shipping-queue.test.js; what's under test
+// here is auto-remediation's OWN decision to drain them into this run's
+// single batch, so every export is a thin fake driven by the fixtures above.
+mock.module(resolve('../../store/shipping-queue.js'), {
+  namedExports: {
+    QUEUE_STATES: { QUEUED: 'queued', PREPARING: 'preparing', PREPARED: 'prepared', SHIPPING: 'shipping', SHIPPED: 'shipped', FAILED: 'failed', SUPERSEDED: 'superseded' },
+    // The fixtures (learnedRepairQueueItems/contentRepairQueueItems) list only
+    // the fields each test cares about — `source`/`kind` are stamped on here
+    // rather than repeated in every fixture literal, since the code under
+    // test filters listByState's result by exactly those two fields (real
+    // store rows are not source-scoped by the query itself; that filtering
+    // is the auto-remediation.js code's own job, which this proves by
+    // requiring it to actually happen).
+    listByState: async (siteId, state) => (
+      state === 'queued' ? learnedRepairQueueItems.map((r) => ({ source: 'learned-repair', ...r }))
+        : state === 'prepared' ? contentRepairQueueItems.map((r) => ({ source: 'content-repair', kind: 'file-edits', ...r }))
+          : []
+    ),
+    markShipped: async (id) => { calls.queueShipped.push(id); },
+    releaseItem: async (id, opts) => { calls.queueReleased.push({ id, ...opts }); },
+    // The file-edits-only slice of today's shared-ceiling spend (see
+    // store/shipping-queue.js's own comment on why this is scoped to
+    // kind:'file-edits' and kept separate from countDraftsBySourcesToday).
+    countShippedFileEditsToday: async () => fileEditsSpentToday,
+  },
+});
+mock.module(resolve('../../agent-memory.js'), {
+  namedExports: {
+    recordFixOutcome: async (args) => { calls.fixOutcomes.push(args); return 1; },
+    // Not exercised by this file (nothing here ever gets far enough to look
+    // one up — that's learned-repair-intercept.test.js's own contract), but
+    // learned-repair.js imports it at module load time, and something in
+    // this test's own graph now transitively imports learned-repair.js.
+    findPortableRepairs: async () => { throw new Error('must not be reached from auto-remediation.test.js'); },
+  },
+});
+// The pre-flight "is this already resolved?" check (server/generators/lib/
+// verification-layer.js) is exercised in full, real logic elsewhere
+// (verification-layer.test.js, broken-link-fix.test.js, redirect-fix.test.js)
+// against generators that actually implement verifyCurrentState. Faked here
+// to the same default the real layer returns for any generator WITHOUT one
+// — 'meta-title' (this file's default fixture type) has none — so every
+// existing test in this file keeps its exact current behavior. The
+// already-resolved describe block below overrides this per-test.
+mock.module(resolve('../../generators/lib/verification-layer.js'), {
+  namedExports: {
+    VERIFICATION_DECISION: { ALREADY_RESOLVED: 'already_resolved', STILL_VALID: 'still_valid', CONFLICT: 'conflict' },
+    verifyRecommendation: async (rec, ctx) => preflightImpl(rec, ctx),
+  },
 });
 mock.module(resolve('../../routes/action-center.js'), {
   namedExports: {
@@ -180,7 +284,14 @@ mock.module(resolve('../../routes/action-center.js'), {
         : { id: draftId, branch_name: `auto/${draftId}` };
     },
     // The manual "Push Branch" retry the unattended path now reuses to
-    // resume a draft stranded at 'approved' by a failed apply().
+    // resume a draft stranded at 'approved' by a failed apply(). Only the
+    // (siteId, draftId) shape — the file-edits queue drain now calls
+    // github-ops.js's own pushDraftBranch directly (imported under the
+    // alias pushFileEditsOntoBatch), mocked separately below, after a
+    // production bug where this action-center.js export was called with
+    // github-ops.js's (site, draftLike, files, target) arguments instead
+    // and silently ran its real (siteId, draftId) body against them — the
+    // whole `site` object landing in a getDraft() call's siteId parameter.
     pushDraftBranch: async (siteId, draftId) => {
       calls.branchPushRetries.push(draftId);
       return { id: draftId, branch_name: `retry/${draftId}` };
@@ -201,7 +312,7 @@ mock.module(resolve('../../routes/action-center.js'), {
     // the batch's one shared push/PR failing instead.
     finalizeBatchPr: async (site, branchName, draftIds) => {
       calls.batchFinalizeCalls.push({ branchName, draftIds });
-      if (finalizeBatchFails) return { ok: false, error: 'simulated batch push/PR failure', rateLimited: finalizeBatchRateLimited };
+      if (finalizeBatchFails) return { ok: false, error: finalizeBatchError, rateLimited: finalizeBatchRateLimited };
       calls.prsOpened.push(...draftIds);
       return { ok: true, pushed: draftIds.length, prNumber: 1, prUrl: 'https://github.com/acme/site/pull/1' };
     },
@@ -343,6 +454,81 @@ describe('auto-remediation — chain shape', () => {
   });
 });
 
+describe('auto-remediation — pre-flight verification ("is this already resolved?")', () => {
+  beforeEach(reset);
+
+  test('a generator with no verifier (verifyRecommendation\'s default) proceeds to generateDraft exactly as before', async () => {
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 1);
+    assert.equal(result.resolved, 0);
+  });
+
+  test('already_resolved closes the recommendation without ever calling generateDraft, and does not count as failed or shipped', async () => {
+    recommendations = [rec(1), rec(2)];
+    preflightImpl = async (r) => (
+      r.id === 1
+        ? { decision: 'already_resolved', reason: 'confirmed-absent', evidence: {} }
+        : { decision: 'still_valid', reason: 'no-verifier-available', evidence: null }
+    );
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.resolved, 1);
+    assert.equal(result.shipped, 1, 'rec 2 still ships normally');
+    assert.equal(result.failed, 0);
+    assert.deepEqual(calls.closed, [1]);
+    assert.deepEqual(calls.generated, ['f2'], 'rec 1 never reached generateDraft — no LLM/GitHub call spent on it');
+  });
+
+  test('an already-resolved item frees its budget slot for backfill, same as a quarantined one', async () => {
+    site.auto_remediation_daily_limit = 1;
+    recommendations = [rec(1), rec(2)];
+    preflightImpl = async (r) => (
+      r.id === 1
+        ? { decision: 'already_resolved', reason: 'confirmed-absent', evidence: {} }
+        : { decision: 'still_valid', reason: 'no-verifier-available', evidence: null }
+    );
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.resolved, 1);
+    assert.equal(result.shipped, 1, 'rec 2 backfills the slot rec 1 freed, even though the daily limit is only 1');
+  });
+
+  test('conflict blocks the recommendation for a human without ever calling generateDraft, and does not count as failed or shipped', async () => {
+    recommendations = [rec(1), rec(2)];
+    preflightImpl = async (r) => (
+      r.id === 1
+        ? { decision: 'conflict', reason: 'stored-target-no-longer-matches-content', evidence: {} }
+        : { decision: 'still_valid', reason: 'no-verifier-available', evidence: null }
+    );
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.conflicted, 1);
+    assert.equal(result.shipped, 1, 'rec 2 still ships normally');
+    assert.equal(result.failed, 0);
+    assert.equal(result.resolved, 0, 'conflicted is disjoint from resolved — the recommendation is blocked, not closed');
+    assert.deepEqual(calls.closed, [], 'a conflict is blocked, never closed');
+    assert.equal(calls.blocked.length, 1);
+    assert.equal(calls.blocked[0].id, 1);
+    assert.match(calls.blocked[0].reason, /stored-target-no-longer-matches-content/);
+    assert.deepEqual(calls.generated, ['f2'], 'rec 1 never reached generateDraft — no LLM/GitHub call spent on it');
+  });
+
+  test('a conflicted item frees its budget slot for backfill, same as an already-resolved one', async () => {
+    site.auto_remediation_daily_limit = 1;
+    recommendations = [rec(1), rec(2)];
+    preflightImpl = async (r) => (
+      r.id === 1
+        ? { decision: 'conflict', reason: 'stored-target-no-longer-matches-content', evidence: {} }
+        : { decision: 'still_valid', reason: 'no-verifier-available', evidence: null }
+    );
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.conflicted, 1);
+    assert.equal(result.shipped, 1, 'rec 2 backfills the slot rec 1 freed, even though the daily limit is only 1');
+  });
+});
+
 describe('auto-remediation — daily budget', () => {
   beforeEach(reset);
 
@@ -390,49 +576,82 @@ describe('auto-remediation — daily budget', () => {
     assert.equal(result.stoppedReason, 'budget-exhausted');
     assert.equal(calls.generated.length, 0);
   });
+
+  // The bug this guards: content-repair and template-capability-repair ship
+  // file edits straight through shipping_queue and never create a `drafts`
+  // row, so countDraftsBySourcesToday alone is structurally blind to them.
+  // countShippedFileEditsToday (mocked here as fileEditsSpentToday) is the
+  // queue's own count of exactly that slice, and it must fold into the same
+  // budget as ordinary drafts — otherwise those two sources could each ship
+  // right up to the ceiling independently and the combined day would exceed
+  // it.
+  test('file-edits work already shipped today (content-repair / template-capability-repair) consumes the same shared budget as drafts', async () => {
+    site.auto_remediation_daily_limit = 3;
+    spentToday = 1; // one ordinary draft already shipped
+    fileEditsSpentToday = 2; // two file-edits items already shipped, never a drafts row
+    recommendations = [rec(1), rec(2), rec(3)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.spentToday, 3, 'drafts (1) + file-edits (2) must be summed, not just the drafts half');
+    assert.equal(result.shipped, 0, 'limit 3 minus 3 already spent (across both lanes) leaves zero room');
+    assert.equal(result.stoppedReason, 'budget-exhausted');
+    assert.equal(calls.generated.length, 0);
+  });
+
+  test('file-edits spend alone can exhaust the day\'s budget with zero drafts shipped', async () => {
+    site.auto_remediation_daily_limit = 2;
+    spentToday = 0;
+    fileEditsSpentToday = 2;
+    recommendations = [rec(1), rec(2)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.spentToday, 2);
+    assert.equal(result.stoppedReason, 'budget-exhausted');
+    assert.equal(calls.generated.length, 0);
+  });
 });
 
 // Categories come from recommendation-taxonomy.js's classify() — the same
 // grouping the Action Center UI shows (e.g. "Meta Titles", "Broken Links",
-// "Blog Opportunities"). Without a per-category cap, a category with sheer
-// volume (e.g. 139 open GEO Signals items) would consume the entire day's
-// budget and a category with only 1-3 open items would never ship at all.
+// "Blog Opportunities").
+//
+// Until 2026-09-10 daily-queue.js's GENERATOR_SHARE_CAP capped any one
+// generator at 50% of the day's merit pass, specifically so a category with
+// sheer volume (e.g. 472 open GEO Signals items) couldn't consume the whole
+// budget and starve a category with only 1-3 open items. That protection
+// was deliberately removed per explicit product decision: a category
+// carrying a genuinely dominant, high-priority backlog should be free to
+// claim as much of the day as it earns on merit rather than be throttled
+// back for variety's sake — see GENERATOR_SHARE_CAP's own comment in
+// daily-queue.js. Higher-severity-tier work (critical-technical, on-page)
+// still always wins its slot ahead of a lower tier regardless of category
+// size — that ordering comes from severity-tiers.js/growth-scoring.js, a
+// different axis than the removed cap, and TIER_FLOOR still guarantees a
+// minimum presence for the lowest tiers (content/cleanup).
 describe('auto-remediation — category-diverse selection', () => {
   beforeEach(reset);
 
-  test('no single category takes more than 5 of the day\'s budget while other categories still have candidates', async () => {
+  test('the full budget fills from the highest-scoring category with no per-category cap, while higher-tier work still wins its slot first', async () => {
     site.auto_remediation_daily_limit = 8;
     recommendations = [
       // detectingAgents matters here — 'opportunity' (rec()'s default) hits
       // recommendation-taxonomy.js's source-level wildcard and collapses
       // everything into one category regardless of type, so each generator
       // here is paired with the real agent that actually detects it.
-      ...Array.from({ length: 10 }, (_, i) => rec(i + 1, { type: 'meta-title', detectingAgents: ['content-gap'] })), // -> "Meta Titles"
-      rec(11, { type: 'broken-link-fix', detectingAgents: ['technical-seo'] }), // -> "Broken Links"
+      ...Array.from({ length: 10 }, (_, i) => rec(i + 1, { type: 'meta-title', detectingAgents: ['content-gap'] })), // -> "Meta Titles", tier 2 (on-page)
+      rec(11, { type: 'broken-link-fix', detectingAgents: ['technical-seo'] }), // -> "Broken Links", tier 1 (critical-technical) — wins its slot first
       rec(12, { type: 'broken-link-fix', detectingAgents: ['technical-seo'] }),
-      rec(13, { type: 'faq', detectingAgents: ['content-gap'] }), // -> "FAQ Opportunities"
+      rec(13, { type: 'faq', detectingAgents: ['content-gap'] }), // -> "FAQ Opportunities", tier 2 — no longer guaranteed a slot once the cap is gone
     ];
 
     const result = await autoRemediateSafeRecommendations(1);
 
     assert.equal(result.shipped, 8, 'the full 8-item budget is used even though one category alone had 10 candidates');
     const metaTitleShipped = calls.generated.filter((f) => ['f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10'].includes(f));
-    assert.equal(metaTitleShipped.length, 5, 'Meta Titles is capped at 5 even though 3 budget slots remained');
-    assert.deepEqual(calls.generated.filter((f) => f === 'f11' || f === 'f12'), ['f11', 'f12'], 'both Broken Links candidates ship — the smaller category is not crowded out');
-    assert.ok(calls.generated.includes('f13'), 'the single Blog Opportunities candidate ships too');
-  });
-
-  test('budget left over after every category\'s 5-item cap is topped up from the next-highest-priority leftovers', async () => {
-    site.auto_remediation_daily_limit = 8;
-    recommendations = [
-      ...Array.from({ length: 10 }, (_, i) => rec(i + 1, { type: 'meta-title', detectingAgents: ['content-gap'] })),
-      rec(11, { type: 'broken-link-fix', detectingAgents: ['technical-seo'] }),
-    ];
-
-    const result = await autoRemediateSafeRecommendations(1);
-
-    assert.equal(result.shipped, 8, 'only one other category exists, so the top-up pass fills the rest of the budget from the capped category');
-    assert.ok(calls.generated.includes('f11'), 'the other category still ships');
+    assert.ok(metaTitleShipped.length > 5, `Meta Titles is no longer capped at 5 — got ${metaTitleShipped.length}, expected it free to exceed the old cap`);
+    assert.ok(calls.generated.includes('f11'), 'critical-technical (broken-link-fix) still wins a slot ahead of the lower-tier bulk category');
   });
 });
 
@@ -554,15 +773,27 @@ describe('batched PR opening', () => {
     assert.equal(calls.batchFinalizeCalls.length, 0);
   });
 
-  test('when the batch push/PR itself fails, every pending item reverts to failed and gets abandoned', async () => {
+  // An UNATTRIBUTABLE batch failure is transient by construction: this one
+  // call fails every pending item together regardless of their content, so a
+  // failure nothing can be pinned on says nothing about any single item.
+  // These drafts keep their real, Quality-Gate-passed commits and re-attempt
+  // on the next run instead of being destroyed — the 2026-09-01 shape, where
+  // 80 drafts died on a sanitized "This pull request could not be opened
+  // right now" that carried no evidence of its own transience.
+  test('an unattributable batch push/PR failure leaves every pending item re-attemptable, not abandoned', async () => {
     finalizeBatchFails = true;
     recommendations = [rec(1), rec(2)];
     const result = await autoRemediateSafeRecommendations(1);
 
     assert.equal(result.shipped, 0, 'nothing actually reached GitHub');
-    assert.equal(result.failed, 2);
+    assert.equal(result.failed, 0, 'a shared batch failure is not scored against the items it happened to catch');
     assert.deepEqual(calls.prsOpened, [], 'no PR was opened');
-    assert.deepEqual(calls.abandoned.map((a) => a.draftId).sort(), ['d-f1', 'd-f2'], 'both drafts are abandoned so they are re-attempted on a future run, not silently stuck at branch_pushed');
+    assert.deepEqual(calls.abandoned, [], 'no draft is destroyed for a failure that says nothing about it');
+    assert.deepEqual(
+      calls.retryable.map((a) => a.draftId).sort(), ['d-f1', 'd-f2'],
+      'both record the failure in place, which reopens their finding for the next run',
+    );
+    assert.equal(result.stoppedReason, 'batch-push-failed-transient', 'never mislabelled as a rate limit, which the headers did not report');
   });
 
   // The 2026-09-01 outage in miniature. This one call fails the whole batch
@@ -587,18 +818,168 @@ describe('batched PR opening', () => {
     assert.equal(result.stoppedReason, 'github-rate-limited', 'reported as its own reason, never as a circuit-breaker fault');
   });
 
-  // The counterpart: transience must be established from evidence, not
-  // assumed. A genuine fault still ends in abandonment, or a broken repo
-  // would retry the same doomed work forever.
-  test('a non-transient batch failure still abandons, so a real fault is never retried forever', async () => {
+  // The exact live string that destroyed 80 drafts on this instance. It is
+  // sanitized before it reaches here, so it carries no rate-limit flag and no
+  // recognizable cause — the shape that must not be read as an item fault.
+  test('a sanitized PR-open failure is re-attemptable, not abandoned', async () => {
     finalizeBatchFails = true;
     finalizeBatchRateLimited = false;
+    finalizeBatchError = 'This pull request could not be opened right now — our team has been notified. (ref: 7f3a91)';
+    recommendations = [rec(1), rec(2)];
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.deepEqual(calls.abandoned, [], 'no Quality-Gate-passed commit is thrown away for an unattributable failure');
+    assert.deepEqual(calls.retryable.map((a) => a.draftId).sort(), ['d-f1', 'd-f2']);
+    assert.equal(result.failed, 0);
+  });
+
+  // The counterpart: a cause that DEMONSTRABLY cannot resolve itself still
+  // ends in abandonment, or the pipeline would re-attempt doomed work every
+  // run forever. A missing PAT is the real example — 40 drafts on this
+  // instance — and it is exactly what a naive "any batch failure is
+  // transient" rule would have retried indefinitely.
+  test('a batch failure with a demonstrably permanent cause still abandons', async () => {
+    finalizeBatchFails = true;
+    finalizeBatchRateLimited = false;
+    finalizeBatchError = 'No GitHub PAT set in env var "GITHUB_PAT"';
     recommendations = [rec(1)];
     const result = await autoRemediateSafeRecommendations(1);
 
     assert.equal(result.failed, 1);
-    assert.deepEqual(calls.retryable, []);
+    assert.deepEqual(calls.retryable, [], 'nothing is left to retry against a config gap that cannot fix itself');
     assert.deepEqual(calls.abandoned.map((a) => a.draftId), ['d-f1']);
+    assert.match(
+      calls.abandoned[0].reason, /GITHUB_PAT/,
+      'the recorded reason names the real cause, so the fix is actionable without reading logs',
+    );
+  });
+});
+
+// The shared shipping queue drain — learned-repair's queued intents and
+// content-repair's already-prepared file edits join THIS SAME batch, rather
+// than either one opening its own PR (the two bypasses closed by routing
+// both through store/shipping-queue.js). See that module and
+// learned-repair.js/repair-site-content-live.js's own module comments.
+describe('shared shipping queue drain — learned-repair', () => {
+  beforeEach(reset);
+
+  test('a queued learned-repair item is generated, shipped, and joins the SAME single PR as ordinary work', async () => {
+    recommendations = [rec(1)];
+    learnedRepairQueueItems = [{ id: 501, generator_id: 'alt-text', finding_id: 'lr-1', params: { page: '/lr' }, memory_ref_id: 42 }];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(calls.batchFinalizeCalls.length, 1, 'still exactly one PR for the whole run');
+    assert.deepEqual(calls.batchFinalizeCalls[0].draftIds.sort(), ['d-f1', 'd-lr-1'].sort(), 'the learned-repair draft rides in the SAME batch as ordinary analytics work');
+    assert.equal(result.shipped, 2, 'both the ordinary recommendation and the learned-repair item count as shipped');
+    assert.deepEqual(calls.queueShipped, [501], 'the queue row is marked shipped once the batch PR is confirmed open');
+    assert.equal(calls.fixOutcomes.length, 1);
+    assert.deepEqual(calls.fixOutcomes[0], { memoryRefId: 42, outcome: 'success', agentId: 'learned-repair', generatorId: 'alt-text', siteId: 1 });
+  });
+
+  test('a learned-repair item ships even on a day with ZERO ordinary analytics work — the batch still begins for it alone', async () => {
+    recommendations = [];
+    learnedRepairQueueItems = [{ id: 501, generator_id: 'alt-text', finding_id: 'lr-1', params: {}, memory_ref_id: 42 }];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(calls.batchFinalizeCalls.length, 1);
+    assert.deepEqual(calls.batchFinalizeCalls[0].draftIds, ['d-lr-1']);
+    assert.equal(result.shipped, 1);
+  });
+
+  test('a failed learned-repair generation is released back to the queue and recorded as a failed reuse against its memory', async () => {
+    recommendations = [];
+    learnedRepairQueueItems = [{ id: 501, generator_id: 'broken-gen', finding_id: 'lr-1', params: {}, memory_ref_id: 42 }];
+    failOn = (type) => type === 'broken-gen';
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.failed, 1);
+    assert.equal(calls.queueShipped.length, 0);
+    assert.equal(calls.queueReleased.length, 1);
+    assert.equal(calls.queueReleased[0].id, 501);
+    assert.equal(calls.queueReleased[0].retryable, false);
+    assert.equal(calls.fixOutcomes.length, 1);
+    assert.equal(calls.fixOutcomes[0].outcome, 'failure');
+    assert.equal(calls.fixOutcomes[0].memoryRefId, 42);
+  });
+
+  test('learned-repair items respect the same remaining daily budget — never bypass it', async () => {
+    site.auto_remediation_daily_limit = 1;
+    recommendations = [rec(1)]; // consumes the only slot
+    learnedRepairQueueItems = [{ id: 501, generator_id: 'alt-text', finding_id: 'lr-1', params: {}, memory_ref_id: 42 }];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.shipped, 1, 'only the one budgeted item ships');
+    assert.equal(calls.queueShipped.length, 0, 'the learned-repair item is left queued, not drained past the ceiling');
+    assert.equal(calls.queueReleased.length, 0, 'left untouched (still queued) — not released as a failure either, since it was never attempted');
+  });
+});
+
+describe('shared shipping queue drain — content-repair', () => {
+  beforeEach(reset);
+
+  test('a prepared content-repair file-edit item is pushed onto the batch and ships in the same PR, without ever becoming a draft', async () => {
+    recommendations = [rec(1)];
+    contentRepairQueueItems = [{ id: 701, params: { edits: [{ path: 'src/a.njk', content: 'x' }], commitMessage: 'repair' } }];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(calls.batchFinalizeCalls.length, 1);
+    assert.deepEqual(calls.batchFinalizeCalls[0].draftIds, ['d-f1'], 'content-repair never creates a drafts row, so it never appears in draftIds');
+    assert.ok(calls.branchPushRetries.includes('content-repair-701'), 'its files are pushed onto the same batch branch');
+    assert.equal(result.shipped, 2, 'the ordinary recommendation and the content-repair edit both count as shipped');
+    assert.deepEqual(calls.queueShipped, [701]);
+  });
+
+  test('content-repair alone (no ordinary work, no learned-repair) still produces exactly one PR', async () => {
+    recommendations = [];
+    contentRepairQueueItems = [{ id: 701, params: { edits: [{ path: 'src/a.njk', content: 'x' }] } }];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(calls.batchFinalizeCalls.length, 1);
+    assert.deepEqual(calls.batchFinalizeCalls[0].draftIds, [], 'no draft-backed items this run');
+    assert.equal(result.shipped, 1);
+    assert.deepEqual(calls.queueShipped, [701]);
+  });
+
+  test('a failed content-repair push is released back to the queue as retryable, not abandoned', async () => {
+    recommendations = [];
+    contentRepairQueueItems = [{ id: 701, params: { edits: [{ path: 'src/a.njk', content: 'x' }] } }];
+    contentRepairPushOn = (id) => id === 701;
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.failed, 1);
+    assert.equal(calls.queueShipped.length, 0);
+    assert.equal(calls.queueReleased.length, 1);
+    assert.equal(calls.queueReleased[0].id, 701);
+    assert.equal(calls.queueReleased[0].retryable, true, 'a push failure is a plumbing issue, not evidence the repair itself was wrong');
+  });
+
+  // The third PR-bypass closed: repair-template-capability.js used to open
+  // its OWN dedicated branch/PR directly. It now queues exactly like
+  // content-repair (same kind:'file-edits' shape), so it drains through the
+  // identical code path — proven here with a DIFFERENT source, alongside a
+  // content-repair item in the same run, to show both coexist in one batch.
+  test('a template-capability-repair file-edit item ships in the SAME batch as a content-repair item and ordinary work', async () => {
+    recommendations = [rec(1)];
+    contentRepairQueueItems = [
+      { id: 701, source: 'content-repair', params: { edits: [{ path: 'src/a.njk', content: 'x' }] } },
+      { id: 702, source: 'template-capability-repair', params: { edits: [{ path: 'src/layouts/service.njk', content: 'y' }] } },
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(calls.batchFinalizeCalls.length, 1, 'still exactly one PR for the whole run');
+    assert.deepEqual(calls.batchFinalizeCalls[0].draftIds, ['d-f1']);
+    assert.ok(calls.branchPushRetries.includes('content-repair-701'));
+    assert.ok(calls.branchPushRetries.includes('template-capability-repair-702'));
+    assert.equal(result.shipped, 3, 'the ordinary recommendation plus both file-edits items');
+    assert.deepEqual(calls.queueShipped.sort(), [701, 702]);
   });
 });
 
@@ -704,6 +1085,62 @@ describe('principled refusals vs systemic faults', () => {
 // conditions — a stale exact-match anchor, and a page/marker never onboarded
 // into url_file_map — repeatedly tripped the circuit breaker on site 1 and
 // halted otherwise-healthy runs with budget left unused.
+// Regression coverage for 2026-09-07: one ship attempt failed with "GitHub
+// App is not configured" while two sibling items in the SAME process
+// authenticated fine seconds apart, and the credential resolved cleanly on
+// every check afterwards. No code path explains that (dotenv is loaded before
+// any other import, nothing outside tests mutates those vars, appConfigured()
+// is a pure sync env read), so there is no root cause to fix — but the
+// CONSEQUENCE is fixable: without a retry, one unexplained blip abandons the
+// draft and parks the recommendation at NEEDS_HUMAN, which is deliberately
+// not auto-retryable, so a human has to notice and requeue it by hand.
+describe('shipDraftForRecommendation — credential failures get exactly one automatic retry', () => {
+  beforeEach(reset);
+
+  test('a credential failure that resolves on retry ships normally instead of parking at NEEDS_HUMAN', async () => {
+    let attempts = 0;
+    applyFailureMessageOn = () => {
+      attempts += 1;
+      return attempts === 1 ? 'GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64' : null;
+    };
+    recommendations = [rec(1, { type: 'meta-title' })];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(attempts, 2, 'the failed attempt is retried exactly once');
+    assert.equal(result.shipped, 1, 'the retry succeeded, so the item ships in the same run — no human requeue needed');
+    assert.equal(result.failed, 0);
+    assert.equal(result.refused, 0);
+  });
+
+  test('a credential failure that persists is retried only ONCE, then reported honestly — a genuinely absent credential is never retried forever', async () => {
+    let attempts = 0;
+    applyFailureMessageOn = () => {
+      attempts += 1;
+      return 'GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64';
+    };
+    recommendations = [rec(1, { type: 'meta-title' })];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(attempts, 2, 'exactly one retry — never an unbounded loop against a credential that genuinely is not there');
+    assert.equal(result.shipped, 0, 'a genuinely missing credential still fails, and still surfaces for a human');
+  });
+
+  test('a NON-credential apply failure is never retried — only this specific class gets the second attempt', async () => {
+    let attempts = 0;
+    applyFailureMessageOn = () => {
+      attempts += 1;
+      return 'No markers configured for "https://example.com/" — add them to url_file_map.';
+    };
+    recommendations = [rec(1, { type: 'analytics-install' })];
+
+    await autoRemediateSafeRecommendations(1);
+
+    assert.equal(attempts, 1, 'an ordinary per-item config gap must not pay a second GitHub write attempt');
+  });
+});
+
 describe('shipDraftForRecommendation apply-failure classification', () => {
   beforeEach(reset);
 
@@ -1149,13 +1586,32 @@ describe('Phase 5 — learning actually changes what the loop does, not just wha
   beforeEach(reset);
 
   test('a generator the learned map has demoted is excluded from this run, and a still-healthy one still ships', async () => {
-    learnedMap = new Map([['meta-title', { demote: true, reason: '3 of 4 recent attempts failed or were rejected — held for review until this improves' }]]);
+    // lastAttemptAt is recent (just demoted) — still inside the probation
+    // cooldown, so no probe fires and this stays a plain exclusion. A
+    // real demoted generator always carries a lastAttemptAt (demote requires
+    // MIN_SAMPLES real attempts) — this fixture matches that.
+    learnedMap = new Map([['meta-title', { demote: true, lastAttemptAt: new Date(), reason: '3 of 4 recent attempts failed or were rejected — held for review until this improves' }]]);
     recommendations = [rec(1, { type: 'meta-title' }), rec(2, { type: 'faq' })];
 
     const result = await autoRemediateSafeRecommendations(1);
 
     assert.equal(result.shipped, 1, 'only the non-demoted generator ships');
     assert.deepEqual(calls.generated, ['f2']);
+  });
+
+  test('a generator demoted with no attempt since past the probation cooldown gets exactly one probe', async () => {
+    // lastAttemptAt is well past PROBATION_COOLDOWN_MS (24h) with no new
+    // attempt since — the exact deadlock (demoted -> never re-attempted ->
+    // never re-scored) this probation mechanism exists to break.
+    learnedMap = new Map([['meta-title', { demote: true, lastAttemptAt: new Date(Date.now() - 48 * 60 * 60 * 1000), reason: 'stale' }]]);
+    recommendations = [rec(1, { type: 'meta-title' }), rec(2, { type: 'meta-title' }), rec(3, { type: 'faq' })];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    // Both the healthy generator AND exactly one probation probe on the
+    // idle-demoted one — never both of its candidates at once.
+    assert.equal(result.shipped, 2, 'the healthy generator ships, plus exactly one probe on the idle demoted one');
+    assert.deepEqual(calls.generated.sort(), ['f1', 'f3'].sort());
   });
 
   test('every shipped item records a "shipped" outcome for its own generator', async () => {

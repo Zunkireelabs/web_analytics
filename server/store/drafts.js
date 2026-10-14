@@ -1,7 +1,7 @@
 import { query } from '../db.js';
 import { isVerifiableDraft, createPendingVerification, getWatchlistItemByFindingId } from './fix-verifications.js';
 import { sanitizeForCustomer } from '../lib/errors.js';
-import { NO_MARKERS_CONFIGURED_FRAGMENT, NO_FILE_MAPPING_FRAGMENT, DESIGN_NOT_REVIEWED_FRAGMENT } from '../lib/draft-failure-phrases.js';
+import { classifyAbandonReason, RETRY_POLICY } from '../lib/attempt-classification.js';
 
 // CRUD for the drafts table, plus its approval lifecycle:
 // draft/edited -> submitted_for_approval -> approved -> implemented. There's
@@ -60,16 +60,137 @@ const SIBLING_COUNT_SELECT = `d.*, (
   WHERE d2.site_id = d.site_id AND d2.branch_name = d.branch_name AND d2.id != d.id
 ) AS sibling_count`;
 
-export async function listDrafts(siteId, { actionType, status } = {}) {
+export async function listDrafts(siteId, { actionType, status, limit } = {}) {
   const conditions = ['d.site_id = $1'];
   const values = [siteId];
   if (actionType) { values.push(actionType); conditions.push(`d.action_type = $${values.length}`); }
   if (status) { values.push(status); conditions.push(`d.status = $${values.length}`); }
-  const { rows } = await query(
-    `SELECT ${SIBLING_COUNT_SELECT} FROM drafts d WHERE ${conditions.join(' AND ')} ORDER BY d.created_at DESC`,
-    values
-  );
+  let sql = `SELECT ${SIBLING_COUNT_SELECT} FROM drafts d WHERE ${conditions.join(' AND ')} ORDER BY d.created_at DESC`;
+  if (limit) { values.push(limit); sql += ` LIMIT $${values.length}`; }
+  const { rows } = await query(sql, values);
   return rows;
+}
+
+// The newest geo-audit report's overall score, and nothing else. The agent
+// status list used to call listDrafts(siteId, { actionType: 'geo-audit' }) —
+// EVERY geo-audit draft, all columns (content, original_content,
+// rollback_snapshot, ...) plus the sibling-count subquery per row — only to
+// read `[0].content.score.overall`. Same ordering listDrafts uses
+// (created_at DESC), so it picks the same row; returns null when there is no
+// draft or no numeric score, exactly as the old `?.` chain did.
+export async function getLatestGeoAuditScore(siteId) {
+  const { rows } = await query(
+    `SELECT content #> '{score,overall}' AS overall
+       FROM drafts
+      WHERE site_id = $1 AND action_type = 'geo-audit'
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [siteId]
+  );
+  return rows[0]?.overall ?? null;
+}
+
+// The Action Center's unfiltered "whole board" load — what listDrafts
+// itself used to be called with directly, and what grew without bound as
+// autonomous shipping accumulated history (site 1: 1,631 draft rows, ~7MB
+// raw before JSON serialization, EACH one also paying SIBLING_COUNT_SELECT's
+// own correlated subquery — see routes/action-center.js's real incident:
+// this made GET /action-center/drafts slow/fail outright, and the client's
+// own error handling (`.catch(() => setDrafts([]))`) silently turned that
+// into "Drafts (0)" / "Done (0)" with no visible error at all).
+//
+// ACTIVE work (not yet terminal) is always returned in FULL — it's what a
+// human needs to see everything that still needs a decision on, and is
+// naturally small: in-flight autonomous work only, reclaimed by
+// action-center-reconciler.js once genuinely stale. Terminal rows are
+// where the unbounded growth actually happened:
+//   - 'abandoned' is never rendered by the Action Center UI at all
+//     (ActionCenter.jsx's own nonImplementedDrafts/implementedDrafts
+//     filters both discard it) — excluded here rather than fetched and
+//     thrown away client-side on every single page load.
+//   - 'implemented' IS rendered (the Done tab), but only the most recent
+//     `implementedLimit` are useful to browse at once; real full history
+//     is still reachable via listDrafts(siteId, { status: 'implemented' })
+//     directly when something actually needs it (an export, an audit).
+// Tab badge counts must NOT be derived from this capped result — see
+// countDraftsByLifecycle below, which is exact regardless of any cap here.
+export async function listDraftsForBoard(siteId, { implementedLimit = 150 } = {}) {
+  const select = await boardSiblingCountSelect();
+  const [active, implemented] = await Promise.all([
+    query(
+      `SELECT ${select} FROM drafts d WHERE d.site_id = $1 AND d.status NOT IN ('implemented', 'abandoned') ORDER BY d.created_at DESC`,
+      [siteId]
+    ),
+    query(
+      `SELECT ${select} FROM drafts d WHERE d.site_id = $1 AND d.status = 'implemented' ORDER BY d.created_at DESC LIMIT $2`,
+      [siteId, implementedLimit]
+    ),
+  ]);
+  return [...active.rows, ...implemented.rows];
+}
+
+// Columns the Action Center BOARD never reads. web/src has zero references to
+// any of them (grep-verified 2026-10-01), yet SELECT d.* shipped all five on
+// every board load — original_content alone is a second full copy of
+// `content`, which is why the board was ~7MB per call at ~1,600 drafts. The
+// full row is still served per-draft by getDraft (GET /action-center/drafts/:id)
+// and listDrafts; only this one list endpoint is slimmed. DraftModal opens from
+// the list row, so the columns IT reads (rollback_snapshot, render_mode_confirm,
+// validation_status, gsc_notification) deliberately stay.
+const BOARD_OMITTED_COLUMNS = new Set([
+  'original_content', 'revision_history', 'rendered_body', 'agent_review_detail', 'target_provenance',
+]);
+
+// Postgres has no SELECT * EXCEPT, and a hardcoded column list would silently
+// hide every column a later migration adds. So read the live column list once
+// per process and subtract the omitted set. On any failure fall back to d.*
+// (the old behavior: bigger, never wrong) and do NOT cache the failure.
+let boardColumnsPromise = null;
+async function loadBoardColumns() {
+  try {
+    const { rows } = await query(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'drafts' ORDER BY ordinal_position`
+    );
+    const cols = rows.map((r) => r.column_name).filter((c) => !BOARD_OMITTED_COLUMNS.has(c));
+    return cols.length ? cols.map((c) => `d."${c.replace(/"/g, '""')}"`).join(', ') : null;
+  } catch {
+    return null;
+  }
+}
+async function boardSiblingCountSelect() {
+  boardColumnsPromise ??= loadBoardColumns();
+  const cols = await boardColumnsPromise;
+  if (!cols) { boardColumnsPromise = null; return SIBLING_COUNT_SELECT; }
+  return SIBLING_COUNT_SELECT.replace('d.*', cols);
+}
+
+// Cheap, always-accurate counts for the Action Center's tab badges — a
+// single GROUP BY, never fetches a draft row's own content/params. Exists
+// specifically so a badge count is never wrong just because the LIST
+// underneath it (listDraftsForBoard) was capped — the two are deliberately
+// independent data sources for the same page.
+export async function countDraftsByLifecycle(siteId) {
+  const { rows } = await query(
+    `SELECT status, COUNT(*)::int AS n,
+            COUNT(*) FILTER (WHERE status = 'implemented' AND implemented_at >= now() - interval '7 days')::int AS n_this_week
+       FROM drafts WHERE site_id = $1 GROUP BY status`,
+    [siteId]
+  );
+  const byStatus = Object.fromEntries(rows.map((r) => [r.status, r.n]));
+  const implemented = byStatus.implemented || 0;
+  const abandoned = byStatus.abandoned || 0;
+  const submittedForApproval = byStatus.submitted_for_approval || 0;
+  const total = rows.reduce((s, r) => s + r.n, 0);
+  const implementedThisWeek = rows.reduce((s, r) => s + (r.n_this_week || 0), 0);
+  return {
+    total,
+    nonImplemented: total - implemented - abandoned,
+    implemented,
+    abandoned,
+    submittedForApproval,
+    implementedThisWeek,
+  };
 }
 
 export async function getDraft(siteId, id) {
@@ -566,7 +687,11 @@ export async function markDraftImplemented(siteId, id) {
       draftId: draft.id,
       pageUrl: draft.input.page,
       generatorId: draft.action_type,
-      queryText: draft.input.query ?? null,
+      // For analytics-install there is no ranking query — queryText instead
+      // carries the exact tracking ID this draft shipped, which is what
+      // verifyAnalyticsInstall re-checks for on the live page (see
+      // isVerifiableDraft's TRACKING_ID_VERIFIABLE_GENERATOR_IDS branch).
+      queryText: draft.input.query ?? draft.input.trackingId ?? null,
       // finding_origin (migration 119) carries the real detecting agent
       // through any shipping mechanism (auto-remediation/execution-engine
       // both overwrite draft.source with their own mechanism label) — fall
@@ -685,6 +810,42 @@ export async function countDraftsBySourceToday(siteId, source, timezone = 'UTC')
   return rows[0]?.n ?? 0;
 }
 
+// Multi-source sibling of countDraftsBySourceToday, for one site. Backs the
+// shared daily ceiling (server/lib/autonomous-quota.js): "spent today" has
+// to mean every autonomous lane together — auto-remediation, the content-gap
+// lane, learned-repair, content-repair — not just whichever one is asking,
+// or two lanes shipping 60 each would each independently believe they were
+// "within budget". Accepts an array so a caller never has to sum several
+// single-source calls itself and risk a source someone forgot to add.
+export async function countDraftsBySourcesToday(siteId, sources, timezone = 'UTC') {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS n FROM drafts
+      WHERE site_id = $1 AND source = ANY($2)
+        AND (created_at AT TIME ZONE $3)::date = (now() AT TIME ZONE $3)::date`,
+    [siteId, Array.isArray(sources) ? sources : [sources], timezone]
+  );
+  return rows[0]?.n ?? 0;
+}
+
+// Weekly counterpart of countDraftsBySourceToday, additionally scoped to one
+// action_type — backs analyst-seo-mapping.js's on-page (faq) weekly shipping
+// cap. On-page keyword updates from keyword gaps have no cadence gate of
+// their own today (unlike blog-outline's blog_min_gap_days, see
+// ship-pacing.js): they ship immediately whenever a gap qualifies, bounded
+// only by the pipeline's overall daily budget. This counts just this week's
+// (Monday-start, matching isoWeekStart in analyst-seo-mapping.js) faq drafts
+// from the keyword-gap source specifically, so a batch of qualifying gaps in
+// one run can't all become on-page edits at once.
+export async function countDraftsBySourceAndTypeThisWeek(siteId, source, actionType, timezone = 'UTC') {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS n FROM drafts
+      WHERE site_id = $1 AND source = $2 AND action_type = $3
+        AND (created_at AT TIME ZONE $4)::date >= date_trunc('week', (now() AT TIME ZONE $4))::date`,
+    [siteId, source, actionType, timezone]
+  );
+  return rows[0]?.n ?? 0;
+}
+
 // Same shape as countDraftsBySourceToday, summed across every site — backs
 // job.js's optional AUTO_REMEDIATION_GLOBAL_DAILY_CEILING. Per-site budgets
 // each use their own timezone (a site's "today" is meaningful to that
@@ -692,11 +853,17 @@ export async function countDraftsBySourceToday(siteId, source, timezone = 'UTC')
 // timezone to prefer, so this uses UTC as a fixed, if slightly coarse,
 // "today" for the platform-wide ceiling — a blunt additional safety net on
 // top of the precise per-site budgets, not a replacement for them.
+// Accepts one source or several. Several matters because there is more than
+// one autonomous shipping lane writing drafts — 'auto-remediation' and
+// analyst-seo-mapping.js's 'analyst-keyword-gap' — and a platform-wide
+// ceiling that counted only the first would let the second ship past it
+// unseen, which is exactly what it did until this took an array.
 export async function countDraftsBySourceTodayAllSites(source) {
+  const sources = Array.isArray(source) ? source : [source];
   const { rows } = await query(
     `SELECT COUNT(*)::int AS n FROM drafts
-      WHERE source = $1 AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date`,
-    [source]
+      WHERE source = ANY($1) AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date`,
+    [sources]
   );
   return rows[0]?.n ?? 0;
 }
@@ -715,15 +882,22 @@ export async function countDraftsBySourceTodayAllSites(source) {
 //
 // Abandoned drafts don't count — an abandoned post was never published, so
 // it should not hold the window open against a real one.
-export async function hasRecentDraftOfType(siteId, actionType, days, timezone = 'UTC') {
+// `filter` splits one action type into lanes by the draft's own content
+// category (ship-pacing.js's trend lane): contentCategory counts ONLY drafts
+// in that category, excludeContentCategory counts everything EXCEPT it.
+// Omitted, the query is exactly what it always was.
+export async function hasRecentDraftOfType(siteId, actionType, days, timezone = 'UTC', filter = {}) {
   if (!days || days <= 0) return false;
+  const { contentCategory = null, excludeContentCategory = null } = filter || {};
   const { rows } = await query(
     `SELECT EXISTS (
        SELECT 1 FROM drafts
         WHERE site_id = $1 AND action_type = $2 AND status <> 'abandoned'
           AND (created_at AT TIME ZONE $4)::date > (now() AT TIME ZONE $4)::date - $3::int
+          AND ($5::text IS NULL OR content->>'category' = $5)
+          AND ($6::text IS NULL OR content->>'category' IS DISTINCT FROM $6)
      ) AS found`,
-    [siteId, actionType, days, timezone]
+    [siteId, actionType, days, timezone, contentCategory, excludeContentCategory]
   );
   return Boolean(rows[0]?.found);
 }
@@ -841,108 +1015,46 @@ export async function getLiveDraftsByFindingId(siteId) {
 // across 6 findings). Every cycle spends an LLM generation plus a handful of
 // GitHub calls to reach the identical failure.
 //
-// Only ITEM-SPECIFIC failures count. Everything excluded below is a property
-// of the infrastructure or of a human decision, and counting any of it would
-// retire findings that have nothing wrong with them — the exact opposite of
-// the goal:
-//   - 'pr_closed_without_merge' / 'superseded': a human closed the PR or the
-//     work was replaced. The draft was fine; the decision was elsewhere.
-//     (This is the single largest bucket — 176 drafts from one closed PR.)
-//   - anything naming a rate limit: transient by definition.
-//   - 'Batch push/PR failed%': the batch's ONE shared push/PR failed, which
-//     fails every pending item at once regardless of their content. On
-//     2026-09-01 that abandoned 54 drafts in a single call — and crucially
-//     their text is sanitized ("This pull request could not be opened right
-//     now — our team has been notified. (ref: …)"), so it does NOT match the
-//     rate-limit filter above even when a rate limit was the true cause.
-//     Without this line the cap would hold precisely the findings this work
-//     exists to rescue.
-//   - 'Stuck at "…"%': the draft-state reset (lib/draft-ship-state.js), which
-//     is a bookkeeping action taken to allow a clean retry, not a verdict on
-//     whether the item can be fixed.
+// Only ITEM-SPECIFIC failures count — exactly the set attempt-classification.js's
+// classifyAbandonReason calls ITEM_DEFECT. Everything else (a human decision,
+// an infrastructure hiccup, a config gap a human still has to close, an
+// already-resolved item) is a property of something other than the item, and
+// counting any of it would retire findings that have nothing wrong with them
+// — the exact opposite of the goal.
+//
+// This used to be its own hand-maintained SQL exclusion list (NOT LIKE/NOT
+// ILIKE clauses plus bind-parameterized fragments for the ones containing an
+// apostrophe — confirmed live, 2026-09-03: an inlined apostrophe in one
+// produced `syntax error at or near "s"` and silently failed every
+// autonomous shipping run's failed-attempt count that day). That list and
+// classifyAbandonReason's RULES were two independent copies of the same
+// judgement and had already drifted: the SQL list never excluded "already
+// has an FAQPage schema" (an ALREADY_RESOLVED verdict, not a defect — ~30
+// live rows counted here that should not have been) and had no entry at all
+// for "No GitHub PAT set" (a NEEDS_HUMAN verdict once classify-attempt.js's
+// own rules were extended to cover it — see that file's history), so every
+// PAT-outage abandon was counted as a per-item defect and retired 11 findings
+// at the 2026-09-07 cap of 3 that had never actually failed on their own
+// merits. Delegating to the one shared classifier is what keeps this from
+// happening a third time.
 //
 // Windowed to 30 days so a finding that failed repeatedly months ago, under
 // long-since-changed code, is not retired forever on that evidence.
-// Reasons that must NEVER count. Each is a real, observed abandon reason that
-// says nothing about whether the ITEM can be fixed — counting any of them
-// retires findings that have nothing wrong with them.
-//
-// The list is deliberately explicit rather than clever. It grew from a
-// concrete failure: on 2026-09-01 the two analytics findings were held at 15
-// and 12 attempts, having been fixed in the meantime — 19 of those 27 were
-// "No markers configured", a config gap a human had since closed. The cap
-// would have permanently suppressed the very work that was now ready to ship.
-// A human closed the PR, or the work was replaced. The draft was fine; the
-// decision was elsewhere. (Largest bucket of all — 176 from one closed PR.)
-const UNCOUNTED_ABANDON_IN_CLAUSE = "abandoned_reason IN ('pr_closed_without_merge', 'superseded', 'sent_back_to_recommendations')";
-
-// Literal, author-controlled NOT LIKE/NOT ILIKE exclusions — safe to inline
-// directly since every one of these is a fixed string written right here,
-// with no single quote in any of them.
-const UNCOUNTED_ABANDON_STATIC_NOT_LIKES = [
-  // Transient by definition.
-  "abandoned_reason NOT ILIKE '%rate limit%'",
-  // The batch's ONE shared push/PR failed, which fails every pending item at
-  // once regardless of content. Its text is sanitized, so it does not match
-  // the rate-limit filter even when a rate limit was the true cause.
-  "abandoned_reason NOT LIKE 'Batch push/PR failed%'",
-  // Same-day batch branch diverged from the default branch — infrastructure,
-  // and self-healing: the branch is date-keyed, so tomorrow forks fresh.
-  "abandoned_reason NOT LIKE '%batch branch%diverged%'",
-  // Bookkeeping, not verdicts: a draft-state reset (lib/draft-ship-state.js)
-  // or a recovery script rescuing a stranded row.
-  "abandoned_reason NOT LIKE 'Stuck at \"%'",
-  "abandoned_reason NOT LIKE 'Recovered:%'",
-];
-
-// CONFIG GAPS. These mean "waiting on a value or mapping a human supplies",
-// never "this item is unfixable" — and the moment that config lands, the
-// item must become eligible again immediately rather than staying retired
-// on the strength of failures whose cause is gone.
-//
-// NOT the "unverified placeholder field" case, deliberately: unlike a
-// missing marker/mapping, that failure recurs identically FOREVER unless a
-// human hand-edits the draft (trust-compliance.js files the finding
-// precisely so they can) — no config change ever resolves it on its own.
-// That IS the per-item "cannot be auto-completed" signal this cap exists to
-// catch, so it counts.
-//
-// DESIGN_NOT_REVIEWED_FRAGMENT is a REMOVED gate, not a config gap — commit
-// 8a32037 deleted the human design-review sign-off this reason came from, so
-// nothing produces it any more. Its old abandons must not keep counting
-// against findings whose one and only failure was a gate that no longer
-// exists.
-//
-// Unlike the static list above, these come from imported constants — real
-// English sentences, not SQL written by this file's own author — and one of
-// them CAN contain a single quote: DESIGN_NOT_REVIEWED_FRAGMENT is "This
-// site's design has not been reviewed yet". Inlining it via template
-// literal the way the static list above does breaks the query the moment
-// that apostrophe closes the LIKE pattern's string literal early —
-// confirmed live, 2026-09-03: this produced `syntax error at or near "s"`
-// and silently failed every autonomous shipping run's failed-attempt count.
-// Passed as bind parameters instead, so no fragment's exact wording — this
-// one's or any future one's — can ever break the query again.
-const UNCOUNTED_ABANDON_FRAGMENTS = [NO_MARKERS_CONFIGURED_FRAGMENT, NO_FILE_MAPPING_FRAGMENT, DESIGN_NOT_REVIEWED_FRAGMENT];
-
 export async function countFailedAttemptsByFinding(siteId) {
-  const staticNotLikes = UNCOUNTED_ABANDON_STATIC_NOT_LIKES.join('\n        AND ');
-  const fragmentNotLikes = UNCOUNTED_ABANDON_FRAGMENTS
-    .map((_, i) => `abandoned_reason NOT LIKE '%' || $${i + 2} || '%'`)
-    .join('\n        AND ');
   const { rows } = await query(
-    `SELECT finding_id, COUNT(*)::int AS attempts
+    `SELECT finding_id, abandoned_reason
        FROM drafts
       WHERE site_id = $1 AND finding_id IS NOT NULL AND status = 'abandoned'
         AND abandoned_reason IS NOT NULL
-        AND abandoned_at > now() - interval '30 days'
-        AND NOT (${UNCOUNTED_ABANDON_IN_CLAUSE})
-        AND ${staticNotLikes}
-        AND ${fragmentNotLikes}
-      GROUP BY finding_id`,
-    [siteId, ...UNCOUNTED_ABANDON_FRAGMENTS]
+        AND abandoned_at > now() - interval '30 days'`,
+    [siteId]
   );
-  return new Map(rows.map((r) => [r.finding_id, r.attempts]));
+  const counts = new Map();
+  for (const row of rows) {
+    if (classifyAbandonReason(row.abandoned_reason).retryPolicy !== RETRY_POLICY.ITEM_DEFECT) continue;
+    counts.set(row.finding_id, (counts.get(row.finding_id) || 0) + 1);
+  }
+  return counts;
 }
 
 // The file-level sibling to getDraftedFindingIds above: that function stops
@@ -994,6 +1106,29 @@ export async function getDraftByFindingId(siteId, findingId) {
   const { rows } = await query(
     "SELECT * FROM drafts WHERE site_id = $1 AND finding_id = $2 AND status != 'abandoned' ORDER BY created_at DESC LIMIT 1",
     [siteId, findingId]
+  );
+  return rows[0] || null;
+}
+
+// Clears a 'branch_pushed' draft's apply_error once its commit has been
+// CONFIRMED present on the branch (lib/batch-pr-recovery.js verifies this
+// against GitHub's compare API before calling).
+//
+// Not cosmetic. recordMergeFailure above writes apply_error for BOTH halves
+// of finalizeBatchPr — the push that never landed and the PR that never
+// opened — and lib/draft-ship-state.js reads apply_error on this status as
+// proof the commit does not exist, which is only true of the first. That
+// conflation is what sent a fully-pushed batch back to be regenerated from
+// scratch every day. Once the commit is confirmed on the branch, the error is
+// stale by definition: the only thing still outstanding is the PR, which is
+// what AWAITING_PR means. So the pass that established the truth writes it
+// down, rather than every later reader re-deriving it from an error string.
+export async function clearApplyErrorForPushedDraft(siteId, id) {
+  const { rows } = await query(
+    `UPDATE drafts SET apply_error = NULL, updated_at = now()
+     WHERE site_id = $1 AND id = $2 AND status = 'branch_pushed' AND pr_number IS NULL
+     RETURNING *`,
+    [siteId, id]
   );
   return rows[0] || null;
 }

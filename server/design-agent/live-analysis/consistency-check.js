@@ -27,6 +27,9 @@
 // currently-unactionable-but-real signal in this app, e.g.
 // technical-seo.js's Core Web Vitals findings).
 
+import { resolveHeadingClasses } from './heading-context.js';
+import { makeVerification, VERDICT } from '../../agents/lib/verdict.js';
+
 function classTokens(...classStrings) {
   const set = new Set();
   for (const s of classStrings) {
@@ -76,6 +79,41 @@ const TYPOGRAPHY_FINDING = 'typography-drift';
 // different.
 const PROSE_LIKE_ROLES = new Set(['content', 'faq', 'features', 'testimonials', 'team', 'pricing']);
 
+// Eyebrow/kicker labels and fine print render below this on purpose — they
+// are never the heading/body convention a prose section is held to.
+const MIN_CHECKED_FONT_PX = 12;
+
+function isVisuallyHiddenClass(classes) {
+  for (const t of classTokens(classes)) {
+    if (t === 'sr-only' || t === 'visually-hidden' || t === 'hidden' || t === 'invisible') return true;
+  }
+  return false;
+}
+
+// What the element actually RENDERS as — the computed font-size/weight
+// capture.js read off the live DOM (item.style) — never its class tokens.
+// null when the item has no computed style, or is hidden / a sub-12px label:
+// no honest rendered evidence, so the check abstains for it.
+function renderedSignature(item) {
+  if (isVisuallyHiddenClass(item.classes)) return null;
+  const size = parseFloat(item.style?.fontSize);
+  if (!Number.isFinite(size) || size < MIN_CHECKED_FONT_PX) return null;
+  return `${Math.round(size)}px/${item.style?.fontWeight ?? ''}`;
+}
+
+// The convention (stored class string) a prose item is held to, resolved per
+// (tag, section role, page type) — see resolveHeadingClasses.
+function conventionFor(profile, page, section, item, bodyConventionClasses) {
+  if (item.role === 'heading' || item.role === 'subheading') {
+    return resolveHeadingClasses(profile, {
+      tag: item.tag, sectionRole: section.role,
+      pageType: page.pageType, pageTypePatterns: profile?.pageTypePatterns,
+    });
+  }
+  if (item.role === 'body') return bodyConventionClasses;
+  return null;
+}
+
 /**
  * @param profile   the site's stored Design Profile v2 (design-profile.js's
  *                  DESIGN_PROFILE_VERSION shape) — never mutated.
@@ -83,12 +121,47 @@ const PROSE_LIKE_ROLES = new Set(['content', 'faq', 'features', 'testimonials', 
  *                  fresh capture — one entry per page type captured.
  * @returns Finding[] — { id, pageUrl, pageType, sectionRole, sectionOrder, evidence }
  */
-export function compareSectionsToProfile(profile, segmentedPages) {
+export function compareSectionsToProfile(profile, segmentedPages, { responsive = null } = {}) {
   const findings = [];
+  // Pages we have REAL responsive measurements for. For those, the
+  // class-name heuristic below (finding 2) is switched off entirely and
+  // responsive-analysis.js's measured defects stand in its place.
+  //
+  // This is a strict improvement, not just a swap: "has no breakpoint-prefixed
+  // class" was only ever a proxy for "probably breaks on a phone", and it is a
+  // bad one in both directions. A section can be perfectly responsive with no
+  // prefixed class at all (a plain flex-wrap, a max-width, a CSS grid with
+  // auto-fit, or any non-Tailwind stylesheet), and a section covered in
+  // md:/lg: classes can still overflow. Measuring the rendered page answers
+  // the real question and drops that whole class of false positive.
+  const measuredPages = new Set(
+    (responsive?.pages || [])
+      .filter((p) => Object.keys(p.byViewport || {}).length > 0)
+      .map((p) => p.url),
+  );
   const breakpointPrefixes = (profile?.responsive?.breakpoints || []).filter((b) => typeof b === 'string' && b);
   const tableConvention = profile?.components?.table?.wrapper ? classTokens(profile.components.table.wrapper) : null;
-  const headingConvention = profile?.typography?.heading?.item ? classTokens(profile.typography.heading.item) : null;
-  const bodyConvention = profile?.typography?.body ? classTokens(profile.typography.body) : null;
+
+  // Rendered signatures of every live prose item that DOES follow its stored
+  // convention, keyed by (tag, convention). Empty for a convention nobody on
+  // the live site follows — a stale profile, which the drift check below
+  // treats as "nothing to hold anyone to".
+  const followersByConvention = new Map();
+  for (const page of segmentedPages || []) {
+    for (const section of page.sections || []) {
+      if (!PROSE_LIKE_ROLES.has(section.role)) continue;
+      for (const item of section.textHierarchy || []) {
+        const conventionClasses = conventionFor(profile, page, section, item, profile?.typography?.body || null);
+        const convention = conventionClasses ? classTokens(conventionClasses) : null;
+        if (!convention || !convention.size || !overlaps(classTokens(item.classes), convention)) continue;
+        const signature = renderedSignature(item);
+        if (!signature) continue;
+        const key = `${item.tag}|${conventionClasses}`;
+        if (!followersByConvention.has(key)) followersByConvention.set(key, new Set());
+        followersByConvention.get(key).add(signature);
+      }
+    }
+  }
 
   for (const page of segmentedPages || []) {
     for (const section of page.sections || []) {
@@ -110,7 +183,12 @@ export function compareSectionsToProfile(profile, segmentedPages) {
           findings.push({
             id: TABLE_FINDING, pageUrl: page.url, pageType: page.pageType,
             sectionRole: section.role, sectionOrder: section.order,
-            evidence: { sectionClasses: table.classes.wrapper, siteConvention: profile.components.table.wrapper },
+            // outerHtml is the live-captured anchor a routed fix patches
+            // against (see design-consistency.js) — absent (never
+            // fabricated) whenever capture.js couldn't resolve a table
+            // element to capture it from, which correctly leaves this
+            // finding unroutable rather than routed against a guessed anchor.
+            evidence: { sectionClasses: table.classes.wrapper, siteConvention: profile.components.table.wrapper, outerHtml: table.outerHtml || '' },
           });
         }
       }
@@ -118,7 +196,8 @@ export function compareSectionsToProfile(profile, segmentedPages) {
       // 2. MISSING RESPONSIVE CLASSES — this site demonstrably uses
       // breakpoint-prefixed classes elsewhere (breakpointPrefixes is real
       // evidence, not an assumption), but this section has none at all.
-      if (breakpointPrefixes.length && sectionTokens.size && !hasResponsiveToken(sectionTokens, breakpointPrefixes)) {
+      if (!measuredPages.has(page.url)
+        && breakpointPrefixes.length && sectionTokens.size && !hasResponsiveToken(sectionTokens, breakpointPrefixes)) {
         findings.push({
           id: RESPONSIVE_FINDING, pageUrl: page.url, pageType: page.pageType,
           sectionRole: section.role, sectionOrder: section.order,
@@ -126,26 +205,56 @@ export function compareSectionsToProfile(profile, segmentedPages) {
         });
       }
 
-      // 3. TYPOGRAPHY DRIFT — a prose-like section whose heading/body text
-      // classes share nothing with the site's own real heading/body
-      // convention. Checked independently for heading and body since a
-      // section can legitimately get one right and the other wrong.
+      // 3. TYPOGRAPHY DRIFT — a prose-like heading/body that RENDERS
+      // differently (computed font-size/weight) from the elements that
+      // follow the site's stored convention on the live pages. Class tokens
+      // are never the verdict: the stored profile string is a single
+      // snapshot (often `text-3xl md:text-4xl`) while the live site may
+      // express the same look with other tokens, or follow a different look
+      // entirely. So:
+      //   - the convention must actually OCCUR on a live page (followers,
+      //     collected up front). A convention nobody on the live site
+      //     follows is a stale profile, not drift — abstain;
+      //   - an item is drift only when its rendered size/weight differs from
+      //     EVERY follower of that convention;
+      //   - sr-only/hidden elements and sub-12px labels (eyebrows) have no
+      //     rendered prose size to judge and are skipped, as are items with
+      //     no computed style.
+      //
+      // A heading's expected classes are resolved per (tag, section.role) —
+      // resolveHeadingClasses (heading-context.js) — rather than one flat
+      // profile.typography.heading.item, so an h1 belonging to this section
+      // (a page whose title lives outside a dedicated hero section, e.g. a
+      // legal page) is compared against this site's own real
+      // hero-vs-standard evidence instead of the h3-level "item heading"
+      // convention that field was actually meant for. Hero sections
+      // themselves are never checked here (PROSE_LIKE_ROLES excludes
+      // 'hero') — a hero is expected to look different from body prose.
       if (PROSE_LIKE_ROLES.has(section.role)) {
         for (const item of section.textHierarchy || []) {
-          const convention = item.role === 'heading' || item.role === 'subheading' ? headingConvention
-            : item.role === 'body' ? bodyConvention : null;
+          const conventionClasses = conventionFor(profile, page, section, item, profile?.typography?.body || null);
+          const convention = conventionClasses ? classTokens(conventionClasses) : null;
           if (!convention || !convention.size) continue;
           const itemTokens = classTokens(item.classes);
-          if (itemTokens.size && !overlaps(itemTokens, convention)) {
-            findings.push({
-              id: TYPOGRAPHY_FINDING, pageUrl: page.url, pageType: page.pageType,
-              sectionRole: section.role, sectionOrder: section.order,
-              evidence: {
-                textRole: item.role, sectionClasses: item.classes,
-                siteConvention: item.role === 'body' ? profile.typography.body : profile.typography.heading.item,
-              },
-            });
-          }
+          if (!itemTokens.size || overlaps(itemTokens, convention)) continue;
+          const signature = renderedSignature(item);
+          if (!signature) continue;
+          const followers = followersByConvention.get(`${item.tag}|${conventionClasses}`);
+          if (!followers || !followers.size || followers.has(signature)) continue;
+          findings.push({
+            id: TYPOGRAPHY_FINDING, pageUrl: page.url, pageType: page.pageType,
+            sectionRole: section.role, sectionOrder: section.order,
+            // outerHtml: same live-captured-anchor discipline as the table
+            // finding above.
+            evidence: {
+              textRole: item.role, sectionClasses: item.classes,
+              siteConvention: conventionClasses,
+              outerHtml: item.outerHtml || '',
+              renderedAs: signature, conventionRendersAs: [...followers],
+            },
+            verification: makeVerification(VERDICT.CONFIRMED, 'computed-style-vs-live-convention',
+              'rendered size/weight differs from every live element following the stored convention'),
+          });
         }
       }
     }

@@ -1,10 +1,14 @@
 import {
-  getBranchSha, createBranch, commitFilesAtomic, createCommitObject, updateRef,
+  getBranchSha, createBranch, commitFilesAtomic, createCommitObject, updateRef, getCommitMessage,
   openPullRequest, listOpenPullRequestsForBranch, defaultBranchName, mergeBranchFromBase, getFileContent,
-  beginFileOverlay, endFileOverlay, recordFileOverlayWrites,
+  beginFileOverlay, endFileOverlay, recordFileOverlayWrites, compareCommits,
 } from '../../github/client.js';
 import { safeMessage } from '../../lib/errors.js';
+import { todayInTz } from '../../util/dates.js';
 import { validateRenderingBatch } from './rendering-gate.js';
+import { validateSectionPreservation } from './section-preservation-gate.js';
+import { actionScopeFor } from './action-scope.js';
+import { findMarkerCorruption } from './marker-merge.js';
 
 // Every draft branch forks from — and every "current content" read (diff
 // preview, live-view, existence check) diffs against — the site's own
@@ -19,13 +23,6 @@ export function baseBranch(site) {
   return defaultBranchName(site);
 }
 
-// Deterministic per-site, per-calendar-day branch name. Strict day-boundary-
-// keyed by design — NOT "reuse until merged": a new branch starts every day
-// regardless of whether yesterday's branch/PR was ever merged, which can
-// leave a prior day's branch/PR open and orphaned forever if nobody merges
-// it — that's accepted, not a bug (see openPrForBranch's PR body, which
-// surfaces this to the human reviewer). UTC date, so behavior is identical
-// regardless of server locale/deploy region.
 // Every failure below is PERSISTED — pushDraftBranch's message lands in
 // drafts.apply_error, the two PR openers' in drafts.merge_error — and is then
 // read by a human days later trying to work out why a draft is stuck. The
@@ -56,8 +53,31 @@ function persistedFailure(context, err, fallback) {
   return { ok: false, reason: 'github-error', error: `${message} (ref: ${id})`, rateLimited: err?.rateLimited === true };
 }
 
+// One batch branch per site per DAY — and "day" here must be the same day the
+// daily budget counts in, which is the site's own timezone (store/drafts.js's
+// countDraftsBySourceToday, isShipCatchupOwed). This used to slice a UTC
+// ISO string, so for any site east of UTC the two disagreed for part of every
+// day: an Asia/Kolkata site shipping at 07:00 local (01:30 UTC) opened
+// `batch-<id>-<utc-today>`, and its own catch-up guard a few hours later —
+// still the same local day, still the same budget day — computed a DIFFERENT
+// UTC date and opened a SECOND branch and a second PR for work that belongs
+// in the day's single reviewable batch.
+//
+// Still idempotent: same site + same local day always produces the same name,
+// which is what lets beginBatchPush reuse an existing branch rather than
+// forking a new one.
+//
+// A site's previous day's batch PR being unmerged never blocks this: each
+// calendar day gets its own name here, so it forks/reuses its own branch
+// independently of yesterday's review status. The real risk that once
+// motivated a day-level block — two days' batches independently touching
+// the same file and colliding once the delayed PR merges (confirmed live:
+// site 1, 2026-09-08, PR #86/#87) — is instead handled at file granularity
+// by auto-remediation.js's pendingDraftFilePaths check (store/drafts.js's
+// getPendingDraftFilePaths) before a draft is ever generated, plus this
+// function's own sync-corruption check below as a second line of defense.
 export function batchBranchName(site, date = new Date()) {
-  const day = date.toISOString().slice(0, 10); // YYYY-MM-DD, UTC
+  const day = todayInTz(site.timezone || 'UTC', date);
   return `action-center/batch-${site.id}-${day}`;
 }
 
@@ -80,18 +100,59 @@ export function batchBranchName(site, date = new Date()) {
 // callers must fail fast on this rather than splice against stale content.
 export async function getOrInitBatchBranch(site, date = new Date()) {
   const branchName = batchBranchName(site, date);
-  let exists;
+  let beforeSha;
   try {
-    await getBranchSha(site, branchName);
-    exists = true;
+    beforeSha = await getBranchSha(site, branchName);
   } catch (err) {
-    if (/404|Not Found/i.test(err.message)) exists = false;
-    else throw err;
+    if (/404|Not Found/i.test(err.message)) return { branchName, exists: false, conflicted: false };
+    throw err;
   }
-  if (!exists) return { branchName, exists: false, conflicted: false };
 
   const synced = await mergeBranchFromBase(site, branchName, baseBranch(site));
-  return { branchName, exists: true, conflicted: !synced.ok };
+  if (!synced.ok) return { branchName, exists: true, conflicted: true };
+  if (!synced.synced) return { branchName, exists: true, conflicted: false };
+
+  // A 201 here only means git's own line-based merge found no OVERLAPPING
+  // hunk — it does NOT mean the result is semantically valid. See
+  // findMarkerCorruption's module comment (marker-merge.js) for the real
+  // incident (zunkireelabs-web PR #87) this guards against: two drafts
+  // independently replacing the same marker's line, one on each side of the
+  // merge, can "cleanly" merge into a duplicated line that's invalid content
+  // git never notices. Checked here, right after the sync, so a corrupted
+  // batch branch is caught before more drafts stack on top of it — not
+  // three checks and a human reviewer later, as it was on PR #87.
+  const corruptedFiles = await findSyncCorruption(site, branchName, beforeSha, synced.sha);
+  if (corruptedFiles.length) return { branchName, exists: true, conflicted: true, corrupted: true, corruptedFiles };
+
+  return { branchName, exists: true, conflicted: false };
+}
+
+// Scans only the files the sync itself touched (via compareCommits) rather
+// than the whole repo — a same-day batch branch only ever has a handful of
+// files in play. Best-effort: a failure IN the check (compareCommits/
+// getFileContent erroring) must never block a sync that git itself already
+// reported as clean, so it degrades to "no corruption found" rather than
+// throwing — same conservatism as every other honest-vs-silent tradeoff in
+// this file, just inverted, since blocking a healthy sync on this check's
+// own plumbing would be a worse outcome than occasionally missing a real
+// corruption.
+async function findSyncCorruption(site, branchName, beforeSha, afterSha) {
+  if (!afterSha || beforeSha === afterSha) return [];
+  let changed;
+  try {
+    changed = await compareCommits(site, beforeSha, afterSha);
+  } catch {
+    return [];
+  }
+
+  const corruptedFiles = [];
+  for (const path of changed.files) {
+    const file = await getFileContent(site, path, branchName).catch(() => null);
+    if (!file) continue;
+    const markers = findMarkerCorruption(file.content);
+    if (markers.length) corruptedFiles.push({ path, markers });
+  }
+  return corruptedFiles;
 }
 
 // Shared, consistent failure shape for every apply()/preview() call site
@@ -100,6 +161,13 @@ export async function getOrInitBatchBranch(site, date = new Date()) {
 // this app (e.g. render-mode-uncertain), so it flows through recordApply-
 // Failure/sendHttpError exactly like any other apply() failure.
 export function batchBranchConflictError(site, batchInfo) {
+  if (batchInfo.corrupted) {
+    const files = batchInfo.corruptedFiles.map(({ path, markers }) => `${path} (${markers.join(', ')})`).join('; ');
+    return {
+      ok: false, reason: 'batch-branch-conflicted',
+      error: `Today's batch branch (${batchInfo.branchName}) synced with ${baseBranch(site)} without a reported git conflict, but left a duplicated marker in: ${files} — likely two drafts independently editing the same field, one on each side of the sync. Resolve it manually on GitHub before more drafts can be pushed today.`,
+    };
+  }
   return {
     ok: false, reason: 'batch-branch-conflicted',
     error: `Today's batch branch (${batchInfo.branchName}) has diverged from ${baseBranch(site)} and couldn't be auto-synced — resolve the conflict manually on GitHub before more drafts can be pushed today.`,
@@ -130,7 +198,20 @@ const FAMILY_WRITE_MARKER = '[family-write]';
 // draft is about to write already differing between today's batch branch's
 // current tip and the site's base branch means an earlier commit THIS PR
 // already touched it — the exact case the sibling-leakage gate flags.
-async function needsFamilyWriteMarker(site, files, target) {
+//
+// A `GLOBAL_BY_DESIGN` draft (action-scope.js — analytics-install,
+// security-headers, html-lang, ...) is a second, unconditional case: its one
+// real target IS the site's shared layout template, so a SINGLE such write
+// already changes every family's rendered output by itself — there's no
+// "second write collides with an earlier one" to detect, unlike a `_data/*`
+// splice. Confirmed live on site 1's 2026-09-08 batch: two analytics-install
+// drafts wrote src/_includes/layouts/base.njk (no `_data/*` file touched at
+// all), and check-family-siblings.mjs — which diffs each family's RENDERED
+// dist output, not this app's source diff — correctly flagged all 21
+// glossary + 4 compare + 4 locations pages as changed, with no commit
+// carrying the marker to say so was intentional.
+async function needsFamilyWriteMarker(site, draft, files, target) {
+  if (actionScopeFor(draft.action_type) === 'global-by-design') return true;
   if (!target.exists) return false; // first commit on today's branch — nothing prior to collide with
   const dataFiles = files.filter((f) => /(^|\/)_data\//.test(f.path));
   if (!dataFiles.length) return false;
@@ -149,46 +230,108 @@ async function needsFamilyWriteMarker(site, files, target) {
 // Deferred-push registry (Action Center same-day batching) — see
 // beginBatchPush/endBatchPush below. Keyed by branch name (already
 // per-site-per-day unique, see batchBranchName). While a branch has an
-// entry here, pushDraftBranch chains its commit onto `headSha` instead of
-// moving the branch ref immediately; endBatchPush moves it once, for
-// everything queued since beginBatchPush.
-const activeBatches = new Map(); // branchName -> { headSha: string|null, count: number }
+// entry here, pushDraftBranch accumulates its files/message into this state
+// instead of creating a commit or moving the branch ref at all; endBatchPush
+// builds ONE commit from everything queued since beginBatchPush and moves
+// the ref once. `files` is keyed by path so a later draft's write to a path
+// an earlier draft in the same run already touched simply replaces it —
+// safe because that later draft computed its content by reading through the
+// overlay below, which already reflects the earlier draft's write.
+const activeBatches = new Map(); // branchName -> { baseSha: string|null, files: Map<path, {path, content}>, entries: string[] }
 
 // Call once before looping through a batch run (routes/action-center.js's
 // executeSafeFixes, auto-remediation.js's per-run loop) so every
-// pushDraftBranch call for this branch during the run creates its commit
-// WITHOUT moving the branch ref — GitHub (and therefore Vercel's per-push
-// preview build) only sees the branch move once, at endBatchPush, instead
-// of once per successfully shipped recommendation. A run that ships up to
-// 60 items used to trigger up to 60 separate preview builds on the SAME
-// PR; this collapses that to one. Also opens the matching file-read overlay
-// (github/client.js) so a later item in the same run sees an earlier item's
-// write immediately, instead of the stale pre-batch content the real
-// (not-yet-moved) branch ref would otherwise return.
+// pushDraftBranch call for this branch during the run only stages its
+// files/message in memory — no commit, no branch move — until endBatchPush
+// builds and pushes the single commit for the whole run. GitHub (and
+// therefore Vercel's per-push preview build) only sees the branch move once,
+// at endBatchPush, instead of once per successfully shipped recommendation,
+// and the batch's whole day of work lands as ONE commit instead of one per
+// item. Also opens the matching file-read overlay (github/client.js) so a
+// later item in the same run sees an earlier item's write immediately,
+// instead of the stale pre-batch content the real (not-yet-moved) branch ref
+// would otherwise return.
 //
 // Idempotent: a re-entrant call for a branch already batching is a no-op,
-// so a nested/accidental double-call can't clobber an in-progress chain.
+// so a nested/accidental double-call can't clobber an in-progress batch.
 export function beginBatchPush(site, branchName) {
   if (!activeBatches.has(branchName)) {
-    activeBatches.set(branchName, { headSha: null, count: 0 });
+    activeBatches.set(branchName, { baseSha: null, files: new Map(), entries: [] });
     beginFileOverlay(site, branchName);
   }
 }
 
-// Pushes every commit accumulated since beginBatchPush as ONE ref update —
-// the one real "push" for the whole run — and always clears the batch
-// state (ref-chain AND file overlay) afterward, even on failure, so a
-// failed run doesn't leave pushDraftBranch silently deferring forever.
-// Returns { ok: true, pushed: 0 } when there was nothing to push (e.g.
-// every item in the run failed before it could commit).
+// batch-pr-recovery.js's commitSubjectMatchesDraft attributes a landed draft
+// by grepping "draft #<id>" against the commit's SUBJECT line alone
+// (listCommitSubjectsAheadOfBase splits on the first '\n') — so every
+// draft's reference has to survive as a substring of ONE single-line
+// subject, not a multi-line body. Deliberately no newline in the message
+// this returns.
+function buildBatchCommitMessage(entries) {
+  return `Action Center: batch — ${entries.join('; ')}`;
+}
+
+// Standing rule this app ships every client-repo change under: a day's work
+// lands as ONE commit, never a trail of incremental fix-up commits.
+// beginBatchPush/endBatchPush already guarantee that WITHIN one run — this
+// closes the gap ACROSS separate same-day runs (the main autonomous pass,
+// its own catch-up guard recovering a different site, a human's own
+// "Execute Safe Fixes" or "bulk approve" click later the same day) — each an
+// independent beginBatchPush/endBatchPush cycle that would otherwise stack
+// its own commit on top of whatever the branch already had, per the ordinary
+// (non-squashed) path below.
+//
+// Only squashes while NO PR is open yet for this branch. Once a PR exists, a
+// human may already be reviewing it — force-rewriting the commit(s) they're
+// looking at would silently invalidate GitHub's own review state (review
+// comments are tied to a specific commit sha), which is a worse outcome than
+// a few extra, perfectly normal "new commits pushed" notifications on an
+// already-open PR. Before any PR exists, nobody has seen this branch at all,
+// so squashing is always safe.
+//
+// Only ever touches a commit whose message this app itself wrote
+// (buildBatchCommitMessage's own "Action Center: batch — " prefix) — refuses
+// to guess at squashing anything else, so a manually-pushed commit a human
+// added directly to the branch (rare, but possible) is never silently
+// absorbed or discarded.
+async function planBatchCommit(site, branchName, currentTipSha, newEntries) {
+  const defaultPlan = { parentSha: currentTipSha, message: buildBatchCommitMessage(newEntries), forced: false };
+
+  const trueBase = await getBranchSha(site, baseBranch(site)).catch(() => null);
+  if (!trueBase || currentTipSha === trueBase) return defaultPlan; // first commit of the day — nothing to squash
+
+  const openPrs = await listOpenPullRequestsForBranch(site, branchName).catch(() => null);
+  if (openPrs === null || openPrs.length > 0) return defaultPlan; // a PR is open, or we couldn't tell — never rewrite
+
+  const prefix = 'Action Center: batch — ';
+  const priorMessage = await getCommitMessage(site, currentTipSha).catch(() => null);
+  if (priorMessage == null || !priorMessage.startsWith(prefix)) return defaultPlan; // not our own commit — refuse to guess
+
+  const priorEntries = priorMessage.slice(prefix.length).split('; ').filter(Boolean);
+  return { parentSha: trueBase, message: buildBatchCommitMessage([...priorEntries, ...newEntries]), forced: true };
+}
+
+// Builds and pushes the ONE commit accumulated since beginBatchPush as ONE
+// ref update — the one real "push" for the whole run — and always clears
+// the batch state (staged files/entries AND file overlay) afterward, even
+// on failure, so a failed run doesn't leave pushDraftBranch silently
+// deferring forever. Returns { ok: true, pushed: 0 } when there was nothing
+// to push (e.g. every item in the run failed before it could stage a file).
 export async function endBatchPush(site, branchName) {
   const state = activeBatches.get(branchName);
   activeBatches.delete(branchName);
   endFileOverlay(site, branchName);
-  if (!state || state.headSha == null) return { ok: true, pushed: 0 };
+  if (!state || state.baseSha == null || state.files.size === 0) return { ok: true, pushed: 0 };
   try {
-    await updateRef(site, branchName, state.headSha);
-    return { ok: true, pushed: state.count };
+    const files = Array.from(state.files.values());
+    const plan = await planBatchCommit(site, branchName, state.baseSha, state.entries);
+    // treeBaseSha is always the branch's real current tip (state.baseSha),
+    // regardless of squashing — the tree must include everything already on
+    // the branch plus this run's new files either way. Only the commit's
+    // PARENT link (plan.parentSha) and message change when squashing.
+    const newSha = await createCommitObject(site, plan.parentSha, files, plan.message, { treeBaseSha: state.baseSha });
+    await updateRef(site, branchName, newSha, { force: plan.forced });
+    return { ok: true, pushed: state.entries.length };
   } catch (err) {
     return persistedFailure('github-ops.endBatchPush', err, 'This batch of changes could not be pushed to GitHub right now — our team has been notified.');
   }
@@ -215,6 +358,16 @@ export async function pushDraftBranch(site, draft, files, target) {
   const renderGate = await validateRenderingBatch(site, files);
   if (!renderGate.ok) return renderGate;
 
+  // Section Preservation Gate (CLAUDE.md §2) — same placement and same
+  // reasoning as the rendering gate directly above: checked before anything
+  // is written, in the one function every implementer funnels through, so no
+  // generator can opt out and no future one has to opt in. Compares what is
+  // about to be committed against what the base branch actually has today,
+  // and refuses an edit that would take away structure the client already
+  // has. See section-preservation-gate.js for why only DISAPPEARANCE fails.
+  const sectionGate = await validateSectionPreservation(site, draft, files, { ref: baseBranch(site) });
+  if (!sectionGate.ok) return sectionGate;
+
   const { branchName, exists } = target;
   try {
     let freshBranchSha = null;
@@ -230,18 +383,18 @@ export async function pushDraftBranch(site, draft, files, target) {
     // draft (see commitFilesAtomic's comment). Replaces a previous
     // sequential getFileSha+putFile-per-file loop, which had exactly that
     // gap for multi-file draft types (llms-txt+robots.txt, broken-link-fix).
-    const marker = (await needsFamilyWriteMarker(site, files, target)) ? ` ${FAMILY_WRITE_MARKER}` : '';
+    const marker = (await needsFamilyWriteMarker(site, draft, files, target)) ? ` ${FAMILY_WRITE_MARKER}` : '';
     const message = `Action Center: apply ${draft.action_type} draft #${draft.id}${marker}`;
 
     const batch = activeBatches.get(branchName);
     if (batch) {
-      // Deferred mode: chain this commit off the last one queued so far
-      // this run (or the branch's real current tip/just-created sha, for
-      // the first commit of the run) — but don't move the ref. endBatchPush
-      // does that once, for the whole run.
-      if (batch.headSha == null) batch.headSha = freshBranchSha ?? await getBranchSha(site, branchName);
-      batch.headSha = await createCommitObject(site, batch.headSha, files, message);
-      batch.count += 1;
+      // Deferred mode: stage this draft's files and commit-message line into
+      // the run's in-memory batch instead of creating a commit — no commit
+      // object, no ref move. endBatchPush builds the single commit for the
+      // whole run from everything staged here.
+      if (batch.baseSha == null) batch.baseSha = freshBranchSha ?? await getBranchSha(site, branchName);
+      for (const f of files) batch.files.set(f.path, f);
+      batch.entries.push(`apply ${draft.action_type} draft #${draft.id}${marker}`);
       recordFileOverlayWrites(site, branchName, files);
     } else {
       await commitFilesAtomic(site, branchName, files, message);

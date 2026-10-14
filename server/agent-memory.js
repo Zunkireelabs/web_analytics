@@ -74,6 +74,7 @@ export async function findRelevantMemory({
      WHERE status NOT IN ('flagged_for_review', 'deprecated')
        AND ($1::text IS NULL OR category = $1)
        AND (NOT $2::boolean OR category != 'code')
+       AND (category != 'design' OR $1::text = 'design')
        AND scope IN ('global', $3)
        AND (generator_id IS NULL OR generator_id = $4)
        AND (site_id IS NULL OR site_id = $5)

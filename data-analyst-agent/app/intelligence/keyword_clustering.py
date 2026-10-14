@@ -230,8 +230,15 @@ async def find_gaps(profile: dict, cluster_rows: list[dict]) -> list[dict]:
         "important keyword topics that are completely missing — topics a site in this real "
         "industry/category would be expected to have real coverage of but currently doesn't. "
         "Ground every suggestion in the real industry/site_type/main_topics given; never "
-        "suggest a topic unrelated to this site's real category. Respond with ONLY a JSON "
-        'object: {"gaps": [{"topic": "...", "reason": "...", "priority": "high"|"medium"|"low"}, ...]}.'
+        "suggest a topic unrelated to this site's real category. "
+        "Separately, look at the gaps you just proposed: when three or more of them are "
+        "genuinely part of one broader theme (a pillar topic with narrower supporting angles "
+        "underneath it, not just loosely similar), group them — give that group a short "
+        "topic_cluster name, mark the single broadest one \"pillar\" and the rest \"supporting\". "
+        "Do NOT force a cluster: most gaps should have topic_cluster null and cluster_role null, "
+        "a forced grouping of unrelated topics is worse than no grouping. Respond with ONLY a "
+        'JSON object: {"gaps": [{"topic": "...", "reason": "...", "priority": "high"|"medium"|"low", '
+        '"topic_cluster": "..."|null, "cluster_role": "pillar"|"supporting"|null}, ...]}.'
     )
     import json
     user = json.dumps({
@@ -253,11 +260,44 @@ async def find_gaps(profile: dict, cluster_rows: list[dict]) -> list[dict]:
         if not topic:
             continue
         priority = g.get("priority")
+        cluster_role = g.get("cluster_role")
+        topic_cluster = g.get("topic_cluster")
         gaps.append({
             "topic": topic,
             "reason": g.get("reason"),
             "priority": priority if priority in VALID_PRIORITIES else "medium",
+            # A cluster needs a real name AND a valid role on THIS row to
+            # count — a role with no name (or vice versa) is a malformed
+            # half-grouping, treated as "not clustered" rather than guessed.
+            "topic_cluster": topic_cluster if (topic_cluster and cluster_role in ("pillar", "supporting")) else None,
+            "cluster_role": cluster_role if (topic_cluster and cluster_role in ("pillar", "supporting")) else None,
         })
+    return _normalize_clusters(gaps)
+
+
+def _normalize_clusters(gaps: list[dict]) -> list[dict]:
+    """Enforces exactly one pillar per topic_cluster name and drops any
+    cluster that ended up with fewer than 3 real members or no pillar at
+    all — the model's own per-row labeling can't guarantee either on its
+    own, and an inconsistent half-cluster is worse than none (find_gaps'
+    own "don't force it" instruction, enforced here rather than trusted)."""
+    by_cluster: dict[str, list[dict]] = {}
+    for g in gaps:
+        if g["topic_cluster"]:
+            by_cluster.setdefault(g["topic_cluster"], []).append(g)
+
+    for name, members in by_cluster.items():
+        pillars = [g for g in members if g["cluster_role"] == "pillar"]
+        if len(members) < 3 or not pillars:
+            for g in members:
+                g["topic_cluster"] = None
+                g["cluster_role"] = None
+            continue
+        if len(pillars) > 1:
+            priority_rank = {"high": 0, "medium": 1, "low": 2}
+            pillars.sort(key=lambda g: priority_rank.get(g["priority"], 1))
+            for demoted in pillars[1:]:
+                demoted["cluster_role"] = "supporting"
     return gaps
 
 

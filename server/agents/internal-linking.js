@@ -10,6 +10,7 @@ export const meta = {
   name: 'Internal Linking Agent',
   description: 'Analyzes the site\'s own internal link structure — pages with unusually few outbound internal links relative to this site\'s own average, real internal-link dead ends.',
   category: 'seo',
+  requiresCapabilities: ['public-web'],
   version: 1,
   // Orphaned-page detection (pages no internal link reaches at all) already
   // exists on technical-seo.js via the weekly site-wide crawl comparison —

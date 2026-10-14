@@ -3,10 +3,13 @@ import { readFileSync } from 'node:fs';
 import { pool, updateSiteRepoConfig, updateSiteAutoRemediation } from '../db.js';
 import { getSiteById } from '../store/read.js';
 import { auditSite } from './audit-url-file-map.js';
+import { runDiscovery } from '../discovery/run-discovery.js';
 import { shouldAutoEnableOnConnect } from '../routes/clients.js';
 import { queueDesignAgentDerivationForSite } from '../job.js';
 import { refreshBlockedRecommendations } from '../agents/lib/recommendation-coordinator.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
+import { persistDerivedContentConfig } from '../lib/derive-repo-content-config.js';
+import { assessTenantReadiness, printReadiness } from '../lib/tenant-provisioning.js';
 
 // A synthetic req so recordAuditEvent's resolveActor(req) records this as a
 // 'system' actor rather than throwing on a missing req.userId — same shape
@@ -25,7 +28,15 @@ function systemActorReq(siteId) {
 //     [--repo-url "https://github.com/zunkiree-labs/zunkireelabs-site"] \
 //     [--default-branch main] [--tech-stack astro] \
 //     [--github-pat-env-var GITHUB_PAT] \
+//     [--github-app-id <id> --github-app-private-key-env-var GITHUB_APP_PRIVATE_KEY_B64_<CLIENT>] \
 //     [--url-file-map path/to/url-file-map.json]
+//
+// --github-app-id / --github-app-private-key-env-var are for a client with
+// their OWN registered GitHub App (migration 154) rather than the shared
+// default one — this is what gives that tenant its own GitHub API rate-limit
+// budget instead of sharing the default App's with every other tenant. Omit
+// both to keep using the shared default App (still set via
+// --github-app-installation-id alone, as before).
 //
 // url-file-map.json shape (see server/implementers/types.js / migration 028):
 //   { "pages": {...}, "patterns": [...], "newContentTargets": {...}, "siteRoot": {...},
@@ -63,18 +74,13 @@ function parseArgs(argv) {
   return flags;
 }
 
-async function main() {
-  const flags = parseArgs(process.argv.slice(2));
-  const siteId = Number(flags['site-id']);
-  if (!siteId) {
-    throw new Error(
-      'Usage: connect-repo.js --site-id <id> --repo-owner <org> --repo-name <repo> [--repo-url <url>] [--default-branch main] [--tech-stack astro] [--github-pat-env-var GITHUB_PAT] [--github-app-installation-id <id>|none] [--url-file-map path.json]'
-    );
-  }
-
-  const site = await getSiteById(siteId);
-  if (!site) throw new Error(`No site found with id ${siteId}.`);
-
+// Core logic, exported so onboard-client.js (the single coherent onboarding
+// flow) can run this same step in-process. Takes an already-loaded site row;
+// returns { site, connected } — `connected` false means no repo flags were
+// passed, which is a legitimate day-1 state (many clients don't need Action
+// Center apply on day one), not an error, when driven from the combined flow.
+export async function performRepoConnect(site, flags) {
+  const siteId = site.id;
   const update = {};
   if (flags['repo-owner'] != null) update.repoOwner = flags['repo-owner'];
   if (flags['repo-name'] != null) update.repoName = flags['repo-name'];
@@ -93,10 +99,25 @@ async function main() {
       throw new Error('--github-app-installation-id must be an integer (or "none" to clear it).');
     }
   }
+  // A client with their own registered GitHub App (migration 154) instead of
+  // the shared default one — gives this site its own GitHub API rate-limit
+  // budget rather than sharing the default App's with every other tenant.
+  // 'none' moves the site back onto the shared default App.
+  if (flags['github-app-id'] != null) {
+    update.githubAppId = flags['github-app-id'] === 'none' ? null : Number(flags['github-app-id']);
+    if (update.githubAppId !== null && !Number.isInteger(update.githubAppId)) {
+      throw new Error('--github-app-id must be an integer (or "none" to clear it).');
+    }
+  }
+  if (flags['github-app-private-key-env-var'] != null) {
+    update.githubAppPrivateKeyEnvVar = flags['github-app-private-key-env-var'] === 'none'
+      ? null
+      : flags['github-app-private-key-env-var'];
+  }
   if (flags['url-file-map'] != null) update.urlFileMap = JSON.parse(readFileSync(flags['url-file-map'], 'utf8'));
 
   if (!Object.keys(update).length) {
-    throw new Error('Pass at least one of --repo-owner, --repo-name, --repo-url, --default-branch, --tech-stack, --github-pat-env-var, --github-app-installation-id, --url-file-map.');
+    return { site, connected: false };
   }
 
   let updated = await updateSiteRepoConfig({ siteId, ...update });
@@ -108,6 +129,8 @@ async function main() {
   if (update.techStack !== undefined) console.log(`  tech_stack → ${updated.tech_stack}`);
   if (update.githubPatEnvVar !== undefined) console.log(`  github_pat_env_var → ${updated.github_pat_env_var}`);
   if (update.githubAppInstallationId !== undefined) console.log(`  github_app_installation_id → ${updated.github_app_installation_id ?? '(none — uses PAT)'}`);
+  if (update.githubAppId !== undefined) console.log(`  github_app_id → ${updated.github_app_id ?? '(none — uses the shared default App)'}`);
+  if (update.githubAppPrivateKeyEnvVar !== undefined) console.log(`  github_app_private_key_env_var → ${updated.github_app_private_key_env_var ?? '(none)'}`);
   if (update.urlFileMap !== undefined) console.log('  url_file_map → updated');
 
   if (updated.repo_owner && updated.repo_name) {
@@ -142,12 +165,65 @@ async function main() {
       console.warn(`Could not queue Design Agent derivation: ${err.message} — the next daily sweep will pick this up instead.`)
     );
 
+    // Automatic repo discovery — the actual fix for the class of onboarding
+    // gap that left url_file_map.pages/patterns empty (or wrong, e.g. an
+    // assumed `/<slug>/ -> src/app/$1/page.tsx` regex that never matched
+    // this framework's real routing) whenever nobody hand-authored a
+    // --url-file-map JSON. Inspects the connected repo, detects its real
+    // framework and routing structure (Next.js App/Pages Router, Astro,
+    // Eleventy/Jekyll/Hugo front-matter routing — see discovery/run-discovery.js),
+    // and writes ONLY what it can prove by reading the result back through
+    // the exact same resolvers backend.js uses (discovery/auto-configure.js).
+    // Anything it can't prove is left for a human, not guessed — see the
+    // config-completeness check right after this, which reports exactly
+    // what's still missing. Best-effort: a failure here must not undo the
+    // repo config write above.
+    console.log('\nRunning repo discovery (framework, routes, render capabilities)...');
+    try {
+      const discovery = await runDiscovery(updated);
+      if (discovery.ok) {
+        console.log(`  framework: ${discovery.technology.framework?.name || '(not detected)'}${discovery.technology.framework?.ambiguous ? ' (ambiguous — see site_understanding)' : ''}`);
+        console.log(`  routes discovered: ${discovery.routes.routes.length} static, ${discovery.routes.families.length} pattern famil${discovery.routes.families.length === 1 ? 'y' : 'ies'}, ${discovery.routes.unresolved.length} unresolved`);
+        console.log(`  auto-configured: ${discovery.autoConfigured.applied} url_file_map entrie(s) written and verified`);
+        updated = (await getSiteById(siteId)) || updated;
+
+        // renderCapabilities + newContentTargets, derived from the same
+        // discovery result. Previously both were left for a human to
+        // hand-author and in practice nobody did, which is the single largest
+        // source of blocked autonomous work: every net-new page generator
+        // (landing-page, blog-outline, direct-answer, translation, the three
+        // compliance pages, missing-page-create) fails closed without them.
+        // Derives only what the repo proves; anything else is reported as a
+        // named gap rather than defaulted.
+        try {
+          const content = await persistDerivedContentConfig(updated, discovery);
+          if (content.applied) {
+            updated = content.site || updated;
+            console.log(`  render capabilities: ${Object.keys(content.patch.renderCapabilities?.extensions || {}).length} extension(s) recorded${content.markdownProven ? '' : ' (no Markdown-safe extension proven)'}`);
+            if (content.derivedTargets.length) {
+              console.log(`  new-page targets derived: ${content.derivedTargets.length}`);
+              for (const t of content.derivedTargets) console.log(`    ${t.type} → ${t.dir}/*${t.extension}  (${t.reason})`);
+            }
+          }
+          for (const gap of content.gaps) console.log(`  gap: ${gap}`);
+        } catch (err) {
+          console.warn(`  Could not derive render capabilities/new-page targets: ${err.message}`);
+        }
+      } else {
+        console.log(`  discovery skipped: ${discovery.reason}`);
+      }
+    } catch (err) {
+      console.warn(`Repo discovery failed to run: ${err.message} — falling back to whatever url_file_map was passed by hand.`);
+    }
+
     // Auto-run the same config-completeness check `npm run audit-url-file-map`
     // does, right now, instead of leaving it as a separate step someone has
     // to remember — this is exactly the gap that let drafts get stuck on
     // missing url_file_map entries / vanished SEOAI markers after onboarding
-    // looked "done." Best-effort: a failure here (e.g. GitHub API hiccup)
-    // must not undo the repo config write above.
+    // looked "done." Runs AFTER discovery above so its gap count reflects
+    // what's genuinely still missing, not what discovery would have filled
+    // in anyway. Best-effort: a failure here (e.g. GitHub API hiccup) must
+    // not undo the repo config write above.
     console.log('\nRunning config-completeness check...');
     try {
       await auditSite(siteId);
@@ -178,6 +254,34 @@ async function main() {
   } else {
     console.log('Still missing repo_owner/repo_name — Apply Change will 400 until both are set.');
   }
+
+  // One unambiguous statement of what this tenant still needs, instead of
+  // leaving "connected" and "actually works end to end" as different things
+  // nobody reconciles.
+  const fresh = (await getSiteById(siteId)) || updated;
+  printReadiness(await assessTenantReadiness(fresh));
+  return { site: fresh, connected: true };
+}
+
+async function main() {
+  const flags = parseArgs(process.argv.slice(2));
+  const siteId = Number(flags['site-id']);
+  if (!siteId) {
+    throw new Error(
+      'Usage: connect-repo.js --site-id <id> --repo-owner <org> --repo-name <repo> [--repo-url <url>] [--default-branch main] [--tech-stack astro] [--github-pat-env-var GITHUB_PAT] [--github-app-installation-id <id>|none] [--github-app-id <id>|none] [--github-app-private-key-env-var <VAR>|none] [--url-file-map path.json]'
+    );
+  }
+
+  const site = await getSiteById(siteId);
+  if (!site) throw new Error(`No site found with id ${siteId}.`);
+
+  const anyFlag = ['repo-owner', 'repo-name', 'repo-url', 'default-branch', 'tech-stack', 'github-pat-env-var', 'github-app-installation-id', 'github-app-id', 'github-app-private-key-env-var', 'url-file-map']
+    .some((k) => flags[k] != null);
+  if (!anyFlag) {
+    throw new Error('Pass at least one of --repo-owner, --repo-name, --repo-url, --default-branch, --tech-stack, --github-pat-env-var, --github-app-installation-id, --github-app-id, --github-app-private-key-env-var, --url-file-map.');
+  }
+
+  await performRepoConnect(site, flags);
 }
 
 main()

@@ -1,6 +1,51 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { ensureMarkers, spliceMarkers, isHeadScopedField, isNoEofInsertField, buildMergeValues } from './marker-merge.js';
+import { ensureMarkers, spliceMarkers, isHeadScopedField, isNoEofInsertField, buildMergeValues, findMarkerCorruption, renderExpandedHtml, sanitizeCapturedTemplate } from './marker-merge.js';
+
+// Regression coverage for the zunkireelabs-web PR #87 incident: two
+// independent title drafts (one landed on main, one on the batch branch)
+// each cleanly replaced the same LINE marker's line in place — no single
+// commit ever produced a duplicate. It was git's own "clean" merge of the
+// two, sync'd by getOrInitBatchBranch (github-ops.js), that left both
+// `title:` lines behind as invalid YAML. findMarkerCorruption is the
+// content-level check that catches that outcome after the fact.
+describe('findMarkerCorruption', () => {
+  test('finds nothing wrong in a normal, single-occurrence LINE marker', () => {
+    const content = '---\nlayout: base.njk\ntitle: "Hello" # SEOAI:TITLE\n---\n';
+    assert.deepEqual(findMarkerCorruption(content), []);
+  });
+
+  test('flags a duplicated LINE marker, the actual PR #87 shape', () => {
+    const content = [
+      '---',
+      'layout: base.njk',
+      'title: "AI Search Playbook for Product Teams | Zunkiree Labs" # SEOAI:TITLE',
+      'title: "Zunkiree Labs: AI Search Playbook for Product Teams" # SEOAI:TITLE',
+      'description: x',
+      '---',
+    ].join('\n');
+    assert.deepEqual(findMarkerCorruption(content), ['TITLE']);
+  });
+
+  test('finds nothing wrong in a normal, balanced BLOCK marker', () => {
+    const content = '<!-- SEOAI:FAQ:START -->hi<!-- SEOAI:FAQ:END -->';
+    assert.deepEqual(findMarkerCorruption(content), []);
+  });
+
+  test('flags a BLOCK marker with two START tags (or any start/end mismatch)', () => {
+    const content = '<!-- SEOAI:FAQ:START -->a<!-- SEOAI:FAQ:START -->b<!-- SEOAI:FAQ:END -->';
+    assert.deepEqual(findMarkerCorruption(content), ['FAQ']);
+  });
+
+  test('a file with several distinct, healthy markers stays clean', () => {
+    const content = [
+      'title: "T" # SEOAI:TITLE',
+      '<!-- SEOAI:FAQ:START -->x<!-- SEOAI:FAQ:END -->',
+      '{/* SEOAI:SCHEMA:START */}y{/* SEOAI:SCHEMA:END */}',
+    ].join('\n');
+    assert.deepEqual(findMarkerCorruption(content), []);
+  });
+});
 
 describe('head-scoped fields (canonical, open-graph)', () => {
   test('isHeadScopedField identifies the right fields', () => {
@@ -45,6 +90,66 @@ describe('head-scoped fields (canonical, open-graph)', () => {
     assert.match(spliced.newContent, /<link rel="canonical" href="https:\/\/example\.com\/">/);
   });
 
+  // Regression coverage for the admizz-web-dev (Next.js App Router) build
+  // break: a head-scoped marker nested inside a .tsx file's own JSX-style
+  // HEAD region must itself use JSX comment syntax — a raw HTML comment
+  // isn't a comment inside JSX and breaks compilation (`Expected '</',
+  // got '!'`). Confirmed on layout.tsx PR #31, 2026-09-11.
+  test('ensureMarkers nests a head-scoped marker in JSX comment syntax when the HEAD region itself is JSX-style', () => {
+    const file = '<html><head>\n{/* SEOAI:HEAD:START */}{/* SEOAI:HEAD:END */}\n</head></html>';
+    const { content, inserted } = ensureMarkers(file, { canonical: 'CANONICAL' }, 'src/app/layout.tsx');
+    assert.deepEqual(inserted, ['CANONICAL']);
+    assert.match(content, /\{\/\* SEOAI:HEAD:START \*\/\}[\s\S]*\{\/\* SEOAI:CANONICAL:START \*\/\}\{\/\* SEOAI:CANONICAL:END \*\/\}[\s\S]*\{\/\* SEOAI:HEAD:END \*\/\}/);
+    assert.doesNotMatch(content, /<!--/); // never a raw HTML comment inside a .tsx file
+  });
+
+  test('full round trip on a .tsx file: JSX HEAD region present -> auto-create -> splice succeeds', () => {
+    const file = '<html><head>\n{/* SEOAI:HEAD:START */}{/* SEOAI:HEAD:END */}\n</head></html>';
+    const markerMap = { canonical: 'CANONICAL' };
+    const { content: ensured } = ensureMarkers(file, markerMap, 'src/app/layout.tsx');
+    const spliced = spliceMarkers(ensured, markerMap, { canonical: '<link rel="canonical" href="https://example.com/">' });
+    assert.equal(spliced.ok, true);
+    // A JSX-kind marker splices via dangerouslySetInnerHTML (raw HTML can't
+    // be interpolated directly into JSX) — same as any other jsx-kind splice.
+    assert.match(spliced.newContent, /dangerouslySetInnerHTML/);
+    assert.match(spliced.newContent, /<link rel=\\"canonical\\" href=\\"https:\/\/example\.com\/\\">/);
+  });
+
+  // Regression coverage for web-chayce-properties PR #17: src/index.njk
+  // nests its whole SEOAI:HEAD region inside a `headExtra: |` YAML
+  // block-scalar front-matter value, indented 2 spaces. Auto-creating the
+  // nested CANONICAL/OPENGRAPH markers (and splicing open-graph's
+  // multi-line meta tags into OPENGRAPH) at column 0 dropped below the
+  // block scalar's indentation, ending it early — the next real
+  // front-matter key (footScripts) then got misparsed as stray content and
+  // Eleventy's build failed with a YAMLException. Confirmed real on that
+  // PR, 2026-09-15.
+  test('nested head-scoped markers and multi-line splice values preserve a YAML block-scalar front matter\'s indentation', () => {
+    const file = [
+      '---',
+      'title: "Chayce"',
+      'headExtra: |',
+      '  <style>.chayce-footer{display:flex}</style>',
+      '  <!-- SEOAI:HEAD:START --><!-- SEOAI:HEAD:END -->',
+      'footScripts: |',
+      '  <script src="/js/a.js"></script>',
+      '---',
+      'body',
+    ].join('\n');
+    const markerMap = { canonical: 'CANONICAL', openGraph: 'OPENGRAPH' };
+    const { content: ensured } = ensureMarkers(file, markerMap, 'src/index.njk');
+    const spliced = spliceMarkers(ensured, markerMap, {
+      canonical: '<link rel="canonical" href="https://chayceproperties.com/">',
+      openGraph: ['<meta property="og:title" content="Chayce">', '<meta name="twitter:card" content="summary_large_image">'].join('\n'),
+    });
+    assert.equal(spliced.ok, true);
+    // Every line inside the headExtra block scalar — including both
+    // continuation lines of the multi-line openGraph value — must keep the
+    // block's 2-space indentation; nothing drops to column 0.
+    const headExtraLines = spliced.newContent.split('headExtra: |\n')[1].split('footScripts:')[0].split('\n').filter(Boolean);
+    for (const line of headExtraLines) assert.match(line, /^  /, `expected 2-space indent, got: ${JSON.stringify(line)}`);
+  });
+
   // Plain Markdown/MDX is the one shape where EOF really is inside the
   // rendered body (see isNoEofInsertField's comment) — every OTHER body
   // field, including faq, now needs real structural detection
@@ -61,6 +166,43 @@ describe('head-scoped fields (canonical, open-graph)', () => {
     const { content, inserted } = ensureMarkers(file, { faq: 'FAQ' }, 'src/pages/about.astro');
     assert.deepEqual(inserted, []);
     assert.equal(content, file); // untouched
+  });
+
+  // Regression coverage for the chayceproperties.com incident: a shared-
+  // layout SSG page file (Eleventy front matter + a `layout:` reference, no
+  // literal <head> of its own) has no nested-HEAD anchor to auto-create, but
+  // DOES have front matter — the LINE_HEAD_FALLBACK_KEY fallback should kick
+  // in instead of failing honestly.
+  test('ensureMarkers falls back to a new front-matter field for canonical when no HEAD region exists but front matter does', () => {
+    const file = '---\ntitle: "Get Started"\nlayout: base.njk\n---\nPage body.\n';
+    const { content, inserted } = ensureMarkers(file, { canonical: 'CANONICAL' });
+    assert.deepEqual(inserted, ['CANONICAL']);
+    assert.match(content, /canonicalUrl: "" # SEOAI:CANONICAL/);
+    assert.doesNotMatch(content, /SEOAI:HEAD/); // no nested-HEAD region was invented
+  });
+
+  test('spliceMarkers picks the bare-URL value for a front-matter-fallback canonical marker', () => {
+    const file = '---\ntitle: "Get Started"\nlayout: base.njk\n---\nPage body.\n';
+    const markerMap = { canonical: 'CANONICAL' };
+    const { content: ensured } = ensureMarkers(file, markerMap);
+    const spliced = spliceMarkers(ensured, markerMap, {
+      canonical: { block: '<link rel="canonical" href="https://example.com/get-started/">', line: 'https://example.com/get-started/' },
+    });
+    assert.equal(spliced.ok, true);
+    assert.match(spliced.newContent, /canonicalUrl: "https:\/\/example\.com\/get-started\/" # SEOAI:CANONICAL/);
+    assert.doesNotMatch(spliced.newContent, /<link rel="canonical"/); // the HTML-tag variant was never written into front matter
+  });
+
+  test('a real nested-HEAD region still wins over the front-matter fallback when both are available', () => {
+    const file = '---\ntitle: "Get Started"\n---\n<head>\n<!-- SEOAI:HEAD:START --><!-- SEOAI:HEAD:END -->\n</head>\nPage body.\n';
+    const markerMap = { canonical: 'CANONICAL' };
+    const { content: ensured } = ensureMarkers(file, markerMap);
+    assert.doesNotMatch(ensured, /canonicalUrl:/); // no front-matter field invented
+    const spliced = spliceMarkers(ensured, markerMap, {
+      canonical: { block: '<link rel="canonical" href="https://example.com/get-started/">', line: 'https://example.com/get-started/' },
+    });
+    assert.equal(spliced.ok, true);
+    assert.match(spliced.newContent, /<link rel="canonical" href="https:\/\/example\.com\/get-started\/">/);
   });
 });
 
@@ -133,10 +275,11 @@ describe('body-scoped fields (expand-content)', () => {
 });
 
 describe('buildMergeValues — canonical/open-graph/expand-content', () => {
-  test('canonical produces a single link tag', () => {
+  test('canonical produces both a link tag (nested-HEAD convention) and a bare URL (front-matter LINE fallback)', () => {
     const result = buildMergeValues('canonical', { canonicalUrl: 'https://example.com/page' });
     assert.equal(result.ok, true);
-    assert.equal(result.values.canonical, '<link rel="canonical" href="https://example.com/page">');
+    assert.equal(result.values.canonical.block, '<link rel="canonical" href="https://example.com/page">');
+    assert.equal(result.values.canonical.line, 'https://example.com/page');
   });
 
   test('canonical fails honestly with no URL', () => {
@@ -217,6 +360,169 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.match(result.values.expandedContent, /<p>Body text<\/p>/);
   });
 
+  // Real defect, chayceproperties.com (2026-09-22): a one-sentence
+  // author-byline section shares the same wrapper template as a full
+  // comparison-content section, so it renders with identical full
+  // section-level padding — a whole page-section's worth of whitespace
+  // around one line of text. The wrapper's own class is preserved (never
+  // replaced) and this modifier is only ever meaningful to a site that
+  // defines it in its own stylesheet — inert everywhere else.
+  test('author-byline gets a compact-modifier class appended to the wrapper, alongside the site\'s own classes', () => {
+    const componentTemplates = {
+      expandContent: { wrapper: '<div class="container seoai-content-section">\n{{ROWS}}\n</div>', row: '  <section><h2>{{HEADING}}</h2><p>{{BODY}}</p></section>' },
+    };
+    const result = buildMergeValues('expand-content', {
+      focus: 'author-byline',
+      sections: [{ heading: 'About the Author', body: 'By the Team.' }],
+    }, 'visible', componentTemplates);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /class="container seoai-content-section seoai-content-section--compact"/);
+  });
+
+  test('a non-byline focus (e.g. comparison-content) keeps the plain wrapper, no compact modifier', () => {
+    const componentTemplates = {
+      expandContent: { wrapper: '<div class="container seoai-content-section">\n{{ROWS}}\n</div>', row: '  <section><h2>{{HEADING}}</h2><p>{{BODY}}</p></section>' },
+    };
+    const result = buildMergeValues('expand-content', {
+      focus: 'comparison-content',
+      sections: [{ heading: 'Comparison', body: 'Real content.' }],
+    }, 'visible', componentTemplates);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /class="container seoai-content-section"/);
+    assert.doesNotMatch(result.values.expandedContent, /seoai-content-section--compact/);
+  });
+
+  // Regression, measured live on site 1 (2026-09-18): expand-content's
+  // marker is shared across every FOCUS on a page (comparison-content,
+  // author-byline, freshness-date, external-citations, ... — each its own
+  // recommendation/draft). Without `fileContent`, a later draft for a
+  // DIFFERENT focus on the same page wholesale-replaced the marker with
+  // only its own section, silently deleting an earlier focus's already-
+  // shipped content — caught live by section-preservation-gate.js when it
+  // deleted a <table>, but only after burning a full ship attempt.
+  test('expand-content PRESERVES a different focus\'s already-shipped section instead of replacing it', () => {
+    const fileContent = '<!-- SEOAI:EXPANDEDCONTENT:START --><div><section><h2>Old Focus</h2><p>Old body.</p><table><tr><td>data</td></tr></table></section></div><!-- SEOAI:EXPANDEDCONTENT:END -->';
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'New Focus', body: 'New body.' }],
+    }, 'visible', {}, null, { fileContent });
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /Old Focus/, 'the earlier focus\'s heading must survive');
+    assert.match(result.values.expandedContent, /<table>/, 'the earlier focus\'s table must survive');
+    assert.match(result.values.expandedContent, /New Focus/, 'the new focus\'s own section is still added');
+  });
+
+  test('expand-content does not duplicate a focus retried against its own already-shipped section', () => {
+    const fileContent = '<!-- SEOAI:EXPANDEDCONTENT:START --><div><section><h2>Same Focus</h2><p>Old body.</p></section></div><!-- SEOAI:EXPANDEDCONTENT:END -->';
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'Same Focus', body: 'Updated body.' }],
+    }, 'visible', {}, null, { fileContent });
+    assert.equal(result.ok, true);
+    const occurrences = result.values.expandedContent.match(/Same Focus/g) || [];
+    assert.equal(occurrences.length, 1, 'retrying the same focus must not stack a second copy of its heading');
+  });
+
+  // Real incident, site 8864 (chayceproperties.com, 2026-09-20): two
+  // separate comparison-content drafts for /our-services/, three days
+  // apart, both passed the old heading-text check because their LLM-written
+  // headings genuinely differed ("Comparison of Moving Services" vs
+  // "Comparison of Home Moving Services") — the text check never recognised
+  // the second as a repeat of the same focus, so it appended a visible
+  // duplicate section instead of replacing the first.
+  test('a SAME focus retried with DIFFERENT LLM-written heading text still replaces, not stacks (via the focus marker)', () => {
+    const first = buildMergeValues('expand-content', {
+      focus: 'comparison-content',
+      sections: [{ heading: 'Comparison of Home Moving Services', body: 'Old body.' }],
+    }, 'visible', {}, null, {});
+    const fileContent = `<!-- SEOAI:EXPANDEDCONTENT:START -->${first.values.expandedContent}<!-- SEOAI:EXPANDEDCONTENT:END -->`;
+
+    const second = buildMergeValues('expand-content', {
+      focus: 'comparison-content',
+      sections: [{ heading: 'Comparison of Moving Services', body: 'New body.' }],
+    }, 'visible', {}, null, { fileContent });
+
+    assert.equal(second.ok, true);
+    assert.doesNotMatch(second.values.expandedContent, /Comparison of Home Moving Services/,
+      'the earlier draft\'s different-wording heading must not survive alongside the new one');
+    assert.match(second.values.expandedContent, /Comparison of Moving Services/);
+    const occurrences = (second.values.expandedContent.match(/Comparison of/g) || []).length;
+    assert.equal(occurrences, 1, 'only one comparison-content section should remain, not two stacked');
+  });
+
+  test('the focus marker still preserves a DIFFERENT focus\'s section, even when one of them carries no marker at all', () => {
+    const fileContent = '<!-- SEOAI:EXPANDEDCONTENT:START --><!-- SEOAI:FOCUS:author-byline --><div><section><h2>About the Author</h2><p>By the Team.</p></section></div><!-- SEOAI:EXPANDEDCONTENT:END -->';
+    const result = buildMergeValues('expand-content', {
+      focus: 'comparison-content',
+      sections: [{ heading: 'Comparison of Services', body: 'New body.' }],
+    }, 'visible', {}, null, { fileContent });
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /About the Author/);
+    assert.match(result.values.expandedContent, /Comparison of Services/);
+  });
+
+  test('expand-content with no fileContent given (preview/schema-probe callers) still works exactly as before', () => {
+    const result = buildMergeValues('expand-content', { sections: [{ heading: 'H1', body: 'Body text' }] }, 'visible', {}, null, {});
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<h2>H1<\/h2>/);
+  });
+
+  // The real defect this closes: even with NO configured componentTemplates
+  // at all, a site with a real design profile still has real typography
+  // evidence. Previously that evidence was only ever applied to the row's
+  // HEADING (via expandContentTemplate's projection) — body prose, links and
+  // lists stayed bare <p>/<a>/<ul> regardless, which is the actual "generated
+  // text looks flat" symptom markdown-prose-render.js's own comment names.
+  test('expand-content applies the site\'s real body/link/list typography from the design profile, even with no captured template', () => {
+    const designProfile = {
+      typography: { body: 'text-lg text-gray-600 leading-relaxed', link: 'text-zunkiree-600 hover:underline' },
+      components: { list: { wrapper: 'space-y-2 my-4', item: 'flex items-start gap-2' } },
+    };
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'H1', body: 'See [our docs](https://example.com/docs) for more.\n\n- First point\n- Second point' }],
+    }, 'visible', {}, designProfile);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<p class="text-lg text-gray-600 leading-relaxed">/);
+    assert.match(result.values.expandedContent, /<a href="https:\/\/example\.com\/docs" class="text-zunkiree-600 hover:underline">/);
+    assert.match(result.values.expandedContent, /<ul class="space-y-2 my-4">/);
+    assert.match(result.values.expandedContent, /<li class="flex items-start gap-2">First point<\/li>/);
+  });
+
+  test('expand-content with no design profile at all still renders plain tags — never invents typography', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'H1', body: 'Plain body text.' }],
+    }, 'visible', {}, null);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<p>Plain body text\.<\/p>/);
+  });
+
+  // Same gap, table side: no captured componentTemplates.table (the common
+  // case — nothing ever prompts a first-use table capture the way faq/
+  // expand-content get one) used to ship a completely bare <table>. A
+  // design profile's real components.table/typography/color evidence — the
+  // same evidence markdown-table-render.js's buildTableHtml already uses for
+  // every OTHER generated table on this platform — now grounds this one too.
+  test('expand-content projects a real table style from the design profile when no table has been captured', () => {
+    const designProfile = { components: { table: { wrapper: 'w-full border-collapse acme-table', headerCell: 'acme-th', row: 'acme-row', cell: 'acme-td' } } };
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'Comparison', body: 'Here:\n\n| Feature | Ours | Theirs |\n| --- | --- | --- |\n| Speed | Fast | Slow |' }],
+    }, 'visible', {}, designProfile);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<table class="w-full border-collapse acme-table">/);
+    assert.match(result.values.expandedContent, /<th class="acme-th">Feature<\/th>/);
+    assert.match(result.values.expandedContent, /<tr class="acme-row"><td class="acme-td">Speed<\/td>/);
+    assert.match(result.values.expandedContent, /<div class="overflow-x-auto">/, 'a projected table still gets the structural scroll-safety wrapper, even with no captured wrapper class');
+  });
+
+  test('a real captured componentTemplates.table still wins over a design-profile projection', () => {
+    const componentTemplates = { table: { table: 'captured-table', th: 'captured-th', td: 'captured-td', wrapper: 'captured-wrapper' } };
+    const designProfile = { components: { table: { wrapper: 'projected-table', headerCell: 'projected-th', cell: 'projected-td' } } };
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'Comparison', body: '| Feature | Ours |\n| --- | --- |\n| Speed | Fast |' }],
+    }, 'visible', componentTemplates, designProfile);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<table class="captured-table">/);
+    assert.doesNotMatch(result.values.expandedContent, /projected-table/);
+  });
+
   test('expand-content uses the site\'s own configured template when given one, not the fallback', () => {
     const componentTemplates = {
       expandContent: {
@@ -228,6 +534,126 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.equal(result.ok, true);
     assert.match(result.values.expandedContent, /<h3 class="site-heading">H1<\/h3>/);
     assert.doesNotMatch(result.values.expandedContent, /<h2>/);
+  });
+
+  test('expand-content uses the card variant on a page whose own sections are card-heavy', () => {
+    const componentTemplates = {
+      expandContentCard: {
+        wrapper: '<div>\n{{ROWS}}\n</div>',
+        row: '<div class="rounded-lg border p-6"><h2 class="card-heading">{{HEADING}}</h2><p class="card-body">{{BODY}}</p></div>',
+      },
+      expandContent: {
+        wrapper: '<section>\n{{ROWS}}\n</section>',
+        row: '<h3 class="site-heading">{{HEADING}}</h3><p class="site-body">{{BODY}}</p>',
+      },
+    };
+    const designProfile = {
+      pages: [{
+        url: 'https://example.com/projects/',
+        sections: [
+          { components: [{ type: 'card' }] },
+          { components: [{ type: 'card' }] },
+        ],
+      }],
+    };
+    const result = buildMergeValues(
+      'expand-content',
+      { sections: [{ heading: 'H1', body: 'Body text' }] },
+      'visible',
+      componentTemplates,
+      designProfile,
+      { page: 'https://example.com/projects/' },
+    );
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /rounded-lg border p-6/);
+    assert.doesNotMatch(result.values.expandedContent, /site-heading/);
+  });
+
+  test('expand-content keeps the plain template on a page that is not card-heavy, even with a card variant configured', () => {
+    const componentTemplates = {
+      expandContentCard: {
+        wrapper: '<div>\n{{ROWS}}\n</div>',
+        row: '<div class="rounded-lg border p-6"><h2>{{HEADING}}</h2><p>{{BODY}}</p></div>',
+      },
+      expandContent: {
+        wrapper: '<section>\n{{ROWS}}\n</section>',
+        row: '<h3 class="site-heading">{{HEADING}}</h3><p class="site-body">{{BODY}}</p>',
+      },
+    };
+    const designProfile = {
+      pages: [{ url: 'https://example.com/about/', sections: [{ components: [] }] }],
+    };
+    const result = buildMergeValues(
+      'expand-content',
+      { sections: [{ heading: 'H1', body: 'Body text' }] },
+      'visible',
+      componentTemplates,
+      designProfile,
+      { page: 'https://example.com/about/' },
+    );
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /site-heading/);
+    assert.doesNotMatch(result.values.expandedContent, /rounded-lg border p-6/);
+  });
+
+  test('expand-content on a card-heavy page with no configured card template falls back to plain, never a guessed card look', () => {
+    const componentTemplates = {
+      expandContent: {
+        wrapper: '<section>\n{{ROWS}}\n</section>',
+        row: '<h3 class="site-heading">{{HEADING}}</h3><p class="site-body">{{BODY}}</p>',
+      },
+    };
+    const designProfile = {
+      pages: [{
+        url: 'https://example.com/projects/',
+        sections: [{ components: [{ type: 'card' }] }, { components: [{ type: 'card' }] }],
+      }],
+    };
+    const result = buildMergeValues(
+      'expand-content',
+      { sections: [{ heading: 'H1', body: 'Body text' }] },
+      'visible',
+      componentTemplates,
+      designProfile,
+      { page: 'https://example.com/projects/' },
+    );
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /site-heading/);
+  });
+
+  test('a comparison table with no captured componentTemplates.table gets a neutral inline layout, not a bare zero-CSS <table>', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{
+        heading: 'Chayce Properties vs. Alternative Relocation Services',
+        body: 'Here is how it compares.',
+        table: [
+          { feature: 'Personal Coordination', alternative: 'Distributed', 'this-option': 'One dedicated coordinator' },
+          { feature: 'Team Consistency', alternative: 'Outsourced', 'this-option': 'In-house team' },
+        ],
+      }],
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<table style="width:100%;border-collapse:collapse">/);
+    assert.match(result.values.expandedContent, /<th style="[^"]+">Feature<\/th>/);
+    assert.doesNotMatch(result.values.expandedContent, /<table><thead>/);
+  });
+
+  test('a comparison table uses the site\'s own captured table classes when present, never the neutral fallback', () => {
+    const componentTemplates = {
+      table: { table: 'site-table', th: 'site-th', td: 'site-td', tdFirst: 'site-td-first' },
+    };
+    const result = buildMergeValues('expand-content', {
+      sections: [{
+        heading: 'H1',
+        body: 'Body',
+        table: [{ feature: 'A', value: 'B' }, { feature: 'C', value: 'D' }],
+      }],
+    }, 'visible', componentTemplates);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<table class="site-table">/);
+    assert.match(result.values.expandedContent, /<th class="site-th">/);
+    assert.match(result.values.expandedContent, /<td class="site-td-first">/);
+    assert.doesNotMatch(result.values.expandedContent, / style="/);
   });
 
   test('expand-content fails honestly with no sections', () => {
@@ -369,9 +795,9 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.equal(result.ok, true);
     const html = result.values.expandedContent;
     assert.match(html, /<p>Below is a comparison table outlining the key differences\.<\/p>/);
-    assert.match(html, /<table><thead><tr><th>Feature<\/th><th>Competitor<\/th><th>Zunkiree Labs<\/th><\/tr><\/thead>/);
-    assert.match(html, /<tr><td>Custom AI Solutions<\/td><td>No<\/td><td>Yes<\/td><\/tr>/);
-    assert.match(html, /<td>Yes \(eSewa and Khalti integration\)<\/td><\/tr><\/tbody><\/table>/);
+    assert.match(html, /<table[^>]*><thead><tr><th[^>]*>Feature<\/th><th[^>]*>Competitor<\/th><th[^>]*>Zunkiree Labs<\/th><\/tr><\/thead>/);
+    assert.match(html, /<tr><td[^>]*>Custom AI Solutions<\/td><td[^>]*>No<\/td><td[^>]*>Yes<\/td><\/tr>/);
+    assert.match(html, /<td[^>]*>Yes \(eSewa and Khalti integration\)<\/td><\/tr><\/tbody><\/table>/);
     assert.doesNotMatch(html, /<p>[^<]*<table>/, 'the table must never be nested inside the body <p>');
   });
 
@@ -668,6 +1094,109 @@ describe('buildMergeValues — qa-content borrows the site\'s own FAQ template',
   });
 });
 
+// Reported 2026-09-09: a real captured template (site 8862) carried a
+// fixed `h-[70px]` wrapper height plus the site's page-level FAQ *section*
+// sizing (`max-w-7xl mx-auto ...`). Applied verbatim to a blog post's FAQ,
+// a genuinely long question overflowed/clipped past the viewport edge.
+describe('buildMergeValues — captured template with unsafe classes never ships verbatim', () => {
+  const items = [
+    { question: 'Why is patient data security important for healthcare providers?', answer: 'Because compromised data leads to identity theft and loss of trust.' },
+  ];
+  const captured = {
+    wrapper: '<dl class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-[70px]">\n{{ROWS}}\n</dl>',
+    row: '  <dt class="text-[28px] sm:text-[36px] md:text-[50px] font-bold h-12">{{QUESTION}}</dt>\n  <dd class="mt-3 text-sm opacity-80">{{ANSWER}}</dd>',
+  };
+
+  test('a fixed wrapper height is always stripped, on any page', () => {
+    const result = buildMergeValues('faq', { items }, 'visible', { faq: captured }, null, { page: 'https://example.com/services/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /h-\[70px\]/);
+  });
+
+  test('a fixed row height is always stripped, on any page', () => {
+    const result = buildMergeValues('faq', { items }, 'visible', { faq: captured }, null, { page: 'https://example.com/services/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /h-12/);
+  });
+
+  test('a non-blog page keeps the site\'s real section container sizing', () => {
+    const result = buildMergeValues('faq', { items }, 'visible', { faq: captured }, null, { page: 'https://example.com/services/' });
+    assert.equal(result.ok, true);
+    assert.match(result.values.faq, /max-w-7xl mx-auto/);
+  });
+
+  test('a blog page drops the page-level container sizing but keeps typography', () => {
+    const result = buildMergeValues('faq', { items }, 'visible', { faq: captured }, null, { page: 'https://example.com/blog/patient-data-security/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /max-w-7xl/);
+    assert.doesNotMatch(result.values.faq, /mx-auto/);
+    // Non-size typography — weight, color, opacity — is what "keeps
+    // typography" means here, and still carries over untouched.
+    assert.match(result.values.faq, /font-bold/);
+    assert.match(result.values.faq, /opacity-80/);
+  });
+
+  // This fixture IS admizzeducation.com's real stored template. Section-scale
+  // SIZE has to be stripped inline for the same reason `max-w-7xl` is — and
+  // this assertion used to require the exact opposite, encoding the bug as
+  // expected behaviour: the strip rule only recognised NAMED Tailwind scales
+  // (`text-4xl`), so every arbitrary-value class sailed through it and the
+  // site's FAQ questions shipped at 50px inside article body copy. Judged by
+  // rendered size now (lib/text-scale.js), not by notation: 28px is ordinary
+  // subheading scale and stays, 36px and 50px are section scale and go.
+  test('section-scale ARBITRARY-value sizes are stripped inline, exactly like named ones', () => {
+    const result = buildMergeValues('faq', { items }, 'visible', { faq: captured }, null, { page: 'https://example.com/blog/patient-data-security/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /text-\[50px\]/);
+    assert.doesNotMatch(result.values.faq, /text-\[36px\]/);
+    assert.match(result.values.faq, /text-\[28px\]/);
+  });
+
+  // Site 8862's real capture bug wasn't limited to faq/qaContent — EVERY
+  // captured componentTemplate (expandContent, internalLinks too) carried
+  // the same `h-[70px]`. Confirms the fix, moved into templateFor() itself,
+  // covers every actionType that resolves a componentTemplate, not just the
+  // one first reported.
+  test('qa-content, expand-content and internal-links strip the same unsafe classes', () => {
+    const qaResult = buildMergeValues('qa-content', { items }, 'visible', { qaContent: {
+      wrapper: '<div class="max-w-7xl mx-auto h-[70px]">{{ROWS}}</div>',
+      row: '<details><summary><h3 class="h-8">{{QUESTION}}</h3></summary><p>{{ANSWER}}</p></details>',
+    } }, null, { page: 'https://example.com/blog/patient-data-security/' });
+    assert.equal(qaResult.ok, true);
+    assert.doesNotMatch(qaResult.values.qaContent, /h-\[70px\]|h-8|max-w-7xl|mx-auto/);
+
+    const expandResult = buildMergeValues('expand-content', { sections: [{ heading: 'H', body: 'Body' }] }, 'visible', { expandContent: {
+      wrapper: '<div class="max-w-7xl mx-auto h-[70px]">{{ROWS}}</div>',
+      row: '<section><h2>{{HEADING}}</h2><div>{{BODY}}</div></section>',
+    } }, null, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(expandResult.ok, true);
+    assert.doesNotMatch(expandResult.values.expandedContent, /h-\[70px\]|max-w-7xl|mx-auto/);
+
+    const linksResult = buildMergeValues('internal-links', { suggestions: [{ url: '/a/', anchorText: 'A' }] }, 'visible', { internalLinks: {
+      wrapper: '<ul class="max-w-7xl mx-auto h-[70px]">{{ROWS}}</ul>',
+      row: '<li><a href="{{URL}}">{{ANCHOR_TEXT}}</a></li>',
+    } }, null, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(linksResult.ok, true);
+    assert.doesNotMatch(linksResult.values.links, /h-\[70px\]|max-w-7xl|mx-auto/);
+  });
+
+  // Reported 2026-09-25: zunkireelabs.com's real internal-links row carries a
+  // `w-4 h-4` arrow icon next to each link. The fixed-height strip above
+  // (correctly aimed at a wrapper/heading holding arbitrary-length body
+  // copy) doesn't distinguish an <svg> icon from those — it stripped h-4
+  // right along with h-[70px]/h-12, leaving the icon at its browser-default
+  // intrinsic height instead of its real square size.
+  test('a fixed height on an <svg> icon survives the strip, unlike a text-flow element', () => {
+    const linksResult = buildMergeValues('internal-links', { suggestions: [{ url: '/a/', anchorText: 'A' }] }, 'visible', { internalLinks: {
+      wrapper: '<ul class="max-w-7xl mx-auto h-[70px]">{{ROWS}}</ul>',
+      row: '<li><a href="{{URL}}">{{ANCHOR_TEXT}}<svg class="w-4 h-4"></svg></a></li>',
+    } }, null, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(linksResult.ok, true);
+    assert.doesNotMatch(linksResult.values.links, /h-\[70px\]|max-w-7xl|mx-auto/);
+    assert.match(linksResult.values.links, /<svg class="w-4 h-4">/);
+  });
+});
+
 describe('JSX marker convention (.jsx/.tsx bootstrap-created markers)', () => {
   // ensureMarkers itself no longer creates a body-scoped marker on a .tsx
   // file at all (see isNoEofInsertField above) — that's now
@@ -693,5 +1222,324 @@ describe('JSX marker convention (.jsx/.tsx bootstrap-created markers)', () => {
     const { content, inserted } = ensureMarkers(file, { links: 'LINKS' }, 'page.jsx');
     assert.deepEqual(inserted, []);
     assert.equal(content, file);
+  });
+});
+
+// Regression coverage for a real design-breakdown that shipped autonomously:
+// renderExpandedHtml already received the site's own captured table styling
+// and passed it to renderComparisonTable (the STRUCTURED table path), but
+// never to markdownToHtml — so the same comparison content, written by the
+// model as MARKDOWN instead (which its own prompt invites), rendered as a
+// bare class-less <table>. On a Tailwind site that is a visibly foreign
+// block sitting beside a correctly-styled one on the same page.
+describe('renderExpandedHtml — a markdown table gets the site\'s own table styling', () => {
+  const STYLE = {
+    wrapper: 'overflow-x-auto', table: 'w-full acme-table', thead: 'acme-head',
+    tbody: 'acme-body', th: 'acme-th', td: 'acme-td', tdFirst: 'acme-td-first',
+  };
+  const SECTIONS = [{
+    heading: 'Comparison',
+    body: 'Here is a breakdown:\n\n| Feature | Ours | Theirs |\n| --- | --- | --- |\n| Speed | Fast | Slow |\n| Cost | Low | High |',
+  }];
+
+  test('applies the tenant\'s real captured classes, the same ones a structured table gets', () => {
+    const html = renderExpandedHtml(SECTIONS, undefined, STYLE);
+    assert.match(html, /<table class="w-full acme-table">/);
+    assert.match(html, /<th class="acme-th">Feature<\/th>/);
+    assert.match(html, /<td class="acme-td-first">Speed<\/td>/, 'the row-label column uses the site\'s own first-cell class');
+    assert.match(html, /<td class="acme-td">Fast<\/td>/);
+    assert.match(html, /<div class="overflow-x-auto">/);
+    assert.doesNotMatch(html, /\| --- \|/, 'no raw markdown table syntax survives into the page');
+  });
+
+  test('a site with no captured table still renders a real, bare table (never another tenant\'s look)', () => {
+    const html = renderExpandedHtml(SECTIONS, undefined, {});
+    assert.match(html, /<table><thead><tr><th>Feature<\/th>/);
+    assert.doesNotMatch(html, /acme/);
+  });
+
+  test('a table collapsed onto ONE line still renders as a real table, not literal pipes', () => {
+    // The rows arrive joined by spaces with no newlines at all, so the
+    // line-based detection has no next line to test for a separator row.
+    const collapsed = [{
+      heading: 'Comparison',
+      body: 'Here is a breakdown: | Feature | Ours | Theirs | |---|---|---| | Speed | Fast | Slow | | Cost | Low | High |',
+    }];
+    const html = renderExpandedHtml(collapsed, undefined, STYLE);
+    assert.match(html, /<table class="w-full acme-table">/);
+    assert.match(html, /<th class="acme-th">Feature<\/th>/);
+    assert.match(html, /<td class="acme-td">Fast<\/td>/);
+    assert.doesNotMatch(html, /\|---\|/, 'no raw separator syntax survives');
+    assert.match(html, /Here is a breakdown:/, 'the real lead-in sentence is preserved');
+  });
+
+  test('a normal row with an empty middle cell is NOT mistaken for collapsed rows', () => {
+    // "| A |  | C |" also has two pipes separated only by spaces; without the
+    // separator-run guard this would be split into bogus rows.
+    const withEmptyCell = [{
+      heading: 'Comparison',
+      body: '| Feature | Ours | Theirs |\n| --- | --- | --- |\n| Speed |  | Slow |',
+    }];
+    const html = renderExpandedHtml(withEmptyCell, undefined, STYLE);
+    assert.match(html, /<td class="acme-td-first">Speed<\/td><td class="acme-td"><\/td><td class="acme-td">Slow<\/td>/);
+  });
+});
+
+// Regression for the 2026-09-10 incident: site 1's captured
+// componentTemplates.faq/qaContent (a homepage section's real markup —
+// `container-custom py-12 md:py-20` wrapper, `text-2xl md:text-3xl` row
+// heading) got spliced verbatim into 7 blog posts' body copy via PR #92,
+// rendering an oversized, H1-looking heading inside a full-width section
+// nested in the article column. sanitizeCapturedTemplate already stripped
+// section-container classes off the WRAPPER for a blog page (2026-09-09
+// fix); this adds the matching strip for a section-headline-scale class on
+// the ROW (which the 09-09 fix deliberately left untouched), and generalizes
+// the whole mechanism from a URL-substring "/blog/" guess to the platform's
+// real page-type classifier (classifyPageType/pageTypePatterns), so any page
+// type — legal, location, service, a future client's own equivalent — gets
+// the same protection, not just URLs containing "/blog/".
+describe('sanitizeCapturedTemplate — page-type-aware heading-size correction', () => {
+  const captured = {
+    wrapper: '<dl class="container-custom py-12 md:py-20">\n{{ROWS}}\n</dl>',
+    row: '  <dt class="text-2xl md:text-3xl font-normal text-gray-900">{{QUESTION}}</dt>\n  <dd class="text-lg text-gray-600">{{ANSWER}}</dd>',
+  };
+
+  test('outside inline-content context, both wrapper and row classes are left untouched', () => {
+    const result = sanitizeCapturedTemplate(captured, { inline: false });
+    assert.match(result.wrapper, /container-custom/);
+    assert.match(result.row, /text-2xl md:text-3xl/);
+  });
+
+  test('inline context strips the wrapper\'s section-container classes (existing 09-09 behavior)', () => {
+    const result = sanitizeCapturedTemplate(captured, { inline: true });
+    assert.doesNotMatch(result.wrapper, /container-custom/);
+  });
+
+  test('with no grounded substitute, inline context strips only the section-headline-scale (3xl+) row class; 2xl and weight/color survive', () => {
+    const result = sanitizeCapturedTemplate(captured, { inline: true });
+    // text-2xl is ordinary in-article subheading scale (site-editor/H2-ish
+    // sizing) and is deliberately left alone — only text-3xl-and-up, which
+    // is section-headline scale in virtually every real Tailwind config, is
+    // unsafe to reuse inline.
+    assert.match(result.row, /text-2xl/);
+    assert.doesNotMatch(result.row, /md:text-3xl/);
+    assert.match(result.row, /font-normal/);
+    assert.match(result.row, /text-gray-900/);
+    // Row's OWN answer text (text-lg) is ordinary in-article scale, not a
+    // section headline — must survive untouched.
+    assert.match(result.row, /text-lg/);
+  });
+
+  test('with a real grounded subheading class for this page type, that class replaces the stripped one instead of leaving nothing', () => {
+    const result = sanitizeCapturedTemplate(captured, { inline: true, groundedHeadingClass: 'text-xl font-semibold' });
+    assert.doesNotMatch(result.row, /md:text-3xl/);
+    assert.match(result.row, /text-xl/);
+    assert.match(result.row, /font-semibold/);
+    // Original weight/color untouched — the grounded class is ADDED, not a
+    // wholesale replacement of everything the site's own captured markup said.
+    assert.match(result.row, /font-normal/);
+    assert.match(result.row, /text-gray-900/);
+  });
+
+  test('buildMergeValues threads a blog page URL through to strip the row heading\'s 3xl+ scale too', () => {
+    const result = buildMergeValues('faq', {
+      items: [{ question: 'Q?', answer: 'A' }],
+    }, 'visible', { faq: captured }, null, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /md:text-3xl/);
+    assert.doesNotMatch(result.values.faq, /container-custom/);
+  });
+
+  test('buildMergeValues leaves a homepage (a page type this site builds as its own full-bleed FAQ section) untouched', () => {
+    const result = buildMergeValues('faq', {
+      items: [{ question: 'Q?', answer: 'A' }],
+    }, 'visible', { faq: captured }, null, { page: 'https://example.com/' });
+    assert.equal(result.ok, true);
+    assert.match(result.values.faq, /text-2xl md:text-3xl/);
+    assert.match(result.values.faq, /container-custom/);
+  });
+
+  test('buildMergeValues corrects a NON-blog inline page type too (a legal page) — not a URL-substring special case', () => {
+    const result = buildMergeValues('faq', {
+      items: [{ question: 'Q?', answer: 'A' }],
+    }, 'visible', { faq: captured }, null, { page: 'https://example.com/legal/privacy-policy/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /md:text-3xl/);
+    assert.doesNotMatch(result.values.faq, /container-custom/);
+  });
+
+  test('buildMergeValues uses the site\'s real captured subheading class for a page type it has real evidence for', () => {
+    const designProfile = {
+      pageTypePatterns: {
+        'blog-article': { textHierarchy: [{ role: 'subheading', classes: 'text-xl font-semibold text-slate-800' }] },
+      },
+    };
+    const result = buildMergeValues('faq', {
+      items: [{ question: 'Q?', answer: 'A' }],
+    }, 'visible', { faq: captured }, designProfile, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /md:text-3xl/);
+    assert.match(result.values.faq, /text-xl font-semibold text-slate-800/);
+  });
+
+  // The real gap: a site with NO page-type-specific subheading evidence yet
+  // (freshly onboarded, or a page type the weekly rescan hasn't covered) used
+  // to strip straight to a bare, unstyled row with nothing replacing it. The
+  // site's own real typography is grounded evidence too, just not
+  // page-type-specific, and is a better floor than shipping no styling at all.
+  //
+  // The fallback is typography.heading.ITEM, not .section. This test used to
+  // assert .section, which was the defect: .section is the site's own
+  // page/section HEADLINE class, so the fallback INFLATED the very heading
+  // this correction exists to shrink. Confirmed live on site 1, where every
+  // block spliced into a blog post rendered at `text-3xl md:text-4xl
+  // lg:text-5xl` because no 'blog-article' evidence had ever been captured.
+  test('buildMergeValues falls back to the site\'s real ITEM-scale heading class, never its section headline', () => {
+    const designProfile = {
+      typography: {
+        heading: {
+          item: 'text-2xl md:text-3xl font-bold text-navy-900',
+          section: 'text-5xl font-black text-hero',
+        },
+      },
+    };
+    const result = buildMergeValues('faq', {
+      items: [{ question: 'Q?', answer: 'A' }],
+    }, 'visible', { faq: captured }, designProfile, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(result.ok, true);
+    assert.match(result.values.faq, /font-bold/);
+    assert.match(result.values.faq, /text-navy-900/);
+    // The section headline must never be reachable from an inline insert...
+    assert.doesNotMatch(result.values.faq, /text-hero|font-black|text-5xl/);
+    // ...and even the item class gets its own section-scale size filtered out,
+    // since an item scale can legitimately include md:text-3xl (site 1's does).
+    assert.doesNotMatch(result.values.faq, /md:text-3xl/);
+    assert.match(result.values.faq, /text-2xl/);
+  });
+
+  test('buildMergeValues strips to nothing when neither page-type evidence nor a site-wide heading class exists', () => {
+    const result = buildMergeValues('faq', {
+      items: [{ question: 'Q?', answer: 'A' }],
+    }, 'visible', { faq: captured }, {}, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /md:text-3xl/);
+  });
+});
+
+describe('inline inserts must not break the article they land in', () => {
+  // The three defects that shipped together on site 1's blog posts, each
+  // reproduced from the real stored template shapes.
+  const expandTemplate = {
+    wrapper: '<div class="container-custom py-12 md:py-20">\n{{ROWS}}\n</div>',
+    row: '<section class="gap-2 text-3xl md:text-4xl">\n  <h2 class="text-3xl font-normal text-gray-900">{{HEADING}}</h2>\n  <p>{{BODY}}</p>\n</section>',
+  };
+  const profile = { typography: { heading: { item: 'text-2xl font-normal text-gray-900', section: 'text-5xl font-black' } } };
+  const blogPage = 'https://example.com/blog/a-post/';
+
+  test('section-scale vertical padding is stripped so the block does not open a gap in the copy', () => {
+    const r = buildMergeValues('expand-content', { sections: [{ heading: 'H', body: 'B' }] },
+      'visible', { expandContent: expandTemplate }, profile, { page: blogPage });
+    assert.equal(r.ok, true);
+    const html = Object.values(r.values)[0];
+    assert.doesNotMatch(html, /py-12/);
+    assert.doesNotMatch(html, /md:py-20/);
+  });
+
+  test('the grounded class lands on the real heading, not the row wrapper', () => {
+    const r = buildMergeValues('expand-content', { sections: [{ heading: 'H', body: 'B' }] },
+      'visible', { expandContent: expandTemplate }, profile, { page: blogPage });
+    const html = Object.values(r.values)[0];
+    assert.match(html, /<h2 class="[^"]*text-2xl/, 'the <h2> itself must carry the corrected size');
+    assert.doesNotMatch(html, /<section class="[^"]*text-2xl/, 'the wrapper must not inherit a heading size that cascades to all children');
+  });
+
+  test('no hero-scale size survives anywhere in an inline insert', () => {
+    const r = buildMergeValues('expand-content', { sections: [{ heading: 'H', body: 'B' }] },
+      'visible', { expandContent: expandTemplate }, profile, { page: blogPage });
+    const html = Object.values(r.values)[0];
+    assert.doesNotMatch(html, /text-3xl|text-4xl|text-5xl|font-black/);
+  });
+
+  test('the same template on a NON-inline page keeps its full section treatment', () => {
+    const r = buildMergeValues('expand-content', { sections: [{ heading: 'H', body: 'B' }] },
+      'visible', { expandContent: expandTemplate }, profile, { page: 'https://example.com/' });
+    const html = Object.values(r.values)[0];
+    assert.match(html, /py-12/, 'a homepage section legitimately earns its own vertical rhythm');
+    assert.match(html, /text-3xl/, 'and its own headline scale');
+  });
+});
+
+// Regression coverage for a real report on site 1 (zunkireelabs): ~10
+// meta-title recommendations kept re-drafting forever because a shipped
+// fix's meta description never actually landed on the live page, even
+// though the title did. Root cause was two layers deep:
+//   1. PLATFORM_DEFAULT_MARKERS['meta-title'] (url-file-map.js) had only a
+//      `title` field — description had no default marker at all, so
+//      spliceMarkers (which iterates markerMap's own keys, never values')
+//      never even looked at a drafted description.
+//   2. Even with a marker configured, ensureMarkers only knows how to
+//      auto-insert a LINE marker for a field in LINE_CONVENTION_FIELDS,
+//      which was `title`-only — description would have fallen through to
+//      the BLOCK/EOF default and been spliced as VISIBLE body text at the
+//      end of the file, not into the front-matter field.
+// buildMergeValues intentionally maps the generator's own `metaDescription`
+// content field onto a marker-map field named `description` — matching the
+// real Eleventy/Jekyll/Hugo front-matter key, not the generator's internal
+// name — so ensureMarkers' front-matter LINE search actually finds it.
+describe('meta-title — description gets a real marker, not just title (regression)', () => {
+  test('buildMergeValues maps content.metaDescription onto the `description` field, not `metaDescription`', () => {
+    const r = buildMergeValues('meta-title', {
+      selectedTitle: 'A Correct, Grounded Title Tag Under Sixty Characters',
+      metaDescription: 'A grounded meta description between one-fifty and one-sixty characters long, written for this exact page and query, no more and no less than that.',
+    }, 'visible');
+    assert.equal(r.ok, true);
+    assert.deepEqual(Object.keys(r.values).sort(), ['description', 'title']);
+    assert.equal(r.values.title, 'A Correct, Grounded Title Tag Under Sixty Characters');
+  });
+
+  test('no metaDescription on the draft — only title is set, same as before', () => {
+    const r = buildMergeValues('meta-title', { selectedTitle: 'Just A Title, No Description Drafted Yet' }, 'visible');
+    assert.equal(r.ok, true);
+    assert.deepEqual(Object.keys(r.values), ['title']);
+  });
+
+  test('ensureMarkers auto-inserts a LINE marker onto an existing, unmarked `description:` front-matter field', () => {
+    const fileContent = [
+      '---',
+      'layout: post.njk',
+      'title: "Old Title" # SEOAI:TITLE',
+      'description: "An old, unmarked meta description nobody ever wired a marker onto."',
+      '---',
+      'Body content.',
+    ].join('\n');
+    const markerMap = { title: 'TITLE', description: 'METADESCRIPTION' };
+    const { content, inserted } = ensureMarkers(fileContent, markerMap, 'src/blog/post.md');
+    assert.ok(inserted.includes('METADESCRIPTION'), 'the description marker must be auto-inserted');
+    assert.match(content, /description: "An old, unmarked meta description nobody ever wired a marker onto\." # SEOAI:METADESCRIPTION/);
+    // The critical assertion: it must NOT fall through to a BLOCK/EOF
+    // marker, which would splice future content as visible text at the end
+    // of the file instead of into the front-matter field.
+    assert.doesNotMatch(content, /<!-- SEOAI:METADESCRIPTION:START -->/);
+  });
+
+  test('end to end: spliceMarkers actually rewrites BOTH title and description in front matter', () => {
+    const fileContent = [
+      '---',
+      'layout: post.njk',
+      'title: "Old Title" # SEOAI:TITLE',
+      'description: "Old description."',
+      '---',
+      'Body content.',
+    ].join('\n');
+    const markerMap = { title: 'TITLE', description: 'METADESCRIPTION' };
+    const { content: ensured } = ensureMarkers(fileContent, markerMap, 'src/blog/post.md');
+    const built = buildMergeValues('meta-title', {
+      selectedTitle: 'A New, Correctly Sized Title Tag For This Page',
+      metaDescription: 'A new, correctly sized meta description for this exact page, long enough to clear the minimum recommended character count for search snippets.',
+    }, 'visible');
+    const spliced = spliceMarkers(ensured, markerMap, built.values);
+    assert.equal(spliced.ok, true);
+    assert.match(spliced.newContent, /title: "A New, Correctly Sized Title Tag For This Page" # SEOAI:TITLE/);
+    assert.match(spliced.newContent, /description: "A new, correctly sized meta description for this exact page, long enough to clear the minimum recommended character count for search snippets\." # SEOAI:METADESCRIPTION/);
   });
 });

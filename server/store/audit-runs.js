@@ -104,9 +104,21 @@ export async function reapStaleAuditRuns() {
     `UPDATE audit_runs SET status = 'failed', finished_at = now(),
        error_message = 'Audit did not complete (process restarted or timed out).'
      WHERE status = 'running' AND started_at < now() - interval '${STALE_RUNNING_HOURS} hours'
-     RETURNING id, site_id`
+     RETURNING id, site_id, triggered_by`
   );
   return rows;
+}
+
+// How many times a full audit has ever been started for this site under a
+// given trigger — used to cap auto-retry of a reaped onboarding audit
+// (server/index.js) so a genuine crash loop doesn't spawn a fresh crawl on
+// every restart forever.
+export async function countAuditRunsByTrigger(siteId, triggeredBy) {
+  const { rows } = await query(
+    `SELECT count(*)::int AS count FROM audit_runs WHERE site_id = $1 AND triggered_by = $2`,
+    [siteId, triggeredBy]
+  );
+  return rows[0].count;
 }
 
 // Extracts the one real page a finding is "about," when it has one — most

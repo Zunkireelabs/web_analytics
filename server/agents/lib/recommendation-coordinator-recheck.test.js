@@ -60,11 +60,18 @@ describe('recheckRecommendation — existing behavior is unchanged when refreshE
     assert.equal(mergedCalls.length, 0);
   });
 
-  test('broken-link-fix: still broken leaves it open, unchanged, no merge attempted', async () => {
+  test('broken-link-fix: still broken leaves it open, unchanged, no merge attempted — but does report recheckedLive: true', async () => {
     recById = { id: 2, status: 'open', recommendation_type: 'broken-link-fix', params: { href: 'https://dead.example/' } };
     recheckLinkImpl = () => ({ broken: true });
     const result = await recheckRecommendation(1, 2, { refreshEvidence: true });
-    assert.deepEqual(result, { status: 'open', changed: false, detail: { broken: true } });
+    // Regression: recheckedLive: true must be set even though there is
+    // nothing to merge — action-center-reconciler.js's driveAutonomousRecovery
+    // needs this signal to ever count a recovery cycle for a broken-link-fix
+    // finding. Without it, a permanently-dead external citation (DNS
+    // failure, expired cert) can never accumulate enough recovery cycles to
+    // reach blockRecommendation, and loops here forever instead of ever
+    // escalating to a human.
+    assert.deepEqual(result, { status: 'open', changed: false, recheckedLive: true, detail: { broken: true } });
     assert.equal(mergedCalls.length, 0, 'broken-link-fix has no fresh params to merge — the href itself was just reconfirmed');
   });
 
@@ -135,5 +142,55 @@ describe('recheckRecommendation — refreshEvidence: true (the autonomous-recove
     assert.equal(result.status, 'open');
     assert.equal(result.changed, false);
     assert.equal(mergedCalls.length, 0);
+  });
+
+  // 'design-consistency' labels findings from the weekly whole-site scan; it is
+  // not a registered agent, so runAgent rejects it with a 404. That is expected,
+  // not a failure — it must not be logged as an internal error (it was, 77 times
+  // in three days) or reported as "could not be re-checked right now".
+  describe('a detecting label that is not a runnable agent', () => {
+    const unknownAgent = () => {
+      const err = new Error('Unknown agent "design-consistency"');
+      err.status = 404;
+      return err;
+    };
+
+    test('returns open/unchanged with an honest reason, without logging an internal error', async () => {
+      recById = { id: 8, status: 'open', recommendation_type: 'typography-drift', page: PAGE, detecting_agents: ['design-consistency'], finding_ids: ['f8'], params: { page: PAGE } };
+      runAgentImpl = async () => { throw unknownAgent(); };
+      const logged = [];
+      const original = console.error;
+      console.error = (...args) => { logged.push(args.join(' ')); };
+      let result;
+      try {
+        result = await recheckRecommendation(1, 8, { refreshEvidence: true });
+      } finally {
+        console.error = original;
+      }
+      assert.equal(result.status, 'open');
+      assert.equal(result.changed, false);
+      assert.match(result.reason, /whole-site scan/);
+      assert.equal(mergedCalls.length, 0);
+      assert.equal(closedIds.length, 0, 'it must not be closed either — nothing was verified');
+      assert.ok(!logged.some((l) => l.includes('internal-error')), `no internal error should be logged, got: ${logged.join(' | ')}`);
+    });
+
+    test('only that exact error is special-cased: other failures still log and report the generic message', async () => {
+      recById = { id: 9, status: 'open', recommendation_type: 'alt-text', page: PAGE, detecting_agents: ['ai-visibility'], finding_ids: ['f9'], params: { page: PAGE } };
+      const notRegistry404 = new Error('Site not found');
+      notRegistry404.status = 404;
+      runAgentImpl = async () => { throw notRegistry404; };
+      const original = console.error;
+      const logged = [];
+      console.error = (...args) => { logged.push(args.join(' ')); };
+      let result;
+      try {
+        result = await recheckRecommendation(1, 9);
+      } finally {
+        console.error = original;
+      }
+      assert.match(result.reason, /could not be re-checked right now/);
+      assert.ok(logged.some((l) => l.includes('internal-error')), 'a genuine failure must still be logged');
+    });
   });
 });

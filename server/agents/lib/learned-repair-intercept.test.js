@@ -11,8 +11,9 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 
 let site;
 let portable;
-let shipCalls;
-let shipError;
+let enqueueCalls;
+let enqueueError;
+let queueCreated;
 let recordedOutcomes;
 let classification;
 let classifyError;
@@ -83,16 +84,20 @@ function grounded(items = [ALT_TEXT_ITEM]) {
   return { items, detectedKeys: new Set(['alt-text::https://client.example/a']), lastAnalyzedAt: null };
 }
 
-const ship = async (...args) => {
-  shipCalls.push(args);
-  if (shipError) throw shipError;
-  return { branch_name: 'action-center/alt-text-1' };
+// Fakes store/shipping-queue.js's enqueue() — interceptWithLearnedRepairs no
+// longer ships directly (that would open its own production PR, exactly the
+// bypass this whole feature was fixed to close), it only records the intent.
+const enqueue = async (...args) => {
+  enqueueCalls.push(args);
+  if (enqueueError) throw enqueueError;
+  return { row: { id: 1, ...args[1] }, created: queueCreated };
 };
 
 beforeEach(() => {
   site = { ...ELEVENTY_SITE };
-  shipCalls = [];
-  shipError = null;
+  enqueueCalls = [];
+  enqueueError = null;
+  queueCreated = true;
   recordedOutcomes = [];
   classifyCalls = [];
   classifyError = null;
@@ -116,8 +121,8 @@ describe('interceptWithLearnedRepairs — consent gates', () => {
   test('both site flags off -> returns the input by identity, nothing runs', async () => {
     site = { ...ELEVENTY_SITE, learned_repair_enabled: false, auto_remediation_enabled: false };
     const input = grounded();
-    assert.equal(await interceptWithLearnedRepairs(7, input, { ship }), input);
-    assert.equal(shipCalls.length, 0);
+    assert.equal(await interceptWithLearnedRepairs(7, input, { enqueue }), input);
+    assert.equal(enqueueCalls.length, 0);
   });
 
   test('learned_repair on but auto_remediation off -> refuses', async () => {
@@ -125,22 +130,22 @@ describe('interceptWithLearnedRepairs — consent gates', () => {
     // client having agreed to unattended changes at all.
     site = { ...ELEVENTY_SITE, auto_remediation_enabled: false };
     const input = grounded();
-    assert.equal(await interceptWithLearnedRepairs(7, input, { ship }), input);
+    assert.equal(await interceptWithLearnedRepairs(7, input, { enqueue }), input);
   });
 
   test('auto_remediation on but learned_repair off -> refuses', async () => {
     site = { ...ELEVENTY_SITE, learned_repair_enabled: false };
     const input = grounded();
-    assert.equal(await interceptWithLearnedRepairs(7, input, { ship }), input);
+    assert.equal(await interceptWithLearnedRepairs(7, input, { enqueue }), input);
   });
 });
 
 describe('interceptWithLearnedRepairs — the happy path', () => {
   test('repairs the item, removes it from items, and binds the memory it used', async () => {
-    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded(), { enqueue });
     assert.equal(out.items.length, 0, 'a repaired item must never become an Action Center row');
-    assert.equal(shipCalls.length, 1);
-    const [, opts] = shipCalls[0];
+    assert.equal(enqueueCalls.length, 1);
+    const [, opts] = enqueueCalls[0];
     assert.equal(opts.memoryRefId, 42, 'the outcome must be credited to the memory that was actually reused');
     assert.equal(opts.generatorId, 'alt-text');
     assert.equal(opts.source, 'learned-repair');
@@ -152,13 +157,13 @@ describe('interceptWithLearnedRepairs — the happy path', () => {
     // key must stay detected or closeStaleRecommendations would treat the
     // problem as resolved before anything shipped.
     const input = grounded();
-    const out = await interceptWithLearnedRepairs(7, input, { ship });
+    const out = await interceptWithLearnedRepairs(7, input, { enqueue });
     assert.equal(out.detectedKeys, input.detectedKeys);
   });
 
   test('leaves unrepaired items in place alongside a repaired one', async () => {
     const other = { ...ALT_TEXT_ITEM, id: 'other', generatorId: 'landing-page' };
-    const out = await interceptWithLearnedRepairs(7, grounded([ALT_TEXT_ITEM, other]), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded([ALT_TEXT_ITEM, other]), { enqueue });
     assert.deepEqual(out.items.map((i) => i.id), ['other']);
   });
 });
@@ -166,43 +171,43 @@ describe('interceptWithLearnedRepairs — the happy path', () => {
 describe('interceptWithLearnedRepairs — refusals all fall through to the Action Center', () => {
   test('an ineligible generator is never touched', async () => {
     const item = { ...ALT_TEXT_ITEM, generatorId: 'landing-page' };
-    const out = await interceptWithLearnedRepairs(7, grounded([item]), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded([item]), { enqueue });
     assert.equal(out.items.length, 1);
-    assert.equal(shipCalls.length, 0);
+    assert.equal(enqueueCalls.length, 0);
   });
 
   test('no portable evidence -> untouched', async () => {
     portable = [];
-    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded(), { enqueue });
     assert.equal(out.items.length, 1);
-    assert.equal(shipCalls.length, 0);
+    assert.equal(enqueueCalls.length, 0);
   });
 
   test('evidence from too few distinct sites -> untouched', async () => {
     portable[0].provenSiteCount = 0; // alt-text needs 1
-    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded(), { enqueue });
     assert.equal(out.items.length, 1);
-    assert.equal(shipCalls.length, 0);
+    assert.equal(enqueueCalls.length, 0);
   });
 
   test('TECHNICAL mismatch -> untouched even though the signature matched', async () => {
     portable[0].siteFingerprint = ['render:nextjs', 'target-ext:.tsx', 'content-type:product'];
-    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded(), { enqueue });
     assert.equal(out.items.length, 1);
-    assert.equal(shipCalls.length, 0);
+    assert.equal(enqueueCalls.length, 0);
   });
 
   test('a site with no renderCapabilities -> untouched (required token absent)', async () => {
     site = { ...ELEVENTY_SITE, url_file_map: { pages: {} } };
-    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded(), { enqueue });
     assert.equal(out.items.length, 1);
-    assert.equal(shipCalls.length, 0);
+    assert.equal(enqueueCalls.length, 0);
   });
 
   test('a lookup failure -> untouched, not a thrown job', async () => {
     const { interceptWithLearnedRepairs: fresh } = await import('./learned-repair.js');
     portable = null; // makes the mocked findPortableRepairs throw
-    const out = await fresh(7, grounded(), { ship });
+    const out = await fresh(7, grounded(), { enqueue });
     assert.equal(out.items.length, 1);
   });
 });
@@ -212,35 +217,35 @@ describe('interceptWithLearnedRepairs — CONTENT-CONTEXT layer', () => {
     // classification defaults to 'product', same as portable[0]'s memory —
     // this is the default beforeEach state, asserted explicitly here so the
     // match case has its own named test rather than being implicit.
-    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded(), { enqueue });
     assert.equal(out.items.length, 0);
-    assert.equal(shipCalls.length, 1);
+    assert.equal(enqueueCalls.length, 1);
   });
 
   test('content-context mismatch (wrong page type) -> refuses even though technical/structural both match', async () => {
     classification = { contentType: 'blog', confidence: 0.95 }; // memory was proven on a 'product' page
-    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded(), { enqueue });
     assert.equal(out.items.length, 1, 'must fall through to the Action Center, not reuse a repair proven on a different kind of page');
-    assert.equal(shipCalls.length, 0);
+    assert.equal(enqueueCalls.length, 0);
   });
 
   test('missing/uncertain content-context (classifier returns null) -> refuses, never assumed compatible', async () => {
     classification = null; // e.g. below MIN_CONFIDENCE, or genuinely unclassifiable
-    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded(), { enqueue });
     assert.equal(out.items.length, 1);
-    assert.equal(shipCalls.length, 0);
+    assert.equal(enqueueCalls.length, 0);
   });
 
   test('LLM/classifier failure -> fails open to the Action Center, never throws or crashes the run', async () => {
     classifyError = new Error('classifier upstream 500');
-    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded(), { enqueue });
     assert.equal(out.items.length, 1);
-    assert.equal(shipCalls.length, 0);
+    assert.equal(enqueueCalls.length, 0);
   });
 
   test('only classifies pages that already have a real evidence-backed candidate — never spent on a page with none', async () => {
     portable = [];
-    await interceptWithLearnedRepairs(7, grounded(), { ship });
+    await interceptWithLearnedRepairs(7, grounded(), { enqueue });
     assert.equal(classifyCalls.length, 0, 'classification is the expensive step and must not run before findPortableRepairs has a real candidate');
   });
 });
@@ -267,9 +272,9 @@ describe('interceptWithLearnedRepairs — decision-chain ordering (technical/str
       repairRecipe: { kind: 'generator-chain', generatorId: 'faq', version: 1 },
       confidence: 0.95, provenSiteCount: 100, // evidence far above the required 4
     }];
-    const out = await interceptWithLearnedRepairs(7, grounded([FAQ_ITEM]), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded([FAQ_ITEM]), { enqueue });
     assert.equal(out.items.length, 1, 'a technical mismatch must refuse no matter how much reuse evidence backs it');
-    assert.equal(shipCalls.length, 0);
+    assert.equal(enqueueCalls.length, 0);
   });
 
   test('a compatible-but-under-evidenced candidate is skipped in favor of a later, sufficiently-proven compatible one — never picked purely by rank/confidence', async () => {
@@ -289,10 +294,10 @@ describe('interceptWithLearnedRepairs — decision-chain ordering (technical/str
         confidence: 0.5, provenSiteCount: 4,
       },
     ];
-    const out = await interceptWithLearnedRepairs(7, grounded([FAQ_ITEM]), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded([FAQ_ITEM]), { enqueue });
     assert.equal(out.items.length, 0);
-    assert.equal(shipCalls.length, 1);
-    assert.equal(shipCalls[0][1].memoryRefId, 2, 'the compatible, sufficiently-proven candidate must win, not the higher-ranked incompatible one');
+    assert.equal(enqueueCalls.length, 1);
+    assert.equal(enqueueCalls[0][1].memoryRefId, 2, 'the compatible, sufficiently-proven candidate must win, not the higher-ranked incompatible one');
   });
 
   test('EVIDENCE gate applies even to a technically/structurally/content-context compatible candidate, independent of findPortableRepairs\' own floor', async () => {
@@ -301,9 +306,9 @@ describe('interceptWithLearnedRepairs — decision-chain ordering (technical/str
       repairRecipe: { kind: 'generator-chain', generatorId: 'faq', version: 1 },
       confidence: 0.9, provenSiteCount: 2, // compatible, but faq requires 4 distinct sites
     }];
-    const out = await interceptWithLearnedRepairs(7, grounded([FAQ_ITEM]), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded([FAQ_ITEM]), { enqueue });
     assert.equal(out.items.length, 1, 'compatibility alone is not enough either — the generator-specific evidence bar still applies');
-    assert.equal(shipCalls.length, 0);
+    assert.equal(enqueueCalls.length, 0);
   });
 
   test('a compatible candidate that clears its generator-specific evidence bar is reused', async () => {
@@ -312,34 +317,44 @@ describe('interceptWithLearnedRepairs — decision-chain ordering (technical/str
       repairRecipe: { kind: 'generator-chain', generatorId: 'faq', version: 1 },
       confidence: 0.9, provenSiteCount: 4,
     }];
-    const out = await interceptWithLearnedRepairs(7, grounded([FAQ_ITEM]), { ship });
+    const out = await interceptWithLearnedRepairs(7, grounded([FAQ_ITEM]), { enqueue });
     assert.equal(out.items.length, 0);
-    assert.equal(shipCalls.length, 1);
-    assert.equal(shipCalls[0][1].memoryRefId, 4);
+    assert.equal(enqueueCalls.length, 1);
+    assert.equal(enqueueCalls[0][1].memoryRefId, 4);
   });
 });
 
-describe('interceptWithLearnedRepairs — execution failure', () => {
-  test('a failed repair keeps the item AND records a failed reuse immediately', async () => {
-    shipError = new Error('anchor no longer matches');
-    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+// Recording a FAILED reuse (recordFixOutcome outcome:'failure') used to
+// happen right here, at intercept time, because that used to be the moment a
+// real ship attempt happened. It no longer is: interceptWithLearnedRepairs
+// now only enqueues an intent (a DB insert, which basically cannot fail in a
+// way that says anything about the borrowed repair's portability), so that
+// bookkeeping moved to auto-remediation.js's queue-draining step — the point
+// a real generate/approve/push attempt (and therefore a real success/failure
+// verdict about the repair) now actually happens. See
+// auto-remediation-learned-repair-drain.test.js for that half of the
+// contract.
+describe('interceptWithLearnedRepairs — enqueue failure', () => {
+  test('an enqueue failure (e.g. a DB error) leaves the item for the Action Center, and throws nothing out of the run', async () => {
+    enqueueError = new Error('connection reset');
+    const out = await interceptWithLearnedRepairs(7, grounded(), { enqueue });
 
-    assert.equal(out.items.length, 1, 'a failed repair must still reach the Action Center');
-    assert.equal(recordedOutcomes.length, 1);
-    assert.equal(recordedOutcomes[0].memoryRefId, 42);
-    assert.equal(recordedOutcomes[0].outcome, 'failure');
-    assert.equal(recordedOutcomes[0].agentId, 'learned-repair');
-    // Recorded now rather than waiting for the 48h live re-check, which will
-    // never run: no draft reached 'implemented', so nothing would have
-    // scheduled one.
+    assert.equal(out.items.length, 1, 'a queueing failure must still reach the Action Center');
+    assert.equal(recordedOutcomes.length, 0, 'no ship attempt happened, so nothing about the memory\'s portability can be concluded here');
+  });
+
+  test('a repair already queued by an earlier pass (created:false) still counts as handled', async () => {
+    queueCreated = false;
+    const out = await interceptWithLearnedRepairs(7, grounded(), { enqueue });
+    assert.equal(out.items.length, 0, 'already-queued work must not also flow to the ordinary Action Center path');
   });
 });
 
 describe('interceptWithLearnedRepairs — dry run', () => {
   test('matches but never ships, and never removes the item', async () => {
     process.env.LEARNED_REPAIR_DRY_RUN = '1';
-    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
-    assert.equal(shipCalls.length, 0);
+    const out = await interceptWithLearnedRepairs(7, grounded(), { enqueue });
+    assert.equal(enqueueCalls.length, 0);
     assert.equal(out.items.length, 1, 'nothing was actually fixed, so nothing may be filtered out');
   });
 });

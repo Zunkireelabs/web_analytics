@@ -35,19 +35,160 @@ const STOPWORDS = new Set([
   'how', 'what', 'why', 'guide', 'understanding', 'exploring', 'unlocking',
 ]);
 
+// Place names are strong, common Pexels keywords for travel/scenery
+// photography, not for whatever industry the post is actually about. A
+// title's own place name is often a deliberate local-SEO keyword (e.g. "IT
+// Companies in Nepal", a genuine target keyword for a Nepal-based tech
+// company) and must never by itself be enough to win a match against a
+// temple/mountain/street photo that has nothing to do with the post's real
+// subject. Stripped from both the text sent to Pexels and the terms scored,
+// so the search and the relevance check run on what the post is actually
+// about, not on where its target market happens to be.
+const LOCATION_TERMS = new Set([
+  'nepal', 'nepali', 'nepalese', 'kathmandu', 'pokhara', 'lalitpur', 'bhaktapur',
+  'pashupatinath', 'himalaya', 'himalayan', 'himalayas', 'everest', 'annapurna',
+]);
+
 function significantWords(text) {
   return (text || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOPWORDS.has(w));
+    .filter((w) => w.length > 2 && !STOPWORDS.has(w) && !LOCATION_TERMS.has(w));
+}
+
+// Removes only place-name words from the text actually sent to Pexels'
+// search endpoint, leaving everything else — including short-but-meaningful
+// words like "AI" that significantWords' length filter drops for scoring
+// purposes — intact. Scoring and search must strip location terms the same
+// way, but search must not also inherit scoring's unrelated length/stopword
+// filtering, or a core topic keyword like "AI" would silently stop reaching
+// Pexels at all.
+function stripLocationWords(text) {
+  return (text || '')
+    .split(/\s+/)
+    .filter((w) => !LOCATION_TERMS.has(w.toLowerCase().replace(/[^a-z0-9]/g, '')))
+    .join(' ');
 }
 
 // Generic stock-photo filler that photographers tag literally as such — a
 // clean relevance score on "isolated on white background" is still a bad
 // featured image for a blog post. Penalized rather than excluded outright,
 // since a real match can still legitimately carry one of these words.
-const GENERIC_STOCK_TERMS = new Set(['isolated', 'clipart', 'vector', 'icon', 'template', 'mockup', 'copyspace', 'copy space']);
+// The literal "toy robot" cliché this file's own top comment describes as
+// the original bug is still reachable through the FALLBACK query alone:
+// 'artificial intelligence technology' has only 3 significant terms, so a
+// candidate sharing just ONE generic word ("technology", "innovation") with
+// it already scores ~0.33-0.38 — enough to clear MIN_RELEVANCE_SCORE — and
+// Pexels' own top results for that query are dominated by humanoid-robot
+// stock photography. 'robot'/'humanoid'/etc. are penalized the same way as
+// the other generic-stock terms here: a real, specific match (e.g. a title
+// genuinely about robotics) can still win on its OTHER significant words,
+// but this can no longer be the entire reason a fallback-query candidate
+// clears the bar.
+const GENERIC_STOCK_TERMS = new Set([
+  'isolated', 'clipart', 'vector', 'icon', 'template', 'mockup', 'copyspace', 'copy space',
+  'robot', 'robots', 'robotic', 'humanoid', 'cyborg', 'android', 'futuristic',
+]);
+
+// Hard exclusion, not a scoring penalty — a title containing an emotionally
+// loaded word like "struggles" or "challenges" can score a real, high
+// relevance match against a photo whose alt text uses the same word for a
+// completely different (and often sensitive/inappropriate) reason: this is
+// how "Navigating Challenges: The Struggles of AI Companies in Nepal" landed
+// a wheelchair-on-stairs accessibility-struggle photo as a blog's featured
+// image. No score is high enough to excuse this category ever appearing on
+// a client site, so a candidate matching any of these is dropped from the
+// pool entirely, before scoring runs — the query can still win on its
+// OTHER significant words against a different, real candidate, or fall
+// through to a later, broader query exactly as an empty-result page would.
+const SENSITIVE_CONTENT_TERMS = new Set([
+  'wheelchair', 'wheelchairs', 'disability', 'disabled', 'disabilities',
+  'amputee', 'amputation', 'prosthetic', 'prosthesis', 'crutches',
+  'injury', 'injured', 'wound', 'wounded', 'bleeding', 'blood',
+  'hospital', 'patient', 'ambulance', 'emergency', 'surgery', 'ill', 'illness',
+  'funeral', 'coffin', 'grave', 'grief', 'grieving', 'mourning', 'crying',
+  'depression', 'depressed', 'suicide', 'self-harm', 'addiction',
+  'violence', 'violent', 'abuse', 'assault', 'war', 'weapon', 'gun', 'combat',
+  'refugee', 'poverty', 'homeless', 'starvation', 'famine', 'disaster',
+  'nude', 'naked', 'nudity',
+]);
+
+// Word-boundary substring matching directly on the raw alt text, not
+// tokenized like significantWords — a multi-word term like "self-harm"
+// would never survive significantWords' punctuation-stripping into a single
+// token, and this check must not miss it.
+const SENSITIVE_CONTENT_PATTERN = new RegExp(
+  `\\b(${[...SENSITIVE_CONTENT_TERMS].map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`,
+  'i'
+);
+
+function hasSensitiveContent(altText) {
+  return SENSITIVE_CONTENT_PATTERN.test(altText || '');
+}
+
+// Hard exclusion, same reasoning as SENSITIVE_CONTENT_TERMS above but for a
+// different failure: a title's own ordinary English words ("store", "best")
+// can match Pexels alt text that only contains them because the photo is of
+// a real third-party company's storefront/signage — "Exploring AI Store
+// Innovations in Nepal" matched a Google Store photo on "store", and
+// "Exploring the Best IT Companies in Nepal" matched a Seattle's Best Coffee
+// sign on "best". Publishing a real, unrelated brand's storefront on a
+// client's own blog is a brand-safety problem regardless of how well the
+// surrounding words score, so any of these full brand names/phrases in a
+// candidate's alt text disqualifies it outright, the same way a sensitive-
+// content term does. Deliberately specific multi-word phrases (never a bare
+// generic word like "best" or "store" alone) so this can't gut ordinary
+// matches that just happen to use common retail vocabulary.
+const BRAND_NAME_TERMS = [
+  'google store', 'apple store', 'microsoft store', 'samsung store', 'sony store',
+  "seattle's best coffee", 'starbucks', 'best buy', "mcdonald's", 'burger king',
+  'kfc', 'subway restaurant', 'whole foods', "trader joe's", 'walmart', 'target store',
+  'costco', 'nordstrom', '7-eleven', 'ikea', 'nike store', 'adidas store',
+  'coca-cola', 'pepsi', 'amazon fulfillment', 'facebook', 'instagram logo',
+  'netflix', 'disney store', 'gucci', 'chanel', 'zara store', 'h&m store',
+  'toyota', 'honda', 'bmw', 'mercedes-benz', 'audi', 'tesla showroom',
+];
+
+const BRAND_NAME_PATTERN = new RegExp(
+  `\\b(${BRAND_NAME_TERMS.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`,
+  'i'
+);
+
+function hasBrandMention(altText) {
+  return BRAND_NAME_PATTERN.test(altText || '');
+}
+
+// Hard exclusion, same reasoning as SENSITIVE_CONTENT_TERMS/BRAND_NAME_TERMS
+// above: a Nepal-based tenant's post can score a real relevance match
+// against a photo that has nothing to do with the post's actual business
+// topic, purely because Pexels' catalog for Nepal-adjacent search terms
+// skews toward tourism/culture cliché photography — a mountain temple, a
+// weaver at a loom, someone's hands shaping pottery, a coffee-shop
+// interior. LOCATION_TERMS already stops a bare place name from winning a
+// match on its own, but a candidate can still clear the bar on OTHER
+// overlapping words while its alt text is unmistakably one of these
+// clichés — real reported complaint: a business/technology post ending up
+// illustrated with generic Nepali scenery, a cafe interior, or an
+// artisan's-hands-at-work photo, none of which represent the actual post.
+const OFF_TOPIC_CLICHE_TERMS = [
+  'temple', 'monastery', 'stupa', 'pagoda', 'prayer flag', 'prayer flags',
+  'trekking', 'sherpa', 'himalayan peak', 'mountain village', 'rural village',
+  'traditional village', 'rice paddy', 'rice terrace',
+  'cafe', 'coffee shop', 'espresso', 'cappuccino', 'latte', 'barista', 'coffee cup',
+  'handicraft', 'handicrafts', 'artisan', 'artisans', 'craftsman', 'craftswoman',
+  'handloom', 'handwoven', 'weaving', 'loom', 'pottery', 'potter', 'wood carving',
+  'woodcarving', 'embroidery', 'basket weaving', 'handmade craft',
+];
+
+const OFF_TOPIC_CLICHE_PATTERN = new RegExp(
+  `\\b(${OFF_TOPIC_CLICHE_TERMS.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`,
+  'i'
+);
+
+function isOffTopicCliche(altText) {
+  return OFF_TOPIC_CLICHE_PATTERN.test(altText || '');
+}
 
 function scoreCandidate(photo, queryTerms) {
   if (!photo?.alt) return 0;
@@ -63,8 +204,8 @@ function scoreCandidate(photo, queryTerms) {
   return score;
 }
 
-async function fetchCandidates(query, perPage) {
-  const url = `${BASE}/search?query=${encodeURIComponent(query)}&per_page=${perPage}&orientation=landscape`;
+async function fetchCandidates(query, perPage, page = 1) {
+  const url = `${BASE}/search?query=${encodeURIComponent(query)}&per_page=${perPage}&orientation=landscape&page=${page}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -127,6 +268,19 @@ export function pexelsPhotoIdFromUrl(url) {
 // `excludePhotoIds`: photo ids (see pexelsPhotoIdFromUrl) already in use
 // elsewhere on this site — skipped even if they'd otherwise win, so a new or
 // repaired post never lands on an image another post is already using.
+// A query only ever advances past page 1 when page 1's best candidate
+// didn't clear MIN_RELEVANCE_SCORE — confirmed live on site 1 (2026-09-18):
+// with 81 photo ids already excluded (site-wide usedPhotoIds, growing as the
+// site publishes more posts), the fallback query's page-1 best scored 0.30
+// (just under the 0.34 bar), while page 2 of that SAME query had a clean
+// 0.55 match. A mature site's exclusion set eventually shadows enough of
+// page 1's results that a real, on-topic, unused photo can sit just one page
+// further down — a query this generator would otherwise give up on entirely.
+// Bounded to 2 pages per query (not unbounded) since this only fires on a
+// query that already failed once, and each extra page is a real Pexels API
+// call.
+const MAX_PEXELS_PAGES = 2;
+
 export async function searchImage(queries, { perPage = 5, excludePhotoIds } = {}) {
   const list = (Array.isArray(queries) ? queries : [queries]).filter(Boolean);
   if (!configured() || !list.length) return null;
@@ -134,16 +288,27 @@ export async function searchImage(queries, { perPage = 5, excludePhotoIds } = {}
   for (const query of list) {
     const terms = significantWords(query);
     if (!terms.length) continue;
-    // eslint-disable-next-line no-await-in-loop
-    const photos = await fetchCandidates(query, perPage);
-    let best = null;
-    let bestScore = -Infinity;
-    for (const photo of photos) {
-      if (excludePhotoIds?.has(photo.id)) continue;
-      const score = scoreCandidate(photo, terms);
-      if (score > bestScore) { bestScore = score; best = photo; }
+    // Strip place names from the text actually sent to Pexels too, not just
+    // from scoring — otherwise a location word in the title (see
+    // LOCATION_TERMS) still floods the candidate pool with travel photos
+    // before relevance scoring ever gets a say.
+    const strippedQuery = stripLocationWords(query);
+    for (let page = 1; page <= MAX_PEXELS_PAGES; page++) {
+      // eslint-disable-next-line no-await-in-loop
+      const photos = await fetchCandidates(strippedQuery, perPage, page);
+      let best = null;
+      let bestScore = -Infinity;
+      for (const photo of photos) {
+        if (excludePhotoIds?.has(photo.id)) continue;
+        if (hasSensitiveContent(photo.alt)) continue;
+        if (hasBrandMention(photo.alt)) continue;
+        if (isOffTopicCliche(photo.alt)) continue;
+        const score = scoreCandidate(photo, terms);
+        if (score > bestScore) { bestScore = score; best = photo; }
+      }
+      if (best && bestScore >= MIN_RELEVANCE_SCORE) return toResult(best);
+      if (photos.length < perPage) break; // no further pages exist
     }
-    if (best && bestScore >= MIN_RELEVANCE_SCORE) return toResult(best);
   }
   return null;
 }

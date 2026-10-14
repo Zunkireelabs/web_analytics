@@ -193,15 +193,45 @@ function findReturnedJsxRoots(ast) {
         : (arg.type === 'JSXFragment' ? arg
         : (arg.type === 'ParenthesizedExpression' && arg.expression?.type === 'JSXElement') ? arg.expression
         : null);
-      if (jsx) roots.push(jsx);
+      if (jsx) roots.push({ jsx, fn: path.getFunctionParent()?.node ?? null });
     },
     ArrowFunctionExpression(path) {
       // Implicit-return arrow components: `() => <div>...</div>`
       const body = path.node.body;
-      if (body?.type === 'JSXElement') roots.push(body);
+      if (body?.type === 'JSXElement') roots.push({ jsx: body, fn: path.node });
     },
   });
   return roots;
+}
+
+// The function node a file's `export default` resolves to, or null.
+//
+// Handles both spellings React/Next codebases actually use: the inline
+// `export default function Page() {}` and the deferred `function Page() {}`
+// … `export default Page`. Only these two — anything cleverer (a HOC call, a
+// conditional export) deliberately resolves to null so the caller falls back
+// to refusing rather than guessing at a wrapped component.
+function findDefaultExportedFunction(ast) {
+  let target = null;
+  traverse(ast, {
+    ExportDefaultDeclaration(path) {
+      const decl = path.node.declaration;
+      if (decl.type === 'FunctionDeclaration' || decl.type === 'ArrowFunctionExpression' || decl.type === 'FunctionExpression') {
+        target = decl;
+        return;
+      }
+      if (decl.type !== 'Identifier') return;
+      const binding = path.scope.getBinding(decl.name);
+      const bound = binding?.path?.node;
+      if (!bound) return;
+      if (bound.type === 'FunctionDeclaration') target = bound;
+      else if (bound.type === 'VariableDeclarator'
+        && (bound.init?.type === 'ArrowFunctionExpression' || bound.init?.type === 'FunctionExpression')) {
+        target = bound.init;
+      }
+    },
+  });
+  return target;
 }
 
 // Depth-first search for the first element matching `tagNames` inside a JSX
@@ -238,11 +268,31 @@ function detectJsxContainer(fileContent, { trustedTagName = null } = {}) {
     return { ok: false, reason: 'parse-error', error: message };
   }
 
-  const roots = findReturnedJsxRoots(ast);
-  if (roots.length === 0) return { ok: false, reason: 'no-jsx-return-found', error: 'No component in this file returns JSX — nothing to anchor a content container to.' };
-  if (roots.length > 1) return { ok: false, reason: 'multiple-jsx-returns-ambiguous', error: `Found ${roots.length} separate JSX-returning functions in this file — can't tell which one is the real page component.` };
+  const jsxReturns = findReturnedJsxRoots(ast);
+  if (jsxReturns.length === 0) return { ok: false, reason: 'no-jsx-return-found', error: 'No component in this file returns JSX — nothing to anchor a content container to.' };
 
-  const root = roots[0];
+  // More than one JSX-returning function is the norm, not an anomaly: a
+  // Next.js App Router `page.tsx` routinely defines local presentational
+  // helpers alongside the page itself. What makes the page unambiguous is
+  // that it is the DEFAULT EXPORT — that is the framework's own contract for
+  // "this is the route's component", not a heuristic. So narrow by it before
+  // refusing. Only a file whose default export can't be resolved to exactly
+  // one JSX-returning function is genuinely ambiguous.
+  //
+  // Multiple returns INSIDE the page component (early returns for loading or
+  // empty states) stay ambiguous and still refuse — the framework says which
+  // function is the page, never which of its branches is the real body.
+  let roots = jsxReturns;
+  if (roots.length > 1) {
+    const defaultFn = findDefaultExportedFunction(ast);
+    const fromDefault = defaultFn ? roots.filter((r) => r.fn === defaultFn) : [];
+    if (fromDefault.length !== 1) {
+      return { ok: false, reason: 'multiple-jsx-returns-ambiguous', error: `Found ${roots.length} separate JSX-returning functions in this file — can't tell which one is the real page component.` };
+    }
+    roots = fromDefault;
+  }
+
+  const root = roots[0].jsx;
   const found = findJsxContainer(root, trustedTagName ? [trustedTagName] : ['main', 'article']);
   if (trustedTagName && !found) {
     // The learned strategy expected a specific tag that isn't here — this

@@ -9,8 +9,9 @@ import { createComponentTemplateJob, getQueuedComponentTemplateJob, createDesign
 import { getSiteById } from '../../store/read.js';
 import {
   projectAllComponentTemplates, projectComponentTemplate, stampDesignProfile,
-  isProfileUsable, isProjectable,
+  isProfileUsable, isProjectable, DESIGN_PROFILE_VERSION,
 } from '../../design-agent/lib/design-profile.js';
+import { resolveFile } from './url-file-map.js';
 
 // The generatorId every componentTemplate-derivation lesson (see
 // recordRejectedTemplateLesson below) is filed under in agent_fix_memory —
@@ -132,6 +133,25 @@ export function extractStylesheetHrefs(html) {
   return hrefs;
 }
 
+// A site built with page-scoped inline CSS (a <style> block per page,
+// rather than one linked global stylesheet — see Chayce's design profile)
+// legitimately defines its real, live classes nowhere a <link
+// rel="stylesheet"> fetch would ever see them. Without this,
+// checkTemplateFreshness reads that as "the live site no longer defines
+// this class" on every single page, because the only CSS it ever looked at
+// was an external file such a site may not even have — a false drift
+// verdict on unchanged, correctly-styled markup, not real evidence of
+// anything going stale.
+const STYLE_TAG_RE = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+export function extractInlineStyleBlocks(html) {
+  const blocks = [];
+  let m;
+  while ((m = STYLE_TAG_RE.exec(html))) {
+    if (m[1]) blocks.push(m[1]);
+  }
+  return blocks;
+}
+
 // Tailwind escapes any character that isn't valid in a bare CSS identifier
 // with a backslash when it generates the selector for a class whose name
 // contains it (e.g. `md:text-2xl` -> `.md\:text-2xl`, `w-1/2` -> `.w-1\/2`,
@@ -183,6 +203,65 @@ export function classExistsInCss(cls, css) {
     idx = css.indexOf(needle, idx + 1);
   }
   return false;
+}
+
+// The declaration-block TEXT for a class selector (everything between its
+// first matching { and }), normalized (collapsed whitespace, trimmed) so a
+// cosmetic reformat of the same CSS doesn't read as a change. Shared by
+// classIsLabelStyle (below) and checkClassRuleDrift — the same "find the
+// real rule body" primitive, previously duplicated inline in the former.
+//
+// Real gap this exists for: classExistsInCss answers "does the live site
+// still define .bg-white at all" — true even if a rebrand redefined what
+// .bg-white (or a custom CSS variable it references) actually renders as. A
+// site's HTML can keep the exact same class names forever while a design
+// system/Tailwind-config/CSS-variable change silently changes what those
+// names mean. Existence was never evidence of an unchanged VALUE.
+function extractCssRuleBody(cls, css) {
+  const needle = `.${escapeForCssSelector(cls)}`;
+  let idx = css.indexOf(needle);
+  while (idx !== -1) {
+    const after = css[idx + needle.length];
+    if (after !== undefined && !IDENT_CONTINUATION.test(after)) {
+      const open = css.indexOf('{', idx);
+      const close = open === -1 ? -1 : css.indexOf('}', open);
+      if (open !== -1 && close !== -1) return css.slice(open + 1, close).replace(/\s+/g, ' ').trim();
+    }
+    idx = css.indexOf(needle, idx + 1);
+  }
+  return null;
+}
+
+// { className: ruleBodyText } for every class that has a real rule in `css`
+// — a class extractCssRuleBody can't find a body for (custom CSS with no
+// matching selector, or purely structural/never-styled) is simply absent
+// from the result, not an error; callers compare only classes present in
+// BOTH snapshots (see checkClassRuleDrift), same "can't tell, don't guess"
+// stance as everywhere else in this module.
+export function captureClassRules(classes, css) {
+  const rules = {};
+  for (const cls of classes) {
+    const body = extractCssRuleBody(cls, css);
+    if (body != null) rules[cls] = body;
+  }
+  return rules;
+}
+
+// Compares a template's previously-captured rule bodies (stored on the stamp
+// as `verifiedClassRules` — see stampTemplateVerification) against what the
+// live CSS defines for those same classes right now. Only classes present in
+// BOTH snapshots are compared: a class that's dropped out of the live CSS
+// entirely is already caught by checkTemplateFreshness's own missingClasses
+// check, and a class with no captured rule body in the first place was never
+// asserted to be stable, so neither is this function's job to flag.
+export function checkClassRuleDrift(verifiedClassRules, liveCss) {
+  if (!verifiedClassRules || typeof verifiedClassRules !== 'object') return { drifted: [] };
+  const drifted = [];
+  for (const [cls, before] of Object.entries(verifiedClassRules)) {
+    const after = extractCssRuleBody(cls, liveCss);
+    if (after != null && after !== before) drifted.push({ cls, before, after });
+  }
+  return { drifted };
 }
 
 // Rebuilds every literal `class="..."` attribute in a template, keeping only
@@ -238,6 +317,28 @@ export function filterTemplateToLiveClasses(template, css) {
   return { template: filtered, dropped: [...dropped] };
 }
 
+// The exact CSS a real browser would load for this page — every linked
+// stylesheet plus every inline <style> block, in the same order
+// checkTemplateFreshness has always gathered them in. Factored out so there
+// is exactly ONE implementation of "get this page's real CSS": the
+// page-evidence auto-recapture path below (extractPageTypographyEvidence's
+// bare-tag-via-container fallback) also needs the live CSS, and may run with
+// no prior candidate template at all (a brand-new page with no tier
+// verified yet), so it cannot always reuse a freshness check's own `css`
+// return value — it needs to be able to gather it from scratch too, and a
+// second, slightly-different copy of this gathering logic is exactly how
+// the two would eventually drift.
+async function gatherPageCss(pageUrl, html, fetchStylesheet) {
+  const hrefs = extractStylesheetHrefs(html);
+  const cssParts = extractInlineStyleBlocks(html);
+  for (const href of hrefs) {
+    // eslint-disable-next-line no-await-in-loop
+    const css = await fetchStylesheet(resolveUrl(pageUrl, href));
+    if (css) cssParts.push(css);
+  }
+  return cssParts.join('\n');
+}
+
 // Single source of truth for "is this stored template still real" — fetches
 // the exact live page this draft is about to publish to (not some other
 // reference page), so the check reflects the exact CSS that page will
@@ -254,22 +355,88 @@ export async function checkTemplateFreshness({ pageUrl, templateEntry, fetchPage
   const html = await fetchPage(pageUrl);
   if (!html) return { ok: false, error: `Could not fetch ${pageUrl} to check its current live design.` };
 
-  const hrefs = extractStylesheetHrefs(html);
-  if (!hrefs.length) return { ok: false, error: `No <link rel="stylesheet"> found on ${pageUrl} — cannot verify the current design.` };
+  const css = await gatherPageCss(pageUrl, html, fetchStylesheet);
+  if (!css) return { ok: false, error: `No <link rel="stylesheet"> and no inline <style> block found on ${pageUrl} — cannot verify the current design.` };
 
-  const cssParts = [];
-  for (const href of hrefs) {
-    const css = await fetchStylesheet(resolveUrl(pageUrl, href));
-    if (css) cssParts.push(css);
-  }
-  if (!cssParts.length) return { ok: false, error: `Could not fetch any stylesheet linked from ${pageUrl}.` };
-
-  const css = cssParts.join('\n');
   const missingClasses = classes.filter((cls) => !classExistsInCss(cls, css));
   // `css` is included so a caller with a stale result can filter the template
   // down to what actually ships (filterTemplateToLiveClasses) without a
-  // second fetch of the exact same stylesheets.
-  return { ok: true, stale: missingClasses.length > 0, missingClasses, checkedClasses: classes, css };
+  // second fetch of the exact same stylesheets. `html` likewise, so a caller
+  // that also wants checkTemplateStructuralMatch below doesn't re-fetch the
+  // exact same page.
+  return { ok: true, stale: missingClasses.length > 0, missingClasses, checkedClasses: classes, css, html };
+}
+
+// A regex that matches this exact markup SHAPE on a real page: every
+// `{{PLACEHOLDER}}` becomes a wildcard (the real question/answer/heading
+// content there is unpredictable by design and must not be required
+// verbatim), and any run of literal whitespace becomes a whitespace-run
+// match (real repo indentation can differ trivially from the captured copy
+// without the shape having changed — same tolerance checkTemplateFreshness's
+// own class-matching already has for CSS). Every other character — tag
+// names, real attribute values, an Alpine `x-data`/`@click` directive, a
+// `<button>`/`<svg>` that a plain `<dl>` doesn't have — must match
+// literally. That literal survival is exactly the evidence this check
+// exists to require, where checkTemplateFreshness's class-existence check
+// cannot: two structurally unrelated components can share every individual
+// utility class (a flat `<dl>` and a rich Alpine accordion can both use
+// `text-2xl`, `font-normal`) while looking nothing alike.
+function structuralPattern(markup) {
+  const trimmed = (markup || '').trim();
+  // A guard against a pathological template producing a runaway regex, not
+  // a realistic limit for any real captured component — never silently
+  // "pass" on this, since that would be exactly the false confidence this
+  // check exists to prevent; the caller reports it as inconclusive instead.
+  if (!trimmed || trimmed.length > 8000) return null;
+  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const withWildcards = escaped.replace(/\\\{\\\{[A-Z_]+\\\}\\\}/g, '[\\s\\S]*?');
+  // Zero-OR-more, not one-or-more: whitespace between tags is purely
+  // cosmetic and can be added, removed, or reformatted (a repo prettify
+  // pass, minification) without the actual SHAPE changing — only literal
+  // tag/attribute text is real evidence of shape.
+  const withWhitespace = withWildcards.replace(/\s+/g, '\\s*');
+  // A tag boundary with NO whitespace in the captured copy must equally
+  // tolerate whitespace being introduced on the live page — the \s+->\s*
+  // substitution above only touches whitespace that already existed in the
+  // captured copy; this covers the opposite direction.
+  return withWhitespace.replace(/></g, '>\\s*<');
+}
+
+// Whether TEMPLATE's markup shape still exists, structurally, anywhere on
+// the given reference page — not just whether its classes resolve in CSS
+// somewhere on the site (checkTemplateFreshness's own, narrower question).
+//
+// Only safe to call against a REFERENCE page that is genuinely expected to
+// contain this component right now (the site's homepage — sitePageUrl(site),
+// the same default every self-heal/re-derivation/backfill call site above
+// already uses — or wherever the template was actually captured from). Never
+// call this against an in-progress DRAFT's own target page: that page
+// legitimately does not have the component yet, which is the entire reason
+// the draft exists — checkTemplateFreshness's own CSS-only check is correct
+// there (backend.js's apply-time gate) precisely because Tailwind ships one
+// stylesheet for the whole site, so class-existence is meaningful on ANY
+// page, while structure is only meaningful on a page that actually has the
+// real thing.
+//
+// `html` lets a caller that already fetched this page for
+// checkTemplateFreshness's own CSS check (checkTemplateFreshness's return
+// now carries it) skip a second, redundant fetch of the exact same URL.
+export async function checkTemplateStructuralMatch({ pageUrl, templateEntry, fetchPage = fetchText, html = null }) {
+  if (!templateEntry?.wrapper) return { ok: true, structurallyStale: false, missingStructure: [] };
+
+  const page = html ?? await fetchPage(pageUrl);
+  if (!page) return { ok: false, error: `Could not fetch ${pageUrl} to check its current live structure.` };
+
+  const missing = [];
+  for (const [slot, markup] of [['wrapper', templateEntry.wrapper], ['row', templateEntry.row]]) {
+    if (!markup) continue;
+    const pattern = structuralPattern(markup);
+    if (!pattern) continue; // all-placeholder, empty, or too-large a slot has no shape to check — never a false failure
+    let re;
+    try { re = new RegExp(pattern); } catch { continue; } // never let a pathological pattern crash verification
+    if (!re.test(page)) missing.push(slot);
+  }
+  return { ok: true, structurallyStale: missing.length > 0, missingStructure: missing };
 }
 
 // The same placeholder contract marker-merge.js's renderFaqHtml/
@@ -345,9 +512,19 @@ export const TEMPLATE_VERIFIED_BY = {
 // identifies the evidence — a design_generate job id, a user id, or the page
 // URL a freshness check ran against — so a later "why is this trusted?" has a
 // real answer instead of a bare boolean.
-export function stampTemplateVerification(template, { verifiedBy, verifiedRef = null, at = new Date() } = {}) {
+export function stampTemplateVerification(template, { verifiedBy, verifiedRef = null, at = new Date(), classRules = null } = {}) {
   if (!template) return template;
-  return { ...template, verifiedAt: at.toISOString(), verifiedBy, verifiedRef: verifiedRef == null ? null : String(verifiedRef) };
+  return {
+    ...template,
+    verifiedAt: at.toISOString(),
+    verifiedBy,
+    verifiedRef: verifiedRef == null ? null : String(verifiedRef),
+    // A fresh baseline every time this stamps (never merged with whatever
+    // the template happened to carry before) — a class that's since been
+    // dropped from the checked set must not leave a stale rule body sitting
+    // around to be compared against nothing on some future run.
+    verifiedClassRules: classRules || {},
+  };
 }
 
 // The single predicate the gate asks. Deliberately structural-only (is there a
@@ -414,6 +591,23 @@ function classesOnSlotElement(markup, placeholder) {
   return match ? match[1].trim().split(/\s+/).filter(Boolean) : [];
 }
 
+// True when `cls` is the element a selector actually styles (the last compound
+// of at least one selector in the rule's list), not merely an ancestor in a
+// descendant selector. `.navbar .container .phone small{font-size:9px}` styles
+// the <small>, not `.container` — treating it as a rule for `.container` made
+// every wrapper class that appears inside a footer/nav rule look like a label.
+// Also rejects a match inside a comment, where "selector" is just prose.
+function classIsSubjectOfSelector(cls, css, idx, open) {
+  const ruleStart = css.lastIndexOf('}', idx) + 1;
+  const selectorText = css.slice(ruleStart, open).replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const needle = `.${escapeForCssSelector(cls)}`;
+  return selectorText.split(',').some((sel) => {
+    const subject = sel.trim().split(/[\s>+~]+/).filter(Boolean).pop() || '';
+    const at = subject.indexOf(needle);
+    return at !== -1 && !IDENT_CONTINUATION.test(subject[at + needle.length] ?? ' ');
+  });
+}
+
 // True when the CSS defines `cls` with a rule that makes text read as a label
 // rather than prose. Scoped to the single rule block following the selector so
 // an unrelated later `text-transform` in the sheet can't produce a false
@@ -426,7 +620,7 @@ function classIsLabelStyle(cls, css) {
     if (after !== undefined && !IDENT_CONTINUATION.test(after)) {
       const open = css.indexOf('{', idx);
       const close = open === -1 ? -1 : css.indexOf('}', open);
-      if (open !== -1 && close !== -1) {
+      if (open !== -1 && close !== -1 && classIsSubjectOfSelector(cls, css, idx, open)) {
         const body = css.slice(open + 1, close);
         if (/text-transform\s*:\s*uppercase/i.test(body)) return true;
         const size = /font-size\s*:\s*([\d.]+)(rem|px|em)/i.exec(body);
@@ -684,12 +878,18 @@ export function designReviewState(site) {
 // demonstrably used for a different role) fails; a profile with no observed
 // mismatch, or no usable profile at all, passes.
 //
-// Every call is logged to design_integrity_verdicts regardless of mode, so
-// the false-positive rate can be checked against real profiles before
-// DESIGN_INTEGRITY_ENFORCE is turned on. In log-only mode (the default) a
-// failing verdict is still recorded but never blocks — see that env var's
-// own comment for why enforcement is a separate, later flip rather than
-// bundled into this same change.
+// Every call is logged to design_integrity_verdicts regardless of mode.
+// Enforcement is ON by default — matching generators/lib/design-integrity-
+// guard.js's designIntegrityEnforced(), the sibling gate on the manual-
+// generate path, which has run this way safely since it was wired in.
+// This is the ship-time twin of that gate (frontend.js/backend.js's apply,
+// the unattended path a live customer site actually depends on to catch a
+// real mismatch), so it must not default to the weaker mode: a verdict
+// proven trustworthy on the manual path is exactly as trustworthy here,
+// the same verifyProfileRoles call against the same stored profile.
+// DESIGN_INTEGRITY_ENFORCE=false remains as the escape hatch — set it if a
+// thin design-profile capture ever produces a false positive against
+// genuinely fine content; the issue stays recorded and visible either way.
 //
 // Deliberately scoped to ONE recommendation's apply call, not the whole
 // site: unlike the human sign-off it replaces, a failure here quarantines
@@ -702,7 +902,7 @@ export async function checkDesignIntegrityGate(site, { actionType = null, findin
   if (!isProfileUsable(profile)) return { ok: true, reason: 'no-profile' };
 
   const verdict = verifyProfileRoles(profile);
-  const enforced = process.env.DESIGN_INTEGRITY_ENFORCE === 'true';
+  const enforced = process.env.DESIGN_INTEGRITY_ENFORCE !== 'false';
 
   await recordDesignIntegrityVerdict({ siteId: site.id, findingId, actionType, verdict, enforced });
 
@@ -710,7 +910,23 @@ export async function checkDesignIntegrityGate(site, { actionType = null, findin
   return verdict;
 }
 
-export async function verifyTemplateAgainstLiveSite(actionType, template, { pageUrl, fetchPage, fetchStylesheet } = {}) {
+// `expectsLiveExample` is the caller's answer to "is this template CLAIMING to
+// mirror a component that already exists on the reference page?" — true for a
+// captured/stored template (the claim is the whole point of capturing it),
+// false for a freshly PROJECTED one, which composes brand-new markup for a
+// component this site may never have had.
+//
+// That distinction has to be explicit, because the structural check below is
+// only meaningful under the first reading. Applied to a projection it always
+// fails — a never-before-seen FAQ cannot already appear on the homepage — and
+// a check that can only ever say no is not a safety net, it is an outage:
+// confirmed against admizzeducation.com, where all five projected templates
+// failed structurally for exactly this reason, which would leave that site
+// (and every newly onboarded client, whose components by definition don't
+// exist yet) permanently on plain unstyled defaults. Every other check here
+// — placeholders, class existence, class-rule drift, body-slot role — is
+// valid for both kinds and still runs for both.
+export async function verifyTemplateAgainstLiveSite(actionType, template, { pageUrl, fetchPage, fetchStylesheet, expectsLiveExample = true } = {}) {
   if (!template?.wrapper) return { ok: false, reason: 'missing' };
   if (!pageUrl) return { ok: false, reason: 'unreachable', error: 'No live page URL available to verify against.' };
 
@@ -745,6 +961,51 @@ export async function verifyTemplateAgainstLiveSite(actionType, template, { page
   const label = bodySlotLooksLikeLabel(actionType, template, freshness.css);
   if (label) return { ok: false, reason: 'body-slot-is-label', error: label };
 
+  // Class existence is not structure. Every check above answers "do these
+  // classes resolve on this site somewhere" — this is the one that answers
+  // "does this template's actual SHAPE still exist on the page it claims to
+  // represent." A flat <dl> and a real Alpine accordion can share every
+  // individual class while being nothing alike; only this catches that (see
+  // checkTemplateStructuralMatch's own comment — the 2026-09-10 incident
+  // this exists to prevent).
+  //
+  // Skipped entirely for a projection (expectsLiveExample: false) — see this
+  // function's own header for why asking it there produces a guaranteed,
+  // meaningless failure rather than evidence.
+  const structural = expectsLiveExample
+    ? await checkTemplateStructuralMatch({ pageUrl, templateEntry: template, fetchPage, html: freshness.html })
+      .catch((err) => ({ ok: false, error: err.message }))
+    : { ok: true, structurallyStale: false, missingStructure: [] };
+  if (!structural.ok) return { ok: false, reason: 'unreachable', error: structural.error };
+  if (structural.structurallyStale) {
+    return {
+      ok: false, reason: 'structural-mismatch',
+      error: `This template's captured markup shape (${structural.missingStructure.join(', ')}) no longer appears anywhere on ${pageUrl} — its classes are still live, but the actual component structure doesn't match. Re-capture it from a real, current example of the component instead of trusting class-existence alone.`,
+      missingStructure: structural.missingStructure,
+    };
+  }
+
+  const currentClassRules = captureClassRules(freshness.checkedClasses, freshness.css);
+
+  // Same-name, different meaning: a class can exist AND keep the exact same
+  // markup shape while a design-system/Tailwind-config/CSS-variable change
+  // silently redefines what it renders as (a rebrand that repoints a color
+  // token, say) — checkTemplateFreshness only proves the selector still
+  // exists, never that its declaration is unchanged. Only meaningful once
+  // there's a prior baseline to compare against (verifiedClassRules is only
+  // ever written by a PASSING verification, so its absence just means this
+  // is the template's first pass — nothing to compare yet, not a failure).
+  if (template.verifiedClassRules && Object.keys(template.verifiedClassRules).length) {
+    const { drifted } = checkClassRuleDrift(template.verifiedClassRules, freshness.css);
+    if (drifted.length) {
+      return {
+        ok: false, reason: 'class-rule-drift',
+        error: `${drifted.length} class(es) still exist on ${pageUrl} but their real CSS definition changed since this template was last verified (e.g. "${drifted[0].cls}" was "${drifted[0].before}", is now "${drifted[0].after}") — a design-system/rebrand change, not a missing class. Re-verify once the new look is confirmed correct.`,
+        drifted,
+      };
+    }
+  }
+
   return {
     ok: true,
     reason: 'passed',
@@ -752,6 +1013,7 @@ export async function verifyTemplateAgainstLiveSite(actionType, template, { page
     stamped: stampTemplateVerification(template, {
       verifiedBy: TEMPLATE_VERIFIED_BY.FRESHNESS_CHECK,
       verifiedRef: pageUrl,
+      classRules: currentClassRules,
     }),
   };
 }
@@ -835,6 +1097,556 @@ export function contentWrapperAvailability(site) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// PAGE-SCOPED COMPONENT TEMPLATES
+//
+// Everything above this point treats a componentTemplates[key] entry as ONE
+// global template per site, captured/verified against a single reference
+// page (sitePageUrl(site) — the homepage) and then applied to whatever page
+// a draft happens to target. That is a correct model for a site with a real
+// shared design system (one Tailwind build, one CSS bundle, every page draws
+// from the same class vocabulary) — checkTemplateFreshness's own
+// class-existence check is meaningful on ANY page of such a site, by design.
+//
+// It silently stops being true for a site with NO shared design system at
+// all: page-scoped inline CSS, a different <style> block per page, classes
+// like `.home-h2`/`.home-section`/`.body-copy` that are only ever DEFINED on
+// the homepage. Confirmed live on chayceproperties.com (site #8864): its
+// expandContent/faq componentTemplates entries were captured with
+// `verifiedRef` pointing at the homepage and hardcode exactly those three
+// classes, which genuinely do not exist on /faq/, /news/, /about-chayce/,
+// etc. — not a "went stale since capture", a "was never true of this page in
+// the first place". Every draft targeting a non-homepage page correctly
+// failed checkTemplateFreshness and was abandoned to human review — the
+// check was doing its job, but the underlying model had no way to represent
+// "this site has no shared design system, this page is its own source of
+// truth."
+//
+// The fix is not to weaken the check (a homepage class genuinely missing
+// from /faq/'s CSS is real evidence, not a false positive) — it is to stop
+// assuming there is only ever ONE template to check, and to give a target
+// page's OWN evidence somewhere to live when it turns out to disagree with
+// the site-level one.
+//
+// Three tiers, most specific first, mirroring exactly what
+// COMPONENT_TEMPLATE_KEY already models one level up:
+//   - PAGE:      site.url_file_map.siteRoot.pageComponentTemplates[key].byUrl[pageUrl]
+//                — captured and verified against exactly this URL.
+//   - PAGE_TYPE: .byFile[filePath] — filePath is resolveFile(site, pageUrl),
+//                the SAME "which repo file renders this page" signal
+//                url-file-map.js already uses for everything else. Two URLs
+//                that resolve to the same file (every /blog/:slug post
+//                through one pattern-matched template, say) are the same
+//                page type BY CONSTRUCTION — reusing that existing signal
+//                instead of inventing a second, parallel page-type taxonomy
+//                is what makes a genuinely shared template still get reused
+//                across pages of the same type, rather than re-captured
+//                once per URL for a site that DOES share a template family.
+//   - SITE:      site.url_file_map.siteRoot.componentTemplates[key] — today's
+//                shape, completely unchanged, and still the right answer
+//                whenever it's actually verified against the shared-design
+//                sites this was always correct for (Zunkireelabs, Admizz).
+//
+// resolvePageComponentTemplate below is the one entry point that walks all
+// three tiers against the REAL target page and, only if none of them verify,
+// derives a brand-new page-specific template straight from that page's own
+// live markup (buildPageEvidenceComponentTemplate) — autonomously, so a page
+// simply having its own valid, different design is never treated as a
+// failure requiring a human, only a genuine incident (unreachable page, or a
+// page with no real styled structure to derive anything from) still is.
+
+// The file this URL maps to, per url_file_map — the existing, authoritative
+// "which template renders this page" signal (used everywhere else a page's
+// identity as a TYPE matters: resolveAdapter, checkSharedTemplateWrite).
+// Returns null exactly when resolveFile itself would (no url_file_map entry
+// matches), which every caller here treats as "no page-type grouping
+// available, fall back to page-specific only" — never as an error.
+export function pageTemplateFileKey(site, pageUrl) {
+  if (!pageUrl) return null;
+  return resolveFile(site, pageUrl) || null;
+}
+
+function pageComponentTemplateSlots(site, componentKey) {
+  return site?.url_file_map?.siteRoot?.pageComponentTemplates?.[componentKey] || {};
+}
+
+export const PAGE_COMPONENT_TEMPLATE_TIER = Object.freeze({
+  PAGE: 'page',
+  PAGE_TYPE: 'page-type',
+  SITE: 'site',
+});
+
+// Landmarks stripped before hunting for a representative heading/paragraph —
+// a nav link or a footer legal blurb is real text on the page, but neither
+// is evidence of how this site presents an FAQ answer or an expanded-content
+// paragraph. Best-effort (a plain regex, not a DOM parse — same tool this
+// whole module already uses for classExistsInCss/extractLiteralClassNames),
+// not a claim of perfect landmark detection.
+function stripLandmarks(html) {
+  return html
+    .replace(/<nav\b[\s\S]*?<\/nav>/gi, '')
+    .replace(/<header\b[\s\S]*?<\/header>/gi, '')
+    .replace(/<footer\b[\s\S]*?<\/footer>/gi, '');
+}
+
+// Attrs captured separately from the class check below (rather than
+// requiring \bclass="..." in the regex itself, as this file's earlier
+// version of these did) so a REAL, sufficiently-long heading/paragraph with
+// NO class of its own can still reach resolveElementEvidence's bare-tag
+// fallback below, instead of being invisible to this scan entirely.
+const HEADING_ANY_RE = /<h([1-3])\b([^>]*)>([\s\S]*?)<\/h\1>/gi;
+const PARAGRAPH_ANY_RE = /<p\b([^>]*)>([\s\S]*?)<\/p>/gi;
+const CLASS_ATTR_VALUE_RE = /\bclass="([^"]*)"/;
+const STRIP_TAGS_RE = /<[^>]+>/g;
+// A heading/paragraph below this length is more likely an eyebrow, a badge,
+// or a UI label than the section's real title/prose — the same "long enough
+// to be a judgment call, not a guess" bar bodySlotLooksLikeLabel's own
+// font-size heuristic exists for, just on text length instead of CSS.
+// "New", "Sale", "Featured" are all real badge/eyebrow text under this
+// length; a genuine section heading ("Frequently Asked Questions", "Our
+// Services") is essentially never this short.
+const MIN_HEADING_TEXT_LENGTH = 10;
+const MIN_BODY_TEXT_LENGTH = 30;
+// How far back from a found heading/paragraph to look for the section/div
+// that visually wraps it. A plain nearest-preceding-opening-tag scan, not a
+// real DOM ancestor walk (this module has no HTML parser, deliberately —
+// see classExistsInCss's own comment on why a substring/regex approach is
+// the house style here) — it can occasionally attribute a SIBLING's wrapper
+// to the match instead of its true parent. That is an acceptable, bounded
+// imprecision for an optional field (layout.container is CSS classes only,
+// never structural claims validated elsewhere), not for the heading/body
+// classes themselves, which this never guesses at.
+const CONTAINER_SEARCH_WINDOW = 1500;
+const CONTAINER_TAG_RE = /<(?:section|div|article)\b[^>]*\bclass="([^"]*)"/gi;
+
+function nearestPrecedingContainerClass(html, matchIndex) {
+  const before = html.slice(Math.max(0, matchIndex - CONTAINER_SEARCH_WINDOW), matchIndex);
+  let found = null;
+  let m;
+  CONTAINER_TAG_RE.lastIndex = 0;
+  while ((m = CONTAINER_TAG_RE.exec(before))) found = m[1].trim();
+  return found || null;
+}
+
+// Whether the page's real CSS confirms that `.containerClass` genuinely
+// styles `tag` via a descendant/compound selector chain — the bare-tag-
+// selector counterpart to classExistsInCss's real-selector-boundary
+// discipline above. Real, live incident this exists for: Chayce Properties'
+// /get-started/index.html?package=... pages (fetched live 2026-09-18) style
+// their hero heading and lead paragraph with ZERO classes on the tags
+// themselves — `<h1>...</h1>`, bare `<p>...</p>` — entirely via container-
+// scoped rules in the page's own inline <style> block: `.gs-hero h1{...}`,
+// `.gs-rec p{...}`. classExistsInCss alone can never confirm this (there is
+// no class on the element to look up), and extractPageTypographyEvidence's
+// class-only search returned null for the WHOLE page as a result, even
+// though real, verifiably-styled prose was sitting right there.
+//
+// Deliberately requires TAG to be the RIGHTMOST simple selector in the
+// chain, not merely present anywhere in it — `.gs-hero h1 em` is a real
+// rule in that same stylesheet, and it styles `em`, not `h1`; `h1` there is
+// only an ANCESTOR of the actual target. Crediting that as evidence that
+// `.gs-hero` styles `h1` directly would be an unverified inference, exactly
+// the kind of guess this module's "real or nothing" discipline throughout
+// (see classExistsInCss's, extractCssRuleBody's own comments) refuses to
+// make. A bare regex split on whitespace, not a real CSS selector parser —
+// same accepted "no real parser, a real boundary check instead" trade this
+// file already makes everywhere else — so a combinator written without
+// surrounding whitespace (`.gs-hero>h1`) or a selector inside an at-rule
+// this simple brace-matching regex mishandles is a known, bounded gap, not
+// a silent wrong answer: worst case this returns false (no evidence found)
+// on a real rule it couldn't parse, never true for one that isn't there.
+const CSS_RULE_RE = /([^{}]+)\{[^{}]*\}/g;
+function tagStyledViaContainer(tag, containerClass, css) {
+  if (!tag || !containerClass || !css) return false;
+  const containerNeedle = `.${escapeForCssSelector(containerClass)}`;
+  CSS_RULE_RE.lastIndex = 0;
+  let m;
+  while ((m = CSS_RULE_RE.exec(css))) {
+    for (const rawSelector of m[1].split(',')) {
+      const parts = rawSelector.trim().split(/\s+/).filter(Boolean);
+      if (!parts.length) continue;
+      const last = parts[parts.length - 1];
+      if (last.toLowerCase() !== tag.toLowerCase()) continue; // this rule's real target isn't `tag`
+      const ancestorChain = parts.slice(0, -1).join(' ');
+      let idx = ancestorChain.indexOf(containerNeedle);
+      while (idx !== -1) {
+        const after = ancestorChain[idx + containerNeedle.length];
+        if (after === undefined || !IDENT_CONTINUATION.test(after)) return true;
+        idx = ancestorChain.indexOf(containerNeedle, idx + 1);
+      }
+    }
+  }
+  return false;
+}
+
+function classOf(attrs) {
+  const m = CLASS_ATTR_VALUE_RE.exec(attrs);
+  return m ? m[1].trim() : null;
+}
+
+// Resolves real evidence for ONE candidate element the caller has already
+// confirmed is real, sufficiently long text (see MIN_HEADING_TEXT_LENGTH/
+// MIN_BODY_TEXT_LENGTH at the call sites). A literal class is the existing,
+// highest-confidence evidence and needs no CSS lookup at all. Failing that,
+// and only when `css` is available to actually confirm it, falls back to
+// tagStyledViaContainer above — never a guess: a class-less candidate with
+// no confirmable container evidence returns null, and the caller's scan
+// continues to the next real candidate on the page rather than giving up at
+// the first one that doesn't pan out.
+function resolveElementEvidence({ attrs, tag, index, body, css }) {
+  const cls = classOf(attrs);
+  if (cls) return { class: cls };
+  if (!css) return null;
+  const containerClass = nearestPrecedingContainerClass(body, index);
+  if (!containerClass) return null;
+  return tagStyledViaContainer(tag, containerClass, css) ? { tag, containerClass } : null;
+}
+
+// The page-specific counterpart to what a full design-profile CAPTURE
+// (Playwright, geometry, computed styles — server/design-agent/live-analysis/
+// capture.js) does at the whole-site level, scaled down to "find one real
+// heading and one real paragraph on THIS page and read real evidence of how
+// they're styled" — no browser, just the fetched HTML (and, when available,
+// the real live CSS) checkTemplateFreshness/gatherPageCss already work with.
+// Returns null (never a partial/invented guess) when either slot can't be
+// found with real evidence of ANY kind.
+//
+// `css` is optional (defaults to null) purely for backward compatibility —
+// every existing caller/test that only ever passed `html` keeps working
+// exactly as before, just without the bare-tag fallback below (which needs
+// real CSS to confirm anything). resolvePageComponentTemplate, the one real
+// caller, always has CSS in hand (gatherPageCss) by the time it calls this.
+export function extractPageTypographyEvidence(html, css = null) {
+  if (!html) return null;
+  const body = stripLandmarks(html);
+
+  let headingEvidence = null;
+  let headingIndex = null;
+  HEADING_ANY_RE.lastIndex = 0;
+  let m;
+  while ((m = HEADING_ANY_RE.exec(body))) {
+    const text = m[3].replace(STRIP_TAGS_RE, '').trim();
+    if (text.length < MIN_HEADING_TEXT_LENGTH) continue;
+    const evidence = resolveElementEvidence({ attrs: m[2], tag: `h${m[1]}`, index: m.index, body, css });
+    if (evidence) { headingEvidence = evidence; headingIndex = m.index; break; }
+  }
+  if (!headingEvidence) return null;
+
+  let bodyEvidence = null;
+  let bodyIndex = null;
+  PARAGRAPH_ANY_RE.lastIndex = 0;
+  while ((m = PARAGRAPH_ANY_RE.exec(body))) {
+    const text = m[2].replace(STRIP_TAGS_RE, '').trim();
+    if (text.length < MIN_BODY_TEXT_LENGTH) continue;
+    const evidence = resolveElementEvidence({ attrs: m[1], tag: 'p', index: m.index, body, css });
+    if (evidence) { bodyEvidence = evidence; bodyIndex = m.index; break; }
+  }
+  if (!bodyEvidence) return null;
+
+  // The legacy, class-scoped container reading — kept exactly as before
+  // (used by buildPageEvidenceComponentTemplate's existing both-classed
+  // path below) even when one or both slots resolved via the new bare-tag
+  // fallback instead: still real, non-invented evidence (the nearest real
+  // wrapper either match sits inside), just not always the field that
+  // fallback path actually needs (headingContainerClass/bodyContainerClass
+  // below carry that).
+  const containerClass = nearestPrecedingContainerClass(body, Math.min(headingIndex, bodyIndex))
+    || nearestPrecedingContainerClass(body, headingIndex)
+    || null;
+
+  return {
+    headingClass: headingEvidence.class || null,
+    bodyClass: bodyEvidence.class || null,
+    containerClass,
+    // Set only when this slot resolved via the bare-tag/container fallback
+    // (never both a .class and a .tag on the same evidence object) — see
+    // buildPageEvidenceComponentTemplate for how each combination renders.
+    headingTag: headingEvidence.tag || null,
+    headingContainerClass: headingEvidence.tag ? headingEvidence.containerClass : null,
+    bodyTag: bodyEvidence.tag || null,
+    bodyContainerClass: bodyEvidence.tag ? bodyEvidence.containerClass : null,
+  };
+}
+
+// Turns page evidence into a real componentTemplate. Two distinct paths:
+//
+// 1. BOTH slots carry a literal class (the original, highest-confidence
+//    shape) — reuses design-profile.js's own PROJECTORS (projectComponentTemplate)
+//    against a minimal, honest "profile" built from ONLY this one page's
+//    real classes, never the site's aggregated designProfile, which is
+//    exactly the thing that's wrong for a page-scoped-CSS site. Unchanged
+//    from before this function also handled bare-tag evidence, byte-for-byte.
+//
+//    layout.container falls back to the empty string (never undefined) when
+//    no wrapping element was found — cx() already drops empty/falsy
+//    fragments cleanly, so the projected wrapper simply carries no extra
+//    container class rather than one invented from nothing.
+//    validateDesignProfile requires layout.container OR layout.prose to be
+//    truthy, so a page with no discoverable container still needs a
+//    non-empty value here; falling back to the body's own class (real,
+//    non-invented — it is the innermost real wrapper this evidence found)
+//    rather than failing the whole derivation over a missing outer <div> is
+//    the same "don't let cosmetic markup shallowness block a real,
+//    otherwise-good capture" call filterTemplateToLiveClasses makes
+//    elsewhere in this file.
+//
+// 2. Either slot resolved via the bare-tag/container fallback instead (see
+//    extractPageTypographyEvidence) — CANNOT route through path 1's
+//    pseudoProfile/PROJECTORS machinery: validateDesignProfile requires
+//    typography.body and typography.heading.item to be TRUTHY, non-empty
+//    strings, and a class-less slot's honest value is an empty string,
+//    which that check correctly rejects as "no design language to project."
+//    Weakening validateDesignProfile itself to accept an empty string would
+//    also let a genuinely BROKEN class-based profile (a rebrand that
+//    silently dropped a real class down to "") through unnoticed at every
+//    other call site that check protects — not an acceptable trade for this
+//    one caller. So this composes the markup DIRECTLY instead, mirroring
+//    the exact same tag/nesting SHAPE projectExpandContent already produces
+//    (a <section> row inside a classed wrapper <div>) — just preserving the
+//    REAL tag literally wherever there is no class (a bare-tag CSS rule is
+//    tag-SPECIFIC: `.gs-hero h1` will never match an emitted `<h2>` the way
+//    a literal class matches on any tag), and emitting no class attribute
+//    at all on a slot this evidence confirmed genuinely has none of its own.
+//    'expand-content' and 'qa-content' are supported — faq's row shape (an
+//    Alpine accordion trigger/panel) doesn't reduce to "one bare tag inside
+//    one container" the way expand-content's plain heading+paragraph row
+//    does, and forcing it through this same shape would be a guess about
+//    structure this evidence never actually observed, not a derivation from
+//    it. qa-content's native shape (a <details>/<summary> disclosure, see
+//    marker-merge.js's DEFAULT_QA_TEMPLATE) DOES reduce to exactly this —
+//    one heading-ish tag (the summary's question) and one body tag (the
+//    answer) — so it reuses the same bare-tag evidence, just wrapped in its
+//    own real markup shape. Added 2026-09-22: real incident, Chayce
+//    Properties (site 8864) — every SITE-tier qaContent template captured
+//    from the homepage fails checkTemplateFreshness on every other page
+//    (Chayce's CSS classes are page-scoped, see the classOf/PAGE-SCOPED
+//    comments elsewhere in this file), forcing recapture on every qa-content
+//    draft; recapture found real, confirmed bare-tag evidence
+//    (`.container h1`/`.container p` selectors) but this function refused it
+//    solely because actionType was 'qa-content', not because the evidence
+//    itself was any less real than what expand-content already accepts —
+//    154 abandoned drafts, ~40 of them this exact cause, confirmed still
+//    firing daily before this fix.
+const BARE_TAG_ACTION_TYPES = new Set(['expand-content', 'qa-content']);
+
+export function buildPageEvidenceComponentTemplate(actionType, evidence) {
+  if (!isProjectable(actionType) || !evidence) return null;
+
+  if (evidence.headingClass && evidence.bodyClass) {
+    const pseudoProfile = {
+      version: DESIGN_PROFILE_VERSION,
+      typography: {
+        body: evidence.bodyClass,
+        heading: { item: evidence.headingClass, section: evidence.headingClass },
+      },
+      layout: { container: evidence.containerClass || evidence.bodyClass },
+      spacing: {},
+      components: {},
+    };
+    if (!isProfileUsable(pseudoProfile)) return null;
+    return projectComponentTemplate(pseudoProfile, actionType);
+  }
+
+  if (!BARE_TAG_ACTION_TYPES.has(actionType)) return null;
+  const headingUsable = evidence.headingClass || (evidence.headingTag && evidence.headingContainerClass);
+  const bodyUsable = evidence.bodyClass || (evidence.bodyTag && evidence.bodyContainerClass);
+  if (!headingUsable || !bodyUsable) return null;
+
+  // The one real, confirmed container class this row's markup must be
+  // nested inside for a bare-tag descendant-selector rule (`.gs-hero h1`)
+  // to actually match once this row is spliced elsewhere on the page — CSS
+  // descendant selectors match by ancestry anywhere in the DOM, never by
+  // original page position, so reusing this real class on a brand-new
+  // wrapper elsewhere on the page is exactly as valid as the class-based
+  // path above already assumes for a literal class. Prefers whichever slot
+  // actually NEEDS a container (a class-based slot needs none at all), then
+  // falls back to the same generic reading path 1 already accepts.
+  const wrapperClass = evidence.bodyContainerClass || evidence.headingContainerClass
+    || evidence.containerClass || evidence.bodyClass || evidence.headingClass || '';
+  if (!wrapperClass) return null; // no real class anywhere to ground this markup in — nothing safe to derive
+
+  const headingTag = evidence.headingClass ? 'h2' : evidence.headingTag;
+  const headingAttr = evidence.headingClass ? ` class="${evidence.headingClass}"` : '';
+  const bodyTag = evidence.bodyClass ? 'div' : evidence.bodyTag;
+  const bodyAttr = evidence.bodyClass ? ` class="${evidence.bodyClass}"` : '';
+
+  // qa-content's real, native shape is a <details>/<summary> disclosure (see
+  // DEFAULT_QA_TEMPLATE, marker-merge.js) — not expand-content's flat
+  // <section>. The heading tag becomes the question label inside <summary>,
+  // the body tag becomes the answer panel, same real evidence either way.
+  if (actionType === 'qa-content') {
+    return {
+      wrapper: `<div class="${wrapperClass}">\n{{ROWS}}\n</div>`,
+      row: `  <details>\n    <summary>\n      <${headingTag}${headingAttr}>{{QUESTION}}</${headingTag}>\n    </summary>\n    <${bodyTag}${bodyAttr}>{{ANSWER}}</${bodyTag}>\n  </details>`,
+    };
+  }
+
+  return {
+    wrapper: `<div class="${wrapperClass}">\n{{ROWS}}\n</div>`,
+    row: `  <section>\n    <${headingTag}${headingAttr}>{{HEADING}}</${headingTag}>\n    <${bodyTag}${bodyAttr}>{{BODY}}</${bodyTag}>\n  </section>`,
+  };
+}
+
+// The one entry point every apply-time caller should use instead of reading
+// componentTemplates[key] directly (backend.js previously did exactly that,
+// unconditionally checking the SITE tier against whatever page a draft
+// happened to target — see this section's header for why that's wrong for a
+// page-scoped-CSS site). Walks PAGE -> PAGE_TYPE -> SITE, most specific
+// first, using checkTemplateFreshness's plain class-existence check — the
+// SAME check and the SAME semantics backend.js's apply-time gate always used
+// (never checkTemplateStructuralMatch/verifyTemplateAgainstLiveSite's full
+// contract here: the target page legitimately doesn't have this component
+// yet, which is the entire reason the draft exists — see
+// checkTemplateStructuralMatch's own header for why that check is only ever
+// meaningful against a page already expected to contain the real thing).
+//
+// Only when NONE of the three tiers verify does this fall through to
+// deriving a brand-new page-specific template from the target page's own
+// live markup and VERIFYING that (verifyTemplateAgainstLiveSite,
+// expectsLiveExample: false — same contract the site-level design-profile
+// projection path already uses in resolveOrCreateComponentTemplate, since
+// this is also a projection, not a claimed-to-already-exist capture). A
+// successful derivation is persisted so every later draft against this same
+// URL — and, via the PAGE_TYPE tier, every other URL this site's own
+// url_file_map says shares the same template file — reuses it instead of
+// re-deriving from scratch.
+export async function resolvePageComponentTemplate(site, actionType, pageUrl, {
+  fetchPage = fetchText,
+  fetchStylesheet = fetchText,
+  saveConfig = updateSiteRepoConfig,
+  recordAudit = recordAuditEvent,
+} = {}) {
+  const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
+  if (!componentKey) return { ok: true, reason: 'no-concept', template: null, tier: null, componentKey: null };
+  if (!pageUrl) return { ok: true, reason: 'no-page', template: site?.url_file_map?.siteRoot?.componentTemplates?.[componentKey] || null, tier: PAGE_COMPONENT_TEMPLATE_TIER.SITE, componentKey };
+
+  const fileKey = pageTemplateFileKey(site, pageUrl);
+  const slots = pageComponentTemplateSlots(site, componentKey);
+  const candidates = [
+    { tier: PAGE_COMPONENT_TEMPLATE_TIER.PAGE, template: slots.byUrl?.[pageUrl] || null },
+    { tier: PAGE_COMPONENT_TEMPLATE_TIER.PAGE_TYPE, template: fileKey ? slots.byFile?.[fileKey] || null : null },
+    { tier: PAGE_COMPONENT_TEMPLATE_TIER.SITE, template: site?.url_file_map?.siteRoot?.componentTemplates?.[componentKey] || null },
+  ];
+
+  // Reused for the recapture step below when every tier turns out stale —
+  // checkTemplateFreshness already fetched this exact page (and its real
+  // CSS) and returns both, so the recapture derivation doesn't need a
+  // second round trip to the same URL/stylesheets for the common case
+  // (every tier genuinely stale, page reachable). Only ever set from a
+  // successful (ok: true) check, and always set together — both come from
+  // the same single checkTemplateFreshness call each iteration.
+  let fetchedHtml = null;
+  let fetchedCss = null;
+  for (const candidate of candidates) {
+    if (!candidate.template?.wrapper) continue;
+    // eslint-disable-next-line no-await-in-loop
+    const freshness = await checkTemplateFreshness({ pageUrl, templateEntry: candidate.template, fetchPage, fetchStylesheet })
+      .catch((err) => ({ ok: false, error: err.message }));
+    if (!freshness.ok) {
+      // Infra failure reaching the live page at all — fails OPEN exactly like
+      // checkTemplateFreshness's own contract always has (a network blip is
+      // not evidence a template is bad), so this tries the candidate as-is
+      // rather than burning an auto-recapture attempt on a page we could not
+      // even fetch. Every candidate below this one would fail the same
+      // fetch, so returning here rather than looping is not a missed check.
+      return { ok: true, template: candidate.template, tier: candidate.tier, source: 'existing-unverified-infra', componentKey };
+    }
+    if (!freshness.stale) {
+      return { ok: true, template: candidate.template, tier: candidate.tier, source: 'existing', componentKey };
+    }
+    fetchedHtml = freshness.html || fetchedHtml;
+    fetchedCss = freshness.css || fetchedCss;
+    // stale: a MORE SPECIFIC tier being wrong (e.g. a page-specific template
+    // whose page has since been redesigned) must not stop a still-good, more
+    // general tier from being tried — only exhausting every tier justifies
+    // recapture.
+  }
+
+  // AUTO-RECAPTURE — no existing tier verifies against this exact page. This
+  // is the autonomous-reconciliation path point 6/7 of the fix ask for:
+  // derive fresh evidence from the real target page and retry, rather than
+  // abandoning the draft to human review just because one page's design
+  // legitimately differs from (or has drifted from) what was captured
+  // elsewhere.
+  const html = fetchedHtml || await fetchPage(pageUrl);
+  if (!html) {
+    return {
+      ok: false, reason: 'unreachable', componentKey,
+      error: `Could not fetch ${pageUrl} to derive or verify a "${componentKey}" component template for it.`,
+    };
+  }
+  // Needed for extractPageTypographyEvidence's bare-tag-via-container
+  // fallback below (see its own comment) — gathered fresh via the same
+  // single implementation checkTemplateFreshness itself uses (gatherPageCss)
+  // when no candidate loop iteration already supplied it (a page with no
+  // existing template at ANY tier never enters that loop's body at all).
+  const css = fetchedCss || await gatherPageCss(pageUrl, html, fetchStylesheet);
+
+  const evidence = extractPageTypographyEvidence(html, css);
+  const derived = evidence && buildPageEvidenceComponentTemplate(actionType, evidence);
+  if (!derived) {
+    return {
+      ok: false, reason: 'no-page-evidence', componentKey,
+      error: `Could not find a real, styled heading and paragraph on ${pageUrl} to derive a "${componentKey}" `
+        + 'component template from — this page may not carry enough of its own markup structure to safely generate '
+        + 'this content onto it. This needs a human to add real, styled markup this page can be grounded in.',
+    };
+  }
+
+  const verified = await verifyTemplateAgainstLiveSite(actionType, derived, { pageUrl, fetchPage, fetchStylesheet, expectsLiveExample: false })
+    .catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
+  if (!verified.ok) {
+    return {
+      ok: false, componentKey,
+      reason: verified.reason || 'derivation-failed',
+      error: verified.error || `A component template derived from ${pageUrl}'s own real markup did not verify against the page's own live design.`,
+    };
+  }
+
+  const stamped = { ...verified.stamped, tier: fileKey ? PAGE_COMPONENT_TEMPLATE_TIER.PAGE_TYPE : PAGE_COMPONENT_TEMPLATE_TIER.PAGE, sourcePage: pageUrl };
+  const existingStore = site?.url_file_map?.siteRoot?.pageComponentTemplates || {};
+  const existingForKey = existingStore[componentKey] || {};
+  const urlFileMap = {
+    ...site.url_file_map,
+    siteRoot: {
+      ...site.url_file_map?.siteRoot,
+      pageComponentTemplates: {
+        ...existingStore,
+        [componentKey]: {
+          byUrl: { ...existingForKey.byUrl, [pageUrl]: stamped },
+          // Promoted to the PAGE_TYPE slot too whenever this page maps to a
+          // known repo file, so every OTHER url_file_map-mapped URL sharing
+          // that same file (a blog-post pattern, a location-page pattern)
+          // benefits from this capture immediately rather than each needing
+          // its own draft to hit this same fallback path once independently.
+          ...(fileKey ? { byFile: { ...existingForKey.byFile, [fileKey]: stamped } } : (existingForKey.byFile ? { byFile: existingForKey.byFile } : {})),
+        },
+      },
+    },
+  };
+  await saveConfig({ siteId: site.id, urlFileMap }).catch((err) => {
+    console.error(`[design-drift] could not persist page-specific "${componentKey}" template for site ${site.id} / ${pageUrl}:`, err.message);
+  });
+  await recordAudit(systemActorReq(site.id), {
+    action: 'tenant.page_component_template_captured',
+    targetType: 'site',
+    targetId: String(site.id),
+    tenantSiteId: site.id,
+    tenantName: site.name,
+    metadata: { actionType, componentKey, pageUrl, fileKey, checkedClasses: verified.checkedClasses?.length ?? 0 },
+    success: true,
+  }).catch(() => {});
+
+  return {
+    ok: true,
+    template: stamped,
+    tier: fileKey ? PAGE_COMPONENT_TEMPLATE_TIER.PAGE_TYPE : PAGE_COMPONENT_TEMPLATE_TIER.PAGE,
+    source: 'captured-from-page',
+    componentKey,
+    justCaptured: true,
+  };
+}
+
 // LEARN side of the loop this module's RETRIEVE half (resolveOrCreateComponentTemplate
 // below) already reads from. Single source of truth for what a rejected-template lesson looks
 // like — called from resolveOrCreateComponentTemplate below, the sole
@@ -849,7 +1661,19 @@ export function contentWrapperAvailability(site) {
 // in this codebase requires — same shape action-center.js uses to record a
 // Quality Gate hit. Never lets a memory-write failure block the caller —
 // same fail-open discipline as everywhere else this table is touched.
-export function recordRejectedTemplateLesson({ siteId, actionType, error, recordFixOutcomeFn = recordFixOutcome }) {
+export function recordRejectedTemplateLesson({
+  siteId, actionType, error, recordFixOutcomeFn = recordFixOutcome,
+  // The retrievable twin: the row below is filed under a generator id no
+  // lookup ever asks for, so it was never read back. This one is keyed to the
+  // tenant's design knowledge, which the profile extractor does read.
+  recordDesignFailureFn = async (...a) => (await import('../../store/design-knowledge.js')).recordDesignFailure(...a),
+}) {
+  Promise.resolve(recordDesignFailureFn(siteId, {
+    patternId: 'template-missing-placeholder', component: 'component-template',
+    detail: `"${actionType}" template: ${error}`,
+    correction: `Keep every placeholder required for "${actionType}" verbatim in the derived template`,
+    validation: { passed: false, gate: 'template-placeholders' },
+  })).catch(() => {});
   return recordFixOutcomeFn({
     category: 'content', scope: 'client', siteId, generatorId: DESIGN_AGENT_GENERATOR_ID,
     validationRuleId: `missing-placeholders:${actionType}`, outcome: 'success', sourceType: 'runtime-auto',
@@ -945,6 +1769,22 @@ export const DESIGN_CONTEXT_GENERATOR_IDS = new Set([
   'blog-outline', 'landing-page', 'cookie-policy', 'privacy-policy', 'terms-of-service',
 ]);
 
+// Generators verified to never emit rendered markup/classes at all — only
+// meta values, JSON-LD, a config file, or (blog-image) a frontmatter image
+// field. design-integrity-guard.js's findDesignIntegrityIssues reports on
+// whether a generator's output "would render using" a mismatched class, a
+// claim that is simply false for any of these, so they're excluded rather
+// than included: unlike DESIGN_CONTEXT_GENERATOR_IDS above (an allowlist for
+// prose grounding, additive and harmless to under-include), this is a
+// deny-list — a generator belongs here only when its own implementer file
+// confirms it produces no visible styling, so a new generator defaults to
+// GETTING the check rather than silently skipping it.
+export const NO_MARKUP_GENERATOR_IDS = new Set([
+  'meta-title', 'schema', 'canonical', 'sitemap', 'robots-fix', 'robots-bootstrap', 'security-headers',
+  'html-lang', 'viewport', 'open-graph', 'llms-txt', 'analytics-install',
+  'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'geo-audit', 'blog-image',
+]);
+
 // The shared design-intelligence layer's RETRIEVE half — mirrors
 // agent-memory.js's withAgentMemory exactly (same signature shape, same
 // "append a grounding block to the system prompt, fail open on any error"
@@ -995,6 +1835,10 @@ export async function persistDesignProfile(site, rawProfile, {
   saveConfig = updateSiteRepoConfig,
   recordAudit = recordAuditEvent,
   persistTemplatesFn = persistDerivedComponentTemplates,
+  // Resolves siteRoot.inlineProse from the site's own human-written articles.
+  // null (the default) when INLINE_PROSE_AUTODETECT is off, so every existing
+  // caller and test is unchanged.
+  detectInlineProseFn = null,
 } = {}) {
   const profile = stampDesignProfile(rawProfile, {
     derivedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT,
@@ -1026,7 +1870,43 @@ export async function persistDesignProfile(site, rawProfile, {
   const projected = projectAllComponentTemplates(profile);
   const result = await persistTemplatesFn(siteWithProfile, projected, { jobId });
 
-  return { ok: true, profile, projected: result?.saved || {}, rejected: result?.rejected || [] };
+  // After the profile and templates are safely saved: the mode is a refinement
+  // and must never put them at risk. Lazy import — the detector pulls in the
+  // browser layer, which nothing else in this module needs.
+  let inlineProse = null;
+  const autodetect = detectInlineProseFn
+    || ((await import('../../design-agent/live-analysis/inline-prose-detect.js')).isInlineProseAutodetectEnabled()
+      ? (await import('../../design-agent/live-analysis/inline-prose-detect.js')).detectInlineProseMode
+      : null);
+  if (autodetect) {
+    const { applyInlineProseDetection } = await import('../../design-agent/live-analysis/inline-prose-detect.js');
+    inlineProse = await applyInlineProseDetection({ site: siteWithProfile, profile, saveConfig, detect: autodetect });
+  }
+
+  return { ok: true, profile, projected: result?.saved || {}, rejected: result?.rejected || [], ...(inlineProse ? { inlineProse } : {}) };
+}
+
+// The cheap sibling of persistDesignProfile above: the weekly rescan's fresh
+// capture matched the stored baseline (compareSectionsToProfile found no
+// meaningful drift in live-analysis-handler.js), so there is nothing new to
+// derive and nothing to re-project — only `lastCheckedAt` moves, so the next
+// operator looking at the stored profile can tell the check actually ran
+// this week rather than the profile being stale/abandoned. Deliberately does
+// NOT call stampDesignProfile (that stamps derivedAt/derivedBy/derivedRef,
+// which would misrepresent a skip as a fresh derivation) and does NOT
+// re-project component templates (projectAllComponentTemplates over an
+// unchanged profile can only ever reproduce what's already saved).
+export async function refreshDesignProfileCheckedAt(site, storedProfile, {
+  at = new Date(),
+  saveConfig = updateSiteRepoConfig,
+} = {}) {
+  const profile = { ...storedProfile, lastCheckedAt: at.toISOString() };
+  const urlFileMap = {
+    ...site.url_file_map,
+    siteRoot: { ...site.url_file_map?.siteRoot, designProfile: profile },
+  };
+  await saveConfig({ siteId: site.id, urlFileMap });
+  return { ok: true, profile };
 }
 
 export async function persistDerivedComponentTemplates(site, componentTemplates, {
@@ -1294,7 +2174,10 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
 
       const pageUrl = sitePageUrl(site);
       if (pageUrl) {
-        const checked = await verifyTemplateAgainstLiveSite(actionType, projected, { pageUrl, fetchPage, fetchStylesheet })
+        // A PROJECTION, not a capture: it composes new markup rather than
+        // claiming to mirror something already on the page, so the structural
+        // shape check is skipped (see verifyTemplateAgainstLiveSite's header).
+        const checked = await verifyTemplateAgainstLiveSite(actionType, projected, { pageUrl, fetchPage, fetchStylesheet, expectsLiveExample: false })
           .catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
 
         if (checked.ok) {
@@ -1306,7 +2189,7 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
           // here rather than re-fetched, since it is the same page.
           const filtered = filterTemplateToLiveClasses(projected, checked.css || '');
           const reChecked = validatePlaceholders(actionType, filtered.template).ok
-            ? await verifyTemplateAgainstLiveSite(actionType, filtered.template, { pageUrl, fetchPage, fetchStylesheet })
+            ? await verifyTemplateAgainstLiveSite(actionType, filtered.template, { pageUrl, fetchPage, fetchStylesheet, expectsLiveExample: false })
                 .catch(() => ({ ok: false }))
             : { ok: false };
           if (reChecked.ok) {
@@ -1324,6 +2207,30 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
         // DESIGN_AGENT defaults untouched — this branch already re-validated
         // placeholders before verifying, so 'invalid-placeholders' here would
         // only mean the LIVE check disagreed, which should never happen.
+        //
+        // 'structural-mismatch' cannot reach this branch at all any more —
+        // superseded design decision, kept here as a record of why: an
+        // earlier version of this fix (see git history) blocked on that
+        // verdict the same way 'body-slot-is-label' does below. That turned
+        // out to be wrong in a different way: a projected template composes
+        // BRAND-NEW markup for a component the site may never have had
+        // before (its first-ever FAQ), so "does this exact shape already
+        // appear on the reference page" is unanswerable-by-construction for
+        // every projection, always. Confirmed live: admizzeducation.com
+        // failed this check on ALL FIVE of its projected templates, which
+        // would have left it — and every future newly-onboarded client,
+        // whose components by definition don't exist yet — permanently on
+        // plain unstyled defaults. The actual fix is one level up:
+        // verifyTemplateAgainstLiveSite is called with
+        // `expectsLiveExample: false` for every projection (see the two
+        // call sites above), which skips checkTemplateStructuralMatch
+        // entirely rather than running it and then hoping to handle its
+        // only-ever-failing verdict correctly here. The admizzeducation.com
+        // incident this was written for is still fixed — by the classes/
+        // role checks that DO run, plus the profile-level fixes in
+        // profile-extract.js (correctHeadingTypography's item-vs-section
+        // cap, correctSpacing's fixed-height rejection) that stop a bad
+        // value from being projected in the first place.
         //
         // 'body-slot-is-label' is the one verdict that must NOT fall through.
         // Every other failure here means "we could not confirm this template",

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { fingerprintSet, computeMissingUrls, buildMissingUrlsFinding } from './sitemap-diff.js';
+import { fingerprintSet, computeMissingUrls, buildMissingUrlsFinding, verifyMissingUrls, dominantHost, isSitemapCandidate } from './sitemap-diff.js';
 
 // Pure logic only — no DB/HTTP involved, so every case here runs without a
 // real database. The DB-fetching wrapper (agents/sitemap.js's run()) is
@@ -136,5 +136,47 @@ describe('buildMissingUrlsFinding', () => {
   test('recommendedAction carries exactly the missing URLs, so the generator never has to re-derive them', () => {
     const finding = buildMissingUrlsFinding({ sitemapPath: 'x', missingUrls: ['/a/'], orphanedUrls: [] });
     assert.deepEqual(finding.recommendedAction.params.missingUrls, ['/a/']);
+  });
+});
+
+describe('live verification of missing URLs', () => {
+  const live = (u, extra = {}) => ({ url: u, verdict: 'live', status: 200, canonical: null, ...extra });
+
+  test('dominantHost picks the host most sitemap entries use', () => {
+    assert.equal(dominantHost([{ loc: 'https://a.com/1' }, { loc: 'https://a.com/2' }, { loc: 'https://www.a.com/3' }]), 'a.com');
+    assert.equal(dominantHost([]), null);
+  });
+
+  test('isSitemapCandidate rejects query strings and other hosts', () => {
+    assert.equal(isSitemapCandidate('https://a.com/x/', 'a.com'), true);
+    assert.equal(isSitemapCandidate('https://a.com/x/?y=1', 'a.com'), false);
+    assert.equal(isSitemapCandidate('https://www.a.com/x/', 'a.com'), false);
+  });
+
+  test('keeps only live self-canonical URLs; probes the pre-filtered set, not the whole diff', async () => {
+    const probed = [];
+    const probe = async (u) => {
+      probed.push(u);
+      if (u.endsWith('/gone/')) return { url: u, verdict: 'dead', status: 404 };
+      if (u.endsWith('/moved/')) return { url: u, verdict: 'redirect', status: 301 };
+      if (u.endsWith('/dupe/')) return live(u, { canonical: 'https://a.com/real/' });
+      if (u.endsWith('/flaky/')) return { url: u, verdict: 'unverifiable', status: 503 };
+      return live(u, { canonical: u });
+    };
+    const r = await verifyMissingUrls(
+      ['https://a.com/ok/', 'https://a.com/gone/', 'https://a.com/moved/', 'https://a.com/dupe/', 'https://a.com/flaky/', 'https://a.com/q/?x=1', 'https://www.a.com/ok/'],
+      { canonicalHost: 'a.com', probe },
+    );
+    assert.deepEqual(r.confirmed, ['https://a.com/ok/']);
+    assert.deepEqual(r.unverifiable, ['https://a.com/flaky/']);
+    assert.equal(probed.length, 5); // query + www variants never probed
+    assert.ok(r.dropped.some((d) => d.reason === 'canonicalized-elsewhere'));
+  });
+
+  test('caps probes per run and reports the rest as skipped', async () => {
+    const urls = Array.from({ length: 10 }, (_, i) => `https://a.com/p${i}/`);
+    const r = await verifyMissingUrls(urls, { canonicalHost: 'a.com', maxProbes: 4, probe: async (u) => live(u) });
+    assert.equal(r.confirmed.length, 4);
+    assert.equal(r.skipped.length, 6);
   });
 });

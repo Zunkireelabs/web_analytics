@@ -115,6 +115,29 @@ describe('internal-links generator — candidate selection', () => {
   });
 });
 
+describe('internal-links generator — mustLinkTo (query-cannibalization resolution)', () => {
+  test('restricts the candidate set to exactly the given URL, ignoring the ranking-pages pool', async () => {
+    rankingPages = [{ dim_value: 'https://example.com/boots' }, { dim_value: 'https://example.com/trails' }];
+    llmResponse = [{ anchorText: 'winning page', targetUrl: 'https://example.com/winner', rationale: 'r' }];
+    const { content } = await generate({ siteId: 1, params: { page: SOURCE, mustLinkTo: 'https://example.com/winner' } });
+    assert.deepEqual(content.suggestions, [{ anchorText: 'winning page', targetUrl: 'https://example.com/winner', rationale: 'r' }]);
+  });
+
+  test('still drops a suggestion the model aims anywhere but the required target', async () => {
+    llmResponse = [{ anchorText: 'wrong', targetUrl: 'https://example.com/boots', rationale: 'r' }];
+    const { content } = await generate({ siteId: 1, params: { page: SOURCE, mustLinkTo: 'https://example.com/winner' } });
+    assert.deepEqual(content.suggestions, []);
+    assert.equal(content.droppedHallucinated, 1);
+  });
+
+  test('refuses an off-domain mustLinkTo rather than linking to a page it cannot confirm is real', async () => {
+    await assert.rejects(
+      generate({ siteId: 1, params: { page: SOURCE, mustLinkTo: 'https://competitor.com/winner' } }),
+      /not on this site's own domain/,
+    );
+  });
+});
+
 describe('internal-links generator — hallucinated URL rejection', () => {
   test('a targetUrl not in the real candidate list is dropped, not written into the page', async () => {
     llmResponse = [

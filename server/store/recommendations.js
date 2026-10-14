@@ -1,5 +1,23 @@
 import { query } from '../db.js';
 
+// Every detecting agent already computes expected_impact.value — real
+// impressions/clicks/gap-magnitude at finding time (see
+// server/agents/*.js's expectedImpact literals) — but until now nothing
+// read it back: both open-recommendation queries below ordered purely by
+// priority tier + recency, discarding the one number that says which
+// same-tier finding is actually worth more. Generic across every site: no
+// client-specific weighting, just "prefer the bigger number this agent
+// already measured, within the same priority tier".
+//
+// Guarded by a regex rather than a bare ::numeric cast — expected_impact is
+// free-form JSONB written by ~20 different agents, and one future non-numeric
+// value would otherwise throw inside the ORDER BY and break the ship queue
+// for every site, not just the row that produced it. NULLS LAST (via
+// DESC NULLS LAST at each call site) so a finding with basis:'estimate' and
+// no value falls back to priority-tier + recency exactly as before.
+const IMPACT_VALUE_SQL = `(CASE WHEN expected_impact->>'value' ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                                THEN (expected_impact->>'value')::numeric END)`;
+
 // CRUD for the recommendations table — the Recommendation Coordinator's only
 // persistence layer (see agents/lib/recommendation-coordinator.js, which is
 // the only caller allowed to invoke the writes below). Dedup key is
@@ -53,20 +71,36 @@ export async function findOpenRecommendation(siteId, page, recommendationType) {
   return rows[0] || null;
 }
 
+// A draft only carries the single finding_id it was drafted from
+// (drafts.finding_id), but the recommendation it belongs to may have merged
+// in several — finding_ids is the array side of that relationship, so this
+// has to search it rather than an equality match. Not status-scoped: a
+// recommendation can close (fixed) between a draft merging and this being
+// called at merge-finalize time, and its goal_id is still the real one to
+// attribute the impact measurement to. See store/fix-impact.js's goal_id
+// (migration 172) — Stage 2d of the Business Goals plan.
+export async function getRecommendationByFindingId(siteId, findingId) {
+  const { rows } = await query(
+    `SELECT * FROM recommendations WHERE site_id = $1 AND $2 = ANY(finding_ids) ORDER BY id DESC LIMIT 1`,
+    [siteId, findingId]
+  );
+  return rows[0] || null;
+}
+
 export async function insertRecommendation(siteId, {
   page, recommendationType, issue, reason, params, findingId, detectingAgent, priority, expectedImpact, riskTier,
-  blockedReason, confidence,
+  blockedReason, confidence, goalId = null, goalAlignment = null, decisionId = null,
 }) {
   const { rows } = await query(
     `INSERT INTO recommendations
-       (site_id, page, recommendation_type, issue, reason, params, finding_ids, detecting_agents, priority, expected_impact, risk_tier, blocked_reason, blocked_kind, blocked_since, confidence)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CASE WHEN $12::text IS NOT NULL THEN now() ELSE NULL END, $14)
+       (site_id, page, recommendation_type, issue, reason, params, finding_ids, detecting_agents, priority, expected_impact, risk_tier, blocked_reason, blocked_kind, blocked_since, confidence, goal_id, goal_alignment, decision_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CASE WHEN $12::text IS NOT NULL THEN now() ELSE NULL END, $14, $15, $16, $17)
      RETURNING *`,
     [
       siteId, page, recommendationType, issue, reason || null, JSON.stringify(params || {}),
       [findingId], [detectingAgent], priority || 'medium', expectedImpact ? JSON.stringify(expectedImpact) : null,
       riskTier || 'manual', blockedReason ?? null, classifyBlockedKind(blockedReason),
-      confidence ?? null,
+      confidence ?? null, goalId, goalAlignment ? JSON.stringify(goalAlignment) : null, decisionId,
     ]
   );
   return rows[0];
@@ -80,7 +114,7 @@ export async function insertRecommendation(siteId, {
 // supporting_agents is "who else corroborated it." Never changes `status` —
 // closing a recommendation is out of scope for M1 (see
 // recommendation-coordinator.js's syncFromGrounded doc comment).
-export async function mergeIntoRecommendation(id, { findingId, agentId, reason, params, priority, expectedImpact, blockedReason, riskTier, confidence }) {
+export async function mergeIntoRecommendation(id, { findingId, agentId, reason, params, priority, expectedImpact, blockedReason, riskTier, confidence, goalId = null, goalAlignment = null, decisionId = null }) {
   // risk_tier is NOT NULL and is now written unconditionally, so an omitted
   // riskTier would surface as a constraint violation deep in the driver.
   // Reject it here instead, where the caller is still in the stack trace.
@@ -130,6 +164,21 @@ export async function mergeIntoRecommendation(id, { findingId, agentId, reason, 
          ELSE blocked_since
        END,
        risk_tier = $10,
+       -- Also NOT COALESCE'd, same reasoning as blocked_reason/risk_tier
+       -- above: recomputed fresh every sync from the site's current active
+       -- goals (agents/lib/recommendations.js), so a paused/deleted goal
+       -- clears a stale alignment on the very next sync rather than it
+       -- persisting forever.
+       goal_id = $12,
+       goal_alignment = $13,
+       -- Unlike goal_id/goal_alignment above, COALESCE'd rather than
+       -- written unconditionally: a decide() call is bounded/rare by design
+       -- (default-bucket-decision.js's MAX_DECISION_ENGINE_CALLS_PER_RUN),
+       -- so a finding whose decision simply didn't make this particular
+       -- run's cap must keep whatever decision_id a prior run already
+       -- recorded, not have it silently wiped back to NULL. $14 is NULL on
+       -- every call this module doesn't produce a fresh decision for.
+       decision_id = COALESCE($14, decision_id),
        last_seen_at = now(),
        updated_at = now()
      WHERE id = $1
@@ -139,7 +188,7 @@ export async function mergeIntoRecommendation(id, { findingId, agentId, reason, 
       params ? JSON.stringify(params) : null, priority || null,
       expectedImpact ? JSON.stringify(expectedImpact) : null,
       blockedReason ?? null, classifyBlockedKind(blockedReason), riskTier,
-      confidence ?? null,
+      confidence ?? null, goalId, goalAlignment ? JSON.stringify(goalAlignment) : null, decisionId,
     ]
   );
   return rows[0];
@@ -192,7 +241,7 @@ export async function refreshRecommendationBlockState(id, { blockedReason, riskT
 // open at all is invisible to it by construction.
 export async function listOpenBlockedRecommendations(siteId, { onlyDetectingAgent, excludeDetectingAgent } = {}) {
   const { rows } = await query(
-    `SELECT id, recommendation_type, params, detecting_agents FROM recommendations
+    `SELECT id, recommendation_type, params, detecting_agents, blocked_reason FROM recommendations
      WHERE site_id = $1 AND status = 'open' AND blocked_reason IS NOT NULL
        AND ($2::text IS NULL OR $2 = ANY(detecting_agents))
        AND ($3::text IS NULL OR NOT ($3 = ANY(detecting_agents)))`,
@@ -201,13 +250,52 @@ export async function listOpenBlockedRecommendations(siteId, { onlyDetectingAgen
   return rows;
 }
 
+// Priority tier + goal-alignment boost, combined into one DESCENDING score —
+// mirrors server/agents/lib/goal-alignment.js's PRIORITY_TIER_SCORE/
+// GOAL_ALIGNMENT_BOOST/effectivePriorityScore EXACTLY (same numbers, same
+// tier gap of 10, same 'strong' boost of 12 bridging exactly one tier). Kept
+// as a literal SQL CASE rather than calling out to JS because this ORDER BY
+// must stay pure SQL — but the numbers are not independently chosen, they
+// are that module's constants copied here; a change to one without the
+// other is caught by recommendations.test.js's "listOpenRecommendations —
+// effective-priority ORDER BY" golden-string assertion.
+// goal_alignment is read from the column set at sync time (agents/lib/
+// recommendations.js), never recomputed at query time — this only orders
+// among rows already 'open'; it changes nothing about eligibility, risk
+// tier, or any safety/autonomy gate.
+const EFFECTIVE_PRIORITY_SQL = `(
+  CASE priority WHEN 'high' THEN 30 WHEN 'medium' THEN 20 WHEN 'low' THEN 10 ELSE 20 END +
+  CASE goal_alignment->>'level'
+    WHEN 'strong' THEN 12 WHEN 'partial' THEN 6 WHEN 'weak' THEN 2 ELSE 0 END
+)`;
+
 export async function listOpenRecommendations(siteId) {
   const { rows } = await query(
     `SELECT * FROM recommendations WHERE site_id = $1 AND status = 'open' ORDER BY
-       CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC`,
+       ${EFFECTIVE_PRIORITY_SQL} DESC,
+       ${IMPACT_VALUE_SQL} DESC NULLS LAST, last_seen_at DESC`,
     [siteId]
   );
   return rows;
+}
+
+// Distinct pages currently carrying an OPEN recommendation whose
+// detecting_agents includes this agentId — used by candidate-pages.js to
+// force a page with a stale-looking finding back into a page-rotation
+// agent's batch instead of leaving it to rotation luck. Real gap confirmed
+// 2026-09-29: ai-visibility kept re-recommending FAQ/schema fixes already
+// shipped in a shared template (base.njk) because the affected page simply
+// hadn't come up again in MAX_PAGES=20 rotation since the fix went live —
+// closeStaleRecommendations only closes a recommendation for a page this
+// run actually re-checked, so an unrotated page's stale finding just sat
+// open indefinitely. See candidate-pages.js's own comment at the call site.
+export async function getOpenRecommendationPages(siteId, agentId) {
+  const { rows } = await query(
+    `SELECT DISTINCT page FROM recommendations
+     WHERE site_id = $1 AND status = 'open' AND $2 = ANY(detecting_agents) AND page IS NOT NULL AND page != ''`,
+    [siteId, agentId]
+  );
+  return rows.map((r) => r.page);
 }
 
 export async function getRecommendationById(siteId, id) {
@@ -330,7 +418,8 @@ export async function blockRecommendation(id, reason) {
 export async function listOpenSafeRecommendations(siteId, limit) {
   const { rows } = await query(
     `SELECT * FROM recommendations WHERE site_id = $1 AND status = 'open' AND risk_tier = 'safe' AND blocked_reason IS NULL AND execution_job_id IS NULL
-       ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC
+       ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+       ${IMPACT_VALUE_SQL} DESC NULLS LAST, last_seen_at DESC
        LIMIT $2`,
     [siteId, limit]
   );
@@ -360,8 +449,15 @@ export async function markRecommendationsUnfixable(siteId, dropped) {
     // recommendation is blocked (our-config / awaiting-derivation / site-fact)
     // — an 'unfixable' row isn't blocked in that sense, it's terminal, and the
     // UI is expected to branch on status before ever looking at blocked_kind.
+    // risk_tier must move to 'manual' in the same statement — migration 108's
+    // recommendations_blocked_is_manual CHECK requires blocked_reason IS NULL
+    // OR risk_tier = 'manual', and this row is about to get a blocked_reason.
+    // Without it, any row whose risk_tier was 'safe' at the moment it became
+    // unfixable throws here and aborts the REST of syncFromGrounded for this
+    // site (closeStaleRecommendations et al. run first and are unaffected,
+    // but nothing after this call in the same site's sync executes).
     const { rowCount } = await query(
-      `UPDATE recommendations SET status = 'unfixable', blocked_reason = $4, updated_at = now()
+      `UPDATE recommendations SET status = 'unfixable', blocked_reason = $4, risk_tier = 'manual', updated_at = now()
        WHERE site_id = $1 AND page = $2 AND recommendation_type = $3 AND status = 'open'`,
       [siteId, page, generatorId, reason || 'This page no longer exists or cannot be resolved to a real source.']
     );
@@ -387,13 +483,20 @@ export async function setRecommendationExecutionState(id, { executionJobId, exec
 // Called once per site per sync from recommendation-coordinator.js's
 // syncFromGrounded — see that file for how stillDetectedKeys is built.
 //
-// checked = { agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds },
-// built by buildRecommendations (agents/lib/recommendations.js). Most agents
-// only examine a bounded rotation batch per run — a page missing from this
-// run's findings usually means "not re-checked today," not "fixed," so
-// closing on absence alone was making recommendations vanish in bulk (then
-// often reappear later) without ever being confirmed clean. A stale row is
-// only closed when we're sure it was actually re-verified:
+// checked = { agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds,
+// authoritativeAgentIds }, built by buildRecommendations (agents/lib/
+// recommendations.js) and recommendation-coordinator.js's syncFromGrounded.
+// authoritativeAgentIds is the roster this specific sync pass actually
+// re-checks (RECOMMENDATION_AGENT_IDS, agents/lib/insights.js) — a row whose
+// detecting_agents are ENTIRELY outside that roster (analyst-insights,
+// analyst-keyword-gaps, growth-opportunities: sources with no detection step
+// in THIS pass at all) is skipped outright, before any of the logic below
+// runs. Most agents only examine a bounded rotation batch per run — a page
+// missing from this run's findings usually means "not re-checked today," not
+// "fixed," so closing on absence alone was making recommendations vanish in
+// bulk (then often reappear later) without ever being confirmed clean. A
+// stale row is only closed when we're sure it was actually re-verified:
+//   - not this pass's business at all (see authoritativeAgentIds above): left untouched
 //   - no page (site-level/collapsed key, e.g. cookie-policy, security-headers
 //     as a fix action): unchanged — these are recomputed in full every run
 //   - broken-link-fix: only if the page's outbound links were part of this
@@ -403,7 +506,7 @@ export async function setRecommendationExecutionState(id, { executionJobId, exec
 //     isn't rotation-batched (checks everything every run, so its silence is
 //     already trustworthy) or did re-check this exact page this run
 export async function closeStaleRecommendations(siteId, stillDetectedKeys, checked = {}) {
-  const { agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds } = checked;
+  const { agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, authoritativeAgentIds } = checked;
   const { rows } = await query(
     `SELECT id, page, recommendation_type, detecting_agents FROM recommendations WHERE site_id = $1 AND status = 'open'`,
     [siteId]
@@ -412,6 +515,18 @@ export async function closeStaleRecommendations(siteId, stillDetectedKeys, check
     .filter((r) => {
       const key = `${r.recommendation_type}::${r.page}`;
       if (stillDetectedKeys.has(key)) return false;
+      // A row this call has no authority over — none of its detecting_agents
+      // belong to the roster this sync pass actually re-checks (see
+      // authoritativeAgentIds' own comment below) — must never be touched.
+      // Confirmed real bug, fixed 2026-09-10: before this guard, a row whose
+      // ONLY detecting_agent was e.g. 'analyst-insights' (never a member of
+      // batchRotatedAgentIds, which only ever holds Node RECOMMENDATION_AGENT_IDS)
+      // made the .every() check below vacuously true and got superseded on
+      // the very next unrelated Node grounded-agent sync — same UTC morning
+      // it was created, before the shipping pass ever saw it. Silence from a
+      // detection pass that was never asked about this row's source in the
+      // first place is not evidence the finding resolved.
+      if (authoritativeAgentIds && !(r.detecting_agents || []).some((agentId) => authoritativeAgentIds.has(agentId))) return false;
       if (!r.page) return true;
       // r.page is recommendationPageKey()'s `${sourcePage}::${href}` compound for this
       // type (see recommendation-coordinator.js), but linkCrawlCheckedKeys holds bare

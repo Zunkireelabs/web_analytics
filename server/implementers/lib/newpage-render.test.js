@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   renderCompliancePageBody, renderLandingPageBody, renderBlogOutlineBody,
   renderDirectAnswerBody, renderTranslationBody,
+  renderDirectAnswerBodyTsx, renderTranslationBodyTsx,
 } from './newpage-render.js';
 import { DESIGN_PROFILE_VERSION } from '../../design-agent/lib/design-profile.js';
 
@@ -58,6 +59,21 @@ describe('renderCompliancePageBody', () => {
 
     const closeIdx = body.indexOf('</div>');
     assert.equal(body.slice(closeIdx - 2, closeIdx), '\n\n');
+  });
+
+  // 2026-09-09: a captured contentWrapper can carry an incidental fixed
+  // height (site 8862's real capture had `h-[70px]` on every componentTemplate,
+  // this one included) — catastrophic here since this wraps a WHOLE page
+  // body, not one section.
+  test('a fixed height on the captured contentWrapper is stripped — a whole page body is never 70px tall', () => {
+    const site = {
+      url_file_map: {
+        siteRoot: { componentTemplates: { contentWrapper: { wrapper: '<div class="max-w-7xl mx-auto h-[70px]">\n{{BODY}}\n</div>' } } },
+      },
+    };
+    const body = renderCompliancePageBody(content, {}, site);
+    assert.doesNotMatch(body, /h-\[70px\]/);
+    assert.match(body, /max-w-7xl mx-auto/);
   });
 
   test('a contentWrapper template missing the {{BODY}} placeholder is ignored, not applied broken', () => {
@@ -143,6 +159,13 @@ describe('permalink front matter on net-new pages', () => {
     assert.match(renderTranslationBody({ translatedTitle: 'Servicios' }, site, { permalink: '/es/servicios/' }), /^permalink: "\/es\/servicios\/"$/m);
   });
 
+  test('writes a front-matter category only when the draft carries one (trend insight posts)', () => {
+    const withCat = renderBlogOutlineBody({ title: 'Superintelligence', category: 'Insights', sections: [] }, site, {});
+    assert.match(withCat, /^category: "Insights"$/m);
+    const without = renderBlogOutlineBody({ title: 'Boilers', sections: [] }, site, {});
+    assert.doesNotMatch(without, /^category:/m);
+  });
+
   test('no permalink resolved -> the key is omitted entirely, not written empty', () => {
     for (const [render, content] of [
       [renderLandingPageBody, { headline: 'Leeds' }],
@@ -169,6 +192,75 @@ describe('permalink front matter on net-new pages', () => {
   test('a brand-new compliance page takes the resolved permalink', () => {
     const body = renderCompliancePageBody({ headline: 'Cookie Policy' }, {}, site, { permalink: '/cookies/' });
     assert.match(body, /^permalink: "\/cookies\/"$/m);
+  });
+});
+
+// Regression for the zunkireelabs incident: a brand-new/near-empty blog
+// directory has no siblings for newcontent-contract.js to sample, so
+// renderBlogOutlineBody's own hardcoded defaults are what actually ships.
+// They must match FIELD_ALIASES' own first/most-likely name for each field
+// (newcontent-contract.js) — 'image'/'image_alt'/'image_credit' are real
+// blog templates use, but they are lower-priority aliases in that same list,
+// not the canonical default a no-evidence case should guess first.
+describe('blog featured-image front matter defaults with no sibling evidence', () => {
+  const site = { url_file_map: {} };
+
+  test('with no fieldNames (no siblings sampled), the canonical featuredImage/featuredImageAlt/featuredImageCredit keys are used', () => {
+    const body = renderBlogOutlineBody(
+      { title: 'Boilers', featuredImage: { url: 'https://images.pexels.com/photo.jpg', alt: 'A boiler', photographer: 'Jane Doe' } },
+      site,
+    );
+    assert.match(body, /^featuredImage: "https:\/\/images\.pexels\.com\/photo\.jpg"$/m);
+    assert.match(body, /^featuredImageAlt: "A boiler"$/m);
+    assert.match(body, /^featuredImageCredit: "Photo by Jane Doe on Pexels"$/m);
+    assert.doesNotMatch(body, /^image:/m);
+  });
+
+  test('fieldNames from real sibling sampling still wins over the default', () => {
+    const body = renderBlogOutlineBody(
+      { title: 'Boilers', featuredImage: { url: 'https://images.pexels.com/photo.jpg' } },
+      site,
+      { fieldNames: { featuredImage: 'heroImage' } },
+    );
+    assert.match(body, /^heroImage: "https:\/\/images\.pexels\.com\/photo\.jpg"$/m);
+    assert.doesNotMatch(body, /^featuredImage:/m);
+  });
+});
+
+// Landing pages and direct-answer pages, unlike blog, have no established
+// featured-image convention on this platform — until sibling evidence proves
+// otherwise, this renderer must never guess a key and invent an image slot
+// the site's own template doesn't have (same "never invent a look" rule
+// DEFAULT_EXPAND_TEMPLATE's fallback follows in marker-merge.js).
+describe('landing-page/direct-answer featured-image front matter is opt-in, never guessed', () => {
+  const site = { url_file_map: {} };
+  const featuredImage = { url: 'https://images.pexels.com/photo.jpg', alt: 'A city skyline', photographer: 'Jane Doe' };
+
+  test('renderLandingPageBody omits any image field with no sibling evidence, even when a Pexels image was found', () => {
+    const body = renderLandingPageBody({ headline: 'Leeds', featuredImage }, site);
+    assert.doesNotMatch(body, /image/i);
+  });
+
+  test('renderLandingPageBody writes the image under the directory\'s real sibling-sampled key', () => {
+    const body = renderLandingPageBody({ headline: 'Leeds', featuredImage }, site, { fieldNames: { featuredImage: 'heroImage' } });
+    assert.match(body, /^heroImage: "https:\/\/images\.pexels\.com\/photo\.jpg"$/m);
+    assert.match(body, /^featuredImageAlt: "A city skyline"$/m);
+    assert.match(body, /^featuredImageCredit: "Photo by Jane Doe on Pexels"$/m);
+  });
+
+  test('renderDirectAnswerBody omits any image field with no sibling evidence', () => {
+    const body = renderDirectAnswerBody({ heading: 'How long?', featuredImage }, site);
+    assert.doesNotMatch(body, /image/i);
+  });
+
+  test('renderDirectAnswerBody writes the image under the directory\'s real sibling-sampled key', () => {
+    const body = renderDirectAnswerBody({ heading: 'How long?', featuredImage }, site, { fieldNames: { featuredImage: 'coverImage' } });
+    assert.match(body, /^coverImage: "https:\/\/images\.pexels\.com\/photo\.jpg"$/m);
+  });
+
+  test('sibling evidence with no actual Pexels result still omits the field — nothing to write', () => {
+    const body = renderLandingPageBody({ headline: 'Leeds' }, site, { fieldNames: { featuredImage: 'heroImage' } });
+    assert.doesNotMatch(body, /image/i);
   });
 });
 
@@ -308,6 +400,34 @@ describe('net-new pages consume the site design profile', () => {
     assert.match(out, /<h2 class="text-2xl">Why us<\/h2>/, 'heading still gets site typography');
     assert.doesNotMatch(out, /rounded-lg border/);
   });
+
+  // Confirmed live (2026-09-24): a generated blog post's own "## Subheading"
+  // rendered at typography.heading.section (hero scale) — a landing page's
+  // real section headings correctly use that scale, but a blog post's own
+  // in-article subheading is a different role and reads far larger than the
+  // site's own human-written reference post for the exact same markdown.
+  test('a blog post (real permalink) gets item-scale headings, not the landing-page section scale', () => {
+    const out = renderBlogOutlineBody(
+      { title: 'T', sections: [{ heading: 'A subheading', body: 'Body text.' }] },
+      siteWithProfile,
+      { permalink: '/blog/some-post/' },
+    );
+    assert.match(out, /<h2 class="text-lg font-medium">A subheading<\/h2>/);
+    assert.doesNotMatch(out, /<h2 class="text-2xl">/);
+  });
+
+  test('the same content with no permalink at all is unchanged — still section scale (today\'s default)', () => {
+    const out = renderBlogOutlineBody(
+      { title: 'T', sections: [{ heading: 'A subheading', body: 'Body text.' }] },
+      siteWithProfile,
+    );
+    assert.match(out, /<h2 class="text-2xl">A subheading<\/h2>/);
+  });
+
+  test('a landing page keeps section-scale headings even when given a permalink', () => {
+    const out = renderLandingPageBody(landing, siteWithProfile, { permalink: '/some-landing-page/' });
+    assert.match(out, /<h2 class="text-2xl">Why us<\/h2>/);
+  });
 });
 
 // Regression guard for a bug that shipped editorial instructions into published
@@ -401,5 +521,110 @@ describe('a markdown table inside generated content is projected through the ten
     const noTable = { title: 'x', sections: [{ heading: 'H', body: 'Plain prose, no table here.' }] };
     const out = renderBlogOutlineBody(noTable, siteWithProfile);
     assert.match(out, /Plain prose, no table here\./);
+  });
+});
+
+describe('renderDirectAnswerBodyTsx / renderTranslationBodyTsx — Next.js App Router variants', () => {
+  const directAnswerContent = {
+    query: 'What GPA do I need to study in Canada?',
+    directAnswer: 'Most Canadian colleges require a minimum GPA of 2.5, though competitive programs ask for higher.',
+    supportingSections: [{ heading: 'Undergraduate vs. postgraduate', body: 'Requirements differ by level.' }],
+    featuredImage: { url: 'https://example.com/canada.webp', alt: 'Canada' },
+  };
+
+  test('renders valid-shaped TSX with props passed through JSON.stringify, not interpolated into JSX', () => {
+    const out = renderDirectAnswerBodyTsx(directAnswerContent, {});
+    assert.match(out, /import GeneratedDirectAnswer from "@\/components\/GeneratedDirectAnswer";/);
+    assert.match(out, /export const answer = \{/);
+    assert.match(out, /export default function Page\(\) \{/);
+    assert.match(out, /return <GeneratedDirectAnswer \{\.\.\.answer\} \/>;/);
+    // The literal answer text — including its own apostrophe-free punctuation
+    // — must appear only inside the JSON.stringify'd block, never spliced
+    // directly into JSX.
+    assert.match(out, /"directAnswer": "Most Canadian colleges require a minimum GPA of 2\.5, though competitive programs ask for higher\."/);
+  });
+
+  test('a title/answer containing quotes and braces stays valid, JSON-escaped text — never breaks the file', () => {
+    const risky = {
+      query: 'Is a "conditional offer" the same as {admission}?',
+      directAnswer: 'Not quite — a "conditional offer" still requires meeting listed conditions.',
+    };
+    const out = renderDirectAnswerBodyTsx(risky, {});
+    assert.doesNotThrow(() => JSON.parse(out.match(/export const answer = (\{[\s\S]*?\n\});/)[1]));
+  });
+
+  test('includes alternates.canonical only when a canonicalUrl is passed, matching renderBlogOutlineBodyTsx', () => {
+    const withUrl = renderDirectAnswerBodyTsx(directAnswerContent, {}, { canonicalUrl: 'https://admizzeducation.com/answers/canada-gpa' });
+    assert.match(withUrl, /alternates: \{ canonical: "https:\/\/admizzeducation\.com\/answers\/canada-gpa" \}/);
+    const withoutUrl = renderDirectAnswerBodyTsx(directAnswerContent, {});
+    assert.doesNotMatch(withoutUrl, /alternates:/);
+  });
+
+  const translationContent = {
+    sourceTitle: 'Study in Canada',
+    translatedTitle: 'Étudier au Canada',
+    translatedMetaDescription: 'Découvrez comment étudier au Canada.',
+    translatedContent: 'Le Canada est une destination populaire pour les étudiants internationaux.',
+  };
+
+  test('renders valid-shaped TSX and never emits alternates.canonical — translation has no urlPattern to resolve', () => {
+    const out = renderTranslationBodyTsx(translationContent, {});
+    assert.match(out, /import GeneratedTranslation from "@\/components\/GeneratedTranslation";/);
+    assert.match(out, /export const translation = \{/);
+    assert.match(out, /"title": "Étudier au Canada"/);
+    assert.match(out, /return <GeneratedTranslation \{\.\.\.translation\} \/>;/);
+    assert.doesNotMatch(out, /alternates:/);
+  });
+
+  test('falls back to sourceTitle/sourceMetaDescription when the translated fields are absent', () => {
+    const out = renderTranslationBodyTsx({ sourceTitle: 'About Us', sourceMetaDescription: 'Who we are.', translatedContent: 'x' }, {});
+    assert.match(out, /"title": "About Us"/);
+    assert.match(out, /description: "Who we are\."/);
+  });
+});
+
+describe('renderBlogOutlineBody — siteRoot.inlineProse: "layout" (blog layout styles article prose)', () => {
+  const designProfile = {
+    typography: {
+      heading: { section: 'text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900', item: 'text-2xl md:text-3xl font-normal text-gray-900' },
+      body: 'text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl',
+      link: 'text-zunkiree-600 hover:underline',
+    },
+  };
+  const wrapper = { wrapper: '<div class="container-custom py-12 md:py-20">\n{{BODY}}\n</div>' };
+  const content = { title: 'Boilers', sections: [{ heading: 'Bleeding radiators', body: 'Turn the **valve** and see [the guide](/guide/).' }] };
+  const mk = (extra = {}) => ({ url_file_map: { siteRoot: { designProfile, componentTemplates: { contentWrapper: wrapper }, ...extra } } });
+
+  test('opted in: a blog post body stays plain markdown so the layout styles it', () => {
+    const body = renderBlogOutlineBody(content, mk({ inlineProse: 'layout' }), { permalink: '/blog/boilers/' });
+    assert.match(body, /^## Bleeding radiators$/m);
+    assert.doesNotMatch(body, /text-lg md:text-xl|text-3xl|max-w-2xl|<h2|<p /);
+    assert.match(body, /container-custom py-12 md:py-20/);
+  });
+
+  test('default (not opted in): unchanged, the profile classes are still projected', () => {
+    const body = renderBlogOutlineBody(content, mk(), { permalink: '/blog/boilers/' });
+    assert.match(body, /<h2 class="text-2xl md:text-3xl font-normal text-gray-900">Bleeding radiators<\/h2>/);
+    assert.match(body, /<p class="text-lg md:text-xl/);
+  });
+
+  test('opted in but NOT an article page (a landing page permalink): still projected', () => {
+    const body = renderBlogOutlineBody(content, mk({ inlineProse: 'layout' }), { permalink: '/services/boilers/' });
+    assert.match(body, /<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">/);
+  });
+});
+
+describe('renderBlogOutlineBody — page role from evidence, not the URL regex', () => {
+  const content = { title: 'T', metaDescription: 'd', sections: [{ heading: 'Why it matters', body: 'Some body text here.' }] };
+  const profile = { version: 2, typography: { body: 'BODYCLS', heading: { item: 'ITEMCLS', section: 'SECTIONCLS' } }, layout: { prose: 'max-w-prose' } };
+  const site = { url_file_map: { siteRoot: { designProfile: profile } } };
+
+  test('a post under a prefix the regex does not know is projected as inline (article) prose', () => {
+    // /recursos/ classifies 'other' via classifyPageType, which used to mean
+    // section/hero scale. The action type is decisive: a blog post is an article body.
+    const unknownPrefix = renderBlogOutlineBody(content, site, { permalink: '/recursos/mi-post/' });
+    const knownPrefix = renderBlogOutlineBody(content, site, { permalink: '/blog/mi-post/' });
+    const headingClass = (html) => (html.match(/<h2[^>]*class="([^"]*)"/) || [])[1];
+    assert.equal(headingClass(unknownPrefix), headingClass(knownPrefix));
   });
 });

@@ -5,14 +5,42 @@ let issued;
 
 let implementedFindingIdsRows = [];
 let pendingDraftFilePathsRows = [];
+let countFailedAttemptsRows = [];
 let insertDraftConflict = null; // set to a fake draft row to simulate a 23505 race on the next INSERT
 let insertDraftErrorConstraint = 'drafts_site_finding_id_unique';
+let activeBoardRows = [];
+let implementedBoardRows = [];
+let lifecycleCountRows = [];
+let draftsColumnRows = null; // null => the information_schema lookup throws (exercises the d.* fallback)
+let geoAuditScoreRows = [];
 
 function fakeQuery(text, params = []) {
   const sql = text.replace(/\s+/g, ' ').trim();
   issued.push({ sql, params });
+  if (sql.includes('FROM information_schema.columns')) {
+    if (!draftsColumnRows) throw new Error('simulated information_schema failure');
+    return { rows: draftsColumnRows };
+  }
+  if (sql.startsWith("SELECT content #> '{score,overall}' AS overall FROM drafts")) {
+    return { rows: geoAuditScoreRows };
+  }
   if (sql.startsWith("UPDATE drafts SET status = 'branch_pushed'")) {
     return { rows: [{ id: params[1], status: 'branch_pushed' }] };
+  }
+  if (sql.includes("d.status NOT IN ('implemented', 'abandoned')")) {
+    return { rows: activeBoardRows };
+  }
+  if (sql.includes("d.status = 'implemented' ORDER BY d.created_at DESC LIMIT")) {
+    return { rows: implementedBoardRows };
+  }
+  if (sql.startsWith('SELECT status, COUNT(*)::int AS n,')) {
+    return { rows: lifecycleCountRows };
+  }
+  if (sql.includes('WHERE d.site_id = $1 AND d.status = $2 ORDER BY d.created_at DESC LIMIT $3')) {
+    return { rows: implementedBoardRows };
+  }
+  if (sql.includes('WHERE d.site_id = $1 AND d.status = $2 ORDER BY d.created_at DESC')) {
+    return { rows: activeBoardRows };
   }
   if (sql.startsWith('SELECT DISTINCT d.finding_id')) {
     return { rows: implementedFindingIdsRows };
@@ -41,8 +69,8 @@ function fakeQuery(text, params = []) {
   if (sql.startsWith('SELECT * FROM drafts WHERE site_id = $1 AND finding_id = $2')) {
     return { rows: insertDraftConflict ? [insertDraftConflict] : [] };
   }
-  if (sql.startsWith('SELECT finding_id, COUNT(*)::int AS attempts')) {
-    return { rows: [{ finding_id: 'f1', attempts: 4 }] };
+  if (sql.startsWith('SELECT finding_id, abandoned_reason')) {
+    return { rows: countFailedAttemptsRows };
   }
   throw new Error(`drafts.test.js fake query: unhandled SQL shape: ${sql}`);
 }
@@ -55,9 +83,13 @@ const {
   markDraftBranchPushed, getImplementedFindingIds,
   countVisibleFaqDrafts, distinctVisibleFaqDraftPages, hasImplementedVisibleFaqForPage,
   createDraft, getPendingDraftFilePaths,
+  listDrafts, listDraftsForBoard, countDraftsByLifecycle, getLatestGeoAuditScore,
 } = await import('./drafts.js');
 
-beforeEach(() => { issued = []; implementedFindingIdsRows = []; pendingDraftFilePathsRows = []; insertDraftConflict = null; insertDraftErrorConstraint = 'drafts_site_finding_id_unique'; });
+beforeEach(() => {
+  issued = []; implementedFindingIdsRows = []; pendingDraftFilePathsRows = []; insertDraftConflict = null; insertDraftErrorConstraint = 'drafts_site_finding_id_unique';
+  activeBoardRows = []; implementedBoardRows = []; lifecycleCountRows = [];
+});
 
 // Prompt 7 audit / migration 118: the app-level getDraftByFindingId-then-
 // insert check in generateDraft() has a real concurrent window (LLM
@@ -232,70 +264,246 @@ describe('visible-FAQ cap/dedup queries cover both faq and qa-content', () => {
 // human had already closed. The cap would have permanently suppressed exactly
 // the work that had just been made possible.
 describe('countFailedAttemptsByFinding — what must never count as an item failure', () => {
-  beforeEach(() => { issued = []; });
+  beforeEach(() => { issued = []; countFailedAttemptsRows = []; });
 
-  const recordFor = async () => {
+  // The exclusion logic itself now lives in attempt-classification.js's
+  // classifyAbandonReason (RETRY_POLICY.ITEM_DEFECT is the only policy this
+  // function counts) — this file's own job is just fetching the raw rows and
+  // delegating. These tests exercise that delegation with real abandon-reason
+  // strings/codes, not the old hand-maintained SQL exclusion list, which had
+  // already drifted from classifyAbandonReason's rules before it was removed
+  // (see this function's own header comment for the two concrete gaps that
+  // drift produced live on site 1).
+  const countFor = async (rows) => {
+    countFailedAttemptsRows = rows;
     const { countFailedAttemptsByFinding } = await import('./drafts.js');
-    await countFailedAttemptsByFinding(1);
-    return issued.at(-1);
+    return countFailedAttemptsByFinding(1);
   };
-  const sqlFor = async () => (await recordFor()).sql;
 
   test('config gaps a human can close are excluded — the item becomes eligible the moment they do', async () => {
-    const { params } = await recordFor();
-    assert.ok(params.includes('No markers configured for'));
-    assert.ok(params.includes('No url_file_map entry matches'));
-  });
-
-  // Real incident, 2026-09-03: DESIGN_NOT_REVIEWED_FRAGMENT ("This site's
-  // design has not been reviewed yet") was inlined into the SQL text via
-  // template literal, same as the two config-gap fragments above. Its
-  // apostrophe closed the LIKE pattern's quoted string literal early,
-  // producing `syntax error at or near "s"` and silently failing every
-  // autonomous shipping run's failed-attempt count. Fixed by passing every
-  // fragment as a bind parameter instead of inlining it — this test proves
-  // a fragment WITH a quote in it can never do that again, not just that
-  // today's specific fragments happen to be quote-free.
-  test('a fragment containing a single quote (the removed design-review gate) is bound as a parameter, never inlined into the SQL text', async () => {
-    const { sql, params } = await recordFor();
-    assert.ok(params.includes("This site's design has not been reviewed yet"));
-    assert.doesNotMatch(sql, /site's/);
-    assert.match(sql, /NOT LIKE '%' \|\| \$\d+ \|\| '%'/);
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'Auto-ship failed: No markers configured for "/pricing" — add e.g. {"faq":"SEOAI:FAQ"} to url_file_map.pages[...].placements.' },
+      { finding_id: 'f1', abandoned_reason: 'Auto-ship failed: No url_file_map entry matches "/pricing".' },
+      { finding_id: 'f1', abandoned_reason: 'no-insertion-marker' },
+      { finding_id: 'f1', abandoned_reason: 'no-file-mapping' },
+    ]);
+    assert.equal(m.has('f1'), false);
   });
 
   // The opposite of the case above: this one recurs identically FOREVER
   // unless a human hand-edits the draft (trust-compliance.js files the
   // finding specifically so they can) — no config change ever resolves it on
   // its own. That IS the per-item "cannot be auto-completed" signal the
-  // convergence cap exists to catch, so — unlike the two config gaps above —
-  // it counts.
+  // convergence cap exists to catch, so — unlike the config gaps above — it
+  // counts.
   test('an unverified-placeholder failure DOES count — nothing resolves it automatically', async () => {
-    const sql = await sqlFor();
-    assert.doesNotMatch(sql, /unverified placeholder field/);
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'Auto-ship failed: refusing to publish an unverified placeholder field' },
+    ]);
+    assert.equal(m.get('f1'), 1);
   });
 
   test('human decisions and bookkeeping are excluded — neither is a verdict on the item', async () => {
-    const sql = await sqlFor();
-    assert.match(sql, /pr_closed_without_merge/);
-    assert.match(sql, /sent_back_to_recommendations/);
-    assert.match(sql, /Recovered:/);
-    assert.match(sql, /Stuck at/);
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'pr_closed_without_merge' },
+      { finding_id: 'f1', abandoned_reason: 'sent_back_to_recommendations' },
+      { finding_id: 'f1', abandoned_reason: 'Recovered: stranded at submitted_for_approval by the pre-fix swallow-and-strand gap (2026-08-25).' },
+      { finding_id: 'f1', abandoned_reason: 'Stuck at "branch_pushed" and not resumable — abandoned so a fresh draft can be generated.' },
+    ]);
+    assert.equal(m.has('f1'), false);
   });
 
   test('infrastructure failures that hit every pending item at once are excluded', async () => {
-    const sql = await sqlFor();
-    assert.match(sql, /rate limit/);
-    assert.match(sql, /Batch push\/PR failed/);
-    assert.match(sql, /batch branch.*diverged/);
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'rate limit exceeded, retry later' },
+      { finding_id: 'f1', abandoned_reason: 'Batch push/PR failed: This pull request could not be opened right now — our team has been notified. (ref: abc123)' },
+      { finding_id: 'f1', abandoned_reason: "Auto-ship failed: Today's batch branch (action-center/batch-1-2026-08-30) has diverged from main." },
+    ]);
+    assert.equal(m.has('f1'), false);
+  });
+
+  // Real incident, 2026-09-07: this exact string was counted as a per-item
+  // defect by the old SQL list (no exclusion for it existed at all), which
+  // wrongly retired 11 findings at the convergence cap on drafts that had
+  // never actually failed on their own merits — the outage was in
+  // infrastructure (a duplicate, unmanaged app container racing the real
+  // deploy with no GITHUB_PAT in its environment), not in any of those items.
+  test('a GitHub-credentials outage is excluded — it says nothing about the item', async () => {
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'Auto-ship failed: No GitHub PAT set in env var "GITHUB_PAT"' },
+    ]);
+    assert.equal(m.has('f1'), false);
+  });
+
+  // Real incident, 2026-09-01/2026-09-07: an item-specific defect (a schema
+  // mismatch, an anchor no longer found) DOES still count — only the reasons
+  // that say nothing about the item are excused, and this proves the fix
+  // didn't quietly stop counting real defects too.
+  test('a genuine item-specific defect still counts', async () => {
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'Auto-ship failed: 1 anchor(s) no longer found verbatim in src/pages/about.njk — the source may have changed.' },
+      { finding_id: 'f1', abandoned_reason: 'invalid-edit' },
+    ]);
+    assert.equal(m.get('f1'), 2);
   });
 
   test('the count is windowed, so long-dead failures under changed code do not retire a finding forever', async () => {
-    assert.match(await sqlFor(), /abandoned_at > now\(\) - interval '30 days'/);
+    await countFor([{ finding_id: 'f1', abandoned_reason: 'invalid-edit' }]);
+    const { sql } = issued.find((i) => i.sql.startsWith('SELECT finding_id, abandoned_reason'));
+    assert.match(sql, /abandoned_at > now\(\) - interval '30 days'/);
   });
 
   test('returns a Map of finding_id -> attempts', async () => {
-    const { countFailedAttemptsByFinding } = await import('./drafts.js');
-    const m = await countFailedAttemptsByFinding(1);
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'invalid-edit' },
+      { finding_id: 'f1', abandoned_reason: 'invalid-edit' },
+      { finding_id: 'f1', abandoned_reason: 'invalid-edit' },
+      { finding_id: 'f1', abandoned_reason: 'invalid-edit' },
+      { finding_id: 'f2', abandoned_reason: 'pr_closed_without_merge' },
+    ]);
     assert.equal(m.get('f1'), 4);
+    assert.equal(m.has('f2'), false);
+  });
+});
+
+describe('listDrafts — limit', () => {
+  test('an explicit limit is sent as a real LIMIT clause, not applied client-side', async () => {
+    implementedBoardRows = [{ id: 1, status: 'implemented' }];
+    await listDrafts(1, { status: 'implemented', limit: 5 });
+    const call = issued.find((i) => i.sql.includes("d.status = $2 ORDER BY d.created_at DESC LIMIT $3"));
+    assert.ok(call, 'expected a LIMIT clause in the issued SQL');
+    assert.deepEqual(call.params, [1, 'implemented', 5]);
+  });
+
+  test('no limit given -> no LIMIT clause at all, same as before this existed', async () => {
+    activeBoardRows = [];
+    await listDrafts(1, { status: 'open' });
+    const call = issued[issued.length - 1];
+    assert.doesNotMatch(call.sql, /LIMIT/);
+  });
+});
+
+describe('listDraftsForBoard', () => {
+  test('active (non-terminal) drafts are fetched with no LIMIT at all — this is the set a human must be able to see in full', async () => {
+    activeBoardRows = [{ id: 1, status: 'approved' }, { id: 2, status: 'pr_opened' }];
+    implementedBoardRows = [];
+    await listDraftsForBoard(1);
+    const activeCall = issued.find((i) => i.sql.includes("d.status NOT IN ('implemented', 'abandoned')"));
+    assert.ok(activeCall);
+    assert.doesNotMatch(activeCall.sql, /LIMIT/);
+  });
+
+  test('implemented drafts are capped, with the cap sent as a real query param', async () => {
+    activeBoardRows = [];
+    implementedBoardRows = [{ id: 3, status: 'implemented' }];
+    await listDraftsForBoard(1, { implementedLimit: 42 });
+    const implementedCall = issued.find((i) => i.sql.includes("d.status = 'implemented' ORDER BY d.created_at DESC LIMIT"));
+    assert.ok(implementedCall);
+    assert.deepEqual(implementedCall.params, [1, 42]);
+  });
+
+  test('abandoned drafts are never fetched at all — the Action Center UI never renders them', async () => {
+    activeBoardRows = [];
+    implementedBoardRows = [];
+    await listDraftsForBoard(1);
+    assert.ok(!issued.some((i) => i.sql.includes("'abandoned'") && !i.sql.includes('NOT IN')));
+  });
+
+  test('combines active + capped-implemented into one result, active first', async () => {
+    activeBoardRows = [{ id: 1, status: 'approved' }];
+    implementedBoardRows = [{ id: 2, status: 'implemented' }];
+    const result = await listDraftsForBoard(1);
+    assert.deepEqual(result.map((r) => r.id), [1, 2]);
+  });
+});
+
+// Egress fix (2026-10-01): the board used to SELECT d.* — every column, incl.
+// original_content (a second full copy of `content`) — on every load. Order
+// matters in this describe: the column list is cached per process after the
+// first SUCCESSFUL lookup, so the failure/fallback test must run first.
+describe('listDraftsForBoard — slim column list', () => {
+  test('if the column lookup fails it falls back to d.* (bigger, never wrong) and does not cache the failure', async () => {
+    draftsColumnRows = null;
+    activeBoardRows = []; implementedBoardRows = [];
+    await listDraftsForBoard(1);
+    const boardCall = issued.find((i) => i.sql.includes("d.status NOT IN ('implemented', 'abandoned')"));
+    assert.match(boardCall.sql, /^SELECT d\.\*, \(/);
+  });
+
+  test('once the lookup succeeds, the omitted heavy columns are gone, everything else (incl. future columns) stays', async () => {
+    draftsColumnRows = [
+      'id', 'site_id', 'status', 'content', 'original_content', 'revision_history', 'rendered_body',
+      'agent_review_detail', 'target_provenance', 'rollback_snapshot', 'validation_status', 'some_future_column',
+    ].map((column_name) => ({ column_name }));
+    activeBoardRows = []; implementedBoardRows = [];
+    await listDraftsForBoard(1);
+    const boardCall = issued.filter((i) => i.sql.includes("d.status NOT IN ('implemented', 'abandoned')")).pop();
+    for (const heavy of ['original_content', 'revision_history', 'rendered_body', 'agent_review_detail', 'target_provenance']) {
+      assert.doesNotMatch(boardCall.sql, new RegExp(`"${heavy}"`), `${heavy} must not be selected for the board`);
+    }
+    // columns DraftModal reads from the list row, plus an unlisted future column, must survive
+    for (const kept of ['content', 'rollback_snapshot', 'validation_status', 'some_future_column']) {
+      assert.match(boardCall.sql, new RegExp(`d\\."${kept}"`), `${kept} must still be selected`);
+    }
+    assert.doesNotMatch(boardCall.sql, /d\.\*/);
+    assert.match(boardCall.sql, /AS sibling_count/);
+  });
+
+  test('the implemented-drafts query is slimmed too and keeps its LIMIT param', async () => {
+    activeBoardRows = []; implementedBoardRows = [];
+    await listDraftsForBoard(1, { implementedLimit: 7 });
+    const call = issued.filter((i) => i.sql.includes("d.status = 'implemented' ORDER BY d.created_at DESC LIMIT")).pop();
+    assert.doesNotMatch(call.sql, /original_content/);
+    assert.deepEqual(call.params, [1, 7]);
+  });
+});
+
+describe('getLatestGeoAuditScore', () => {
+  test('returns the newest geo-audit score and asks the DB for one row, not every draft', async () => {
+    geoAuditScoreRows = [{ overall: 73 }];
+    assert.equal(await getLatestGeoAuditScore(5), 73);
+    const call = issued.find((i) => i.sql.startsWith("SELECT content #> '{score,overall}'"));
+    assert.match(call.sql, /action_type = 'geo-audit'/);
+    assert.match(call.sql, /ORDER BY created_at DESC LIMIT 1/);
+    assert.deepEqual(call.params, [5]);
+  });
+
+  test('null when there is no geo-audit draft, or it has no score', async () => {
+    geoAuditScoreRows = [];
+    assert.equal(await getLatestGeoAuditScore(5), null);
+    geoAuditScoreRows = [{ overall: null }];
+    assert.equal(await getLatestGeoAuditScore(5), null);
+  });
+});
+
+describe('countDraftsByLifecycle', () => {
+  test('derives nonImplemented as total minus implemented minus abandoned, from real per-status counts alone', async () => {
+    lifecycleCountRows = [
+      { status: 'approved', n: 3, n_this_week: 0 },
+      { status: 'pr_opened', n: 2, n_this_week: 0 },
+      { status: 'implemented', n: 10, n_this_week: 4 },
+      { status: 'abandoned', n: 7, n_this_week: 0 },
+    ];
+    const counts = await countDraftsByLifecycle(1);
+    assert.equal(counts.total, 22);
+    assert.equal(counts.implemented, 10);
+    assert.equal(counts.abandoned, 7);
+    assert.equal(counts.nonImplemented, 5); // 3 approved + 2 pr_opened
+    assert.equal(counts.implementedThisWeek, 4);
+  });
+
+  test('never fetches a single draft row — one GROUP BY query only, so this can never be the thing that times out', async () => {
+    lifecycleCountRows = [];
+    await countDraftsByLifecycle(1);
+    assert.equal(issued.length, 1);
+    assert.match(issued[0].sql, /GROUP BY status/);
+  });
+
+  test('all-zero site (no drafts at all) reports zero everywhere, not a crash', async () => {
+    lifecycleCountRows = [];
+    const counts = await countDraftsByLifecycle(1);
+    assert.deepEqual(counts, {
+      total: 0, nonImplemented: 0, implemented: 0, abandoned: 0, submittedForApproval: 0, implementedThisWeek: 0,
+    });
   });
 });

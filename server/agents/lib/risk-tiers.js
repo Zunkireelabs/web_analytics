@@ -29,7 +29,16 @@
 const SAFE_GENERATOR_IDS = new Set([
   'meta-title', 'faq', 'schema', 'llms-txt', 'internal-links', 'sitemap',
   'robots-fix', 'security-headers', 'html-lang', 'canonical', 'viewport',
-  'open-graph', 'expand-content', 'qa-content',
+  // Safe to auto-ship: technical-seo.js only ever recommends this generator
+  // when robotsTxtFound is false (a real, verified absence — never when a
+  // file already exists, so this can never clobber real content), and its
+  // only other input (disallowPatterns) is deterministic pattern-matching
+  // over real GSC data (index-bloat.js's foreign-platform-extension and
+  // spam-numeric-param checks) — never LLM-guessed. Worst case on a false
+  // positive is one extra narrow Disallow line; the file always still opens
+  // with Allow: /.
+  'robots-bootstrap',
+  'open-graph', 'expand-content', 'refresh-content', 'qa-content',
   // Deterministic from the page's real URL path, no LLM — same shape as
   // canonical.js, which is already in this set for the same reason.
   'breadcrumbs',
@@ -176,6 +185,52 @@ const SAFE_GENERATOR_IDS = new Set([
   // the daily run ships whatever is genuinely open, rather than inventing a
   // topic every morning.
   'blog-outline',
+  // Same exact-match-or-refuse shape as schema-repair/content-integrity-repair
+  // above: the actual file patch (implementers/lib/soft-404-inject.js) only
+  // ever applies when the exact known-vulnerable `try_files ... /index.html;`
+  // line is still present byte-for-byte, with no existing error_page 404 and
+  // no ambiguous second occurrence — anything else refuses rather than
+  // guessing, so a failed match already leaves the recommendation open for a
+  // human instead of force-applying a misread config.
+  'soft-404-nginx',
+  // Same exact-match-or-refuse shape as soft-404-nginx just above, one
+  // level more conservative still: implementers/lib/redirect-chain-nginx-
+  // inject.js additionally refuses if the live rule's CURRENT target has
+  // drifted from what the real redirect walk (agents/redirect-chain.js)
+  // observed — never trusts a stale hop, never guesses which of two
+  // matching rules is "the" real one.
+  'redirect-chain-nginx',
+  // Same idempotent hash-marker splice as security-headers just above (both
+  // fixed-syntax, deterministic nginx blocks spliced into their own
+  // dedicated `# SEOAI:...:START/END` marker region, no LLM, no
+  // exact-match-or-refuse complexity beyond the shared brace-balance
+  // guardrail) — technical-seo.js only ever recommends this generator when
+  // the site's own tracked nginx config exists AND a real fetched response
+  // was observed missing Content-Encoding, never guessed.
+  'compression-nginx',
+  // All-or-nothing exact-match-or-refuse (implementers/lib/sitemap-removal-
+  // inject.js): every requested URL must still be found as an exact
+  // <url><loc>...</loc></url> entry in the LIVE sitemap at apply time, or
+  // none are removed. Never touches the underlying robots.txt/noindex/
+  // canonical signal — only ever removes THIS platform's own sitemap
+  // listing to agree with Google's already-confirmed current state, which
+  // is why it's safe even though the source of that state (a human's
+  // noindex decision, a robots rule) is never itself verified as
+  // "correct": worst case, a real page's sitemap entry disappears
+  // temporarily, and sitemap.js's own existing "URL missing from sitemap"
+  // detection re-adds it automatically the moment the underlying signal
+  // changes — no separate undo mechanism needed.
+  'sitemap-removal',
+  // Added 2026-09-17: the counterpart to sitemap-removal above for a
+  // build-time-templated sitemap (see implementers/lib/sitemap-
+  // frontmatter-exclude-inject.js) — same exact-match-or-refuse shape as
+  // content-integrity-repair/schema-repair: the page's own front-matter
+  // block must already exist and not already carry the field, or the
+  // whole draft refuses rather than guessing at a new location. Only ever
+  // recommended (agents/sitemap-conflict.js) when the site's own
+  // sitemapExcludeField has been verified against its real template
+  // source, never assumed from the sitemap's engine alone.
+  'sitemap-frontmatter-exclude',
 ]);
 
 // Everything NOT in the set above is manual, and stays that way for a stated
@@ -192,4 +247,28 @@ const SAFE_GENERATOR_IDS = new Set([
 
 export function riskTierForGenerator(generatorId) {
   return SAFE_GENERATOR_IDS.has(generatorId) ? 'safe' : 'manual';
+}
+
+// Findings whose DETECTION is a heuristic rather than an observed defect, so
+// the generator's own safe tier (which only says the FIX is mechanically safe)
+// is not enough to let them ship unreviewed. Measured 2026-10-01: 250 of 611
+// open zunkireelabs rows were geo-signals checklist items ("cite external
+// sources", "add datePublished") on pages with 0-6 impressions, all auto-
+// eligible, and typography-drift rows were flagging deliberate per-page
+// heading sizes. The row stays visible; it just needs a human decision.
+// Per-finding, deliberately not a change to any generator's tier above.
+export function requiresHumanReview(item) {
+  if (item?.source === 'geo-signals') return true;
+  // Trend insight posts used to ALWAYS need a person, because they make claims
+  // about current events. Decided otherwise (2026-10-07, owner): they ship
+  // unattended like any other blog-outline. What still protects them is not a
+  // reviewer but the way they are built — trend-radar only groups real,
+  // linked headlines, insightContext() tells the writer every recent claim
+  // must come from those headlines and be attributed to its outlet, and the
+  // normal blog pacing, quality gate and design gates all still apply.
+  // TREND_RADAR_REQUIRE_REVIEW=true restores the old always-review behaviour
+  // without a deploy, should a bad post ever make that the right call.
+  if (item?.source === 'trend-radar' && process.env.TREND_RADAR_REQUIRE_REVIEW === 'true') return true;
+  const fixType = item?.params?.fixType;
+  return typeof fixType === 'string' && fixType.startsWith('typography-drift');
 }

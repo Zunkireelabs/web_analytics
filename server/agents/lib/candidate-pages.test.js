@@ -1,6 +1,6 @@
 import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { filterSoftNotFoundPages, clearSoftNotFoundCache, zeroTrafficSlotsFor } from './candidate-pages.js';
+import { filterSoftNotFoundPages, clearSoftNotFoundCache, zeroTrafficSlotsFor, dedupeQueryVariants } from './candidate-pages.js';
 
 // A 200 status does not prove a page exists. zunkireelabs.com serves its
 // homepage byte-for-byte for ANY unmatched path — /gaas/ and /zzz-not-a-page/
@@ -109,6 +109,45 @@ describe('filterSoftNotFoundPages', () => {
   });
 });
 
+describe('dedupeQueryVariants — the Chayce Properties `?h=` regression', () => {
+  test('drops a tracking-param variant that shares a pathname with a real page, folding its impressions in', () => {
+    const impressions = new Map([
+      ['https://chayceproperties.com/', 5],
+      ['https://chayceproperties.com/?h=123210041280', 9],
+    ]);
+    const kept = dedupeQueryVariants(
+      ['https://chayceproperties.com/', 'https://chayceproperties.com/?h=123210041280'],
+      impressions,
+    );
+    assert.deepEqual(kept, ['https://chayceproperties.com/']);
+    assert.equal(impressions.get('https://chayceproperties.com/'), 14);
+  });
+
+  test('leaves a query-driven page untouched when no bare sibling shares its pathname', () => {
+    // get-started.njk's own ?package= variants — real, distinct content.
+    const urls = [
+      'https://chayceproperties.com/get-started/index.html?package=Gold',
+      'https://chayceproperties.com/get-started/index.html?package=Silver',
+    ];
+    assert.deepEqual(dedupeQueryVariants(urls), urls);
+  });
+
+  test('leaves a lone query-string URL alone when it is the only entry', () => {
+    const urls = ['https://chayceproperties.com/?h=8020347041280'];
+    assert.deepEqual(dedupeQueryVariants(urls), urls);
+  });
+
+  test('works without an impressions map (zero-traffic pool has nothing to merge)', () => {
+    const urls = ['https://chayceproperties.com/', 'https://chayceproperties.com/?h=1630566011280'];
+    assert.deepEqual(dedupeQueryVariants(urls), ['https://chayceproperties.com/']);
+  });
+
+  test('an unparseable URL is treated as its own group rather than throwing', () => {
+    const urls = ['not-a-url', 'https://chayceproperties.com/'];
+    assert.deepEqual(dedupeQueryVariants(urls).sort(), urls.sort());
+  });
+});
+
 describe('zeroTrafficSlotsFor — the whole site gets scanned, not just its top pages', () => {
   // The reported symptom: newer blog posts and low-traffic resource pages
   // never getting an FAQ, because they never reached the front of the queue.
@@ -137,5 +176,23 @@ describe('zeroTrafficSlotsFor — the whole site gets scanned, not just its top 
 
   test('a brand-new site with no GSC data at all spends the whole batch on inventory', () => {
     assert.equal(zeroTrafficSlotsFor(20, 0, 50), 20);
+  });
+});
+
+describe('dedupeQueryVariants — http/https duplicates of one page', () => {
+  test('keeps only the https URL and folds the http impressions into it', () => {
+    const impressions = new Map([['http://example.com/', 4], ['https://example.com/', 10]]);
+    const kept = dedupeQueryVariants(['http://example.com/', 'https://example.com/'], impressions);
+    assert.deepEqual(kept, ['https://example.com/']);
+    assert.equal(impressions.get('https://example.com/'), 14);
+  });
+
+  test('a lone http URL is left alone', () => {
+    assert.deepEqual(dedupeQueryVariants(['http://example.com/only']), ['http://example.com/only']);
+  });
+
+  test('www and apex stay separate', () => {
+    const kept = dedupeQueryVariants(['https://example.com/', 'https://www.example.com/']);
+    assert.equal(kept.length, 2);
   });
 });

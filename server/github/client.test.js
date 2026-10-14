@@ -2,9 +2,10 @@ import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   getFileContent, getFileSha, beginFileOverlay, endFileOverlay, recordFileOverlayWrites,
-  createCommitObject, updateRef, commitFilesAtomic,
+  createCommitObject, updateRef, commitFilesAtomic, getCommitMessage,
   getBranchSha, getLastKnownRateLimit, RATE_LIMIT_RESERVE, searchCodeForString,
 } from './client.js';
+import { clearInstallationTokenCache } from './app-auth.js';
 
 // Real HTTP calls need a resolvable token — githubTokenEnvVar defaults to
 // 'GITHUB_PAT' for a site with no per-site override (credentials.js).
@@ -175,6 +176,106 @@ describe('createCommitObject / updateRef split', () => {
       globalThis.fetch = original;
     }
   });
+
+  // github-ops.js's same-day squash (2026-09 lifecycle fix — one commit per
+  // day, guaranteed across separate same-day runs, not just within one):
+  // the new commit's TREE must come from wherever today's accumulated
+  // changes already are (treeBaseSha), while its PARENT link points further
+  // back, past today's earlier commit(s), to the real pre-today base.
+  test('createCommitObject reads its TREE from treeBaseSha when given, but still parents the commit on parentSha', async () => {
+    const calls = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {
+      const u = String(url);
+      calls.push({ url: u, method: opts?.method, body: opts?.body ? JSON.parse(opts.body) : null });
+      if (u.includes('/git/commits/branch-tip-sha')) return jsonResponse({ tree: { sha: 'cumulative-tree-sha' } });
+      if (u.includes('/git/trees')) return jsonResponse({ sha: 'new-tree-sha' });
+      if (u.endsWith('/git/commits')) return jsonResponse({ sha: 'squashed-commit-sha' });
+      throw new Error(`unexpected fetch: ${u}`);
+    };
+    try {
+      const sha = await createCommitObject(site, 'real-base-sha', [{ path: 'a.txt', content: 'hi' }], 'squashed message', { treeBaseSha: 'branch-tip-sha' });
+      assert.equal(sha, 'squashed-commit-sha');
+      // The tree read came from treeBaseSha, not parentSha.
+      assert.ok(calls.some((c) => c.url.includes('/git/commits/branch-tip-sha')));
+      assert.ok(!calls.some((c) => c.url.includes('/git/commits/real-base-sha')));
+      // But the new commit's own parent is parentSha, not treeBaseSha.
+      const commitCreateCall = calls.find((c) => c.method === 'POST' && c.url.endsWith('/git/commits'));
+      assert.deepEqual(commitCreateCall.body.parents, ['real-base-sha']);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('createCommitObject with no treeBaseSha behaves exactly as before — tree and parent both come from parentSha', async () => {
+    const calls = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {
+      const u = String(url);
+      calls.push({ url: u, method: opts?.method, body: opts?.body ? JSON.parse(opts.body) : null });
+      if (u.includes('/git/commits/parent-sha')) return jsonResponse({ tree: { sha: 'base-tree-sha' } });
+      if (u.includes('/git/trees')) return jsonResponse({ sha: 'new-tree-sha' });
+      if (u.endsWith('/git/commits')) return jsonResponse({ sha: 'new-commit-sha' });
+      throw new Error(`unexpected fetch: ${u}`);
+    };
+    try {
+      await createCommitObject(site, 'parent-sha', [{ path: 'a.txt', content: 'hi' }], 'a commit');
+      const commitCreateCall = calls.find((c) => c.method === 'POST' && c.url.endsWith('/git/commits'));
+      assert.deepEqual(commitCreateCall.body.parents, ['parent-sha']);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('updateRef with no force option omits it from the request body entirely — unchanged wire format for every existing caller', async () => {
+    const calls = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {
+      calls.push({ body: opts?.body ? JSON.parse(opts.body) : null });
+      return jsonResponse({});
+    };
+    try {
+      await updateRef(site, 'batch-branch', 'sha-1');
+      assert.deepEqual(calls[0].body, { sha: 'sha-1' });
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('updateRef with force:true sends the non-fast-forward flag GitHub requires for a same-day squash', async () => {
+    const calls = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {
+      calls.push({ body: opts?.body ? JSON.parse(opts.body) : null });
+      return jsonResponse({});
+    };
+    try {
+      await updateRef(site, 'batch-branch', 'sha-1', { force: true });
+      assert.deepEqual(calls[0].body, { sha: 'sha-1', force: true });
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('getCommitMessage returns only the first line of the commit message', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => jsonResponse({ message: 'Action Center: batch — draft #1; draft #2' });
+    try {
+      assert.equal(await getCommitMessage(site, 'some-sha'), 'Action Center: batch — draft #1; draft #2');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('getCommitMessage throws (never returns a fabricated value) on a real GitHub error', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => new Response('not found', { status: 404 });
+    try {
+      await assert.rejects(() => getCommitMessage(site, 'missing-sha'));
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
 });
 
 // The 2026-09-01 outage: the 08:00 auto-remediation run created ~130 drafts
@@ -304,7 +405,7 @@ describe('rate limiting', () => {
     });
     try {
       await getBranchSha(site, 'main');
-      const state = getLastKnownRateLimit();
+      const state = getLastKnownRateLimit(site);
       assert.equal(state.remaining, RATE_LIMIT_RESERVE - 1);
       assert.equal(state.low, true);
     } finally {
@@ -320,7 +421,7 @@ describe('rate limiting', () => {
     });
     try {
       await getBranchSha(site, 'main');
-      assert.equal(getLastKnownRateLimit().low, false);
+      assert.equal(getLastKnownRateLimit(site).low, false);
     } finally {
       globalThis.fetch = original;
     }
@@ -346,7 +447,7 @@ describe('rate-limit state — the ways it must NOT latch', () => {
       globalThis.fetch = async () => ok(); // now a response with no headers at all
       await getBranchSha(site, 'main');
 
-      const state = getLastKnownRateLimit();
+      const state = getLastKnownRateLimit(site);
       assert.notEqual(state.remaining, 0, 'a missing header must not read as an exhausted budget');
       assert.equal(state.low, false, 'and must not halt the run');
     } finally {
@@ -371,7 +472,7 @@ describe('rate-limit state — the ways it must NOT latch', () => {
       });
       await searchCodeForString(site, 'needle');
 
-      const state = getLastKnownRateLimit();
+      const state = getLastKnownRateLimit(site);
       assert.equal(state.remaining, 4900, 'core state still reflects the last CORE response');
       assert.equal(state.low, false, 'search exhaustion must not stop the ship path');
     } finally {
@@ -391,7 +492,7 @@ describe('rate-limit state — the ways it must NOT latch', () => {
     globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '3', 'x-ratelimit-reset': past });
     try {
       await getBranchSha(site, 'main');
-      const state = getLastKnownRateLimit();
+      const state = getLastKnownRateLimit(site);
       assert.equal(state.remaining, 3, 'the observation is still reported honestly');
       assert.equal(state.low, false, 'but a budget that has already refilled must not keep halting runs');
     } finally {
@@ -405,9 +506,148 @@ describe('rate-limit state — the ways it must NOT latch', () => {
     globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '3', 'x-ratelimit-reset': future });
     try {
       await getBranchSha(site, 'main');
-      assert.equal(getLastKnownRateLimit().low, true);
+      assert.equal(getLastKnownRateLimit(site).low, true);
     } finally {
       globalThis.fetch = original;
     }
+  });
+
+  // Real bug, found 2026-09-07 while auditing for client #2's onboarding
+  // (site 8862, "Admizz Education"): this state used to be one shared value
+  // for the whole process, on the reasoning that every site shared one PAT.
+  // That stopped being true the moment a second tenant gets its OWN
+  // credential — a distinct github_pat_env_var, or its own GitHub App
+  // installation. Before this fix, exhausting site A's budget would falsely
+  // report site B's unrelated, healthy budget as `low` (or the reverse: mask
+  // a real exhaustion on B behind A's healthy reading) — auto-remediation.js
+  // and routes/action-center.js both gate an entire site's shipping run on
+  // this single check.
+  test('two sites on DIFFERENT credentials have independent rate-limit state', async () => {
+    const siteA = { id: 1, repo_owner: 'acme', repo_name: 'site-a' };
+    const siteB = { id: 2, repo_owner: 'acme', repo_name: 'site-b', github_pat_env_var: 'GITHUB_PAT_B' };
+    const originalB = process.env.GITHUB_PAT_B;
+    process.env.GITHUB_PAT_B = 'test-token-b';
+    const original = globalThis.fetch;
+    try {
+      globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '3' }); // exhaust A
+      await getBranchSha(siteA, 'main');
+      globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '4900' }); // B is healthy
+      await getBranchSha(siteB, 'main');
+
+      assert.equal(getLastKnownRateLimit(siteA).low, true, "A's own exhausted budget must still read low");
+      assert.equal(getLastKnownRateLimit(siteB).low, false, "B's healthy budget must not be poisoned by A's");
+    } finally {
+      globalThis.fetch = original;
+      if (originalB === undefined) delete process.env.GITHUB_PAT_B;
+      else process.env.GITHUB_PAT_B = originalB;
+    }
+  });
+
+  // The inverse and equally real case: two sites that deliberately still
+  // share one PAT (the default before a tenant has its own GitHub App
+  // installation) hit the exact same real GitHub-side budget, so they must
+  // be reported as ONE shared state, not artificially separated by site.id.
+  test('two sites sharing the SAME credential see one real shared budget', async () => {
+    const siteA = { id: 1, repo_owner: 'acme', repo_name: 'site-a' }; // both default to GITHUB_PAT
+    const siteC = { id: 3, repo_owner: 'acme', repo_name: 'site-c' };
+    const original = globalThis.fetch;
+    try {
+      globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '3' });
+      await getBranchSha(siteA, 'main');
+
+      assert.equal(getLastKnownRateLimit(siteC).low, true, "sharing site A's token means sharing its exhausted budget");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
+// Regression coverage: authHeaders' missing-credential error must name the
+// credential actually missing, for all three real cases — a site on the
+// App path is not misdiagnosed as a PAT problem, a site on the PAT path is
+// not misdiagnosed as an App problem, and code search (which NEVER
+// consults the App path, even for a site that otherwise uses one — see
+// credentials.js's searchToken) is never told to "configure the App" when
+// the real gap is a missing classic PAT for search specifically.
+describe('authHeaders — missing-credential error names the right credential', () => {
+  const originalEnv = { ...process.env };
+  function resetEnv() {
+    for (const k of Object.keys(process.env)) if (!(k in originalEnv)) delete process.env[k];
+    Object.assign(process.env, originalEnv);
+  }
+  after(resetEnv);
+
+  test('PAT-path site with no PAT set: blames the PAT env var, not the App', async () => {
+    resetEnv();
+    delete process.env.GITHUB_PAT;
+    delete process.env.GITHUB_APP_ID;
+    delete process.env.GITHUB_APP_PRIVATE_KEY_B64;
+    const patSite = { id: 99, repo_owner: 'acme', repo_name: 'site', github_app_installation_id: null };
+    await assert.rejects(
+      () => getBranchSha(patSite, 'main'),
+      (err) => { assert.match(err.message, /No GitHub PAT set in env var "GITHUB_PAT"/); return true; },
+    );
+  });
+
+  test('App-path site with the App unconfigured: blames GITHUB_APP_ID/PRIVATE_KEY, never the PAT', async () => {
+    resetEnv();
+    delete process.env.GITHUB_APP_ID;
+    delete process.env.GITHUB_APP_PRIVATE_KEY_B64;
+    process.env.GITHUB_PAT = 'irrelevant-should-not-be-named';
+    clearInstallationTokenCache();
+    const appSite = { id: 100, repo_owner: 'acme', repo_name: 'site', github_app_installation_id: 12345 };
+    await assert.rejects(
+      () => getBranchSha(appSite, 'main'),
+      (err) => {
+        assert.match(err.message, /GitHub App is not configured/);
+        assert.doesNotMatch(err.message, /GITHUB_PAT\b/, 'must not blame the PAT env var when the site is on the App path');
+        return true;
+      },
+    );
+  });
+
+  test('a site with its OWN registered App (migration 154) and no matching key: blames its own env var, not the shared default', async () => {
+    resetEnv();
+    // The shared default App IS configured here — proving the bug: before
+    // this fix, a site on its own dedicated App still got blamed for the
+    // shared GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY_B64 even though those were
+    // never the actual credential this site depends on.
+    process.env.GITHUB_APP_ID = 'shared-default-app-is-fine';
+    process.env.GITHUB_APP_PRIVATE_KEY_B64 = 'shared-default-key-is-fine';
+    delete process.env.GITHUB_APP_PRIVATE_KEY_B64_CHAYCE;
+    clearInstallationTokenCache();
+    const chaycePropertiesSite = {
+      id: 8864, repo_owner: 'acme', repo_name: 'site',
+      github_app_installation_id: 160525254,
+      github_app_id: 4894335,
+      github_app_private_key_env_var: 'GITHUB_APP_PRIVATE_KEY_B64_CHAYCE',
+    };
+    await assert.rejects(
+      () => getBranchSha(chaycePropertiesSite, 'main'),
+      (err) => {
+        assert.match(err.message, /GITHUB_APP_PRIVATE_KEY_B64_CHAYCE/);
+        assert.match(err.message, /4894335/);
+        assert.doesNotMatch(err.message, /set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64\b/, 'must not blame the shared default App when this site has its own');
+        return true;
+      },
+    );
+  });
+
+  test('code search with no search-specific PAT, even on an otherwise-fully-configured App site: blames the search PAT, never the App', async () => {
+    resetEnv();
+    process.env.GITHUB_APP_ID = 'irrelevant-app-is-fine';
+    process.env.GITHUB_APP_PRIVATE_KEY_B64 = 'irrelevant-app-is-fine';
+    delete process.env.GITHUB_PAT_SEARCH;
+    delete process.env.GITHUB_SEARCH_PAT;
+    clearInstallationTokenCache();
+    const appSite = { id: 101, repo_owner: 'acme', repo_name: 'site', github_app_installation_id: 12345 };
+    await assert.rejects(
+      () => searchCodeForString(appSite, 'needle'),
+      (err) => {
+        assert.match(err.message, /GITHUB_PAT_SEARCH/);
+        assert.doesNotMatch(err.message, /GitHub App is not configured/, 'the App being unconfigured is not the problem here — it is fully configured and irrelevant to search');
+        return true;
+      },
+    );
   });
 });

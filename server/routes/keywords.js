@@ -7,8 +7,10 @@ import {
   getLatestLayoutSuggestion, saveLayoutSuggestion, createUserKeywordGap,
   getProductCapabilities, createProductCapability, updateProductCapabilityStatus,
 } from '../store/data-analyst.js';
-import { createActionCenterRecommendationForGap, buildProductTopicMap, opportunityDraftEligibility } from '../agents/lib/analyst-seo-mapping.js';
+import { PRODUCT_KNOWLEDGE_KINDS } from '../lib/product-knowledge-kinds.js';
+import { createActionCenterRecommendationForGap, buildProductTopicMap, opportunityDraftEligibility, recommendedActionForGap } from '../agents/lib/analyst-seo-mapping.js';
 import { buildGrowthOpportunities } from '../agents/lib/growth-opportunities.js';
+import { translateKeywords } from '../agents/lib/keyword-translation.js';
 import { generateDraft } from './action-center.js';
 import { getSiteById } from '../store/read.js';
 
@@ -75,7 +77,10 @@ router.post('/internal/keywords/:siteId/growth-opportunities/generate-draft', as
 router.get('/internal/keywords/:siteId/gaps', async (req, res, next) => {
   try {
     const { status } = req.query;
-    res.json(await getKeywordGaps(req.params.siteId, status));
+    const gaps = await getKeywordGaps(req.params.siteId, status);
+    // recommended_action comes from the SAME rules that decide whether a draft is
+    // created, so the UI shows what will really happen — not a fixed "Blog post".
+    res.json(gaps.map((g) => ({ ...g, recommended_action: recommendedActionForGap(g) })));
   } catch (e) { next(e); }
 });
 
@@ -103,6 +108,22 @@ router.post('/internal/keywords/:siteId/gaps', async (req, res, next) => {
       'Requested on the Analyst page as a growth target.'
     );
     res.status(gap.alreadyQueued ? 200 : 201).json(gap);
+  } catch (e) { next(e); }
+});
+
+// English glosses for non-English keywords shown on the Analyst page. A POST
+// (not a GET) only because the term list can outgrow a query string; it reads
+// and writes nothing. Fails soft inside translateKeywords — never a 500 for
+// a decorative lookup.
+router.post('/internal/keywords/:siteId/translate', async (req, res, next) => {
+  try {
+    const terms = req.body?.terms;
+    if (!Array.isArray(terms)) {
+      const err = new Error('terms must be an array of strings.');
+      err.status = 400;
+      throw err;
+    }
+    res.json({ translations: await translateKeywords(terms) });
   } catch (e) { next(e); }
 });
 
@@ -179,22 +200,33 @@ router.get('/internal/keywords/:siteId/profile', async (req, res, next) => {
 // yet that lets an agent propose one, so nothing here is ever invented.
 router.get('/internal/keywords/:siteId/capabilities', async (req, res, next) => {
   try {
-    const { status } = req.query;
-    res.json(await getProductCapabilities(req.params.siteId, status));
+    const { status, kind } = req.query;
+    // Defaults to 'capability' so the Analyst page's existing list is exactly
+    // what it was before migration 176; `kind=all` returns every kind of
+    // product knowledge, or pass one specific kind.
+    if (kind !== undefined && kind !== 'all' && !PRODUCT_KNOWLEDGE_KINDS.includes(kind)) {
+      return res.status(400).json({ error: `kind must be 'all' or one of ${PRODUCT_KNOWLEDGE_KINDS.join(', ')}.` });
+    }
+    res.json(await getProductCapabilities(req.params.siteId, status, { kind: kind === 'all' ? null : (kind || 'capability') }));
   } catch (e) { next(e); }
 });
 
 router.post('/internal/keywords/:siteId/capabilities', async (req, res, next) => {
   try {
-    const { name, category, description, industries } = req.body || {};
+    const { name, category, description, industries, kind, details } = req.body || {};
     if (!name || !String(name).trim()) {
       return res.status(400).json({ error: 'name is required.' });
+    }
+    if (kind !== undefined && !PRODUCT_KNOWLEDGE_KINDS.includes(kind)) {
+      return res.status(400).json({ error: `kind must be one of ${PRODUCT_KNOWLEDGE_KINDS.join(', ')}.` });
     }
     const capability = await createProductCapability(req.params.siteId, {
       name: String(name).trim(),
       category: category || null,
       description: description || null,
       industries: Array.isArray(industries) ? industries : [],
+      kind: kind || 'capability',
+      details: details && typeof details === 'object' && !Array.isArray(details) ? details : {},
     });
     res.status(201).json(capability);
   } catch (e) { next(e); }

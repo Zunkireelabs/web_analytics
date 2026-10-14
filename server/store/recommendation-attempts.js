@@ -96,6 +96,26 @@ export async function countRecoveryCyclesByFinding(siteId) {
   return new Map(rows.map((r) => [r.finding_id, r.cycles]));
 }
 
+// The refusal-cap counterpart to countRecoveryCyclesByFinding above —
+// recommendation-scoped rather than finding-scoped, since
+// countRefusalsByRecommendation (generator-learning.js) counts refusals per
+// recommendation, not per finding. `finding_id IS NULL` is what keeps this
+// disjoint from the query above: driveAutonomousRecovery's own 'recovered'
+// rows always carry a real finding_id, so a recommendation that has been
+// through BOTH recovery paths is never double-counted by either one —
+// see driveAutonomousRefusalRecovery (action-center-reconciler.js), which
+// is the only writer of a finding_id-less 'recovered' row.
+export async function countRefusalRecoveryCyclesByRecommendation(siteId) {
+  const { rows } = await query(
+    `SELECT recommendation_id, COUNT(*)::int AS cycles
+       FROM recommendation_attempts
+      WHERE site_id = $1 AND recommendation_id IS NOT NULL AND finding_id IS NULL AND outcome = 'recovered'
+      GROUP BY recommendation_id`,
+    [siteId],
+  );
+  return new Map(rows.map((r) => [r.recommendation_id, r.cycles]));
+}
+
 // The full history behind one card, oldest first — what the Action Center
 // shows when a user asks "why does this keep coming back".
 export async function listAttemptsForRecommendation(siteId, recommendationId, findingIds = []) {

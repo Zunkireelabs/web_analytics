@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyAbandonReason, isAutoRetryable, RETRY_POLICY } from './attempt-classification.js';
+import { FAILURE_CLASS } from './failure-classification.js';
 
 // Every string below is a REAL abandoned_reason counted in the live drafts
 // table on 2026-09-03, with its live row count. They are the whole point of
@@ -53,6 +54,52 @@ test('a missing url_file_map entry waits on a human, and stops retrying', () => 
   assert.equal(isAutoRetryable(retryPolicy), false);
 });
 
+test('a broken link genuinely absent from the whole repo is stale, not a mapping gap', () => {
+  // Real message shape produced by backend.js's computeBrokenLinkFixMerge
+  // once repo-local search covers the whole repo (2026-09-08): a human
+  // cannot fix this by adding a url_file_map entry, because full-coverage
+  // search already proved there is nothing left to map to. Verified live
+  // against site 1 (2026-09-11) — a pankey.org citation link on a dental
+  // blog post that no longer exists anywhere in the repo.
+  const { retryPolicy } = classifyAbandonReason(
+    'Auto-ship failed: No file could be found or safely stripped for href="https://pankey.org/the-era-of-the-ai-virtual-assistants-in-dentistry/" across 1 known source page(s) (0 have no url_file_map entry; 1 mapped file(s) don\'t contain this link); also checked the site-wide link config file, no match — a full repository search (not a bounded sample) found this href hardcoded nowhere in it. This link is confirmed absent from every real candidate file in the repo — the finding is likely stale rather than missing a mapping.',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.ALREADY_RESOLVED);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
+test('a broken link with real search candidates that just don’t match still waits on a human', () => {
+  // The narrower fragment above must not swallow this case: repo-local
+  // search DID find files containing the string, stripLink just couldn't
+  // apply cleanly — genuinely still a "the right file is unreachable" gap.
+  const { retryPolicy } = classifyAbandonReason(
+    'Auto-ship failed: No file could be found or safely stripped for href="https://github.com/zunkiree" across 1 known source page(s) (0 have no url_file_map entry; 1 mapped file(s) don\'t contain this link) — also checked 4 repository-local search candidate(s), none matched.',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+});
+
+test('a fine-grained PAT unable to use the merge-branch endpoint waits on a human, not the item', () => {
+  // Real message, site 1, 2026-09-11 — 5 identical occurrences in one run,
+  // all against different GEO content with nothing wrong with any of it.
+  const { retryPolicy } = classifyAbandonReason(
+    'Auto-ship failed: mergeBranchFromBase failed (403): {"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com/rest/branches/branches#merge-a-branch","status":"403"}',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
+test('the fine-grained-PAT block reason carries the already-known remediation, not just the diagnosis', () => {
+  // Messaging-only regression: the fix (classic PAT/App token, or a
+  // Git-Data-API-based sync) was already fully known when this rule was
+  // written — it must reach whoever reviews the block, not stay a comment
+  // only a future engineer reading the source would ever see.
+  const { summary } = classifyAbandonReason(
+    'Auto-ship failed: mergeBranchFromBase failed (403): {"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com/rest/branches/branches#merge-a-branch","status":"403"}',
+  );
+  assert.match(summary, /classic PAT/i);
+  assert.match(summary, /Git Data API/i);
+});
+
 test('missing markers wait on a human too', () => {
   // 10 + 9 live rows (Facebook Pixel and GA4).
   const { retryPolicy } = classifyAbandonReason(
@@ -94,6 +141,62 @@ test('a rate limit is transient wherever it appears', () => {
   assert.equal(retryPolicy, RETRY_POLICY.RETRY);
 });
 
+test('an unconfigured GitHub App is a missing-credential wait, same as a missing PAT', () => {
+  // Regression: client.js used to blame "No GitHub PAT set" even when the site
+  // is on the App path (github_app_installation_id set) and the real gap is
+  // GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY_B64 — this pattern must classify the
+  // same way the PAT message always has, not fall through to a generator defect.
+  const { retryPolicy } = classifyAbandonReason(
+    'Auto-ship failed: GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
+test('a missing code-search PAT is a config wait, not a per-item content defect', () => {
+  // Regression: before this rule existed, "No file could be found... code
+  // search fallback failed: No classic PAT with repo scope set for code
+  // search" had no matching rule and fell through to the unrecognized-text
+  // default (ITEM_DEFECT) — wrongly implying each individual broken-link-fix
+  // item was itself broken, when the real cause is a single missing
+  // site-wide credential (GITHUB_PAT_SEARCH / GITHUB_SEARCH_PAT) that blocks
+  // every broken-link-fix needing the code-search fallback identically.
+  const { retryPolicy } = classifyAbandonReason(
+    'Auto-ship failed: No file could be found or safely stripped for href="https://crm.zunkiree.com" across 1 known source page(s) (0 have no url_file_map entry; 1 mapped file(s) don\'t contain this link) — code search fallback failed: No classic PAT with "repo" scope set for code search — set GITHUB_PAT_SEARCH (or the global GITHUB_SEARCH_PAT) to enable the code-search fallback..',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
+test('an incomplete bounded repository search waits on a human, not a per-item defect or an infinite silent retry', () => {
+  // Regression: the repository-local search fallback (repo-local-search.js)
+  // is deliberately bounded — for a repo with more real candidate files
+  // than that bound, "not found in what was scanned" must never be reported
+  // as a confident per-item defect (implying THIS href is definitely
+  // nowhere), nor silently retried forever against the same unscanned
+  // files with no new evidence.
+  const { retryPolicy } = classifyAbandonReason(
+    'Auto-ship failed: No file could be found or safely stripped for href="https://dead.example/" across 1 known source page(s) (0 have no url_file_map entry; 1 mapped file(s) don\'t contain this link) — also checked 3 repository-local search candidate(s), none matched. The repository has more real candidate files than a bounded search can safely scan in one pass, and none of the scanned files matched — this could not be fully verified as absent from the repo.',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
+test('an unresolvable link target waits on a human, and does not re-draft on every recovery cycle', () => {
+  // Regression, measured live on site 1 (2026-09-09): the plain
+  // "…none matched." variant carried neither the credential phrase nor the
+  // bounded-search phrase, so it fell through to the ITEM_DEFECT default.
+  // ITEM_DEFECT is not merely "wrong label" here — ship-pacing grants
+  // MAX_FAILED_ATTEMPTS afresh per recovery cycle, so 75 findings produced
+  // 296 drafts, re-failing identically from 2026-08-23 onward.
+  const { retryPolicy, failureClass } = classifyAbandonReason(
+    'Auto-ship failed: No file could be found or safely stripped for href="https://beed.com.np" across 1 known source page(s) (0 have no url_file_map entry; 1 mapped file(s) don\'t contain this link) — also checked 1 repository-local search candidate(s), none matched.',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(failureClass, FAILURE_CLASS.CLIENT_REPO);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
 test('bookkeeping resets are not verdicts', () => {
   // 31 live rows from the one-off stranded-draft recovery script.
   assert.equal(
@@ -130,4 +233,79 @@ test('an unrecognized failure counts rather than retrying forever in silence', (
 test('an empty reason is retryable rather than held against the item', () => {
   assert.equal(classifyAbandonReason(null).retryPolicy, RETRY_POLICY.RETRY);
   assert.equal(classifyAbandonReason('').retryPolicy, RETRY_POLICY.RETRY);
+});
+
+// ---- Implementer reason CODES (the refusal path) -----------------------
+// auto-remediation.js records a refusal's `err.reason` — the implementers'
+// short `{ ok: false, reason }` code — into generator_outcomes.detail, and
+// countRefusalsByRecommendation classifies THAT to decide whether the refusal
+// was the item's own fault. A bare code matches none of the prose rules, so
+// before these every code fell through to the ITEM_DEFECT default and counted
+// against the item — retiring, among others, site 1's GA4 and Meta Pixel
+// analytics-install recommendations at 12 and 15 "honest refusals" that were
+// every one of them a self-healing missing marker.
+
+test('a config-gap reason CODE is a human gap, not an item defect', () => {
+  for (const code of ['no-insertion-marker', 'no-file-mapping', 'no-markers-configured', 'no-repo']) {
+    assert.equal(classifyAbandonReason(code).retryPolicy, RETRY_POLICY.NEEDS_HUMAN, code);
+  }
+});
+
+test('the code form agrees with the prose form of the same gap', () => {
+  // These two describe one situation and must never disagree about it.
+  assert.equal(
+    classifyAbandonReason('no-file-mapping').retryPolicy,
+    classifyAbandonReason('No url_file_map entry matches "/pricing".').retryPolicy,
+  );
+});
+
+test('an infrastructure reason CODE is transient, not an item defect', () => {
+  for (const code of ['github-error', 'batch-branch-conflicted', 'pr-open-failed', 'unreachable']) {
+    assert.equal(classifyAbandonReason(code).retryPolicy, RETRY_POLICY.RETRY, code);
+  }
+});
+
+test('draft lifecycle-state reason CODES say nothing about the item', () => {
+  // learned-repair.js excuses exactly these two for its own reuse scoring;
+  // the refusal cap has to reach the same verdict from the same input.
+  for (const code of ['awaiting-human-review', 'draft-reset', 'design-unreviewed']) {
+    assert.equal(classifyAbandonReason(code).retryPolicy, RETRY_POLICY.RETRY, code);
+  }
+});
+
+test('a genuinely item-specific reason CODE still counts against the item', () => {
+  // The caps exist for a reason: only codes that say nothing about the item
+  // were excused, and nothing here may quietly join them.
+  for (const code of ['invalid-edit', 'draft-not-ready', 'quality-gate-exhausted', 'no-match']) {
+    assert.equal(classifyAbandonReason(code).retryPolicy, RETRY_POLICY.ITEM_DEFECT, code);
+  }
+});
+
+test('a redirect rule this platform can\'t see waits on a human, and stops retrying', () => {
+  // Regression, measured live on site 1 (2026-09-18): this message had no
+  // matching rule and fell through to the ITEM_DEFECT default — but
+  // ship-pacing's recovery-cycle logic resets the attempt count on
+  // ITEM_DEFECT findings whenever fresh evidence re-confirms the same
+  // issue, so two redirect-chain findings retried 8 times each, still
+  // open, never blocked for a human to actually resolve.
+  const { retryPolicy, failureClass } = classifyAbandonReason(
+    'Auto-ship failed: Could not find an exact "location = /resources/khushbu-nirman-case-study { return ...; }" or "rewrite /resources/khushbu-nirman-case-study ...;" rule for this path — the redirect may be defined elsewhere (a CDN, a CMS, DNS), which this platform can\'t see or edit.',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(failureClass, FAILURE_CLASS.CLIENT_REPO);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
+test('a CLAUDE.md §2 section-removal refusal waits on a human, and stops retrying', () => {
+  // Regression, measured live on site 1 (2026-09-18): same ITEM_DEFECT-
+  // fallthrough problem as the redirect rule above — the safety gate
+  // refuses identically every time, so retrying can never succeed, but
+  // nothing marked it NEEDS_HUMAN, so it kept re-attempting instead of
+  // surfacing to a person for a real decision.
+  const { retryPolicy, failureClass } = classifyAbandonReason(
+    'This change would remove existing structure from src/pages/services/saas-development.njk that is live on the site today: 1 <table> element(s) removed (1 → 0). An SEO/content change must add to or update a page, never take away a section the client already has (CLAUDE.md §2). The draft was not applied.',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(failureClass, FAILURE_CLASS.AGENT_LOGIC);
+  assert.equal(isAutoRetryable(retryPolicy), false);
 });

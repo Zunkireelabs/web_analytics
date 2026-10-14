@@ -33,18 +33,23 @@ let drafts;
 let recs;
 let recorded;
 let recheckImpl;
+let passOrder;
+let refusalOutcomes; // raw generator_outcomes rows: { recommendation_id, detail }
+let decisionOutcomes; // setDecisionOutcome calls: { id, status, outcomeRef }
 
-const UNCOUNTED_REASONS = new Set(['pr_closed_without_merge', 'superseded', 'sent_back_to_recommendations']);
+// Delegates to the real classifier rather than hand-copying its rules here —
+// store/drafts.js's countFailedAttemptsByFinding used to carry its own
+// independent SQL exclusion list, and that copy had already drifted from
+// classifyAbandonReason's rules before it was deleted in favor of calling
+// the classifier directly (see that function's own header comment). A
+// SECOND hand-copied list in this test file would only reintroduce the same
+// risk one level up.
+const { classifyAbandonReason, RETRY_POLICY } = await import('./attempt-classification.js');
 function countsFromDrafts() {
   const counts = new Map();
   for (const d of drafts) {
     if (d.status !== 'abandoned' || !d.abandoned_reason) continue;
-    const r = d.abandoned_reason;
-    if (UNCOUNTED_REASONS.has(r)) continue;
-    if (/rate limit/i.test(r)) continue;
-    if (r.startsWith('Batch push/PR failed')) continue;
-    if (/batch branch/i.test(r) && /diverged/i.test(r)) continue;
-    if (r.startsWith('Stuck at "') || r.startsWith('Recovered:')) continue;
+    if (classifyAbandonReason(d.abandoned_reason).retryPolicy !== RETRY_POLICY.ITEM_DEFECT) continue;
     counts.set(d.finding_id, (counts.get(d.finding_id) || 0) + 1);
   }
   return counts;
@@ -64,6 +69,9 @@ function fakeQuery(text, params = []) {
   }
   // Pass 2 (reclaimStalledDrafts) — not under test here; always empty.
   if (sql.startsWith('SELECT id, finding_id, status, action_type, branch_name, updated_at FROM drafts')) {
+    // Pass 2's stall-reclaim SELECT. Its position relative to pass 0 is the
+    // whole point of that fix, so note when it runs.
+    passOrder.push('stall-reclaim');
     return { rows: [] };
   }
   // Pass 3 (classifyUnrecordedFailures) — abandoned drafts with no attempt row yet.
@@ -78,10 +86,12 @@ function fakeQuery(text, params = []) {
     const live = drafts.find((d) => d.finding_id === findingId && d.status !== 'abandoned');
     return { rows: live ? [{ ...live }] : [] };
   }
-  // countFailedAttemptsByFinding (store/drafts.js).
-  if (sql.startsWith('SELECT finding_id, COUNT(*)::int AS attempts FROM drafts')) {
-    const counts = countsFromDrafts();
-    return { rows: [...counts.entries()].map(([finding_id, attempts]) => ({ finding_id, attempts })) };
+  // countFailedAttemptsByFinding (store/drafts.js) — fetches raw rows now and
+  // classifies them in JS, same as countsFromDrafts above does for this
+  // test's own bookkeeping.
+  if (sql.startsWith('SELECT finding_id, abandoned_reason FROM drafts')) {
+    const abandoned = drafts.filter((d) => d.status === 'abandoned' && d.abandoned_reason);
+    return { rows: abandoned.map((d) => ({ finding_id: d.finding_id, abandoned_reason: d.abandoned_reason })) };
   }
   // countRecoveryCyclesByFinding (store/recommendation-attempts.js).
   if (sql.startsWith("SELECT finding_id, COUNT(*)::int AS cycles FROM recommendation_attempts")) {
@@ -91,6 +101,24 @@ function fakeQuery(text, params = []) {
       counts.set(r.finding_id, (counts.get(r.finding_id) || 0) + 1);
     }
     return { rows: [...counts.entries()].map(([finding_id, cycles]) => ({ finding_id, cycles })) };
+  }
+  // countRefusalsByRecommendation (agents/lib/generator-learning.js) and
+  // countRefusalRecoveryCyclesByRecommendation (store/recommendation-attempts.js)
+  // — driveAutonomousRefusalRecovery's own two counts. No test in this file
+  // exercises a held refusal (that's covered separately in
+  // ship-pacing.test.js's applyRefusalCap suite), so both are unconditionally
+  // empty here — this just keeps the fake DB from throwing on the two extra
+  // queries every reconcileSite call now makes.
+  if (sql.startsWith('SELECT recommendation_id, detail FROM generator_outcomes')) {
+    return { rows: refusalOutcomes.map((r) => ({ recommendation_id: r.recommendation_id, detail: r.detail })) };
+  }
+  if (sql.startsWith('SELECT recommendation_id, COUNT(*)::int AS cycles FROM recommendation_attempts')) {
+    const counts = new Map();
+    for (const r of recorded) {
+      if (r.outcome !== 'recovered' || r.finding_id || !r.recommendation_id) continue;
+      counts.set(r.recommendation_id, (counts.get(r.recommendation_id) || 0) + 1);
+    }
+    return { rows: [...counts.entries()].map(([recommendation_id, cycles]) => ({ recommendation_id, cycles })) };
   }
   if (sql.startsWith('SELECT id, status, blocked_reason FROM recommendations')) {
     const findingId = params[1];
@@ -139,6 +167,27 @@ function fakeQuery(text, params = []) {
     if (rec) rec.status = 'superseded';
     return { rows: [] };
   }
+  // logInternal's (server/lib/errors.js) best-effort, fire-and-forget error
+  // persistence — fires on any real failure path this suite exercises
+  // (recheckRecommendation errors, apply_error abandons). This test doesn't
+  // assert anything about it, just needs it to not blow up the fake DB.
+  if (sql.startsWith('INSERT INTO internal_errors')) {
+    return { rows: [] };
+  }
+  // surfaceCapabilityGaps (pass 3b) — maps a gap's affected draft ids back to
+  // the finding ids their recommendations are found by.
+  if (sql.startsWith('SELECT DISTINCT finding_id FROM drafts')) {
+    const ids = params[1];
+    const findingIds = [...new Set(drafts.filter((d) => ids.includes(d.id) && d.finding_id).map((d) => d.finding_id))];
+    return { rows: findingIds.map((finding_id) => ({ finding_id })) };
+  }
+  // setDecisionOutcome (store/decisions.js) — surfaceCapabilityGaps' new call
+  // site closing the decision-engine experience-memory loop.
+  if (sql.startsWith('UPDATE decisions SET status')) {
+    const [id, status, outcomeRef] = params;
+    decisionOutcomes.push({ id, status, outcomeRef });
+    return { rows: [{ id, status, outcome_ref: outcomeRef }] };
+  }
   throw new Error(`action-center-reconciler.test.js fake query: unhandled SQL shape: ${sql}`);
 }
 
@@ -148,10 +197,51 @@ mock.module(resolve('../db.js'), {
   namedExports: { query: (text, params) => fakeQuery(text, params) },
 });
 mock.module(resolve('../agents/lib/recommendation-coordinator.js'), {
-  namedExports: { recheckRecommendation: async (siteId, id, opts) => recheckImpl(siteId, id, opts) },
+  namedExports: {
+    recheckRecommendation: async (siteId, id, opts) => recheckImpl(siteId, id, opts),
+    // Real value, not a stub — surfaceCapabilityGaps builds its
+    // blocked_reason text with this exact prefix (see the test at line ~627
+    // asserting on that text), so the mock must carry the real constant
+    // rather than an arbitrary one that would silently desync from it.
+    CAPABILITY_GAP_BLOCK_PREFIX: 'Part of a shared capability gap on "',
+  },
+});
+// Pass 0 is mocked wholesale for the same reason recheckRecommendation is:
+// its own behavior has its own test file (batch-pr-recovery.test.js). What
+// matters HERE is only that the reconciler runs it, and runs it BEFORE the
+// stall reclaim — see the ordering test at the end of this file.
+mock.module(resolve('./batch-pr-recovery.js'), {
+  namedExports: {
+    recoverUnopenedBatchPrs: async (siteId) => {
+      passOrder.push('pr-recovery');
+      return { branches: 0, opened: 0, adopted: 0, abandoned: 0, skipped: 0, details: [] };
+    },
+  },
+});
+// driveAutonomousRefusalRecovery's own three dependencies — dynamically
+// imported inside the reconciler itself (see that function's own comment
+// for why), but still interceptable by mock.module regardless of import
+// timing, same as every other mocked dependency in this file.
+let siteFixture;
+let mergeImpl;
+mock.module(resolve('../store/read.js'), {
+  namedExports: { getSiteById: async () => siteFixture },
+});
+mock.module(resolve('../implementers/backend.js'), {
+  namedExports: { computeBrokenLinkFixMerge: async (site, draft, ref) => mergeImpl(site, draft, ref) },
+});
+mock.module(resolve('../implementers/lib/github-ops.js'), {
+  namedExports: { baseBranch: () => 'main' },
+});
+// capabilityGapDetector — defaults to "no gaps" so every pre-existing test in
+// this file (none of which is about capability-gap clustering) is unaffected
+// by pass 3b's addition. Tests for the pass itself override gapsImpl.
+let gapsImpl;
+mock.module(resolve('../agents/lib/capability-gap-detector.js'), {
+  namedExports: { capabilityGapDetector: { detectCapabilityGaps: async (siteId) => gapsImpl(siteId) } },
 });
 const { reconcileSite } = await import('./action-center-reconciler.js');
-const { MAX_RECOVERY_CYCLES, MAX_FAILED_ATTEMPTS } = await import('../agents/lib/ship-pacing.js');
+const { MAX_RECOVERY_CYCLES, MAX_FAILED_ATTEMPTS, MAX_REFUSALS, MAX_REFUSAL_RECOVERY_CYCLES } = await import('../agents/lib/ship-pacing.js');
 const { NO_FILE_MAPPING_FRAGMENT } = await import('./draft-failure-phrases.js');
 
 const SITE_ID = 1;
@@ -172,7 +262,13 @@ beforeEach(() => {
   drafts = [];
   recs = [];
   recorded = [];
+  passOrder = [];
+  refusalOutcomes = [];
+  siteFixture = { id: SITE_ID, repo_owner: 'acme', repo_name: 'site' };
+  mergeImpl = async () => { throw new Error('computeBrokenLinkFixMerge must not be called for this test'); };
   recheckImpl = async () => { throw new Error('recheckRecommendation must not be called for this test'); };
+  gapsImpl = async () => [];
+  decisionOutcomes = [];
 });
 
 describe('pass 4 (driveAutonomousRecovery) — below the cap: untouched, no re-detection at all', () => {
@@ -207,6 +303,26 @@ describe('pass 4 (driveAutonomousRecovery) — crossing the cap triggers autonom
     const recovered = recorded.find((r) => r.outcome === 'recovered');
     assert.ok(recovered, 'a distinct "recovered" attempt is recorded, not just another "failed" one');
     assert.equal(recovered.retry_policy, 'retry');
+  });
+
+  test('regression: a broken-link-fix recheck (recheckedLive: true, no refreshed/freshParams) still counts as a recovery cycle', async () => {
+    // Without this, a permanently-dead external citation (DNS failure,
+    // expired cert) never accumulates recovery cycles and never reaches
+    // blockRecommendation — it loops here forever instead of ever
+    // escalating to a human. broken-link-fix's recheckRecommendation branch
+    // has no fresh params to report (the href doesn't change), so it can
+    // only signal genuine live re-detection via recheckedLive.
+    drafts = priorFailures('f2b', MAX_FAILED_ATTEMPTS);
+    recs = [{ id: 21, finding_id: 'f2b', finding_ids: ['f2b'], status: 'open', blocked_reason: null }];
+    recheckImpl = async () => ({ status: 'open', changed: false, recheckedLive: true, detail: { broken: true } });
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.recovery.recovered, 1);
+    assert.equal(result.recovery.blocked, 0);
+    assert.equal(recs[0].blocked_reason, null);
+    const recovered = recorded.find((r) => r.finding_id === 'f2b' && r.outcome === 'recovered');
+    assert.ok(recovered, 'a broken-link-fix recheck without refreshed params must still record a recovery attempt');
   });
 
   test('abandons any live draft still sitting on the finding so the next attempt reads the refreshed params', async () => {
@@ -324,6 +440,137 @@ describe('pass 4 (driveAutonomousRecovery) — dry run', () => {
   });
 });
 
+// N refused outcomes already on record for a recommendation, matching
+// countRefusalsByRecommendation's own query shape (generator_outcomes,
+// outcome='refused', detail='no-match' — the exact real detail string
+// backend.js's computeBrokenLinkFixMerge produces for the "found candidate
+// files but couldn't safely strip any of them" case).
+function priorRefusals(recommendationId, n) {
+  return Array.from({ length: n }, () => ({ recommendation_id: recommendationId, detail: 'no-match' }));
+}
+
+describe('driveAutonomousRefusalRecovery — below the cap: untouched, no re-check at all', () => {
+  test('a recommendation under MAX_REFUSALS is left alone; computeBrokenLinkFixMerge is never called', async () => {
+    refusalOutcomes = priorRefusals(70, MAX_REFUSALS - 1);
+    recs = [{ id: 70, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'p', href: 'h' } }];
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.recommendations.length, 0);
+    assert.equal(recs[0].blocked_reason, null);
+  });
+
+  test('only broken-link-fix is handled — a different held generator type is left exactly as before', async () => {
+    refusalOutcomes = priorRefusals(71, MAX_REFUSALS);
+    recs = [{ id: 71, recommendation_type: 'redirect-chain-nginx', status: 'open', blocked_reason: null, params: {} }];
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.recommendations.length, 0, 'not this pass\'s job yet — real scope limit, not a silent gap');
+  });
+});
+
+describe('driveAutonomousRefusalRecovery — crossing the cap re-checks live instead of holding forever', () => {
+  test('confirmed-absent (stale) closes the recommendation, same as a resolved convergence-cap recheck', async () => {
+    refusalOutcomes = priorRefusals(72, MAX_REFUSALS);
+    recs = [{ id: 72, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://dead.example.com' } }];
+    mergeImpl = async () => ({ ok: false, reason: 'confirmed-absent', stale: true, error: 'gone' });
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.resolved, 1);
+    assert.equal(result.refusalRecovery.blocked, 0);
+    assert.equal(recs[0].status, 'superseded');
+  });
+
+  test('genuinely now fixable: records a recovery cycle (raising the cap) but does NOT ship anything itself', async () => {
+    refusalOutcomes = priorRefusals(73, MAX_REFUSALS);
+    recs = [{ id: 73, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://fixable.example.com' } }];
+    mergeImpl = async () => ({ ok: true, files: [{ filePath: 'a.njk' }] });
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.recovered, 1);
+    assert.equal(result.refusalRecovery.blocked, 0);
+    assert.equal(recs[0].status, 'open', 'still open — shipping is the next scheduled run\'s job, not this pass\'s');
+    const recovered = recorded.find((r) => r.recommendation_id === 73 && r.outcome === 'recovered');
+    assert.ok(recovered, 'a distinct "recovered" attempt is recorded so the cap rises for next time');
+    assert.equal(recovered.finding_id, null, 'refusal-recovery rows never carry a finding_id — that is what keeps them disjoint from the convergence cap\'s own counter');
+  });
+
+  test('still refuses on re-check: still spends a recovery cycle (real evidence gathered either way), not shipped, not blocked', async () => {
+    refusalOutcomes = priorRefusals(74, MAX_REFUSALS);
+    recs = [{ id: 74, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://still-stuck.example.com' } }];
+    mergeImpl = async () => ({ ok: false, reason: 'no-match', stale: false, error: 'still stuck' });
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.recovered, 1);
+    assert.equal(result.refusalRecovery.blocked, 0);
+    assert.equal(recs[0].blocked_reason, null);
+  });
+
+  test('a transient re-check error (rate limit) is not evidence and must not consume a recovery cycle', async () => {
+    refusalOutcomes = priorRefusals(75, MAX_REFUSALS);
+    recs = [{ id: 75, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://x.example.com' } }];
+    mergeImpl = async () => { throw Object.assign(new Error('GitHub rate limit reached'), { rateLimited: true }); };
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.recovered, 0);
+    assert.equal(result.refusalRecovery.blocked, 0);
+    assert.equal(recorded.find((r) => r.recommendation_id === 75), undefined);
+  });
+
+  test('the second recovery cycle fires once the raised cap is also exhausted', async () => {
+    // One refusal-recovery cycle already used, raising the cap to 2*MAX_REFUSALS.
+    refusalOutcomes = priorRefusals(76, MAX_REFUSALS * 2);
+    recs = [{ id: 76, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://x.example.com' } }];
+    recorded.push({ recommendation_id: 76, finding_id: null, outcome: 'recovered' }); // one cycle already spent
+    let mergeCalls = 0;
+    mergeImpl = async () => { mergeCalls += 1; return { ok: false, reason: 'no-match', stale: false, error: 'still stuck' }; };
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(mergeCalls, 1, 'a second, independent refusal-recovery cycle is attempted');
+    assert.equal(result.refusalRecovery.recovered, 1);
+    assert.equal(result.refusalRecovery.blocked, 0, 'still not exhausted — MAX_REFUSAL_RECOVERY_CYCLES is 2, this is only the second');
+  });
+});
+
+describe('driveAutonomousRefusalRecovery — NEEDS_HUMAN only once refusal-recovery is truly exhausted', () => {
+  test('blocks only after MAX_REFUSAL_RECOVERY_CYCLES independent re-checks all still refuse', async () => {
+    const cap = MAX_REFUSALS * (MAX_REFUSAL_RECOVERY_CYCLES + 1);
+    refusalOutcomes = priorRefusals(77, cap);
+    recs = [{ id: 77, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://x.example.com' } }];
+    recorded.push(
+      { recommendation_id: 77, finding_id: null, outcome: 'recovered' },
+      { recommendation_id: 77, finding_id: null, outcome: 'recovered' },
+    );
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.blocked, 1);
+    assert.equal(recs[0].status, 'open', 'blocked, not closed — a human can still generate it by hand');
+    assert.ok(recs[0].blocked_reason);
+  });
+});
+
+describe('driveAutonomousRefusalRecovery — dry run', () => {
+  test('reports what it would do without calling computeBrokenLinkFixMerge or writing anything', async () => {
+    refusalOutcomes = priorRefusals(78, MAX_REFUSALS);
+    recs = [{ id: 78, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://x.example.com' } }];
+    mergeImpl = async () => { throw new Error('must not be called during a dry run'); };
+
+    const result = await reconcileSite(SITE_ID, { apply: false });
+
+    assert.equal(result.refusalRecovery.recommendations.length, 1);
+    assert.equal(result.refusalRecovery.recovered, 0);
+    assert.equal(result.refusalRecovery.blocked, 0);
+    assert.equal(recs[0].blocked_reason, null);
+  });
+});
+
 describe('pass 3 (classifyUnrecordedFailures) — ITEM_DEFECT is recorded but no longer decided here', () => {
   test('records the attempt but leaves blocking/recovery entirely to pass 4', async () => {
     drafts = [{ id: 1, site_id: SITE_ID, finding_id: 'g1', status: 'abandoned', abandoned_reason: ANCHOR_ERROR('a.njk') }];
@@ -359,6 +606,132 @@ describe('pass 3 (classifyUnrecordedFailures) — ITEM_DEFECT is recorded but no
   });
 });
 
+describe('pass 3b (surfaceCapabilityGaps) — clustering acts on a detected gap instead of leaving it shadow-only', () => {
+  test('blocks every open recommendation whose finding is affected by a detected gap, with the shared diagnosis', async () => {
+    drafts = [
+      { id: 1, site_id: SITE_ID, finding_id: 'k1', status: 'abandoned' },
+      { id: 2, site_id: SITE_ID, finding_id: 'k2', status: 'abandoned' },
+      { id: 3, site_id: SITE_ID, finding_id: 'k3', status: 'abandoned' },
+    ];
+    recs = [
+      { id: 900, finding_id: 'k1', status: 'open', blocked_reason: null },
+      { id: 901, finding_id: 'k2', status: 'open', blocked_reason: null },
+      { id: 902, finding_id: 'k3', status: 'open', blocked_reason: null },
+    ];
+    gapsImpl = async () => [{
+      generatorId: 'expand-content',
+      summary: 'Unsupported JSX structure',
+      affectedIds: [1, 2, 3],
+      affectedCount: 3,
+      status: 'detected',
+    }];
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.capabilityGaps.gapsDetected, 1);
+    assert.equal(result.capabilityGaps.recommendationsBlocked, 3);
+    for (const rec of recs) {
+      assert.match(rec.blocked_reason, /shared capability gap on "expand-content"/);
+      assert.match(rec.blocked_reason, /Unsupported JSX structure/);
+    }
+  });
+
+  test('prefers the investigation rationale as the diagnosis when one was run', async () => {
+    drafts = [{ id: 4, site_id: SITE_ID, finding_id: 'k4', status: 'abandoned' }];
+    recs = [{ id: 903, finding_id: 'k4', status: 'open', blocked_reason: null }];
+    gapsImpl = async () => [{
+      generatorId: 'expand-content',
+      summary: 'This fix could not be applied automatically.',
+      affectedIds: [4],
+      affectedCount: 1,
+      status: 'detected',
+      investigation: { action: 'investigate_further', rationale: 'Two distinct root causes underneath one generic bucket.' },
+    }];
+
+    await reconcileSite(SITE_ID, { apply: true });
+
+    assert.match(recs[0].blocked_reason, /Two distinct root causes underneath one generic bucket\./);
+  });
+
+  test('never re-blocks a recommendation already blocked for another reason', async () => {
+    drafts = [{ id: 5, site_id: SITE_ID, finding_id: 'k5', status: 'abandoned' }];
+    recs = [{ id: 904, finding_id: 'k5', status: 'open', blocked_reason: 'already blocked for something else' }];
+    gapsImpl = async () => [{ generatorId: 'x', summary: 's', affectedIds: [5], affectedCount: 1, status: 'detected' }];
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.capabilityGaps.recommendationsBlocked, 0);
+    assert.equal(recs[0].blocked_reason, 'already blocked for something else');
+  });
+
+  test('dry run reports the detected gap but blocks nothing', async () => {
+    drafts = [{ id: 6, site_id: SITE_ID, finding_id: 'k6', status: 'abandoned' }];
+    recs = [{ id: 905, finding_id: 'k6', status: 'open', blocked_reason: null }];
+    gapsImpl = async () => [{ generatorId: 'x', summary: 's', affectedIds: [6], affectedCount: 1, status: 'detected' }];
+
+    const result = await reconcileSite(SITE_ID, { apply: false });
+
+    assert.equal(result.capabilityGaps.gapsDetected, 1);
+    assert.equal(result.capabilityGaps.recommendationsBlocked, 0);
+    assert.equal(recs[0].blocked_reason, null);
+  });
+
+  test('no gaps detected is a no-op', async () => {
+    gapsImpl = async () => [];
+    const result = await reconcileSite(SITE_ID, { apply: true });
+    assert.equal(result.capabilityGaps.gapsDetected, 0);
+    assert.equal(result.capabilityGaps.recommendationsBlocked, 0);
+  });
+
+  test('closes the decision-engine loop (setDecisionOutcome) when an investigated gap actually blocked something', async () => {
+    drafts = [{ id: 7, site_id: SITE_ID, finding_id: 'k7', status: 'abandoned' }];
+    recs = [{ id: 906, finding_id: 'k7', status: 'open', blocked_reason: null }];
+    gapsImpl = async () => [{
+      generatorId: 'expand-content',
+      summary: 'This fix could not be applied automatically.',
+      affectedIds: [7],
+      affectedCount: 1,
+      status: 'detected',
+      investigation: { id: 555, action: 'investigate_further', rationale: 'Root cause X.' },
+    }];
+
+    await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(decisionOutcomes.length, 1);
+    assert.equal(decisionOutcomes[0].id, 555);
+    // 'decided', not 'failed' — nothing was actually attempted here, it was
+    // escalated to a human. decision-evidence.js's DECISION_OUTCOME_KNOWN_STATUSES
+    // deliberately excludes 'decided' so this never gets surfaced to a future
+    // decision as a known (mis-recorded) failure.
+    assert.equal(decisionOutcomes[0].status, 'decided');
+    assert.match(decisionOutcomes[0].outcomeRef, /906/);
+  });
+
+  test('does not touch setDecisionOutcome for a known-RULES gap with no investigation', async () => {
+    drafts = [{ id: 8, site_id: SITE_ID, finding_id: 'k8', status: 'abandoned' }];
+    recs = [{ id: 907, finding_id: 'k8', status: 'open', blocked_reason: null }];
+    gapsImpl = async () => [{ generatorId: 'x', summary: 'a real rule match', affectedIds: [8], affectedCount: 1, status: 'detected' }];
+
+    await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(decisionOutcomes.length, 0);
+  });
+
+  test('does not call setDecisionOutcome when nothing was actually blocked (e.g. already blocked elsewhere)', async () => {
+    drafts = [{ id: 9, site_id: SITE_ID, finding_id: 'k9', status: 'abandoned' }];
+    recs = [{ id: 908, finding_id: 'k9', status: 'open', blocked_reason: 'already blocked' }];
+    gapsImpl = async () => [{
+      generatorId: 'x', summary: 'This fix could not be applied automatically.',
+      affectedIds: [9], affectedCount: 1, status: 'detected',
+      investigation: { id: 556, action: 'investigate_further', rationale: 'r' },
+    }];
+
+    await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(decisionOutcomes.length, 0);
+  });
+});
+
 describe('pass 1 (reconcileStuckApprovedDrafts) — abandons an ITEM_DEFECT approved+apply_error draft; the cap decision is not made here', () => {
   test('always abandons regardless of how many prior failures exist — no block, no willReachCap logic', async () => {
     drafts = [
@@ -383,5 +756,23 @@ describe('pass 1 (reconcileStuckApprovedDrafts) — abandons an ITEM_DEFECT appr
 
     assert.equal(result.itemDefects.drafts.length, 0);
     assert.equal(drafts[0].status, 'approved');
+  });
+});
+
+// The ordering IS the fix. Pass 2 reclaims a 'branch_pushed' draft purely on
+// lack of progress, and a batch whose commits landed but whose PR call failed
+// is indistinguishable from one that never pushed — so running the reclaim
+// first threw away real, pushed commits and regenerated them the next day,
+// every day. Measured on site 1, 2026-09-08: 21 drafts, two branches, both
+// with real commits ahead of main and one already carrying an open PR.
+describe('pass 0 (batch-PR recovery) — ordering', () => {
+  test('finishes already-pushed work BEFORE the stall reclaim is allowed to bin it', async () => {
+    await reconcileSite(1, { apply: true, log: null });
+    assert.equal(passOrder[0], 'pr-recovery', 'pass 0 must run first');
+    assert.ok(passOrder.includes('stall-reclaim'));
+    assert.ok(
+      passOrder.indexOf('pr-recovery') < passOrder.indexOf('stall-reclaim'),
+      'a reclaim that runs first destroys the very work pass 0 exists to finish',
+    );
   });
 });

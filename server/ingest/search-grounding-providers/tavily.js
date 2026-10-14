@@ -96,7 +96,7 @@ export async function searchSources(query, num = 3) {
   // title to work with, without this adapter's shape stopping being a
   // superset of the old {title, url}-only contract google-cse/serpapi used.
   return results
-    .map((r) => ({ title: r.title, url: r.url, content: typeof r.content === 'string' ? r.content.slice(0, 500) : undefined }))
+    .map((r) => ({ title: r.title, url: r.url, content: typeof r.content === 'string' ? r.content.slice(0, 500) : undefined, ...(typeof r.score === 'number' ? { score: r.score } : {}) }))
     .filter((r) => r.title && r.url)
     .slice(0, num);
 }

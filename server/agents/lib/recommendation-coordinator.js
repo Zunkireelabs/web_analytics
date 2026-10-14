@@ -2,7 +2,9 @@ import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, 
 import { getLiveDraftsByFindingId } from '../../store/drafts.js';
 import { attemptSummaryByFinding } from '../../store/recommendation-attempts.js';
 import { categoryByAgentId } from './command-center.js';
-import { riskTierForGenerator } from './risk-tiers.js';
+import { riskTierForGenerator, requiresHumanReview } from './risk-tiers.js';
+import { isProtectedChange } from './protected-pages.js';
+import { getProtectedPageSet } from '../../store/protected-pages.js';
 import { createRecommendationGates } from './recommendation-gates.js';
 import { classify } from './recommendation-taxonomy.js';
 import { recheckLink } from './technical-seo-analysis.js';
@@ -10,6 +12,18 @@ import { getSiteById } from '../../store/read.js';
 import { daysAgoInTz } from '../../util/dates.js';
 import { runAgent } from '../runner.js';
 import { safeMessage } from '../../lib/errors.js';
+import { RECOMMENDATION_AGENT_IDS } from './insights.js';
+import { recordAuditEvent } from '../../store/admin/audit-log.js';
+import { claimForItem } from './work-claims.js';
+
+// A pseudo-req for audit writes made from background/cron code with no real
+// HTTP request behind them — same pattern design-drift.js/webhooks.js/
+// connect-repo.js each already use their own copy of, rather than a shared
+// export, since audit-log.js's recordActor only reads req.userId/req.siteId/
+// req.ip/req.get and none of these callers has a real req to begin with.
+function systemActorReq(siteId) {
+  return { userId: null, siteId, ip: null, get: () => null };
+}
 
 // The Recommendation Coordinator (Phase 4 M1). This is the ONLY component
 // allowed to create or update rows in the `recommendations` table, which is
@@ -39,7 +53,43 @@ import { safeMessage } from '../../lib/errors.js';
 const SITE_LEVEL_GENERATOR_IDS = new Set([
   'cookie-policy', 'privacy-policy', 'terms-of-service',
   'llms-txt', 'security-headers', 'html-lang', 'sitemap', 'robots-fix',
+  // Exactly one real nginx config per site, same as security-headers above.
+  'soft-404-nginx',
+  // Same nginx config, own hash-marker region — still one row per site.
+  'compression-nginx',
+  // Exactly one robots.txt per site, same as robots-fix above — a site
+  // either has one or doesn't, so this can never collide across pages.
+  'robots-bootstrap',
 ]);
+
+// Every `reportOnly.kind` any agent raises (agents/types.js's ReportOnly) —
+// a confirmed, real defect with no safe automatic fix, by the detecting
+// agent's own deliberate choice not to set recommendedAction. None of these
+// has (or should ever get) a matching file under generators/, so a row of
+// this type can never be drafted; its blocked_reason is not a gate verdict,
+// it's the whole reason the row exists. refreshBlockedRecommendations below
+// is the one place that distinction wasn't honored — see its comment.
+// Kept as a static list rather than checking generators/registry.js's
+// getGenerator() (which would return the correct null just as well): that
+// function `import()`s every file under generators/ on first call, several
+// of which transitively pull in the OpenAI SDK, and refreshBlockedRecommendations
+// runs inside a request/cron path this file's own tests deliberately keep
+// free of that chain.
+const REPORT_ONLY_KINDS = new Set([
+  'query-cannibalization', 'authority-backlinks-lost', 'duplicate-content',
+  'device-ctr-deficit', 'competitor-outranking', 'competitor-backlink-gap',
+  'font-size-inconsistency', 'keyword-cluster-gap', 'templated-duplicate-family',
+  'url-variant-duplicate', 'sitemap-index-conflict', 'redirect-chain', 'query-param-duplicate',
+  'soft-404',
+]);
+
+// Marks a blocked_reason as coming from action-center-reconciler.js's
+// surfaceCapabilityGaps (2026-09 lifecycle-gap audit finding #1), not from
+// any condition gates.evaluate() can see or re-derive — it's a diagnosis
+// string about a shared generator defect, not a page/file/config state.
+// Exported so surfaceCapabilityGaps builds its block text with the exact
+// same prefix rather than two copies of one string drifting apart.
+export const CAPABILITY_GAP_BLOCK_PREFIX = 'Part of a shared capability gap on "';
 
 // The real key for a recommendation row — (siteId, page, generatorId) isn't
 // always enough on its own: analytics-install's GA4 and Facebook Pixel
@@ -83,10 +133,45 @@ const SITE_LEVEL_GENERATOR_IDS = new Set([
 // its own row — it silently disappears into finding_ids on whichever topic
 // synced first. `topic` is the real identity of a blog-outline
 // recommendation, the same way `href` is for broken-link-fix.
+// A page reachable at both its `www.` and bare-domain variant (or with vs.
+// without a trailing slash) is the same resource, but the crawler's `page`
+// param is whichever exact URL variant that particular crawl happened to
+// request — so two crawls of the identical page can otherwise mint two
+// different dedup keys and split into two Action Center cards for the same
+// underlying issue. Confirmed as a real report: the same crm.zunkiree.com
+// dead link showed as one recommendation keyed to
+// https://www.zunkireelabs.com/products/ai-crm/ and a second keyed to
+// https://zunkireelabs.com/products/ai-crm/ (no `www.`).
+//
+// Deliberately scoped to ONLY broken-link-fix/missing-page-create, not
+// applied generally (e.g. to the plain `return item.params?.page || ''`
+// fallback below, or expand-content/content-integrity-repair's page
+// component). Those other keys are compared verbatim against the ALREADY
+// STORED `rec.page` column inside recheckRecommendation's generic re-detect
+// match (`recommendationPageKey(...) === rec.page`, below) — normalizing
+// their formula would silently stop matching every existing row whose
+// stored `page` isn't already in the new normalized form (any trailing
+// slash, any `www.`), misreading "still detected" as "resolved" and closing
+// it. broken-link-fix/missing-page-create never reach that comparison (this
+// function returns earlier, via recheckLink against `params.href` alone),
+// so they're the only two safe to normalize without a backfill.
+function normalizePageForKey(page) {
+  if (!page) return page;
+  try {
+    const u = new URL(page);
+    u.hostname = u.hostname.replace(/^www\./i, '');
+    u.hash = '';
+    if (u.pathname.length > 1 && u.pathname.endsWith('/')) u.pathname = u.pathname.slice(0, -1);
+    return u.toString();
+  } catch {
+    return page;
+  }
+}
+
 export function recommendationPageKey(item) {
   if (item.generatorId === 'analytics-install') return `analytics:${item.params?.provider || 'unknown'}`;
   if (item.generatorId === 'expand-content') return `${item.params?.page || ''}::${item.params?.focus || ''}`;
-  if (item.generatorId === 'broken-link-fix' || item.generatorId === 'missing-page-create') return `${item.params?.page || ''}::${item.params?.href || ''}`;
+  if (item.generatorId === 'broken-link-fix' || item.generatorId === 'missing-page-create') return `${normalizePageForKey(item.params?.page) || ''}::${item.params?.href || ''}`;
   if (item.generatorId === 'blog-outline') return `topic::${item.params?.topic || ''}`;
   // Same failure mode as blog-outline above: landing-page has no `page`
   // param either (country-intelligence.js calls it with {market}/{city},
@@ -109,8 +194,19 @@ export function recommendationPageKey(item) {
   // silently disappear into finding_ids. Also fixes a latent version of the
   // same bug for font-consistency.js's font-size-override fixType, which
   // only ever proposed page alone before this.
+  //
+  // 'table-style-drift'/'typography-drift' (routed from
+  // agents/lib/design-consistency.js) sharpen this further: a single page
+  // can have SEVERAL independently-drifted sections of the identical
+  // fixType — e.g. two different tables, or a heading AND a body both
+  // failing typography-drift in different sections — which page::fixType
+  // alone would still collapse onto one row. sectionOrder+textRole (present
+  // only on these two fixTypes' params; undefined for the other five, so
+  // their key is unchanged) is the same per-section discriminator
+  // consistency-check.js's own Finding shape already carries.
   if (item.generatorId === 'content-integrity-repair') {
-    return `${item.params?.page || ''}::${item.params?.fixType || ''}`;
+    const { page, fixType, sectionOrder, textRole } = item.params || {};
+    return `${page || ''}::${fixType || ''}::${sectionOrder ?? ''}::${textRole ?? ''}`;
   }
   // blog-image (agents/blog-image.js) has no live URL to key on — the
   // detector found this post by its real repo path, which is already
@@ -152,7 +248,7 @@ export const DEDUP_IDENTITY = {
   'blog-outline': 'topic',
   'landing-page': 'topic|city|market',
   'comparison-page': 'topic',
-  'content-integrity-repair': 'fixType',
+  'content-integrity-repair': 'fixType|sectionOrder|textRole',
   'blog-image': 'filePath',
 };
 
@@ -202,34 +298,77 @@ export function hasDeclaredDedupIdentity(generatorId, pageKeyedIds) {
 // setting item.blockedReason, rather than each one inventing its own way to
 // stay out of the autonomous path — which is exactly how one of them would
 // eventually forget to.
-function blockedRiskTier(item) {
-  return item.blockedReason ? 'manual' : riskTierForGenerator(item.generatorId);
+function blockedRiskTier(blockedReason, generatorId, item, protectedPages = null) {
+  return blockedReason || requiresHumanReview(item) || isProtectedChange(item, protectedPages) ? 'manual' : riskTierForGenerator(generatorId);
+}
+
+// recommendation-gates.js's evaluate() deliberately never rules on
+// broken-link-fix (its own comment: "excluded from every page gate below" —
+// computeBrokenLinkFixMerge has its own code-search fallback instead), so
+// item.blockedReason is always null for this generator no matter what
+// happened at ship time. The ONLY place that ever learns "this citation's
+// href can't be located anywhere in the repo" is action-center.js's
+// executeRecommendation, via attempt-classification.js's NEEDS_HUMAN verdict
+// — a completely different pass that runs hours earlier, after a real ship
+// attempt, and calls blockRecommendation() directly on the row.
+//
+// Every other generator's blockedReason IS the gate system's own live
+// re-check, so refreshing it unconditionally on each sync (the comment two
+// lines below this function) is correct: a cleared gate must un-block, a
+// regressed one must re-block, with no manual step either way. But applying
+// that same "the detecting agent is the last word" rule to broken-link-fix
+// means the detecting agent (technical-seo.js) has literally no opinion on
+// blocking at all — so every nightly re-detection of the still-dead citation
+// passed blockedReason: null and silently wiped out that same night's (or
+// yesterday's) ship-time block. Confirmed live on site 1: recommendations
+// #42 and #5994 both carried a real `needs_human` verdict after a failed
+// attempt, then showed up unblocked and "safe" again by the next sync,
+// re-shipped, failed identically, and never converged — a permanent
+// RETRY/blocked flap instead of a stable blocked card.
+//
+// Preserving the existing block here (rather than trusting item.blockedReason)
+// is scoped to exactly this one generator/condition, not a general "existing
+// wins" rule, so every other generator's real un-block/re-block behavior is
+// unaffected.
+function resolveBlockedReason(existing, item) {
+  if (item.generatorId === 'broken-link-fix' && !item.blockedReason) {
+    return existing?.blocked_reason ?? null;
+  }
+  return item.blockedReason ?? null;
 }
 
 export async function syncFromGrounded(siteId, grounded) {
+  const protectedPages = await getProtectedPageSet(siteId);
   for (const item of grounded.items) {
     if (!item.generatorId) continue; // buildRecommendations already filters these, but stay defensive
     const page = recommendationPageKey(item);
     const existing = await findOpenRecommendation(siteId, page, item.generatorId);
     if (existing) {
-      if (existing.finding_ids.includes(item.id)) {
-        // Nothing new about the *finding* — finding ids are deterministic
-        // (e.g. `geo-signals:${page}:${label}`), so re-detecting the same
-        // issue yields the same id every run and re-merging it is churn.
-        //
-        // Block state is a different thing entirely: it is recomputed from
-        // live site and repo state on every sync, not carried by the finding.
-        // Returning early here meant that for any recommendation the agents
-        // keep re-detecting — which is most of them — the block never
-        // refreshed in either direction. A template that got verified stayed
-        // blocked; a row corrupted to 'safe' by migration 078 stayed
-        // corrupted. Refresh just that, then skip the merge as before.
-        await refreshRecommendationBlockState(existing.id, {
-          blockedReason: item.blockedReason ?? null,
-          riskTier: blockedRiskTier(item),
-        });
-        continue;
-      }
+      // ALWAYS merge, even when the *finding* itself is unchanged (same
+      // deterministic id as yesterday). This used to early-return here on
+      // the reasoning that a re-detected finding has nothing new to say —
+      // true of the finding, false of its PARAMS. A detecting agent
+      // recomputes params fresh every run from live/current state (e.g.
+      // trust-compliance.js reads sites.ga4_measurement_id fresh each sync),
+      // but analytics-install's finding id
+      // (`trust-compliance:${provider}:missing`) never changes while the
+      // tracker stays uninstalled — so under the old early return, a
+      // recommendation created before an ID was configured in the database
+      // NEVER picked up that ID through normal daily sync, only through the
+      // failure-triggered recovery cycle in action-center-reconciler.js
+      // (bounded, only reached after MAX_FAILED_ATTEMPTS worth of real
+      // failures). Confirmed live: recommendation #47/#48 on site 1 carried
+      // no trackingId from 2026-08-21 through 15 failed drafts, and only
+      // gained one on 2026-09-07 when the recovery path finally forced a
+      // refresh — 17 days and 15 wasted attempts a plain sync should have
+      // avoided. mergeIntoRecommendation's `params = COALESCE($5, params)`
+      // already replaces params wholesale with the fresh value (same
+      // semantics expected_impact/confidence use), so calling it
+      // unconditionally is exactly "recompute this recommendation's facts
+      // from what was just re-detected" — never a data loss, since a
+      // detecting agent that found nothing new about params still passes its
+      // current, correct params, not a blank.
+      const mergedBlockedReason = resolveBlockedReason(existing, item);
       await mergeIntoRecommendation(existing.id, {
         findingId: item.id, agentId: item.source, reason: item.reason,
         params: item.params, priority: item.priority, expectedImpact: item.expectedImpact,
@@ -237,16 +376,73 @@ export async function syncFromGrounded(siteId, grounded) {
         // been verified clears the block automatically (back to its real risk
         // tier), and one that regresses re-blocks — no manual unblock step,
         // and no stale "blocked" banner outliving the thing that caused it.
-        blockedReason: item.blockedReason ?? null,
-        riskTier: blockedRiskTier(item),
+        // (broken-link-fix is the one documented exception — see
+        // resolveBlockedReason above.)
+        blockedReason: mergedBlockedReason,
+        riskTier: blockedRiskTier(mergedBlockedReason, item.generatorId, item, protectedPages),
+        // Unconditional, not COALESCE'd, same reasoning as blockedReason/
+        // riskTier above: buildRecommendations recomputed this fresh from the
+        // site's CURRENT active goals, so a paused/deleted goal must clear a
+        // stale alignment on the very next sync, not carry it forever.
+        goalId: item.goalId ?? null,
+        goalAlignment: item.goalAlignment ?? null,
+        // COALESCE'd in the store layer, not overwritten unconditionally —
+        // see mergeIntoRecommendation's own comment. item.decisionId is
+        // only ever set for a DEFAULT-bucket finding this run's capped
+        // decide() batch actually reached (default-bucket-decision.js);
+        // null here must mean "no fresh decision this run", not "clear
+        // whatever decision was already recorded".
+        decisionId: item.decisionId ?? null,
       });
     } else {
-      await insertRecommendation(siteId, {
+      // No existing row yet, so there is nothing ship-time could have
+      // blocked — item.blockedReason (the gate system's own verdict, null
+      // for broken-link-fix) is the whole story on first insert either way.
+      // Claim the page/topic before creating anything (migration 180). Only
+      // on the INSERT branch: merging into a row this producer already owns
+      // is not new work, and re-claiming every sync would churn the ledger
+      // for no benefit.
+      //
+      // Losing a claim is not an error — it means another of the nine
+      // producers is already working this page or topic, which is exactly
+      // the duplicate this table exists to prevent, so skipping is the
+      // correct outcome. A ledger that is unreachable returns ok, so this
+      // can only ever suppress a real duplicate, never real work.
+      const claim = await claimForItem(siteId, item, 'daily-roster');
+      if (!claim.ok) {
+        console.log(`[recommendations] skipping ${item.generatorId} on ${page || '(site)'} — ${claim.reason}, held by ${claim.heldBy?.producer ?? 'another producer'}`);
+        continue;
+      }
+      const insertBlockedReason = item.blockedReason ?? null;
+      const riskTier = blockedRiskTier(insertBlockedReason, item.generatorId, item, protectedPages);
+      const created = await insertRecommendation(siteId, {
         page, recommendationType: item.generatorId, issue: item.tag, reason: item.reason,
         params: item.params, findingId: item.id, detectingAgent: item.source,
-        priority: item.priority, expectedImpact: item.expectedImpact, riskTier: blockedRiskTier(item),
-        blockedReason: item.blockedReason ?? null,
+        priority: item.priority, expectedImpact: item.expectedImpact, riskTier,
+        blockedReason: insertBlockedReason,
+        goalId: item.goalId ?? null,
+        goalAlignment: item.goalAlignment ?? null,
+        decisionId: item.decisionId ?? null,
       });
+      // DECIDE, audit trail only — this does not gate or change anything;
+      // the actual decision (page key, risk tier, blockedReason) is already
+      // final by the time this runs, computed by the same distributed checks
+      // as always (recommendationPageKey, blockedRiskTier/riskTierForGenerator,
+      // each detecting agent's own evidence). This just answers "why was this
+      // recommendation decided the way it was" after the fact, in one place,
+      // without moving or consolidating any of that logic — see this
+      // session's note on why the checks stay intentionally duplicated.
+      await recordAuditEvent(systemActorReq(siteId), {
+        action: 'recommendation.decided',
+        targetType: 'recommendation',
+        targetId: created?.id != null ? String(created.id) : null,
+        tenantSiteId: siteId,
+        metadata: {
+          generatorId: item.generatorId, page, findingId: item.id, detectingAgent: item.source,
+          riskTier, blockedReason: item.blockedReason ?? null, reason: item.reason ?? null,
+        },
+        success: true,
+      }).catch(() => {}); // recordAuditEvent already never throws; belt-and-suspenders against a future change to that contract
     }
   }
   if (grounded.detectedKeys) {
@@ -254,6 +450,13 @@ export async function syncFromGrounded(siteId, grounded) {
       agentCheckedKeys: grounded.agentCheckedKeys,
       linkCrawlCheckedKeys: grounded.linkCrawlCheckedKeys,
       batchRotatedAgentIds: grounded.batchRotatedAgentIds,
+      // This pass only ever re-detects findings from Node's own grounded
+      // agent roster — a row sourced entirely from analyst-insights,
+      // analyst-keyword-gaps, or growth-opportunities (none of which run as
+      // part of buildRecommendations) must never be closed here on the
+      // strength of THIS roster's silence about it. See closeStaleRecommendations'
+      // own comment for the incident this fixed.
+      authoritativeAgentIds: new Set(RECOMMENDATION_AGENT_IDS),
     });
   }
   // Direct evidence, not absence-of-evidence: unlike closeStaleRecommendations
@@ -305,6 +508,51 @@ export async function refreshBlockedRecommendations(siteId, { onlyDetectingAgent
   const gates = createRecommendationGates(siteId, site);
   let updated = 0;
   for (const rec of rows) {
+    // A reportOnly-kind row (REPORT_ONLY_KINDS above) has no real generator
+    // behind it — recommendations.js deliberately skips gates.evaluate for
+    // these at detection time, with the exact same reasoning: "every gate
+    // answers 'can we safely DRAFT this?', and the row exists precisely
+    // because nothing will be drafted. Running them would mean asking a
+    // url_file_map/design question about a fix that does not exist." This
+    // refresh pass was the one place that reasoning wasn't applied — it
+    // re-evaluates every open BLOCKED row through the generic gates
+    // regardless of type, and for an unregistered generatorId every gate
+    // case falls through to "not blocked", silently wiping the deliberate,
+    // permanent blocked_reason back to null on the very next daily pass
+    // (confirmed live: a query-cannibalization row's blocked_reason went
+    // from its real text to null within the same run that inserted it,
+    // exposing a dead "Generate Solution Draft" button that 404s with
+    // `Unknown generator "query-cannibalization"` on click). Skipping here,
+    // before gates ever sees it, is the fix — leaving the row exactly as
+    // syncFromGrounded's own inline refresh already set it.
+    if (REPORT_ONLY_KINDS.has(rec.recommendation_type)) continue;
+    // Same shape of bug as the query-cannibalization one above, on a second
+    // generator: recommendation-gates.js's evaluate() explicitly excludes
+    // broken-link-fix from every page gate it runs (its own comment —
+    // computeBrokenLinkFixMerge has its own code-search fallback instead),
+    // so gate.blockedReason is unconditionally null for it. This pass would
+    // read that as "verified clear" and wipe out a real needs_human block
+    // action-center.js set after an actual failed ship attempt — confirmed
+    // live: recommendations #42 and #5994 on site 1 both flapped
+    // blocked -> unblocked -> retried -> failed identically -> blocked again,
+    // forever, because this refresh (and syncFromGrounded's own inline one —
+    // see resolveBlockedReason) kept re-clearing a block gates.evaluate has
+    // no way to earn or confirm for this generator. Skipped here for the
+    // same reason REPORT_ONLY_KINDS is: nothing about the row changes
+    // because a pass with no real opinion asked it to.
+    if (rec.recommendation_type === 'broken-link-fix') continue;
+    // Same shape of bug as the two above, on a third source: a capability-gap
+    // block (action-center-reconciler.js's surfaceCapabilityGaps) is a
+    // diagnosis about the GENERATOR, not a condition gates.evaluate() checks
+    // — running the generic page/file gate against it always comes back
+    // "clean" (there was never anything wrong with THIS page), silently
+    // clearing the block with no actual repair having happened, then the row
+    // retries, fails identically against the same undiagnosed generator
+    // defect, and re-clusters into a fresh capability gap next reconcile pass
+    // (2026-09 lifecycle-gap audit finding #1). Skipped here for the same
+    // reason as the other two: nothing about the row changes because this
+    // pass has no real opinion on a generator-level defect.
+    if (rec.blocked_reason?.startsWith(CAPABILITY_GAP_BLOCK_PREFIX)) continue;
     const gate = await gates.evaluate(rec.recommendation_type, rec.params || {}).catch(() => null);
     if (!gate) continue; // could not verify this run — leave the row untouched
     // gate.drop (page proven gone) is deliberately not acted on here: closing
@@ -367,8 +615,15 @@ export async function recheckRecommendation(siteId, recommendationId, { refreshE
     }
     // broken-link-fix has no separate "fresh params" to pull beyond the href
     // itself, which recheckLink just confirmed is still broken — nothing to
-    // refresh, the existing params are already accurate.
-    return { status: 'open', changed: false, detail: result };
+    // refresh, the existing params are already accurate. `recheckedLive: true`
+    // still records that a genuine live re-check happened (as opposed to a
+    // no-op) — driveAutonomousRecovery (action-center-reconciler.js) needs
+    // that signal to ever count a recovery cycle for this recommendation
+    // type. Without it, a permanently-dead external citation/link (DNS
+    // failure, expired cert) can never accumulate the recovery cycles that
+    // lead to blockRecommendation, and loops through "still open, nothing to
+    // refresh" forever instead of ever escalating to a human.
+    return { status: 'open', changed: false, recheckedLive: true, detail: result };
   }
 
   if (!rec.page) return { status: 'open', changed: false, reason: 'site-level recommendation — re-checked automatically on the next full sync' };
@@ -384,6 +639,18 @@ export async function recheckRecommendation(siteId, recommendationId, { refreshE
   try {
     output = await runAgent(agentId, { siteId, start, end, params: { pages: [rec.page] } }, { persist: false });
   } catch (err) {
+    // `detecting_agents[0]` is a LABEL for who raised the finding, not always a
+    // registered, runnable agent: 'design-consistency' is the weekly whole-site
+    // scan (agents/lib/design-consistency.js, run from cron.js/job.js), which has
+    // no per-page agent to re-run. runAgent rejects an unregistered id with a 404
+    // "Unknown agent" before doing any work. That is an expected "can't re-check
+    // this one", not a failure — treating it as one logged an internal error on
+    // every reconciler pass (77 rows in three days, 2026-09-28..30) and told the
+    // user "could not be re-checked right now" about something that can never be
+    // re-checked this way. The scan re-evaluates it on its own next run.
+    if (err?.status === 404 && /^Unknown agent /.test(err.message || '')) {
+      return { status: 'open', changed: false, reason: 'Raised by a whole-site scan rather than a per-page check — it is re-evaluated by that scan\'s next run.' };
+    }
     const { message } = safeMessage('recommendation-coordinator.recheckRecommendation', err, 'This recommendation could not be re-checked right now — it stays open until the next run.');
     return { status: 'open', changed: false, reason: message };
   }
@@ -562,6 +829,11 @@ export async function getRecommendations(siteId) {
         // 'never' — see lib/attempt-classification.js. The UI branches on
         // this to tell "we'll try again" apart from "this needs you".
         lastFailurePolicy: attempts?.lastPolicy || null,
+        // { level: 'strong'|'partial'|'weak'|'none'|'insufficient_evidence',
+        // rationale } from goal-alignment.js at sync time, or null if the
+        // site has no active goals. See ActionCenter.jsx's "why this matters
+        // to your goal" card.
+        goalAlignment: r.goal_alignment || null,
       };
     });
   const lastAnalyzedAt = {};

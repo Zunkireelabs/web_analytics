@@ -1,8 +1,10 @@
 import { getSearchPerformanceRange, getSearchPerformanceForPages, getSiteById } from '../../store/read.js';
 import { listPageInventory } from '../../store/page-inventory.js';
 import { getCheckedAtForPages as getCheckedAtForPagesDefault, markPagesChecked } from '../../store/agent-page-rotation.js';
+import { getOpenRecommendationPages as getOpenRecommendationPagesDefault } from '../../store/recommendations.js';
 import { sortByRotation } from './rotation.js';
 import { knownDomain, filterOwnDomainPages } from './site-domain.js';
+import { isForeignPlatformSpamUrl } from './index-bloat.js';
 // Already exported and already proven against this exact failure — see the
 // SOFT-404 block below for why it was never applied here until now.
 import { fetchSoftNotFoundFingerprint, isSoftNotFound } from './technical-seo-analysis.js';
@@ -35,6 +37,75 @@ const ZERO_TRAFFIC_SHARE = 0.25;
 // changes how a lopsided site splits its batch, not the principle that
 // already-important pages come first.
 const MAX_ZERO_TRAFFIC_SHARE = 0.6;
+
+// A query-string decorated URL sharing a pathname with an already-present
+// query-less URL is, in every real case seen so far, dead tracking cruft
+// riding on top of the real page (Chayce Properties' `?h=...` — a hash
+// param inherited from a prior site on the same domain, matched by nothing
+// this or any other site's own templates read) rather than a second real
+// page. Left undeduped, GSC can hand a junk `?h=` URL more raw impressions
+// than the real page it decorates (bot/referrer traffic), which let it win
+// `aggregateSystemicFinding`'s highest-impression `pickRepresentative` for
+// content-gap.js/technical-seo.js's missing-canonical check — so the one
+// draftable canonical-tag fix a whole site got pointed at a junk URL, never
+// a real one. geo-signals.js has no representative-picking step at all: it
+// loops every candidate in the batch, so an undeduped junk URL there simply
+// earned its own "add author byline" etc. finding right next to real pages.
+// Both bugs share one cause and one fix location: this is the one pool
+// every page-level agent (technical-seo, content-gap, geo-signals, ...)
+// reads its candidates from, so deduping here fixes it for all of them at
+// once — the same "one shared choke point" reasoning as the soft-404 filter
+// below.
+//
+// A pathname with NO query-less URL in the pool at all is left completely
+// untouched: get-started.njk's own `?package=...` variants are real,
+// independently valuable content (the sitemap generator's own comment
+// documents this), and they never collide with this rule because their
+// pathname (`/get-started/index.html`) has no bare sibling — only
+// `/get-started/` does, which is a different pathname entirely.
+export function dedupeQueryVariants(urls, impressionsByPage = null) {
+  const groups = new Map();
+  for (const url of urls) {
+    let key = url;
+    let hasQuery = false;
+    let isHttps = false;
+    try {
+      const parsed = new URL(url);
+      // Scheme is deliberately NOT part of the key: http://host/ and
+      // https://host/ are the same page, and GSC/inventory can carry both
+      // (chayceproperties.com's homepage did), which doubled every
+      // page-level finding for it. Host is kept, so www vs apex stays
+      // separate — that is a different decision this does not make.
+      key = parsed.host + parsed.pathname;
+      hasQuery = Boolean(parsed.search);
+      isHttps = parsed.protocol === 'https:';
+    } catch { /* unparsable URL: treat as its own singleton group below */ }
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ url, hasQuery, isHttps });
+  }
+
+  const kept = [];
+  for (const variants of groups.values()) {
+    const bare = variants.find((v) => !v.hasQuery && v.isHttps) || variants.find((v) => !v.hasQuery);
+    if (!bare || variants.length === 1) {
+      kept.push(...variants.map((v) => v.url));
+      continue;
+    }
+    kept.push(bare.url);
+    // Fold the dropped variants' impressions into the survivor rather than
+    // discarding that traffic signal outright — a page shouldn't look less
+    // trafficked than it really is just because some of its real visits
+    // arrived via a decorated URL.
+    if (impressionsByPage) {
+      for (const v of variants) {
+        if (v.url === bare.url) continue;
+        const extra = impressionsByPage.get(v.url);
+        if (extra) impressionsByPage.set(bare.url, (impressionsByPage.get(bare.url) || 0) + extra);
+      }
+    }
+  }
+  return kept;
+}
 
 export function zeroTrafficSlotsFor(batchSize, gscCount, zeroCount) {
   if (zeroCount <= 0) return 0;
@@ -185,6 +256,7 @@ export async function selectCandidatePages(siteId, agentId, {
   getCheckedAtForPages = getCheckedAtForPagesDefault,
   filterSoftNotFound = filterSoftNotFoundPages,
   markPagesCheckedFn = markPagesChecked,
+  getOpenRecommendationPagesFn = getOpenRecommendationPagesDefault,
 } = {}) {
   const [site, gscPagesRaw, inventoryRaw] = await Promise.all([
     getSiteById(siteId),
@@ -201,29 +273,67 @@ export async function selectCandidatePages(siteId, agentId, {
   // Center. Confirmed 2026-08-24: scanning ownDomains here is what let
   // edgex.zunkireelabs.com pages generate real recommendations at all.
   const domain = knownDomain(site);
-  const gscPages = filterOwnDomainPages(gscPagesRaw, domain);
-  const inventory = filterOwnDomainPages(inventoryRaw, domain, (r) => r.page);
+  // Same-domain doesn't mean same site — a prior owner's legacy platform
+  // (index-bloat.js's FOREIGN_PLATFORM_EXTENSIONS/junk-numeric-param shapes,
+  // first found on chayceproperties.com) can still be sitting in GSC and in
+  // already-persisted page_inventory rows (e.g. from before this filter
+  // existed), so it's applied here too, not just at discovery-ingestion time
+  // in job.js — this is the one pool every page-level agent's batch comes
+  // from, so filtering here keeps those URLs out regardless of how they got
+  // into either source.
+  const gscPages = filterOwnDomainPages(gscPagesRaw, domain).filter((p) => !isForeignPlatformSpamUrl(p.dim_value));
+  const inventory = filterOwnDomainPages(inventoryRaw, domain, (r) => r.page).filter((r) => !isForeignPlatformSpamUrl(r.page));
 
   const impressionsByPage = new Map(gscPages.map((p) => [p.dim_value, Number(p.impressions)]));
-  const gscUrls = gscPages.map((p) => p.dim_value);
-  const zeroTrafficUrls = inventory.map((r) => r.page).filter((page) => !impressionsByPage.has(page)).slice(0, zeroTrafficLimit);
+  const gscUrls = dedupeQueryVariants(gscPages.map((p) => p.dim_value), impressionsByPage);
+  // Zero-traffic query variants have nothing to merge (both sides are 0
+  // impressions) — a plain drop, and also checked against gscUrls' own
+  // pathnames so a zero-traffic `?h=`-style sibling of an already-kept,
+  // real-traffic page doesn't sneak into the batch through this pool instead.
+  const gscPathnames = new Set(gscUrls.map((url) => { try { const u = new URL(url); return u.origin + u.pathname; } catch { return url; } }));
+  const zeroTrafficUrls = dedupeQueryVariants(
+    inventory.map((r) => r.page).filter((page) => !impressionsByPage.has(page)),
+  )
+    .filter((page) => { try { const u = new URL(page); return !gscPathnames.has(u.origin + u.pathname); } catch { return true; } })
+    .slice(0, zeroTrafficLimit);
 
   const checkedAt = await getCheckedAtForPages(siteId, agentId, [...gscUrls, ...zeroTrafficUrls]);
   const gscSorted = sortByRotation(gscUrls, checkedAt);
   const zeroTrafficSorted = sortByRotation(zeroTrafficUrls, checkedAt);
 
-  const zeroTrafficSlots = zeroTrafficSlotsFor(batchSize, gscSorted.length, zeroTrafficSorted.length);
-  let batch = [...gscSorted.slice(0, batchSize - zeroTrafficSlots), ...zeroTrafficSorted.slice(0, zeroTrafficSlots)];
+  // Pages already carrying an OPEN recommendation from THIS agent are
+  // re-verified ahead of ordinary "never checked" rotation, bounded to at
+  // most half the batch so a site with many open findings for this agent
+  // can't starve normal rotation/new-page discovery entirely. Real gap
+  // confirmed 2026-09-29: a shared template fix (base.njk gaining FAQ/schema
+  // markup for every product page) silently resolved several open
+  // ai-visibility recommendations at once, but nothing re-checked them —
+  // MAX_PAGES=20 rotation on a 100+ page site meant an affected page could
+  // sit unrotated, and its now-false finding just stayed open indefinitely.
+  // See getOpenRecommendationPages' own comment for the full story.
+  const RECHECK_SHARE_CAP = 0.5;
+  const maxRecheckSlots = Math.floor(batchSize * RECHECK_SHARE_CAP);
+  const openRecPages = await getOpenRecommendationPagesFn(siteId, agentId);
+  const recheckPages = openRecPages.slice(0, maxRecheckSlots);
+  const recheckSet = new Set(recheckPages);
+
+  const rotationBudget = batchSize - recheckPages.length;
+  const gscRotation = gscSorted.filter((p) => !recheckSet.has(p));
+  const zeroTrafficRotation = zeroTrafficSorted.filter((p) => !recheckSet.has(p));
+  const zeroTrafficSlots = zeroTrafficSlotsFor(rotationBudget, gscRotation.length, zeroTrafficRotation.length);
+  let rotationBatch = [...gscRotation.slice(0, rotationBudget - zeroTrafficSlots), ...zeroTrafficRotation.slice(0, zeroTrafficSlots)];
 
   // Either pool can be smaller than its reserved share (e.g. a brand-new
   // site with few GSC pages, or a site whose crawl hasn't found much yet)
   // — top up from whichever pool still has candidates left rather than
   // wasting the unused slots.
-  if (batch.length < batchSize) {
-    const used = new Set(batch);
+  if (rotationBatch.length < rotationBudget) {
+    const used = new Set([...recheckPages, ...rotationBatch]);
     const leftover = [...gscSorted, ...zeroTrafficSorted].filter((p) => !used.has(p));
-    batch = [...batch, ...leftover].slice(0, batchSize);
+    rotationBatch = [...rotationBatch, ...leftover].slice(0, rotationBudget);
   }
+
+  let batch = [...recheckPages, ...rotationBatch];
 
   // Drop candidates that are this site's catch-all "nothing here" response
   // before any agent analyzes them. Applied to the BATCH rather than the whole

@@ -1,5 +1,5 @@
 import { getSiteById } from '../../store/read.js';
-import { getDesignProfile, verifyProfileRoles, DESIGN_CONTEXT_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
+import { getDesignProfile, verifyProfileRoles, NO_MARKUP_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
 
 // Wires implementers/lib/design-drift.js's verifyProfileRoles — already
 // written, already tested, never called from production code before this —
@@ -31,19 +31,38 @@ import { getDesignProfile, verifyProfileRoles, DESIGN_CONTEXT_GENERATOR_IDS } fr
 //    runQualityGate.clean becomes false — the draft is refused and stays
 //    open for a human to repair/retry, same as any other Quality Gate
 //    failure, never silently shipped.
+// ── Enforcement is now ON by default ────────────────────────────────────
+// The staged rollout above was written when a gate failure meant a flat
+// refusal, so enforcing early risked trading "ships something slightly off"
+// for "ships nothing at all". That tradeoff no longer applies: a design or
+// structure mismatch is now DIAGNOSED and routed back to the generator for
+// bounded, real repair attempts before anything is refused (see
+// generators/lib/design-repair-feedback.js and the repair loop in
+// routes/action-center.js's generateDraft). This gate is the FINAL safety
+// check after repair has genuinely been tried and failed — not the
+// mechanism that does the fixing — so a mismatch reaching it has already
+// survived every automatic correction the system can make, and must not
+// ship to a live customer site.
+//
+// DESIGN_INTEGRITY_ENFORCE=false remains as an escape hatch: if a thin
+// design-profile capture ever makes this fire on genuinely fine content,
+// unsetting enforcement drops it straight back to log-only (the issue is
+// still recorded and visible in Action Center) without a code change.
 export function designIntegrityEnforced() {
-  return process.env.DESIGN_INTEGRITY_ENFORCE === 'true';
+  return process.env.DESIGN_INTEGRITY_ENFORCE !== 'false';
 }
 
 /**
  * @returns {{issues: Array<{path, patternId, snippet, detail, blocking}>}}
  * Same shape every sibling guard returns to runQualityGate. siteId/
- * generatorId are required — with either missing (a generator with no site
- * context, or one outside DESIGN_CONTEXT_GENERATOR_IDS, the same visible-
- * content set withDesignContext already scopes to), this is a no-op.
+ * generatorId are required — with either missing, or generatorId one of
+ * design-drift.js's NO_MARKUP_GENERATOR_IDS (verified to never emit rendered
+ * markup/classes at all), this is a no-op: runs for every OTHER generator by
+ * default, not just an opt-in subset, since any generator that can touch
+ * markup can in principle introduce a design-role mismatch.
  */
-export async function findDesignIntegrityIssues(generatorId, siteId, { fetchSite = getSiteById } = {}) {
-  if (!generatorId || !siteId || !DESIGN_CONTEXT_GENERATOR_IDS.has(generatorId)) return { issues: [] };
+export async function findDesignIntegrityIssues(generatorId, siteId, { fetchSite = getSiteById, enforce = designIntegrityEnforced() } = {}) {
+  if (!generatorId || !siteId || NO_MARKUP_GENERATOR_IDS.has(generatorId)) return { issues: [] };
 
   let site;
   try {
@@ -59,7 +78,14 @@ export async function findDesignIntegrityIssues(generatorId, siteId, { fetchSite
   const verdict = verifyProfileRoles(profile);
   if (verdict.ok) return { issues: [] };
 
-  const blocking = designIntegrityEnforced();
+  // `enforce` is false for a MANUAL generate: a person clicked the button and
+  // is waiting to look at the result, so refusing to produce anything is the
+  // one outcome that helps nobody — they get no draft, no diff, and nothing
+  // to judge. The mismatch is still reported and still visible on the draft;
+  // it just doesn't withhold the draft itself. Enforcement is for the
+  // UNATTENDED path, where "don't ship it" is the only protection a live
+  // customer site has. See generateDraft's `enforceDesignIntegrity`.
+  const blocking = enforce;
   return {
     issues: [{
       path: verdict.field,

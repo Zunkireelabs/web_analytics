@@ -142,6 +142,105 @@ const DEFAULT_SLOT_BY_ACTION_TYPE = {
   'analytics-install': 'head',
 };
 
+// The real field name buildMergeValues() (marker-merge.js) expects for each
+// marker-merge action type — same field->MARKER naming convention
+// zunkireelabs-web's hand-authored `defaults.placements` already uses in
+// production (e.g. faq -> FAQ, schema -> SCHEMA). Exported so backend.js's
+// error-message helper (markerConfigExample) reads this instead of keeping
+// its own drift-prone copy.
+export const MARKER_FIELD_BY_ACTION_TYPE = {
+  'meta-title': 'title',
+  faq: 'faq',
+  schema: 'schema',
+  'internal-links': 'links',
+  canonical: 'canonical',
+  'open-graph': 'openGraph',
+  'expand-content': 'expandedContent',
+  // Deliberately the SAME field as expand-content — see refresh-content.js's
+  // own comment: reusing the real, already-onboarded marker every site has
+  // for expand-content, rather than requiring a second onboarding pass.
+  'refresh-content': 'expandedContent',
+  'qa-content': 'qaContent',
+  breadcrumbs: 'breadcrumbSchema',
+};
+
+// None of these marker names are a genuine per-tenant naming choice — same
+// reasoning analytics-install (the original, sole entry here) already
+// established: there is exactly one real field per action type
+// (MARKER_FIELD_BY_ACTION_TYPE above / marker-merge.js's
+// ANALYTICS_PROVIDER_FIELDS), fixed by the generator itself, and no tenant
+// has ever had a reason to want a different name for e.g. "the FAQ marker."
+// Until this covered every marker-merge type, only Zunkiree Labs (the one
+// site with a hand-authored `defaults.placements` block) could ever get a
+// draft to apply for these action types — every OTHER newly connected site
+// (e.g. Admizz, the first Next.js/App-Router site onboarded) had file paths
+// mapped by discovery but resolveMarkers() returned null for all of them,
+// silently blocking every draft with no visible error. Requiring a human to
+// hand-author the same generic block per site is exactly the class of
+// pointless manual step `defaults.placements` inheritance already exists to
+// avoid — so these are now ALL built-in platform defaults, used only as the
+// last resort (a site-level, page-level, or pattern-level config a human (or
+// discovery) actually wrote always wins — see the resolution order below).
+// A site that genuinely wants different marker names still can, by
+// configuring `defaults.placements[actionType]` explicitly.
+//
+// Not simply `field.toUpperCase()` — Zunkiree Labs' real, already-live
+// config names `internal-links`' marker INTERNALLINKS (the action type),
+// not LINKS (the field), and there is no reason to invent a new, different
+// name now rather than match the one convention already proven in
+// production. Every other entry does happen to equal field.toUpperCase();
+// spelled out explicitly anyway so this table is never silently wrong for
+// the next field whose name doesn't match its action type either.
+const MARKER_NAME_BY_ACTION_TYPE = {
+  'meta-title': 'TITLE',
+  faq: 'FAQ',
+  schema: 'SCHEMA',
+  'internal-links': 'INTERNALLINKS',
+  canonical: 'CANONICAL',
+  'open-graph': 'OPENGRAPH',
+  'expand-content': 'EXPANDEDCONTENT',
+  'refresh-content': 'EXPANDEDCONTENT',
+  'qa-content': 'QACONTENT',
+  breadcrumbs: 'BREADCRUMBSCHEMA',
+};
+
+const PLATFORM_DEFAULT_MARKERS = {
+  ...Object.fromEntries(
+    Object.entries(MARKER_FIELD_BY_ACTION_TYPE).map(([actionType, field]) => [actionType, { [field]: MARKER_NAME_BY_ACTION_TYPE[actionType] }])
+  ),
+  'analytics-install': { analyticsScriptGa4: 'ANALYTICSSCRIPTGA4', analyticsScriptFacebookPixel: 'ANALYTICSSCRIPTFACEBOOKPIXEL' },
+  // meta-title is the one marker-merge action type with TWO real fields, not
+  // one — marker-merge.js's buildMergeValues sets both `title` and (when the
+  // draft has one) a meta-description value on `values`. The generic
+  // single-field derivation above (MARKER_FIELD_BY_ACTION_TYPE has exactly
+  // one field per actionType, for every OTHER action type here) silently
+  // dropped the description field from this map entirely, so spliceMarkers —
+  // which only ever iterates markerMap's OWN keys, never values' — never
+  // even looked at the drafted description, regardless of retries. Confirmed
+  // live on site 1: title updated correctly (its "TITLE" marker exists and
+  // matches the shipped draft) on every one of ~10 meta-title
+  // recommendations, but each page's `description:` front-matter field
+  // carried no marker at all and a value matching neither draft ever
+  // generated — the field was never once written, so every post-ship
+  // verification pass re-found "Meta description length" still broken and
+  // kept re-drafting forever.
+  //
+  // The field key here is `description`, not `metaDescription` (the
+  // generator's own draft.content field name) — deliberately, to match
+  // `title`'s own precedent: LINE_CONVENTION_FIELDS/insertLineMarker find an
+  // existing front-matter field by searching for a literal `${field}:` line,
+  // and every SSG convention this platform targets (Eleventy/Jekyll/Hugo/
+  // 11ty) names that field `description:`, never `metaDescription:`. Using
+  // the generator's internal name here would search for a front-matter key
+  // that never exists, failing exactly the same way this bug already did.
+  // buildMergeValues maps the generator's `metaDescription` onto this
+  // `description` marker field for exactly this reason — see its own
+  // comment. A site that wants a different name for this marker can still
+  // override it via `defaults.placements['meta-title'].markers`, same as any
+  // other field.
+  'meta-title': { title: 'TITLE', description: 'METADESCRIPTION' },
+};
+
 // Single source of truth for "where does this (page, action type) land."
 // Resolution order, highest priority first:
 //   1. page-level `pages[url].placements[actionType]` — { slot?, markers }
@@ -185,7 +284,7 @@ export function resolvePlacement(site, pageUrl, actionType) {
 
   if (entry?.markers) return { slot: defaultSlot, markers: entry.markers };
 
-  return { slot: defaultSlot, markers: null };
+  return { slot: defaultSlot, markers: PLATFORM_DEFAULT_MARKERS[actionType] || null };
 }
 
 // Marker names for a splice-based merge (meta-title/faq — see
@@ -257,6 +356,28 @@ export function resolveLinkDataSources(site, pageUrl) {
   return getMatchingPattern(site, pageUrl)?.linkDataSources || [];
 }
 
+// Same shape/discovery reasoning as resolveLinkDataSources above, for
+// alt-text-inject.js's own version of the identical problem: an image's
+// `src` (and, once configured, its `alt`) can be rendered from a shared
+// data file via a template variable (`<img src="{{ service.heroImage }}"
+// alt="">`) rather than hardcoded in the page's own file OR any file at
+// all as literal text — confirmed on zunkireelabs-web's service pages
+// (2026-09-11): `service.heroImage` in `servicesDetails.json` drives a
+// build-time-hashed output filename (`/assets/images/data-systems-hero.webp`
+// source -> `/assets/data-systems-hero-ByIjgOS7.webp` rendered), so no
+// literal-text search, however complete, can ever find that `src` string —
+// it was never written down anywhere as text. alt-text-inject's Layer 2
+// (repo-local-search) correctly finds a shared LAYOUT that merely renders
+// hardcoded `alt=""`, but the fix belongs in the DATA the layout reads, not
+// the layout markup itself. Shape: [{ dataFile, srcField, altField,
+// format? }, ...] — same id convention as linkDataSources (the page URL's
+// own last path segment), `format` defaults to 'json-array'.
+export function resolveAltTextDataSources(site, pageUrl) {
+  const entry = getPageEntry(site, pageUrl);
+  if (entry?.altTextDataSources) return entry.altTextDataSources;
+  return getMatchingPattern(site, pageUrl)?.altTextDataSources || [];
+}
+
 // Render mode (visible vs. schema-only) is NOT resolved here, and
 // deliberately has no static config surface — see
 // implementers/lib/render-inspector.js. It's decided fresh on every call by
@@ -268,16 +389,28 @@ export function resolveLinkDataSources(site, pageUrl) {
 // Net-new-content generators (blog-outline, landing-page) have no existing
 // URL — resolves a deterministic new file path from the configured target
 // directory/extension plus a slugified title.
+// `filename` (optional) is for frameworks that route by DIRECTORY rather than
+// by file — a Next.js App Router page lives at `dir/<slug>/page.tsx`, never
+// at a flat `dir/<slug>.tsx`, unlike every flat-file target (Eleventy's
+// `src/blog/<slug>.md`) this function was originally written for. When set,
+// it names the fixed filename every new post's own directory contains;
+// `extension` still describes what KIND of file that is (used by
+// newcontent-contract.js's sibling matching), it just no longer participates
+// in the path itself.
 export function resolveNewContentTarget(site, actionType, title) {
   const target = site.url_file_map?.newContentTargets?.[actionType];
   if (!target?.dir || !target?.extension) return null;
+  if (target.filename) return `${target.dir}/${slugifyTitle(title)}/${target.filename}`;
   return `${target.dir}/${slugifyTitle(title)}${target.extension}`;
 }
 
 // The single slug both the file path above and the public URL below derive
 // from — they must agree, or a page gets written to one place and declares
 // it lives at another.
-function slugifyTitle(title) {
+// Exported so callers building something ELSE keyed on the same slug (e.g.
+// frontend.js's generated-posts manifest entry) always derive it identically
+// to the file path/URL above — never a second, driftable slugify call.
+export function slugifyTitle(title) {
   return String(title || 'untitled')
     .toLowerCase().trim()
     .replace(/[^a-z0-9]+/g, '-')
@@ -340,7 +473,7 @@ function slugifyTitle(title) {
 export function resolveNewContentTargetConfig(site, actionType) {
   const target = site?.url_file_map?.newContentTargets?.[actionType];
   if (!target?.dir || !target?.extension) return {};
-  return { dir: target.dir, extension: target.extension };
+  return { dir: target.dir, extension: target.extension, filename: target.filename || null };
 }
 
 export function resolveNewContentLayout(site, actionType) {
@@ -416,6 +549,31 @@ export function resolveSiteRootFile(site, key) {
   return site.url_file_map?.siteRoot?.[key] || null;
 }
 
+// Onboarding-declared author/org avatar assets — one entry per avatar image
+// a client site's own template renders, e.g.:
+//   siteRoot.authorAvatars: [
+//     { label: "Some Person", imagePath: "src/assets/images/team/person.webp", expectedFit: "circular-cover" },
+//     { label: "Org Team", imagePath: "src/assets/images/logo-round.svg", expectedFit: "contain" },
+//   ]
+// expectedFit is the human-declared truth about how the template actually
+// renders it — 'circular-cover' (rounded-full + object-cover, or any other
+// crop-to-fill treatment) or 'contain' (natural aspect ratio preserved).
+// audit-url-file-map.js uses this list plus avatar-aspect-check.js to catch
+// a non-square image declared 'circular-cover' onboarding-time, instead of
+// it being discovered by eye on a live page (see avatar-aspect-check.js's
+// module comment for the real incident this exists to stop from repeating).
+// Nothing here auto-discovers avatar assets — same manual-declaration
+// discipline as every other siteRoot/newContentTargets field in this file.
+//
+// Restored 2026-09-07: commit f717350 (a blog-image hotlinking revert) also
+// deleted this accessor, which that revert had nothing to do with, while
+// leaving its only caller in audit-url-file-map.js intact — so the whole
+// audit script crashed at import with "does not provide an export named
+// resolveAuthorAvatars" and no site could be audited at all.
+export function resolveAuthorAvatars(site) {
+  return site.url_file_map?.siteRoot?.authorAvatars || [];
+}
+
 // Common language name -> ISO 639-1 code, for targetLanguage values an LLM
 // might return as a full name (e.g. "Spanish") rather than a code. Best-
 // effort only — an unrecognized name falls back to a short slug rather than
@@ -444,5 +602,17 @@ function languageCode(targetLanguage) {
 export function resolveTranslationTarget(sourcePath, targetLanguage) {
   if (!sourcePath) return null;
   const code = languageCode(targetLanguage);
+  // Next.js App Router reserves the literal filename `page.(t|j)sx`/`page.js`
+  // as its route-segment marker — a sibling FILE renamed `page.fr.tsx` is not
+  // a recognized route at all (silently never served, not a build error),
+  // unlike every other framework this function resolves for. The equivalent
+  // "same page, another language" target there is a sibling DIRECTORY
+  // suffixed with the language code, which keeps the reserved `page.tsx`
+  // filename intact and gets Next.js its own real route (e.g. /about-fr).
+  const appRouterMatch = sourcePath.match(/^(.*)\/(page\.(?:tsx|jsx|js))$/);
+  if (appRouterMatch) {
+    const [, dir, filename] = appRouterMatch;
+    return `${dir}-${code}/${filename}`;
+  }
   return sourcePath.replace(/(\.[^./]+)$/, `.${code}$1`);
 }

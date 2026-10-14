@@ -14,8 +14,55 @@
 import { chromium } from 'playwright';
 import { classifyPageType } from './schema.js';
 
-const DEFAULT_MAX_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_MAX_PAGES) || 8;
+// Raised from 8 (2026-09-16): with 'other' no longer sub-capped (see
+// discoverPages), a real small-business site's actual page variety needs
+// real room — chayceproperties.com alone has 11 real 'other'-classified
+// pages plus homepage/faq/blog-listing, 14 total. 8 would still have quietly
+// dropped most of them. Each extra page costs one more Playwright page load
+// in a capture that already only runs once a week per site (or once now, on
+// deploy — see force-design-profile-rescan.js), not per request, so the
+// added cost is small and bounded, not per-generation.
+const DEFAULT_MAX_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_MAX_PAGES) || 20;
 const NAV_TIMEOUT_MS = Number(process.env.DESIGN_AGENT_CAPTURE_NAV_TIMEOUT_MS) || 20_000;
+
+// The viewports this agent actually looks at. `desktop` is the one the design
+// PROFILE is derived from — it stays first and stays 1440x900 so every
+// existing block/section/typography fact keeps the exact meaning it had when
+// it was the only viewport that existed. `tablet` and `mobile` are measured
+// separately and only ever ADD responsive facts; nothing about the profile's
+// existing shape is derived from them.
+//
+// Sizes are real device classes, not round numbers: 834x1112 is iPad Air
+// portrait, 390x844 is iPhone 12/13/14. Picked because a site's breakpoints
+// are authored against real devices, so measuring between them (e.g. 800px)
+// would report layout no real visitor sees.
+export const DESKTOP_VIEWPORT = Object.freeze({ name: 'desktop', width: 1440, height: 900 });
+export const RESPONSIVE_VIEWPORTS = Object.freeze([
+  Object.freeze({ name: 'tablet', width: 834, height: 1112 }),
+  Object.freeze({ name: 'mobile', width: 390, height: 844 }),
+]);
+
+// Responsive probing costs one extra page load per page per extra viewport, so
+// it is bounded independently of the profile capture. The probe itself is much
+// cheaper than a profile capture (one evaluate() of measurements, no LLM, no
+// markup serialization), which is why the default covers the whole captured
+// set rather than a sample: a responsive defect on page 7 is exactly as real
+// as one on page 1, and sampling would make detection depend on crawl order.
+// Set DESIGN_AGENT_RESPONSIVE_MAX_PAGES=0 to skip responsive probing entirely.
+const DEFAULT_RESPONSIVE_MAX_PAGES = process.env.DESIGN_AGENT_RESPONSIVE_MAX_PAGES === undefined
+  ? DEFAULT_MAX_PAGES + 2
+  : Number(process.env.DESIGN_AGENT_RESPONSIVE_MAX_PAGES);
+
+// WCAG 2.2 SC 2.5.8 (Target Size, Minimum) — 24x24 CSS px. Deliberately the
+// AA floor and not Apple's 44pt or Android's 48dp guidance: those are design
+// recommendations, and flagging every control under 44px would bury a real
+// defect under dozens of judgement calls on sites that are not actually
+// broken. 24px is the threshold with an objective standard behind it.
+const MIN_TAP_TARGET_PX = 24;
+// See discoverCardHeavyPages below for why these exist separately from
+// DEFAULT_MAX_PAGES.
+const DEFAULT_EXTRA_CARD_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_EXTRA_CARD_PAGES) || 2;
+const DEFAULT_CARD_SCAN_BUDGET = Number(process.env.DESIGN_AGENT_CAPTURE_CARD_SCAN_BUDGET) || 6;
 
 export async function launchBrowser() {
   return chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
@@ -40,31 +87,193 @@ function collectLinksInPage() {
 }
 /* eslint-enable no-undef */
 
+// [listing page type, the detail page type reached FROM it] — see the
+// second-hop block inside discoverPages for why this exists. Kept as a
+// table rather than hardcoding "blog" so a future listing/detail pair
+// (schema.js's PAGE_TYPES) is a one-line addition here.
+const DEEPER_SAMPLE_TYPES = Object.freeze([
+  ['blog-listing', 'blog-article'],
+]);
+
+// classifyPageType sorts every URL into one of nine buckets, and 'other' is
+// the catch-all for everything that doesn't match a named pattern — which on
+// a real site is frequently where the most DESIGN-DISTINCT pages live: a
+// pricing/package-tier page, a property/product detail page, an "our story"
+// page. Keeping only the first URL per bucket (the original behaviour)
+// treated all of those as interchangeable and sampled exactly one.
+//
+// Confirmed on chayceproperties.com: /gold-prestige/, /silver-comfort/,
+// /platinum-bespoke/ and /bronze-essentials/ (its four service-package
+// pages — as commercially central to that site as any named type) all
+// classify 'other' alongside /contact/, /packages/, /about-chayce/,
+// /how-it-works/, /get-started/ and /discovery/ — eleven real pages
+// competing for one slot, so ten were never even opened.
+//
+// 'other' is deliberately NOT given a fixed sub-limit the way every named
+// type keeps exactly one representative: a fixed number picks whichever
+// pages happen to appear FIRST in nav order, which is arbitrary — Chayce's
+// four package-tier pages are its last four nav links, so any fixed cap
+// smaller than ~11 would exclude exactly its most commercially central pages
+// while keeping /contact/ and /discovery/. 'other' instead competes for the
+// SAME overall maxPages budget every other type already shares — the only
+// real fix is giving a site with real page variety enough total budget to
+// fit it (maxPages), not guessing which few 'other' pages deserve a slot.
+//
 // Finds a small, page-type-diverse set of real URLs on this site: the
-// homepage plus the first URL discovered for each OTHER page type, up to
-// maxPages total. Deliberately not a full-site crawl — the goal is one good
-// representative of each page-type pattern (homepage/service/location/
-// landing/faq/blog-listing/blog-article/legal), not exhaustive coverage,
-// so a big site stays a bounded, fast analysis.
-export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAULT_MAX_PAGES } = {}) {
+// homepage, every distinct 'other' page found (bounded only by maxPages),
+// and one representative of every other page-type pattern found (service/
+// location/landing/faq/blog-listing/blog-article/legal), up to maxPages
+// total. Deliberately not an unbounded crawl otherwise — real page VARIETY
+// gets covered, not every last URL on a large site.
+//
+// `knownUrls` (absolute URLs, e.g. from the site's own onboarded page
+// inventory) are considered as ADDITIONAL candidates alongside whatever this
+// crawl finds linked from the homepage. This closes the other half of the
+// same Chayce finding: /faq/ and /news/ are real, correctly-classifiable
+// pages that are simply not linked from the homepage at all (confirmed
+// directly against the live site) — no depth of crawling from the homepage
+// can ever find a page nothing on the homepage points to. A caller that
+// already knows a site's real page list (this platform's onboarding already
+// records one) can hand it in here instead of leaving those pages
+// permanently undiscoverable.
+export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAULT_MAX_PAGES, knownUrls = [], propertyType } = {}) {
   await browserPage.goto(homepageUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   const rawLinks = await browserPage.evaluate(collectLinksInPage);
 
   const seen = new Set([homepageUrl]);
-  const byType = new Map([['homepage', homepageUrl]]);
+  const byType = new Map([['homepage', [homepageUrl]]]);
+  let total = 1;
 
+  const consider = (href) => {
+    if (total >= maxPages) return false;
+    let abs;
+    try { abs = new URL(href, homepageUrl).href.split('#')[0]; } catch { return true; }
+    if (!sameOrigin(abs, homepageUrl) || seen.has(abs)) return true;
+    if (/\.(pdf|jpg|jpeg|png|svg|gif|zip|css|js|xml)$/i.test(abs)) return true;
+
+    const type = classifyPageType(abs, { propertyType });
+    const limit = type === 'other' ? Infinity : 1;
+    const existing = byType.get(type) || [];
+    if (existing.length >= limit) return true;
+
+    seen.add(abs);
+    byType.set(type, [...existing, abs]);
+    total++;
+    return total < maxPages;
+  };
+
+  // Real crawled links first — an actual example the site itself surfaces
+  // is preferred evidence over one this platform merely knows the URL of.
   for (const href of rawLinks) {
+    if (!consider(href)) break;
+  }
+  // Known-but-unlinked pages fill remaining slots, honoring the exact same
+  // per-type limits (an already-full 'other' bucket stays full; this is
+  // ADDITIONAL reach, not a way around the bound).
+  for (const url of knownUrls) {
+    if (!consider(url)) break;
+  }
+
+  // ONE LEVEL DEEPER FOR THE PAGE TYPES INSERTED CONTENT ACTUALLY LANDS ON.
+  //
+  // Everything above is reachable from the HOMEPAGE's own links, and a site
+  // typically links to its blog LISTING (/blog/) from the nav, never to an
+  // individual post. So 'blog-article' — the single most common target for
+  // inserted FAQ/Q&A/expand-content — routinely ended up with no captured
+  // representative at all, and therefore no entry in the derived profile's
+  // pageTypePatterns.
+  //
+  // That absence is not cosmetic: marker-merge.js's groundedInlineHeadingClass
+  // asks pageTypePatterns[pageType] for this page type's real SUBHEADING
+  // class, and with nothing recorded it falls back to the site's
+  // section/page-title heading class — so every block spliced into a blog
+  // post rendered at hero scale. Confirmed live on site 1 (zunkireelabs):
+  // pageTypePatterns held 'blog-listing' but never 'blog-article'.
+  //
+  // Bounded deliberately: at most one extra navigation per missing inline
+  // type, only when a listing page for it was already discovered above, and
+  // only up to maxPages overall — this stays a targeted second hop, not a
+  // crawl. A listing page that yields no usable article link simply leaves
+  // that type unrepresented, exactly as before.
+  for (const [listingType, articleType] of DEEPER_SAMPLE_TYPES) {
+    if (total >= maxPages) break;
+    if (byType.has(articleType) || !byType.has(listingType)) continue;
+    const [listingUrl] = byType.get(listingType);
+    let listingLinks;
+    try {
+      await browserPage.goto(listingUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+      listingLinks = await browserPage.evaluate(collectLinksInPage);
+    } catch {
+      continue; // an unreachable listing page tells us nothing — leave the type unrepresented
+    }
+    for (const href of listingLinks) {
+      let abs;
+      try { abs = new URL(href, listingUrl).href.split('#')[0]; } catch { continue; }
+      if (!sameOrigin(abs, homepageUrl) || seen.has(abs)) continue;
+      if (/\.(pdf|jpg|jpeg|png|svg|gif|zip|css|js|xml)$/i.test(abs)) continue;
+      seen.add(abs);
+      if (classifyPageType(abs, { propertyType }) !== articleType) continue;
+      byType.set(articleType, [abs]);
+      total++;
+      break;
+    }
+  }
+
+  return [...byType.entries()].flatMap(([pageType, urls]) => urls.map((url) => ({ url, pageType })));
+}
+
+// classifyPageType is a URL-shape heuristic (schema.js) — every page whose
+// path doesn't match a known pattern (service/location/faq/blog/legal/...)
+// falls into the same 'other' bucket. discoverPages now keeps every distinct
+// 'other' page it finds within the shared maxPages budget (see its own
+// comment), not just the first — but on a large site that budget can still
+// run out before a genuine card-grid portfolio/case-study page (e.g.
+// /projects/) is reached, and URL classification alone has no way to know
+// that page is any more worth a slot than an unrelated miscellaneous one.
+// This function exists for exactly that residual gap: "flat" content-
+// injection on a card-heavy page (design-profile.js's
+// pageUsesCardSections/projectExpandContentCard has nothing to key off) can
+// still trace back to it never being captured at all, not a rendering bug.
+// Whether a page is card-heavy is a STRUCTURAL fact invisible from its
+// URL, so it can only be found by loading candidates and looking — this scans
+// a bounded number of not-yet-captured same-origin links (re-collected from a
+// fresh homepage visit, since discoverPages doesn't expose its own link list)
+// and keeps the ones that turn out to have several repeating card-shaped
+// blocks. Bounded on both axes (scanBudget page loads attempted, maxFound
+// pages kept) so a large site can't turn this into an unbounded crawl.
+export async function discoverCardHeavyPages(browserPage, homepageUrl, excludeUrls, {
+  scanBudget = DEFAULT_CARD_SCAN_BUDGET,
+  maxFound = DEFAULT_EXTRA_CARD_PAGES,
+  propertyType,
+} = {}) {
+  await browserPage.goto(homepageUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+  const rawLinks = await browserPage.evaluate(collectLinksInPage);
+
+  const seen = new Set(excludeUrls);
+  const found = [];
+  let scanned = 0;
+  for (const href of rawLinks) {
+    if (found.length >= maxFound || scanned >= scanBudget) break;
     let abs;
     try { abs = new URL(href, homepageUrl).href.split('#')[0]; } catch { continue; }
     if (!sameOrigin(abs, homepageUrl) || seen.has(abs)) continue;
     if (/\.(pdf|jpg|jpeg|png|svg|gif|zip|css|js|xml)$/i.test(abs)) continue;
     seen.add(abs);
-    const type = classifyPageType(abs);
-    if (!byType.has(type)) byType.set(type, abs);
-    if (byType.size >= maxPages) break;
+    scanned++;
+    // eslint-disable-next-line no-await-in-loop
+    const captured = await capturePage(browserPage, abs).catch((err) => {
+      console.warn(`[design-agent/capture] could not scan ${abs} for card sections: ${err.message}`);
+      return null;
+    });
+    if (!captured) continue;
+    const cardBlockCount = captured.blocks.filter((b) => b.cardLike).length;
+    // Two or more, same threshold design-profile.js's pageUsesCardSections
+    // applies to the segmented sections this raw block count becomes — one
+    // incidental card (a testimonial, a pricing callout) doesn't make a page
+    // "card-heavy" the way a portfolio/case-study grid is.
+    if (cardBlockCount >= 2) found.push({ ...captured, pageType: classifyPageType(abs, { propertyType }) });
   }
-
-  return [...byType.entries()].map(([pageType, url]) => ({ url, pageType }));
+  return found;
 }
 
 // Runs in-page: walks the direct structural children of <body> (treating
@@ -202,6 +411,20 @@ function extractBlocksInPage() {
     return (el && el.className && typeof el.className === 'string') ? el.className.trim().slice(0, 300) : '';
   }
 
+  // Full, untruncated outerHTML — unlike classesOf's 300-char class-string
+  // summary, this has to stay byte-for-byte complete: it becomes the exact
+  // anchor consistency-check.js's table/typography findings are matched and
+  // patched against (see content-integrity-repair.js's 'table-style-drift'/
+  // 'typography-drift' fixTypes), the same exact-anchor discipline
+  // font-consistency-capture.js already established for its own outerHtml
+  // field. A live DOM capture, not a second static fetch, on purpose: a
+  // static re-fetch can miss classes a client-side hydration step added or
+  // removed after load, which would make the "anchor" this repair patches
+  // not the actual live markup a visitor sees.
+  function outerHtmlOf(el) {
+    return (el && typeof el.outerHTML === 'string') ? el.outerHTML : '';
+  }
+
   function unwrap(el) {
     // <header>/<nav>/<main>/<footer> are landmarks, not visual blocks — the
     // block boundaries that matter are their own direct children.
@@ -256,9 +479,11 @@ function extractBlocksInPage() {
       headingText: heading ? heading.textContent.trim().slice(0, 200) : null,
       headingStyle: styleOf(heading),
       headingClasses: classesOf(heading),
+      headingOuterHtml: outerHtmlOf(heading),
       bodyText: body ? body.textContent.trim().slice(0, 300) : null,
       bodyStyle: styleOf(body),
       bodyClasses: classesOf(body),
+      bodyOuterHtml: outerHtmlOf(body),
       ctaText: cta ? cta.textContent.trim().slice(0, 60) : null,
       ctaTag: cta ? cta.tagName.toLowerCase() : null,
       ctaClasses: classesOf(cta),
@@ -276,12 +501,220 @@ function extractBlocksInPage() {
         wrapper: classesOf(table), headerCell: classesOf(tableHeaderCell),
         row: classesOf(tableBodyRow), cell: classesOf(tableBodyCell),
       },
+      tableOuterHtml: outerHtmlOf(table),
       linkClasses: classesOf(pickLink(el)),
     });
   }
   return { title: document.title, blocks };
 }
 /* eslint-enable no-undef */
+
+// Runs in-page: MEASURES what this viewport actually renders, rather than
+// reading class strings and inferring. This is the whole point of the
+// responsive pass — `responsive.breakpoints` in the stored profile has only
+// ever been a list of class PREFIXES the model reported seeing ("sm:",
+// "md:"), which says a site is capable of responding to width, not that it
+// does so correctly on any given page. Everything here is a number or a
+// boolean read off the rendered page at a real device width.
+//
+// Deliberately much cheaper than extractBlocksInPage: no outerHTML
+// serialization except for the handful of elements that are actually
+// defective (which is the evidence a fix would need to anchor against), and
+// every scan is bounded so a large DOM cannot turn one probe into a crawl.
+// Exported (not just used internally by captureResponsive below) so a
+// caller that has already navigated/mutated a page a different way — a
+// pre-ship preview of a draft's content spliced into the live page, e.g.
+// (see server/generators/lib/responsive-gate.js) — can run this exact same
+// measurement via page.evaluate(measureResponsiveInPage, minTapTargetPx)
+// without a second, redundant navigation.
+/* eslint-disable no-undef */
+export function measureResponsiveInPage(minTapTargetPx) {
+  const vw = window.innerWidth;
+
+  function isVisible(el) {
+    if (!el || !el.getClientRects().length) return false;
+    const cs = window.getComputedStyle(el);
+    return cs.visibility !== 'hidden' && cs.display !== 'none' && Number(cs.opacity) !== 0;
+  }
+
+  function classesOf(el) {
+    return (el && typeof el.className === 'string') ? el.className.trim().slice(0, 300) : '';
+  }
+
+  function describe(el, extra = {}) {
+    const r = el.getBoundingClientRect();
+    return {
+      tag: el.tagName.toLowerCase(),
+      classes: classesOf(el),
+      text: (el.textContent || '').trim().slice(0, 80),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+      // The exact live anchor a class-swap fix would patch against, same
+      // discipline as extractBlocksInPage's outerHtml fields. Bounded: a
+      // whole overflowing <section> can be enormous, and no fix needs more
+      // than the opening element to match on.
+      outerHtml: typeof el.outerHTML === 'string' ? el.outerHTML.slice(0, 4000) : '',
+      ...extra,
+    };
+  }
+
+  // ── Horizontal overflow ────────────────────────────────────────────────
+  // The single most common real responsive defect: something wider than the
+  // screen forces the whole page to pan sideways. Reported as the OUTERMOST
+  // offending elements — descending into an overflowing container would list
+  // every one of its children too and bury the actual cause.
+  const docScrollWidth = Math.max(
+    document.documentElement.scrollWidth,
+    document.body ? document.body.scrollWidth : 0,
+  );
+  const overflowPx = Math.max(0, Math.round(docScrollWidth - vw));
+
+  const overflowingElements = [];
+  if (overflowPx > 1 && document.body) {
+    const queue = [...document.body.children];
+    let scanned = 0;
+    while (queue.length && overflowingElements.length < 5 && scanned < 800) {
+      const el = queue.shift();
+      scanned++;
+      if (!isVisible(el)) continue;
+      const r = el.getBoundingClientRect();
+      const right = r.right;
+      if (right > vw + 1 || r.width > vw + 1) {
+        overflowingElements.push(describe(el, { overflowBy: Math.round(Math.max(right - vw, r.width - vw)) }));
+        continue; // outermost only — do not descend into a known offender
+      }
+      for (const child of el.children) queue.push(child);
+    }
+  }
+
+  // ── Stacking ───────────────────────────────────────────────────────────
+  // Measured, not inferred from grid/flex declarations: group each block's
+  // direct children by their rendered top edge and count how many share a
+  // row. A block laid out as one column at this width has columns === 1,
+  // whatever CSS mechanism produced it. That makes this framework-agnostic
+  // (CSS grid, flexbox, floats, or a table all read the same).
+  function columnsOf(el) {
+    const kids = [...el.children].filter(isVisible);
+    if (kids.length < 2) return kids.length;
+    const rows = new Map();
+    for (const kid of kids.slice(0, 24)) {
+      const top = Math.round(kid.getBoundingClientRect().top / 8) * 8; // 8px tolerance
+      rows.set(top, (rows.get(top) || 0) + 1);
+    }
+    return Math.max(...rows.values());
+  }
+
+  function unwrapLandmark(el) {
+    if (['HEADER', 'NAV', 'MAIN', 'FOOTER'].includes(el.tagName) && el.children.length) return [...el.children];
+    return [el];
+  }
+
+  const blocks = [];
+  const topLevel = document.body ? [...document.body.children].flatMap(unwrapLandmark) : [];
+  let order = 0;
+  for (const el of topLevel.slice(0, 40)) {
+    const r = el.getBoundingClientRect();
+    if (r.height < 4) { order++; continue; }
+    const cs = window.getComputedStyle(el);
+    blocks.push({
+      order: order++,
+      tag: el.tagName.toLowerCase(),
+      classes: classesOf(el),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+      columns: columnsOf(el),
+      paddingTop: Math.round(parseFloat(cs.paddingTop) || 0),
+      paddingLeft: Math.round(parseFloat(cs.paddingLeft) || 0),
+      outerHtml: typeof el.outerHTML === 'string' ? el.outerHTML.slice(0, 1500) : '',
+    });
+  }
+
+  // ── Navigation ─────────────────────────────────────────────────────────
+  // Does the nav collapse behind a control at this width? Both halves are
+  // measured: how many nav links are actually visible, and whether a visible
+  // disclosure control exists. A nav that keeps 8 visible links at 390px has
+  // not collapsed, whatever its classes claim.
+  const navRoot = document.querySelector('header nav') || document.querySelector('nav') || document.querySelector('header');
+  let navigation = null;
+  if (navRoot) {
+    const links = [...navRoot.querySelectorAll('a')];
+    const controls = [...navRoot.querySelectorAll('button, [role="button"], [aria-expanded], [aria-controls]')];
+    navigation = {
+      visibleLinks: links.filter(isVisible).length,
+      totalLinks: links.length,
+      hasVisibleToggle: controls.some((c) => isVisible(c)
+        && (c.hasAttribute('aria-expanded') || c.hasAttribute('aria-controls')
+          || /\b(toggle|hamburger|menu|nav)\b/i.test(classesOf(c)))),
+    };
+  }
+
+  // ── Type scale & spacing ───────────────────────────────────────────────
+  // The dominant heading and a real body paragraph at this width. Body copy
+  // is filtered the same way pickBody does it (length, not class names) so a
+  // kicker never becomes the measured body size.
+  function measureText(el) {
+    if (!el) return null;
+    const cs = window.getComputedStyle(el);
+    return {
+      fontSize: Math.round(parseFloat(cs.fontSize) || 0),
+      lineHeight: Math.round(parseFloat(cs.lineHeight) || 0),
+    };
+  }
+  const headingEl = [...document.querySelectorAll('h1, h2')].filter(isVisible)
+    .sort((a, b) => (parseFloat(window.getComputedStyle(b).fontSize) || 0) - (parseFloat(window.getComputedStyle(a).fontSize) || 0))[0] || null;
+  const bodyEl = [...document.querySelectorAll('p')].find((p) => isVisible(p) && (p.textContent || '').trim().length >= 40) || null;
+
+  // ── Tap targets (small viewports) ──────────────────────────────────────
+  const smallTapTargets = [];
+  const interactive = [...document.querySelectorAll('a, button, input, select, textarea, [role="button"]')].slice(0, 400);
+  for (const el of interactive) {
+    if (smallTapTargets.length >= 5) break;
+    if (!isVisible(el)) continue;
+    const r = el.getBoundingClientRect();
+    // Zero-size and icon-in-link wrappers are excluded by requiring a real
+    // rendered box; a control with no box is not a tap target a user misses.
+    if (r.width < 1 || r.height < 1) continue;
+    if (r.width < minTapTargetPx || r.height < minTapTargetPx) {
+      smallTapTargets.push(describe(el, { minSide: Math.round(Math.min(r.width, r.height)) }));
+    }
+  }
+
+  // ── Clipped content ────────────────────────────────────────────────────
+  // Text cut off rather than wrapped: the element's own content is wider than
+  // its box AND it is set to hide the excess.
+  const clippedElements = [];
+  for (const el of topLevel.slice(0, 40)) {
+    if (clippedElements.length >= 5) break;
+    if (!isVisible(el)) continue;
+    const cs = window.getComputedStyle(el);
+    if (cs.overflowX !== 'hidden' && cs.overflow !== 'hidden') continue;
+    if (el.scrollWidth > el.clientWidth + 1) {
+      clippedElements.push(describe(el, { clippedBy: Math.round(el.scrollWidth - el.clientWidth) }));
+    }
+  }
+
+  return {
+    viewportWidth: vw,
+    documentScrollWidth: Math.round(docScrollWidth),
+    overflowPx,
+    overflowingElements,
+    blocks,
+    navigation,
+    typography: { heading: measureText(headingEl), body: measureText(bodyEl) },
+    smallTapTargets,
+    clippedElements,
+  };
+}
+/* eslint-enable no-undef */
+
+// One responsive probe of one URL at whatever viewport `browserPage`'s context
+// was created with. Separate from capturePage on purpose: this never
+// serializes the full block/markup set, so probing two extra viewports costs
+// roughly a page load each rather than a second full capture.
+export async function captureResponsive(browserPage, url, { minTapTargetPx = MIN_TAP_TARGET_PX } = {}) {
+  await browserPage.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+  return browserPage.evaluate(measureResponsiveInPage, minTapTargetPx);
+}
 
 // screenshot: false by default — the Design Agent's own profile-derivation
 // caller never needs it (structured DOM/CSS facts only), and a screenshot on
@@ -307,12 +740,27 @@ export async function captureSite(homepageUrl, {
   maxPages = DEFAULT_MAX_PAGES,
   launchBrowserFn = launchBrowser,
   screenshots = false,
+  extraCardPages = DEFAULT_EXTRA_CARD_PAGES,
+  responsiveViewports = RESPONSIVE_VIEWPORTS,
+  responsiveMaxPages = DEFAULT_RESPONSIVE_MAX_PAGES,
+  // Passed straight through to discoverPages — see its own comment. A caller
+  // that knows this site's real page inventory (this platform's onboarding
+  // already records one, url_file_map.pages) can hand the absolute URLs in
+  // here so a page never linked from the homepage — confirmed real on
+  // chayceproperties.com's /faq/ and /news/ — still gets a chance to be
+  // captured instead of staying permanently invisible to this analysis.
+  knownUrls = [],
+  // sites.property_type — 'product' sites get product page types (pricing/
+  // features/how-it-works/demo/case-study); omitted/'website' is unchanged.
+  propertyType,
 } = {}) {
   const browser = await launchBrowserFn();
   try {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const context = await browser.newContext({
+      viewport: { width: DESKTOP_VIEWPORT.width, height: DESKTOP_VIEWPORT.height },
+    });
     const page = await context.newPage();
-    const targets = await discoverPages(page, homepageUrl, { maxPages });
+    const targets = await discoverPages(page, homepageUrl, { maxPages, knownUrls, propertyType });
 
     const pages = [];
     for (const { url, pageType } of targets) {
@@ -323,7 +771,63 @@ export async function captureSite(homepageUrl, {
       });
       if (captured) pages.push({ ...captured, pageType });
     }
-    return { homepageUrl, pages };
+
+    // See discoverCardHeavyPages: classifyPageType's URL-only bucketing can
+    // lose a genuine card-grid page (e.g. /projects/) to whatever else won
+    // its 'other' slot above. extraCardPages: 0 opts out entirely (tests,
+    // and any caller that wants the old exact page set).
+    if (extraCardPages > 0) {
+      const cardPages = await discoverCardHeavyPages(page, homepageUrl, pages.map((p) => p.url), { maxFound: extraCardPages, propertyType });
+      for (const captured of cardPages) pages.push(captured);
+    }
+
+    // Responsive pass. One fresh context per extra viewport (a context's
+    // viewport is fixed at creation, and re-using the desktop page with
+    // setViewportSize would leave desktop-width layout state and media-query
+    // listeners already resolved — a real source of false "it stacks fine"
+    // readings). The desktop measurements come from the SAME probe so every
+    // viewport is compared like-for-like rather than against block data
+    // produced by a different code path.
+    const responsive = { viewports: [], pages: [] };
+    const probeTargets = pages.slice(0, Math.max(0, responsiveMaxPages));
+    if (probeTargets.length && responsiveViewports.length) {
+      const viewports = [DESKTOP_VIEWPORT, ...responsiveViewports];
+      const byUrl = new Map(probeTargets.map((p) => [p.url, { url: p.url, pageType: p.pageType, byViewport: {} }]));
+
+      for (const viewport of viewports) {
+        // eslint-disable-next-line no-await-in-loop
+        const vpContext = viewport.name === DESKTOP_VIEWPORT.name
+          ? context
+          : await browser.newContext({
+            viewport: { width: viewport.width, height: viewport.height },
+            // isMobile/hasTouch make a site's own mobile detection (and any
+            // touch-only nav) behave the way it does for a real visitor.
+            isMobile: viewport.width < 768,
+            hasTouch: viewport.width < 768,
+          });
+        // eslint-disable-next-line no-await-in-loop
+        const vpPage = viewport.name === DESKTOP_VIEWPORT.name ? page : await vpContext.newPage();
+        try {
+          for (const target of probeTargets) {
+            // eslint-disable-next-line no-await-in-loop
+            const measured = await captureResponsive(vpPage, target.url).catch((err) => {
+              console.warn(`[design-agent/capture] could not measure ${target.url} at ${viewport.name}: ${err.message}`);
+              return null;
+            });
+            if (measured) byUrl.get(target.url).byViewport[viewport.name] = measured;
+          }
+          responsive.viewports.push({ ...viewport });
+        } finally {
+          if (viewport.name !== DESKTOP_VIEWPORT.name) await vpContext.close();
+        }
+      }
+      // A page every viewport failed to measure carries no responsive signal
+      // at all — keeping it would make "no defects found" indistinguishable
+      // from "never looked".
+      responsive.pages = [...byUrl.values()].filter((p) => Object.keys(p.byViewport).length > 0);
+    }
+
+    return { homepageUrl, pages, responsive };
   } finally {
     await browser.close();
   }

@@ -134,7 +134,14 @@ function fakeQuery(text, params = []) {
   throw new Error(`agent-memory.test.js fake query: unhandled SQL shape: ${sql}`);
 }
 
-mock.module('/Users/yukta/Travel/analytics/server/db.js', {
+// Resolved RELATIVE to this file, never as an absolute path. A hardcoded
+// '/Users/<someone>/...' specifier here matched only one developer's own
+// checkout: everywhere else — a git worktree, CI, a second clone, the Docker
+// build — the specifier simply never matched the module being imported, so
+// the mock silently did not apply, `query` reached the real db.js, and all 31
+// tests below failed on a machine where nothing was actually wrong. Silently,
+// because a mock that matches nothing is not an error.
+mock.module(new URL('./db.js', import.meta.url).href, {
   namedExports: { query: (text, params) => fakeQuery(text, params) },
 });
 const { findRelevantMemory, recordFixOutcome, findPortableRepairs, deprecateMemory, deprecateObsoleteMemories, sanitizeLessonText } = await import('./agent-memory.js');

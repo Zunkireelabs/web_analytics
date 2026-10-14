@@ -1,0 +1,226 @@
+import { getSiteById } from '../store/read.js';
+import { listPageInventory } from '../store/page-inventory.js';
+import { makeFinding, impactFromPriority, effortFromDifficulty } from './lib/findings.js';
+import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS, isLikelyFunctionalQueryParam } from './lib/duplicate-evidence.js';
+import { getOrClassifyPageContentType } from './lib/page-content-classifier.js';
+import { createVariantProber, isSelfCanonical, normalizeUrlForCompare } from './lib/live-probe.js';
+import { allShareCanonical } from './lib/canonical-consolidation.js';
+import { makeVerification, VERDICT } from './lib/verdict.js';
+
+export const meta = {
+  id: 'query-param-duplicates',
+  name: 'Query-Param Faceted URL Duplicate Detector',
+  description: 'Groups a site\'s own already-known real URLs by their base path (query string stripped) and flags when two or more DIFFERENT query-string variants of the same page are all separately known/crawlable. Confidence-gated exactly like url-variant-duplicates.js: 90 days of real GSC clicks/impressions decide a clean winner outright, or — with 2+ traffic-bearing variants — a query-overlap check across every pair can still confirm shared search intent before auto-consolidating.',
+  category: 'technical',
+  requiresCapabilities: ['public-web'],
+  version: 1,
+};
+
+// Groups page_inventory strings, then live-probes every variant (bounded per
+// run, same as url-variant-duplicates.js): inventory also holds 404s and
+// variants that 301 back to the base URL or already canonicalize to it, none
+// of which is a live duplicate. A canonical action never targets a
+// redirecting URL.
+function baseKey(pageUrl) {
+  try {
+    const u = new URL(pageUrl);
+    const path = u.pathname.length > 1 ? u.pathname.replace(/\/+$/, '') : u.pathname;
+    return `${u.hostname.toLowerCase()}${path}`;
+  } catch {
+    return String(pageUrl).split('?')[0];
+  }
+}
+
+function hasQuery(pageUrl) {
+  try { return new URL(pageUrl).search.length > 0; } catch { return pageUrl.includes('?'); }
+}
+
+// A single query-string variant alongside its base page is normal
+// (a legitimate filter/sort link) — this only fires once at least two
+// DIFFERENT query-string combinations of the same page are both known,
+// which is the actual duplication risk (multiple separately-indexable
+// facet combinations, not just one optional parameter existing).
+const MIN_QUERY_VARIANTS = 2;
+
+export async function run({ siteId, dryRun = false }) {
+  const site = await getSiteById(siteId);
+  if (!site) {
+    return {
+      meta, status: 'insufficient-data', facts: null, narrative: null,
+      message: 'Site not found.', generatedAt: new Date().toISOString(),
+    };
+  }
+
+  const inventory = await listPageInventory(siteId, { limit: 2000 });
+  const live = inventory.filter((r) => !r.orphaned);
+  if (!live.length) {
+    return {
+      meta, status: 'insufficient-data', facts: null, narrative: null,
+      message: 'No page inventory recorded yet for this site.', generatedAt: new Date().toISOString(),
+    };
+  }
+
+  const groups = new Map(); // baseKey -> Set<rawPage>
+  for (const row of live) {
+    const key = baseKey(row.page);
+    if (!groups.has(key)) groups.set(key, new Set());
+    groups.get(key).add(row.page);
+  }
+
+  const rawCandidateGroups = [...groups.entries()].filter(([, pagesSet]) => [...pagesSet].filter(hasQuery).length >= MIN_QUERY_VARIANTS);
+  const probeVariants = createVariantProber();
+  const probeByPage = new Map();
+  const candidateGroups = [];
+  let droppedGroups = 0;
+  let unverifiableGroups = 0;
+  for (const [key, pagesSet] of [...rawCandidateGroups].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const probes = await probeVariants([...pagesSet]);
+    for (const [p, r] of probes) probeByPage.set(p, r);
+    if ([...probes.values()].some((r) => r.verdict === 'unverifiable')) { unverifiableGroups++; continue; }
+    // Redirecting/dead variants are not live duplicates (a ?query that 301s to
+    // the base is already consolidated).
+    const livePages = [...pagesSet].filter((p) => probes.get(p).verdict === 'live');
+    if (livePages.filter(hasQuery).length < MIN_QUERY_VARIANTS) { droppedGroups++; continue; }
+    candidateGroups.push([key, new Set(livePages)]);
+  }
+  if (!candidateGroups.length) {
+    return {
+      meta, status: 'ok',
+      facts: { checkedCount: live.length, groupsWithQueryVariants: 0, droppedGroups, unverifiableGroups, findings: [] },
+      narrative: null, generatedAt: new Date().toISOString(),
+    };
+  }
+
+  const allVariants = candidateGroups.flatMap(([, pagesSet]) => [...pagesSet]);
+  const { start: evidenceStart, end: evidenceEnd } = evidenceWindow(site);
+  const trafficByPage = new Map(
+    (await fetchTraffic(siteId, allVariants, evidenceStart, evidenceEnd)).map((t) => [t.page, t])
+  );
+
+  const findings = [];
+  for (const [key, pagesSet] of [...candidateGroups].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const pages = [...pagesSet].sort();
+    const queryVariants = pages.filter(hasQuery);
+    // Already consolidated: every variant declares the same canonical, so
+    // there is nothing to merge or to ask a person about.
+    if (allShareCanonical(pages, probeByPage, normalizeUrlForCompare)) continue;
+    const traffic = pages.map((p) => trafficByPage.get(p) || { page: p, clicks: 0, impressions: 0 });
+
+    // A query-string-free URL among the candidates is always the correct
+    // canonical target, full stop — never decided by traffic. rel=canonical
+    // exists to point a messy/parameterized address at its clean master
+    // copy; picking a query-variant winner just because it happened to earn
+    // more historical clicks (an old shared link, a tracking hash from a
+    // prior site on this domain, ...) points canonicalization backwards,
+    // which is exactly the bug this comment is here to prevent from being
+    // reintroduced (real incident: chayceproperties.com's own homepage "/"
+    // was canonicalized onto "/?h=8020347041280" because that legacy
+    // tracking-hash variant had the only recorded impressions).
+    const bare = pages.find((p) => !hasQuery(p));
+    // Split-traffic escalation signals for this detector: functional-param
+    // detection is the natural fit here (this agent's whole job is grouping
+    // query-string variants), and page purpose is cheap/cached via the
+    // same classifier templated-duplicates.js already uses — no new fetch,
+    // no paid API call.
+    const functionalParamPages = new Set(pages.filter((p) => isLikelyFunctionalQueryParam(p)));
+    const pagePurposeByPage = new Map();
+    // dryRun runs must be side-effect free (classifier cache upsert +
+    // LLM call), so purposes are not classified there.
+    for (const p of dryRun ? [] : pages) {
+      const purpose = await getOrClassifyPageContentType(siteId, p).catch(() => null);
+      if (purpose?.contentType) pagePurposeByPage.set(p, purpose.contentType);
+    }
+    const decision = bare
+      ? { confidence: 'high', winner: trafficByPage.get(bare) || { page: bare, clicks: 0, impressions: 0 }, withTraffic: traffic.filter((t) => t.clicks > 0 || t.impressions > 0), queryOverlap: null, preferredBare: true, decision: 'consolidate', decisionReason: 'bare-url-always-wins' }
+      : await decideWinner(traffic, { siteId, start: evidenceStart, end: evidenceEnd, signals: { functionalParamPages, pagePurposeByPage } });
+
+    const verification = makeVerification(VERDICT.CONFIRMED, 'http-probe', `${pages.length} variants each returned 200 on their own address with no redirect`);
+    if (decision.winner) {
+      // Already consolidated: a loser whose canonical already equals the
+      // winner/base needs nothing; the winner must itself be self-canonical.
+      const losers = pages.filter((p) => p !== decision.winner.page
+        && normalizeUrlForCompare(probeByPage.get(p)?.canonical || '') !== normalizeUrlForCompare(decision.winner.page));
+      const winnerProbe = probeByPage.get(decision.winner.page);
+      if (!losers.length || (winnerProbe && !isSelfCanonical(winnerProbe))) continue;
+      // ALWAYS 'canonical', NEVER a redirect or a query-string-stripping
+      // generator — and never change this to param-strip/redirect without
+      // re-reading this comment. A query parameter grouped into the same
+      // baseKey here can be pure tracking noise OR genuine functional state
+      // this platform has no way to tell apart from URL shape alone (real
+      // case: Chayce's /get-started/index.html?package=... — the parameter
+      // pre-selects a package in the wizard and is read into the CRM
+      // submission payload; stripping or redirecting it away would silently
+      // break package selection for every real visitor who lands via a
+      // package link). A <link rel="canonical"> only changes what search
+      // engines index as the authoritative URL — it never touches real
+      // navigation, so it's the one remediation that's safe regardless of
+      // whether the parameter turns out to be functional or not. Do not
+      // "upgrade" this to a redirect/rewrite generator even for a
+      // HIGH-confidence winner.
+      findings.push(makeFinding({
+        id: `query-param-duplicates:key:${key}`,
+        evidence: { basePath: key, variants: pages, traffic, winner: decision.winner.page, confidence: 'high', queryOverlap: decision.queryOverlap, preferredBare: decision.preferredBare || false },
+        whyItMatters: decision.preferredBare
+          ? `${pages.length} URL variants of the same page (${key}) — ${decision.winner.page} is the clean, parameter-free address and is always the correct canonical target regardless of which variant currently earns more clicks. Confident enough to consolidate automatically.`
+          : decision.queryOverlap?.overlapping
+          ? `${pages.length} URL variants of the same page (${key}) — ${decision.winner.page} earns more real clicks (${decision.winner.clicks}) than every other variant, and their real search queries overlap substantially, confirming shared search intent. Confident enough to consolidate automatically.`
+          : `${pages.length} URL variants of the same page (${key}) — ${decision.winner.page} has all ${decision.winner.clicks} real click(s)/${decision.winner.impressions} impression(s) across the last ${EVIDENCE_LOOKBACK_DAYS} days, and the other ${losers.length} variant(s) have none. Confident enough to consolidate automatically.`,
+        priority: 'medium',
+        verification,
+        recommendedAction: {
+          label: `Canonicalize query-param variant → ${decision.winner.page}`,
+          generatorId: 'canonical',
+          params: { page: losers[0], canonicalTarget: decision.winner.page },
+          effort: effortFromDifficulty(1),
+        },
+        expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: decision.winner.clicks },
+      }));
+      continue;
+    }
+
+    const withTraffic = decision.withTraffic;
+    findings.push(makeFinding({
+      id: `query-param-duplicates:key:${key}`,
+      evidence: { basePath: key, variants: pages, traffic, confidence: decision.confidence, queryOverlap: decision.queryOverlap },
+      whyItMatters: `${queryVariants.length} different query-string variants of the same page (${key}) are all separately known/crawlable — unless each one carries a canonical tag pointing back at the winning URL, Google can index them as separate, competing pages instead of one.${withTraffic.length > 1 ? ` Real traffic evidence is split across ${withTraffic.length} of the variants${decision.queryOverlap && !decision.queryOverlap.overlapping ? ', and their real search queries don\'t overlap substantially, so they may genuinely serve different intents' : ''}, so which one should win isn't unambiguous.` : ' No real click/impression evidence across the last 90 days points to a clear winner.'}`,
+      priority: 'medium',
+      verification,
+      recommendedAction: null,
+      // 'leave-both-independent-intent' is an active, evidenced autonomous
+      // decision (a non-tracking/functional query param, or genuinely
+      // different declared page purposes among the traffic-bearing
+      // variants) — not a punt to a human. Only the true "still
+      // inconclusive" case keeps the human-needed reportOnly copy.
+      reportOnly: decision.decision === 'leave-both-independent-intent'
+        ? {
+          kind: 'query-param-duplicate',
+          label: `${queryVariants.length} query-param variants left independent`,
+          page: pages.find((p) => !hasQuery(p)) || pages[0],
+          decided: true,
+          whyBlocked: decision.decisionReason === 'functional-query-parameter'
+            ? 'At least one variant\'s query parameter isn\'t known tracking noise — treated as functional (may drive real visitor-facing behavior, e.g. pagination or a selection state), so these are left independent rather than consolidated/redirected.'
+            : 'The traffic-bearing variants were classified with genuinely different page purposes — treated as independent intent, so left as separate pages rather than consolidated.',
+        }
+        : {
+          kind: 'query-param-duplicate',
+          label: `${queryVariants.length} query-param variants of the same page`,
+          page: pages.find((p) => !hasQuery(p)) || pages[0],
+          whyBlocked: withTraffic.length > 1
+            ? 'More than one variant has real search traffic and their query overlap doesn\'t confirm shared intent — picking a winner here would risk redirecting a URL that\'s still earning its own real clicks, so it needs a person to confirm which one is intended.'
+            : 'No real traffic signal exists for any variant yet, so there\'s no evidence to pick a winner from — needs a person to confirm whether these already canonicalize correctly.',
+        },
+      expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: 0 },
+    }));
+  }
+
+  const facts = {
+    checkedCount: live.length, groupsWithQueryVariants: findings.length, droppedGroups, unverifiableGroups,
+    autoConsolidated: findings.filter((f) => f.recommendedAction).length,
+    findings,
+  };
+  return {
+    meta, status: 'ok', facts,
+    narrative: findings.length ? `${findings.length} page(s) have multiple query-param variants that may be indexing as duplicates.` : null,
+    generatedAt: new Date().toISOString(),
+  };
+}

@@ -51,7 +51,8 @@ export async function getAnomalyAlerts(siteId, limit = 20) {
 
 export async function getSiteProfile(siteId) {
   const { rows } = await query(
-    `SELECT industry, main_topics_json AS main_topics, site_type, profiled_at
+    `SELECT industry, main_topics_json AS main_topics, site_type, profiled_at,
+            industry_source, industry_confidence
        FROM site_profiles
       WHERE site_id = $1`,
     [siteId]
@@ -64,16 +65,37 @@ export async function getSiteProfile(siteId) {
 // lives in data-analyst-agent/app/collectors/keyword_clustering.py, reached
 // only via the 'save_site_profile' MCP tool, never a direct DB write from
 // Python — see app/mcp_client/client.py's own "ONLY interface" rule).
-export async function saveSiteProfile(siteId, { industry, mainTopics, siteType }) {
+// `industrySource` / `industryConfidence` (183) are optional and every
+// existing caller — including the Python collector's save_site_profile MCP
+// tool — passes neither, which keeps their behaviour byte-identical.
+//
+// The CASE is the one real change: a HUMAN-asserted industry is never
+// overwritten by an inference. Without it, writing a staff-set industry
+// here would work exactly once, until the next clustering run for a tenant
+// that does have Search Console upserted over it. A human write (source
+// 'human') always wins, including over an earlier human write.
+export async function saveSiteProfile(siteId, { industry, mainTopics, siteType, industrySource = null, industryConfidence = null }) {
   await query(
-    `INSERT INTO site_profiles (site_id, industry, main_topics_json, site_type, profiled_at)
-     VALUES ($1, $2, $3, $4, now())
+    `INSERT INTO site_profiles (site_id, industry, main_topics_json, site_type, profiled_at,
+                                industry_source, industry_confidence)
+     VALUES ($1, $2, $3, $4, now(), $5, $6)
      ON CONFLICT (site_id) DO UPDATE SET
-       industry = EXCLUDED.industry,
+       industry = CASE
+         WHEN site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human'
+           THEN site_profiles.industry
+         ELSE EXCLUDED.industry END,
+       industry_source = CASE
+         WHEN site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human'
+           THEN site_profiles.industry_source
+         ELSE EXCLUDED.industry_source END,
+       industry_confidence = CASE
+         WHEN site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human'
+           THEN site_profiles.industry_confidence
+         ELSE EXCLUDED.industry_confidence END,
        main_topics_json = EXCLUDED.main_topics_json,
        site_type = EXCLUDED.site_type,
        profiled_at = EXCLUDED.profiled_at`,
-    [siteId, industry, JSON.stringify(mainTopics || []), siteType || null]
+    [siteId, industry, JSON.stringify(mainTopics || []), siteType || null, industrySource, industryConfidence]
   );
 }
 
@@ -100,10 +122,13 @@ export async function saveKeywordClusters(siteId, clusters) {
 // weekly discovery pass finds again bumps observation_count and last_seen_at
 // on the SAME row rather than creating a duplicate, so
 // qualifyAndShipContentGaps (analyst-seo-mapping.js) can require 2+
-// observations before a gap is even eligible to ship. A gap a human already
-// accepted/dismissed falls outside the partial index, so a resighting there
-// inserts a fresh row exactly as before — re-approval/re-dismissal behavior
-// is unchanged.
+// observations before a gap is even eligible to ship. A topic a human already
+// accepted/dismissed falls outside that partial index, so the INSERT is
+// additionally guarded by a NOT EXISTS check against any accepted/dismissed
+// row for the same (site_id, topic) — otherwise a resighting there would
+// insert a brand-new pending_review row for a topic already rejected once,
+// which is exactly the "reworded/rejected idea resurfacing" the multi-tenant
+// growth spec forbids.
 // observation_count counts DISTINCT WEEKS a topic was genuinely re-observed,
 // not raw calls to this function (migration 143). The increment is gated on
 // last_observed_week strictly advancing, which matters for two reasons:
@@ -124,14 +149,26 @@ export async function saveKeywordClusters(siteId, clusters) {
 // discoveryWeek defaults to the current ISO-week Monday computed in SQL rather
 // than in the caller, so two processes on different hosts (or one with a skewed
 // clock) can't disagree about which week they're writing.
+// topic_cluster/cluster_role (migration 156): optional — set only when the
+// discovery pass (find_gaps, data-analyst-agent) judged several of the gaps
+// it's proposing IN THE SAME CALL to be genuinely related, and grouped them
+// under one cluster name with a single 'pillar' + the rest 'supporting'.
+// Never computed here — this function only persists what the caller already
+// decided, same as every other field on this row.
 export async function saveKeywordGaps(siteId, gaps, source = 'internal_analysis', { discoveryWeek = null } = {}) {
   for (const g of gaps) {
     await query(
       `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source,
-                                 first_discovery_week, last_observed_week)
-       VALUES ($1, $2, $3, $4, 'pending_review', $5,
-               COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date),
-               COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date))
+                                 first_discovery_week, last_observed_week, topic_cluster, cluster_role, location_code,
+                                 search_volume)
+       SELECT $1, $2, $3, $4, 'pending_review', $5,
+              COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date),
+              COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date),
+              $7, $8, $9, $10
+        WHERE NOT EXISTS (
+          SELECT 1 FROM keyword_gaps
+           WHERE site_id = $1 AND topic = $2 AND status IN ('accepted', 'dismissed')
+        )
        ON CONFLICT (site_id, topic) WHERE status = 'pending_review' DO UPDATE SET
          last_seen_at = now(),
          observation_count = keyword_gaps.observation_count
@@ -139,15 +176,39 @@ export async function saveKeywordGaps(siteId, gaps, source = 'internal_analysis'
                    THEN 1 ELSE 0 END),
          last_observed_week = GREATEST(EXCLUDED.last_observed_week,
                                        COALESCE(keyword_gaps.last_observed_week, EXCLUDED.last_observed_week)),
-         reason = COALESCE(EXCLUDED.reason, keyword_gaps.reason)`,
-      [siteId, g.topic, g.reason || null, g.priority || 'medium', source, discoveryWeek]
+         reason = COALESCE(EXCLUDED.reason, keyword_gaps.reason),
+         topic_cluster = COALESCE(EXCLUDED.topic_cluster, keyword_gaps.topic_cluster),
+         cluster_role = COALESCE(EXCLUDED.cluster_role, keyword_gaps.cluster_role),
+         location_code = COALESCE(EXCLUDED.location_code, keyword_gaps.location_code),
+         -- A fresh DataForSEO measurement replaces the old one outright
+         -- (demand can genuinely rise or fall month to month); only missing
+         -- entirely does it fall back to whatever was already stored.
+         search_volume = COALESCE(EXCLUDED.search_volume, keyword_gaps.search_volume)`,
+      [siteId, g.topic, g.reason || null, g.priority || 'medium', source, discoveryWeek, g.topic_cluster || null, g.cluster_role || null, g.location_code || null, g.search_volume ?? null]
     );
   }
 }
 
+// Siblings of one gap within the SAME topic cluster — used only to give a
+// pillar/supporting draft real context about the rest of its cluster (see
+// analyst-seo-mapping.js's clusterContextFor), never to build the cluster
+// itself (that's decided once, in find_gaps, and normalized in
+// _normalize_clusters before it's ever saved).
+export async function getKeywordGapsInCluster(siteId, topicCluster, excludeGapId) {
+  if (!topicCluster) return [];
+  const { rows } = await query(
+    `SELECT id, topic, cluster_role, status
+       FROM keyword_gaps
+      WHERE site_id = $1 AND topic_cluster = $2 AND id != $3
+      ORDER BY (cluster_role = 'pillar') DESC, created_at ASC`,
+    [siteId, topicCluster, excludeGapId ?? -1]
+  );
+  return rows;
+}
+
 export async function getKeywordClusters(siteId, clusterType) {
   const { rows } = await query(
-    `SELECT cluster_name, cluster_type, keywords_json, avg_impressions, avg_position, gap_score
+    `SELECT cluster_name, cluster_type, keywords_json, avg_impressions, avg_position, gap_score, created_at
        FROM keyword_clusters
       WHERE site_id = $1 AND ($2::text IS NULL OR cluster_type = $2)
       ORDER BY created_at DESC`,
@@ -165,6 +226,8 @@ const GAP_STATUS_FROM_DB = { pending_review: 'pending_review', accepted: 'approv
 export async function getKeywordGaps(siteId, status) {
   const { rows } = await query(
     `SELECT id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match,
+            topic_cluster, cluster_role, search_volume, location_code,
+            coverage_status, coverage_reason, coverage_checked_at, coverage_evidence, language_code,
             first_seen_at, last_seen_at, observation_count, evidence_snapshots, created_at,
             -- ::text deliberately. node-postgres parses a DATE into a JS Date at
             -- LOCAL midnight, so in any positive-offset timezone (this app runs
@@ -212,6 +275,59 @@ export async function updateKeywordGapStatus(siteId, gapId, status) {
   return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status] };
 }
 
+// Coverage verdict for one gap (keyword-coverage.js). Unlike setGapClassification
+// this OVERWRITES: a verdict is re-judged when its evidence changes, and a page
+// that stopped covering a topic must be able to clear existing_page_match.
+// existing_page_match keeps its old meaning — set only when an existing page
+// genuinely covers the gap (duplicate/covered) — so gapDraftEligibility's
+// established behaviour is unchanged for those rows.
+export async function setGapCoverage(siteId, gapId, { status, reason, evidence, languageCode, existingPageMatch }) {
+  const { rows } = await query(
+    `UPDATE keyword_gaps SET
+            coverage_status = $3,
+            coverage_reason = $4,
+            coverage_checked_at = now(),
+            coverage_evidence = $5::jsonb,
+            language_code = COALESCE($6, language_code),
+            existing_page_match = $7
+      WHERE site_id = $1 AND id = $2
+      RETURNING id, topic, status, coverage_status, coverage_reason, coverage_checked_at, coverage_evidence, language_code, existing_page_match`,
+    [siteId, gapId, status, reason ?? null, JSON.stringify(evidence ?? {}), languageCode ?? null, existingPageMatch ?? null]
+  );
+  return rows[0] || null;
+}
+
+// Pages that ALREADY rank for queries containing the gap's words. This is the
+// strongest "is it covered" evidence there is — and it finds a page whose slug
+// shares no words with the keyword (synonyms, translations), which the old
+// URL-word pre-filter could never do. Tokens are matched as lowercase substrings
+// (GSC stores queries as typed, with diacritics), all of them required, so a
+// two-word topic does not match every page that mentions one of the words.
+export async function getPagesRankingForTokens(siteId, tokens, days = 90, limit = 200) {
+  const words = [...new Set((tokens || []).map((t) => String(t).toLowerCase()).filter((t) => t.length > 2))]
+    .sort((a, b) => b.length - a.length).slice(0, 3);
+  if (!words.length) return [];
+  const { rows } = await query(
+    `SELECT page, query,
+            SUM(clicks)      AS clicks,
+            SUM(impressions) AS impressions,
+            CASE WHEN SUM(impressions) = 0 THEN NULL
+                 ELSE ROUND(SUM(position * impressions) / SUM(impressions), 2) END AS position
+       FROM gsc_query_page
+      WHERE site_id = $1
+        AND date >= (CURRENT_DATE - ($2::int))
+        AND LOWER(query) LIKE ALL($3::text[])
+      GROUP BY page, query
+      ORDER BY SUM(impressions) DESC
+      LIMIT $4`,
+    [siteId, days, words.map((w) => `%${w}%`), limit]
+  );
+  return rows.map((r) => ({
+    page: r.page, query: r.query, clicks: Number(r.clicks) || 0, impressions: Number(r.impressions) || 0,
+    position: r.position == null ? null : Number(r.position),
+  }));
+}
+
 // Written once by classifyGapRelevance/findExistingPageMatch (analyst-seo-
 // mapping.js) at approval time. Every field is independently optional and
 // COALESCEd against its own current value — the two checks run in parallel
@@ -239,30 +355,74 @@ export async function setGapClassification(siteId, gapId, { searchIntent, produc
 // Product Understanding Layer (migration 111). 'verified' rows are the only
 // ones classifyGapRelevance ever reads — a 'proposed' row an agent adds is
 // invisible to routing decisions until a human approves it.
-export async function getProductCapabilities(siteId, status) {
+//
+// `kind` (migration 176) defaults to 'capability', so every pre-existing
+// caller — classifyGapRelevance, the visibility snapshots, the Analyst page —
+// still sees only capability rows. The richer product knowledge (flow /
+// pricing / audience / proof) is read through getProductKnowledge instead.
+export async function getProductCapabilities(siteId, status, { kind = 'capability' } = {}) {
   const { rows } = await query(
-    `SELECT id, site_id, name, category, description, industries_json AS industries, status, source, created_at, updated_at
+    `SELECT id, site_id, name, category, description, industries_json AS industries, kind, details_json AS details,
+            status, source, created_at, updated_at
        FROM product_capabilities
-      WHERE site_id = $1 AND ($2::text IS NULL OR status = $2)
+      WHERE site_id = $1 AND ($2::text IS NULL OR status = $2) AND ($3::text IS NULL OR kind = $3)
       ORDER BY created_at DESC`,
-    [siteId, status || null]
+    [siteId, status || null, kind || null]
   );
   return rows;
 }
 
+// Every kind of product knowledge for a site, for the generators that WRITE
+// about the product (landing/feature/how-it-works copy). Verified rows only
+// by default — a 'proposed' row is invisible until a human approves it.
+export async function getProductKnowledge(siteId, status = 'verified') {
+  return getProductCapabilities(siteId, status, { kind: null });
+}
+
 // Added through the Analyst page's own form, so 'human' + 'verified' is the
-// only path this function writes — an agent proposing a capability is a
-// separate, not-yet-built entry point that would insert source='agent_proposed',
-// status='proposed' instead. No such writer exists yet, so every row today
-// is human-asserted ground truth, per the "do not invent capabilities" rule.
-export async function createProductCapability(siteId, { name, category, description, industries }) {
+// only path this function writes. The agent-proposed path is
+// proposeProductCapability below — deliberately a separate function rather
+// than a status parameter on this one, so no caller can write a 'verified'
+// row by passing an argument.
+export async function createProductCapability(siteId, { name, category, description, industries, kind = 'capability', details }) {
   const { rows } = await query(
-    `INSERT INTO product_capabilities (site_id, name, category, description, industries_json, status, source)
-     VALUES ($1, $2, $3, $4, $5, 'verified', 'human')
-     RETURNING id, site_id, name, category, description, industries_json AS industries, status, source, created_at, updated_at`,
-    [siteId, name, category || null, description || null, JSON.stringify(industries || [])]
+    `INSERT INTO product_capabilities (site_id, name, category, description, industries_json, kind, details_json, status, source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'verified', 'human')
+     RETURNING id, site_id, name, category, description, industries_json AS industries, kind, details_json AS details,
+               status, source, created_at, updated_at`,
+    [siteId, name, category || null, description || null, JSON.stringify(industries || []), kind,
+      JSON.stringify(details && typeof details === 'object' ? details : {})]
   );
   return rows[0];
+}
+
+// Migration 176's `status='proposed'` gate finally gets its first writer.
+// Anything an agent extracted — from a homepage at onboarding, say — lands
+// here as 'proposed' + 'agent_proposed', which getProductKnowledge's
+// 'verified' default makes INVISIBLE to every generator until a human
+// confirms it on the Analyst page. That is the whole point: it unblocks the
+// tenant whose admin never filled in the capabilities form, without ever
+// stating a machine guess to a model as a verified fact.
+//
+// Idempotent on (site_id, lower(name), kind) so re-running onboarding, or a
+// second extraction pass, does not accumulate near-duplicate rows. A row a
+// human has already VERIFIED or REJECTED is left completely alone — a
+// re-extraction must never undo a human decision.
+export async function proposeProductCapability(siteId, { name, category, description, industries, kind = 'capability', details }) {
+  if (!name || !String(name).trim()) return null;
+  const { rows } = await query(
+    `INSERT INTO product_capabilities (site_id, name, category, description, industries_json, kind, details_json, status, source)
+     SELECT $1, $2, $3, $4, $5, $6, $7, 'proposed', 'agent_proposed'
+      WHERE NOT EXISTS (
+        SELECT 1 FROM product_capabilities
+         WHERE site_id = $1 AND kind = $6 AND lower(name) = lower($2)
+      )
+     RETURNING id, site_id, name, category, description, industries_json AS industries, kind, details_json AS details,
+               status, source, created_at, updated_at`,
+    [siteId, String(name).trim(), category || null, description || null, JSON.stringify(industries || []), kind,
+      JSON.stringify(details && typeof details === 'object' ? details : {})]
+  );
+  return rows[0] || null;
 }
 
 export async function updateProductCapabilityStatus(siteId, id, status) {
@@ -435,14 +595,44 @@ export async function saveLayoutSuggestion(siteId, layoutJson, reason) {
 // (anomaly + forecast_risk + trend_shift together) to compute corroboration,
 // which is cheaper and simpler as one grouped query than three HTTP-shaped
 // filters over the same payload.
+//
+// LEFT JOINs the Python Root Cause Analysis Engine's own output (migration
+// 0018, root_cause_analysis_runs/nodes) — real output the Node side never
+// read before (2026-09 Data Analyst audit finding). Only anomaly/trend_shift
+// insights ever get a run at all (root_cause.py's TRIGGER_INSIGHT_TYPES), so
+// this is null for everything else, same honest "nothing to report" shape
+// every other insufficient-evidence path in this codebase already uses —
+// never fabricated. Picks the single highest `share_of_baseline_change_pct`
+// node from the MOST RECENT 'ok' run for that insight — root_cause.py's own
+// module doc is explicit these are "PARALLEL SIBLINGS... not expected to sum
+// to 100%", i.e. an independently-ranked contributor, never a claim of sole
+// causation — callers must preserve that distinction in any text they build
+// from it (see analyst-fusion.js's buildNarrative).
 export async function getRecentPageInsights(siteId, days = 21) {
   const { rows } = await query(
-    `SELECT id, metric_key, dimension_value AS page, insight_type, severity, evidence, generated_at, period_start
-       FROM insights
-      WHERE client_id = $1 AND dimension_type = 'page'
-        AND generated_at >= now() - ($2 * interval '1 day')
-      ORDER BY generated_at DESC`,
+    `SELECT i.id, i.metric_key, i.dimension_value AS page, i.insight_type, i.severity, i.evidence, i.generated_at, i.period_start,
+            rc.dimension_type AS root_cause_dimension_type, rc.dimension_value AS root_cause_dimension_value,
+            rc.share_of_baseline_change_pct AS root_cause_share_pct
+       FROM insights i
+       LEFT JOIN LATERAL (
+         SELECT n.dimension_type, n.dimension_value, n.share_of_baseline_change_pct
+           FROM root_cause_analysis_runs r
+           JOIN root_cause_analysis_nodes n ON n.run_id = r.id
+          WHERE r.insight_id = i.id AND r.status = 'ok' AND n.share_of_baseline_change_pct IS NOT NULL
+          ORDER BY r.generated_at DESC, n.share_of_baseline_change_pct DESC
+          LIMIT 1
+       ) rc ON true
+      WHERE i.client_id = $1 AND i.dimension_type = 'page'
+        AND i.generated_at >= now() - ($2 * interval '1 day')
+      ORDER BY i.generated_at DESC`,
     [siteId, days]
   );
-  return rows;
+  return rows.map((r) => ({
+    ...r,
+    topRootCause: r.root_cause_dimension_type == null ? null : {
+      dimensionType: r.root_cause_dimension_type,
+      dimensionValue: r.root_cause_dimension_value,
+      sharePct: r.root_cause_share_pct == null ? null : Number(r.root_cause_share_pct),
+    },
+  }));
 }

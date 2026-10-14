@@ -2,6 +2,11 @@ import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLM, callLLMForJson } from '../llm.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
+import { pageStructureGuidance } from './lib/design-aware-composer.js';
+import { tenantContextTextFor } from '../lib/tenant-context.js';
+import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
+import { usedPhotoIds } from './lib/blog-image-usage.js';
+import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
 
 // New file, not an extension of blog-outline.js — blog-outline's content
 // shape is explicitly an OUTLINE (sections of heading+notes, no real prose),
@@ -75,6 +80,13 @@ export async function generate({ siteId, params }) {
   const grounded = fetched.ok && hasSufficientGroundingContent(fetched.analysis);
   const groundingExcerpt = grounded ? fetched.analysis.bodyText.slice(0, GROUNDING_EXCERPT_CHARS) : null;
 
+  // A direct answer is written for a query NO existing page answers, so the
+  // homepage excerpt is often the only thing the model knows about the
+  // business — and when that fetch fails it knows nothing at all. The
+  // verified facts are the one grounding source that does not depend on a
+  // live HTTP request succeeding.
+  const tenantContext = await tenantContextTextFor(site, { sections: ['business', 'product'] });
+
   const system = 'You are a content strategist producing a real, publishable direct-answer section for a discovered ' +
     'search-query gap — the AI-citation "answer-first" pattern: a heading that echoes the real query\'s own phrasing, ' +
     `followed immediately by a complete, standalone ${MIN_WORDS}-${MAX_WORDS} word paragraph that directly answers it. ` +
@@ -83,13 +95,22 @@ export async function generate({ siteId, params }) {
         'fact, statistic, or offering not evidenced in it. '
       : 'Ground every claim ONLY in the real context given below — never invent a fact, statistic, or offering not ' +
         'evidenced in it. ') +
+    // The verified-facts block is a second permitted grounding source, so the
+    // "ONLY in X" rule above has to name it or the two instructions conflict.
+    (tenantContext ? 'The verified business/product facts given below are also grounded evidence you may write from. ' : '') +
     'If internal-link candidate URLs are given, you may suggest linking to them where topically ' +
     'relevant (choosing ONLY from that list — never invent a URL). Respond with ONLY a JSON object: {"title": "...", ' +
     '"heading": "...", "directAnswer": "...", "supportingSections": [{"heading": "...", "body": "..."}], ' +
     '"suggestedFaqTopics": ["...", "..."], "suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]}';
+  // DESIGN CONTEXT REACHES GENERATION HERE — a direct-answer section is
+  // structurally closest to this site's own real FAQ-shaped content
+  // (answer-first, supporting sections), so 'faq' is the primary match.
+  const structureGuidance = pageStructureGuidance(site, 'faq', { fallbackPageTypes: ['other'] });
   const user = `Query: ${query}${context ? `\nContext: ${context}` : ''}` +
     (groundingExcerpt ? `\n\nReal site content (from ${homepage}):\n${groundingExcerpt}` : '') +
-    `\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}`;
+    (tenantContext ? `\n\n${tenantContext}` : '') +
+    `\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}` +
+    (structureGuidance ? `\n\n${structureGuidance}` : '');
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
@@ -106,6 +127,19 @@ export async function generate({ siteId, params }) {
   const suggestedInternalLinks = (Array.isArray(parsed.suggestedInternalLinks) ? parsed.suggestedInternalLinks : [])
     .filter((s) => s && typeof s.anchorText === 'string' && candidateSet.has(s.targetUrl));
 
+  // Best-effort, same as landing-page.js/blog-outline.js: a failed/disabled/
+  // no-result search never blocks an otherwise complete draft, and
+  // renderDirectAnswerBody only ever WRITES this into front matter when the
+  // target directory's real sibling pages already have a featured-image
+  // field (fieldNames from newcontent-contract.js) — never invented for a
+  // directory with no such convention.
+  const excludePhotoIds = imagesConfigured() ? await usedPhotoIds(site) : undefined;
+  const { fallback } = await imageQueryContextFor(site);
+  const featuredImage = await searchImage(
+    buildImageQueries({ title: parsed.title || parsed.heading || query, topic: query, fallback }),
+    { excludePhotoIds, perPage: IMAGE_CANDIDATE_POOL },
+  );
+
   const content = {
     query,
     title: parsed.title || '',
@@ -114,6 +148,14 @@ export async function generate({ siteId, params }) {
     supportingSections: Array.isArray(parsed.supportingSections) ? parsed.supportingSections : [],
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
+    ...(featuredImage ? { featuredImage } : {}),
+    // Same convention as landing-page.js's/blog-outline.js's
+    // content.groundingContext — for claim-grounding-guard.js
+    // (quality-gate.js) to check against. This generator's own prompt is
+    // the strictest of the three (always "ground every claim", with no
+    // "treat it as a creative draft" fallback), so this is the tightest
+    // real-context match of the three generators sharing this check.
+    groundingContext: [context, groundingExcerpt].filter(Boolean).join('\n\n'),
   };
   return { content, summary: `Direct-answer draft for "${query}" (${wordCount(directAnswer)} words)` };
 }

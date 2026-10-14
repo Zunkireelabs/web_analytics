@@ -35,10 +35,20 @@ function parseArgs(argv) {
   return flags;
 }
 
-function report({ siteId, stalled, failures, itemDefects, recovery }) {
-  if (!stalled.drafts.length && !failures.classified && !Object.keys(failures.byPolicy).length
-    && !itemDefects.drafts.length && !recovery.recommendations.length) return;
+function report({ siteId, prRecovery, stalled, failures, itemDefects, recovery }) {
+  const prRecoveryBranches = (prRecovery?.details || []).filter(
+    (b) => b.opened || b.adopted || b.abandoned || b.skipped,
+  );
+  if (!prRecoveryBranches.length && !stalled.drafts.length && !failures.classified
+    && !Object.keys(failures.byPolicy).length && !itemDefects.drafts.length
+    && !recovery.recommendations.length) return;
   console.log(`\nSite ${siteId}`);
+  if (prRecoveryBranches.length) {
+    console.log(`  batch-branch PR recovery:`);
+    for (const b of prRecoveryBranches) {
+      console.log(`    ${b.branch}: ${b.drafts} draft(s) — opened PR for ${b.opened}, adopted into existing PR ${b.adopted}, abandoned (push never landed) ${b.abandoned}, left unconfirmed ${b.skipped}`);
+    }
+  }
   if (stalled.drafts.length) {
     console.log(`  stalled drafts to reclaim: ${stalled.drafts.length}`);
     const byStatus = {};

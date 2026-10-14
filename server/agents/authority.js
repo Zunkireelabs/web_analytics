@@ -106,6 +106,16 @@ async function runWithDataForSeo({ siteId, domain, start, end }) {
       whyItMatters: `${changes.lostBacklinks} backlinks were lost in the last 30 days — a real, notable share of this site's ${summary.referringDomains} referring domains.`,
       priority: 'high',
       recommendedAction: null,
+      // A backlink lives on someone else's website, so nothing in this
+      // repository can restore one — but a spike this size is a confirmed
+      // problem, not a number, and it needs a person to look at who stopped
+      // linking and why. Surfaced read-only rather than dropped.
+      reportOnly: {
+        kind: 'authority-backlinks-lost',
+        label: `${changes.lostBacklinks} backlinks lost in 30 days`,
+        page: '',
+        whyBlocked: 'These links are on other people\'s websites, so there is no change to this site that can restore them. Someone needs to look at which sites stopped linking here and whether it is worth re-establishing those relationships.',
+      },
       expectedImpact: { label: 'High', basis: 'computed', value: changes.lostBacklinks },
     }));
   }

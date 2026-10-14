@@ -9,6 +9,8 @@ import {
   findScalarFieldRange, spliceScalarField, insertNewScalarField, findObjectFieldRange, spliceObjectField, insertNewObjectField,
 } from './lib/js-data-splice.js';
 import { openPrWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer.js';
+import { buildEdit as buildContentIntegrityEdit } from '../lib/content-integrity-inject.js';
+import { applyExactMatchPatches, describePatchFailure } from '../lib/exact-match-patch.js';
 
 // Generic, config-driven writer for "array of objects, one per URL"
 // content files (Eleventy pagination data, a plain JSON collection,
@@ -65,6 +67,28 @@ import { openPrWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer
 // below) — honestly fails (no-insertion-marker) rather than guessing when
 // that nested key doesn't exist, which is the real, correct outcome for a
 // parent with no unique content for that specific sub-section yet.
+//
+// `itemsParentField` is a SEPARATE, unrelated optional addition — for
+// `itemsField` content that sits one level deeper under a FIXED, non-URL-
+// derived object key on the SAME matched entry (as opposed to `nestedField`
+// above, which derives a second id from the URL itself). Real case: web-
+// zenly's features.json objection-handling FAQ content lives at
+// `objections.items` on each feature entry, not a top-level `faq` array the
+// way solutions.json already has it — `objections` is always the same fixed
+// key, never derived from the page URL. { id: 'data-array-content', format,
+// dataFile, idField, itemsParentField: 'objections', itemsField: 'items' }.
+// Purely additive: omitted, behavior is byte-identical to before this was
+// added (an existing config with only `itemsField` keeps splicing the
+// top-level array exactly as it always has — solutions.json's own `faq`
+// config is unaffected). When set, both computeChange and isDataReady first
+// narrow to the `itemsParentField` object (findObjectFieldRange) before
+// looking for `itemsField` inside it, and honestly fail
+// (no-insertion-marker) rather than guess if that parent object itself
+// doesn't exist on a given entry — same fails-closed posture as
+// `nestedField`. Can combine with `nestedField` (nestedField narrows to a
+// URL-derived sub-object first, itemsParentField narrows further into a
+// fixed key on that sub-object), though no real tenant needs that
+// combination yet.
 export const meta = {
   id: 'data-array-content',
   description: 'Config-driven writer for array-of-objects content files (Eleventy data arrays, JSON collections) — file path/id field/items field/format all come from the tenant\'s own url_file_map config.',
@@ -91,7 +115,7 @@ function idFromPageUrl(pageUrl) {
 // second-to-last path segment, inner id is the last. Requires at least two
 // path segments; anything shorter honestly returns nulls rather than
 // guessing which single segment means what.
-function nestedIdsFromPageUrl(pageUrl) {
+export function nestedIdsFromPageUrl(pageUrl) {
   let path;
   try { path = new URL(pageUrl).pathname; } catch { return { id: null, nestedId: null }; }
   const segments = path.replace(/\/+$/, '').split('/').filter(Boolean);
@@ -136,6 +160,7 @@ export async function isDataReady(site, page, config, fetchFile = getFileContent
   const objRange = findObjectRange(file.content, idField, id, format);
   if (!objRange) return false;
   if (config.nestedField) return !!resolveNestedObjectRange(file.content, objRange, config, nestedId);
+  if (config.itemsParentField) return !!findObjectFieldRange(file.content, objRange, config.itemsParentField, format);
   return true;
 }
 
@@ -150,7 +175,7 @@ export async function isDataReady(site, page, config, fetchFile = getFileContent
 // marker-splice into) gets byte-identical rendered HTML written into its
 // own data-array entry instead, using the site's own captured
 // componentTemplates for visual parity, not a second, divergent renderer.
-function scalarValuesFromDraft(actionType, content, componentTemplates, designProfile) {
+function scalarValuesFromDraft(actionType, content, componentTemplates, designProfile, page) {
   if (actionType === 'meta-title') {
     if (!content?.selectedTitle) {
       return { ok: false, error: 'No title has been selected for this draft yet — pick one of the title proposals first.' };
@@ -159,7 +184,21 @@ function scalarValuesFromDraft(actionType, content, componentTemplates, designPr
     if (content.metaDescription) values.metaDescription = content.metaDescription;
     return { ok: true, values };
   }
-  return buildMergeValues(actionType, content || {}, 'visible', componentTemplates, designProfile);
+  const result = buildMergeValues(actionType, content || {}, 'visible', componentTemplates, designProfile, { page });
+  // marker-merge.js's buildMergeValues can return an object-shaped value
+  // ({block, line}) for a field with a front-matter LINE fallback (currently
+  // just `canonical` — see LINE_HEAD_FALLBACK_KEY there) — that choice is
+  // resolved against a page's real template FILE at splice time, which this
+  // adapter has no equivalent of: it writes straight into a data-array
+  // entry's own plain field, always the same "full tag" shape this path has
+  // always written. Unwrap to `.block` so that stays true regardless of
+  // which fields marker-merge.js grows this shape for in the future.
+  if (result.ok && result.values) {
+    for (const [key, value] of Object.entries(result.values)) {
+      if (value && typeof value === 'object' && !Array.isArray(value)) result.values[key] = value.block;
+    }
+  }
+  return result;
 }
 
 // Writes a draft's rendered value(s) into an existing object's own plain
@@ -175,7 +214,7 @@ async function computeScalarFieldChange(site, draft, fetchFile, beforeRef, confi
   const page = draft.content?.page || draft.input?.page;
   const componentTemplates = site?.url_file_map?.siteRoot?.componentTemplates || {};
   const designProfile = site?.url_file_map?.siteRoot?.designProfile || null;
-  const valuesResult = scalarValuesFromDraft(draft.action_type, draft.content, componentTemplates, designProfile);
+  const valuesResult = scalarValuesFromDraft(draft.action_type, draft.content, componentTemplates, designProfile, page);
   if (!valuesResult.ok) {
     return { ok: false, reason: 'draft-not-ready', error: valuesResult.error };
   }
@@ -316,11 +355,140 @@ async function computeSchemaFieldChange(site, draft, fetchFile, beforeRef, confi
   };
 }
 
+// Creates the missing EMPTY `services.<serviceId>` container on an existing
+// location — never any real content (see agents/lib/location-service-gap.js's
+// doc comment: this only ever runs once that module has already confirmed a
+// safe recovery, and even then it writes nothing but `{}`). Once this lands,
+// the location×service page is indistinguishable from one that always had
+// content there — computeScalarFieldChange/computeSchemaFieldChange's own
+// "insert if missing, once" field-level logic (already exercised by every
+// other location×service page in this file) does the real, grounded content
+// writing on the very next normal draft for this page.
+//
+// `draft.content.baseConfig` is the SAME data-array-content adapter config
+// already resolved (by recommendation-gates.js) for whichever real generator
+// first hit `adapter-data-not-ready` on this page — carried through rather
+// than re-resolved here so this needs no adapter config of its own keyed on
+// the literal 'location-service-bootstrap' action type (see
+// implementers/resolve.js's matching special case for why that lookup is
+// skipped for this one action type).
+async function computeLocationServiceBootstrapChange(site, draft, fetchFile, beforeRef) {
+  const page = draft.content?.page || draft.input?.page;
+  const config = draft.content?.baseConfig;
+  if (!config?.dataFile || !config?.nestedField) {
+    return { ok: false, reason: 'invalid-config', error: 'location-service-bootstrap draft is missing its base adapter config (dataFile/nestedField).' };
+  }
+  const { id, nestedId } = nestedIdsFromPageUrl(page);
+  if (!id || !nestedId) return { ok: false, reason: 'no-file-mapping', error: `Could not derive a location + service id pair from "${page || '(no page)'}".` };
+
+  const file = await fetchFile(site, config.dataFile, beforeRef);
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${config.dataFile} does not exist on branch "${beforeRef}".` };
+
+  const format = config.format || 'js-export-array';
+  const idField = config.idField || 'id';
+  let objRange = findObjectRange(file.content, idField, id, format);
+  if (!objRange) return { ok: false, reason: 'no-insertion-marker', error: `Could not find one unambiguous entry for ${idField} "${id}" in ${config.dataFile}.` };
+
+  let content = file.content;
+  let servicesRange = findObjectFieldRange(content, objRange, config.nestedField, format);
+  if (servicesRange && findObjectFieldRange(content, servicesRange, nestedId, format)) {
+    return { ok: false, reason: 'already-exists', error: `"${id}" already has a "${config.nestedField}.${nestedId}" entry in ${config.dataFile} — nothing to bootstrap.` };
+  }
+
+  if (!servicesRange) {
+    content = insertNewObjectField(content, objRange, config.nestedField, {}, format);
+    objRange = { start: objRange.start, end: objRange.end + (content.length - file.content.length) };
+    servicesRange = findObjectFieldRange(content, objRange, config.nestedField, format);
+  }
+  content = insertNewObjectField(content, servicesRange, nestedId, {}, format);
+
+  const check = assertValidContent(content, format);
+  if (!check.ok) {
+    return { ok: false, reason: 'invalid-edit', error: `Auto-generated edit would break ${config.dataFile}'s syntax (${check.error}) — refused to apply.` };
+  }
+
+  return {
+    ok: true, filePath: config.dataFile, oldContent: file.content, newContent: content,
+    changedRegions: [{ field: 'bootstrap', markerName: `${config.nestedField}.${nestedId}`, before: '(none)', after: '{}' }],
+    // Distinct purely for callers that want to confirm this was a
+    // structural bootstrap rather than a content write, without string-
+    // matching `changedRegions`.
+    bootstrap: true,
+  };
+}
+
+// content-integrity-repair's own generator (generators/content-integrity-repair.js)
+// already produces a uniform array of {anchor, replacement} edits for every
+// fix shape (malformed-table/raw-text-table/duplicate-faq/font-size-override/
+// table-style-drift/typography-drift's anchorHtml+replacement,
+// faq-schema-mismatch's originalRaw+jsonLd, and faq-topic-mismatch/
+// faq-cross-page-inconsistency's anchorHtml+replacement plus an optional
+// second schema-resync edit) via buildContentIntegrityEdit —
+// the SAME function implementers/lib/content-integrity-inject.js uses for a
+// normal single-file page. The only thing this adapter adds is WHERE that
+// edit gets applied: a pagination-generated page (/locations/*, /compare/*)
+// has no per-page template file — content-integrity-inject.js's resolveFile
+// call fails closed there ('no-file-mapping'), which is exactly the
+// "Configure a data-array-content adapter for this route, or fix it by
+// hand" dead end this closes. Anchor uniqueness is checked ONLY within the
+// matched entry's own byte range (never the whole data file), so identical
+// markup shared by a templated sibling entry (the same broken-table shape
+// repeated across many locations, say) can never read as ambiguous, and a
+// patch can never land on the wrong entry.
+async function computeContentIntegrityChange(site, draft, fetchFile, beforeRef, config) {
+  const page = draft.content?.page || draft.input?.page;
+  const edits = buildContentIntegrityEdit(draft.content || {});
+  if (!edits) return { ok: false, reason: 'draft-not-ready', error: `Unknown fix type "${draft.content?.fixType}" on this draft.` };
+
+  const idField = config.idField || 'id';
+  const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page), nestedId: null };
+  if (!id || (config.nestedField && !nestedId)) return { ok: false, reason: 'no-file-mapping', error: `Could not derive ${config.nestedField ? 'a location + service id pair' : 'an id'} from "${page || '(no page)'}".` };
+
+  const file = await fetchFile(site, config.dataFile, beforeRef);
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${config.dataFile} does not exist on branch "${beforeRef}".` };
+
+  const format = config.format || 'js-export-array';
+  let objRange = findObjectRange(file.content, idField, id, format);
+  if (!objRange) {
+    return { ok: false, reason: 'no-insertion-marker', error: `Could not find one unambiguous entry for ${idField} "${id}" in ${config.dataFile}.` };
+  }
+  if (config.nestedField) {
+    objRange = resolveNestedObjectRange(file.content, objRange, config, nestedId);
+    if (!objRange) {
+      return { ok: false, reason: 'no-insertion-marker', error: `"${id}" has no "${config.nestedField}.${nestedId}" entry in ${config.dataFile} — this page has no unique content for that section yet.` };
+    }
+  }
+
+  const objectContent = file.content.slice(objRange.start, objRange.end);
+  const patched = applyExactMatchPatches(objectContent, edits);
+  if (!patched.ok) {
+    return { ok: false, reason: 'source-anchor-not-found', error: describePatchFailure(config.dataFile, patched) };
+  }
+  const newContent = file.content.slice(0, objRange.start) + patched.content + file.content.slice(objRange.end);
+
+  const check = assertValidContent(newContent, format);
+  if (!check.ok) {
+    return { ok: false, reason: 'invalid-edit', error: `Auto-generated edit would break ${config.dataFile}'s syntax (${check.error}) — refused to apply.` };
+  }
+
+  return {
+    ok: true, filePath: config.dataFile, oldContent: file.content, newContent,
+    changedRegions: [{ field: draft.content?.fixType || 'content-integrity-repair', before: objectContent, after: patched.content }],
+  };
+}
+
 // `fetchFile` defaults to the real getFileContent — overridable only so
 // tests can supply fixture content without a mocking library.
 export async function computeChange(site, draft, fetchFile = getFileContent, beforeRef = baseBranch(site), analyzePage = analyzePageUrl) {
   const page = draft.content?.page || draft.input?.page;
+  if (draft.action_type === 'location-service-bootstrap') {
+    return computeLocationServiceBootstrapChange(site, draft, fetchFile, beforeRef);
+  }
   const config = resolveAdapter(site, page, draft.action_type);
+  if (draft.action_type === 'content-integrity-repair') {
+    if (!config?.dataFile) return { ok: false, reason: 'no-file-mapping', error: `No data-array-content adapter config (dataFile) found for "${page || '(no page)'}".` };
+    return computeContentIntegrityChange(site, draft, fetchFile, beforeRef, config);
+  }
   if (config?.schemaField) return computeSchemaFieldChange(site, draft, fetchFile, beforeRef, config, analyzePage);
   if (config?.fields) return computeScalarFieldChange(site, draft, fetchFile, beforeRef, config);
   const flatArray = config?.shape === 'flat-array';
@@ -359,6 +527,12 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
       objRange = resolveNestedObjectRange(file.content, objRange, config, nestedId);
       if (!objRange) {
         return { ok: false, reason: 'no-insertion-marker', error: `"${id}" has no "${config.nestedField}.${nestedId}" entry in ${config.dataFile} — this page has no unique content for that section yet.` };
+      }
+    }
+    if (config.itemsParentField) {
+      objRange = findObjectFieldRange(file.content, objRange, config.itemsParentField, format);
+      if (!objRange) {
+        return { ok: false, reason: 'no-insertion-marker', error: `"${id}" has no "${config.itemsParentField}" object in ${config.dataFile} — cannot locate "${config.itemsField}" inside it.` };
       }
     }
     arrayRange = findArrayFieldRange(file.content, objRange, config.itemsField, format);
@@ -407,14 +581,23 @@ export async function apply(site, draft) {
   return pushDraftBranch(site, draft, [{ path: computed.filePath, content: computed.newContent }], batchInfo);
 }
 
+// 'location-service-bootstrap' carries its own base config (see
+// computeLocationServiceBootstrapChange's doc comment) rather than one
+// resolveAdapter can find under its own literal action type — same fallback
+// resolve.js's resolveImplementerForApply already applies for routing.
+function resolveDataArrayConfig(site, page, draft) {
+  if (draft.action_type === 'location-service-bootstrap') return draft.content?.baseConfig || null;
+  return resolveAdapter(site, page, draft.action_type);
+}
+
 export async function mergeToStage(site, draft) {
   const page = draft.content?.page || draft.input?.page;
-  const config = resolveAdapter(site, page, draft.action_type);
+  const config = resolveDataArrayConfig(site, page, draft);
   return openPrWithSnapshot(site, draft, config?.dataFile);
 }
 
 export async function rollback(site, draft) {
   const page = draft.content?.page || draft.input?.page;
-  const config = resolveAdapter(site, page, draft.action_type);
+  const config = resolveDataArrayConfig(site, page, draft);
   return rollbackFromSnapshot(site, draft, config?.dataFile, config?.format || 'js-export-array');
 }

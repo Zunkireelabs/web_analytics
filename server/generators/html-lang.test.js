@@ -1,6 +1,13 @@
-import { test, describe } from 'node:test';
+import { test, describe, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { generate, meta } from './html-lang.js';
+
+const resolve = (p) => new URL(p, import.meta.url).href;
+let analyzeImpl;
+mock.module(resolve('../agents/lib/page-content.js'), {
+  namedExports: { analyzePageUrl: async (url) => analyzeImpl(url) },
+});
+
+const { generate, meta, verifyCurrentState } = await import('./html-lang.js');
 
 // Only exercises the params.lang-provided path, which never calls
 // getSiteById — no real DB needed. The site-config-lookup / 'en' fallback
@@ -35,5 +42,42 @@ describe('html-lang generator', () => {
 
   test('meta.id matches the generatorId agents wire into recommendedAction', () => {
     assert.equal(meta.id, 'html-lang');
+  });
+});
+
+describe('html-lang verifyCurrentState (server/generators/lib/verification-layer.js contract)', () => {
+  const site = { id: 1, website_domain: 'example.com' };
+
+  test('no site context: still_valid without guessing', async () => {
+    const result = await verifyCurrentState({ params: {} }, {});
+    assert.equal(result.decision, 'still_valid');
+    assert.equal(result.reason, 'no-site-context');
+  });
+
+  test('no checkable target (no page and no site domain): still_valid', async () => {
+    const result = await verifyCurrentState({ params: {} }, { site: {} });
+    assert.equal(result.decision, 'still_valid');
+    assert.equal(result.reason, 'no-checkable-target');
+  });
+
+  test('live page already has <html lang>: already_resolved', async () => {
+    analyzeImpl = async () => ({ ok: true, analysis: { htmlLang: 'en' } });
+    const result = await verifyCurrentState({ params: {} }, { site });
+    assert.equal(result.decision, 'already_resolved');
+    assert.equal(result.reason, 'html-lang-present');
+  });
+
+  test('live page still has no <html lang>: still_valid', async () => {
+    analyzeImpl = async () => ({ ok: true, analysis: { htmlLang: null } });
+    const result = await verifyCurrentState({ params: {} }, { site });
+    assert.equal(result.decision, 'still_valid');
+    assert.equal(result.reason, 'html-lang-missing');
+  });
+
+  test('unreachable: still_valid, not a guess either way', async () => {
+    analyzeImpl = async () => ({ ok: false, error: 'timeout' });
+    const result = await verifyCurrentState({ params: {} }, { site });
+    assert.equal(result.decision, 'still_valid');
+    assert.equal(result.reason, 'unreachable');
   });
 });

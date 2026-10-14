@@ -4,6 +4,7 @@ import { getSearchPerformanceRange, getSiteById } from '../../store/read.js';
 import { getCompetitorProvider, competitorProviderConfigured } from '../../ingest/competitor-providers/index.js';
 import { callLLM } from '../../llm.js';
 import { resolveOwnDomain, knownDomain, filterOwnDomainPages } from './site-domain.js';
+import { resolveSiteLocations } from './site-locations.js';
 
 // LLM-driven competitor discovery + crawl + compare — the MVP pipeline that
 // makes competitor-intelligence work with zero external SEO API, so it's
@@ -64,7 +65,7 @@ async function detectCompetitorsFromSerp(ownDomain, topQueries, { locationCode, 
       continue; // one query's failure (quota, no results) shouldn't abort discovery for the rest
     }
     for (const r of results.slice(0, SERP_DEPTH_PER_QUERY)) {
-      if (!r.domain || r.domain === ownDomain) continue;
+      if (!r.domain || r.domain === ownDomain || isKnownPlatformDomain(r.domain)) continue;
       domainCounts.set(r.domain, (domainCounts.get(r.domain) || 0) + 1);
     }
   }
@@ -294,8 +295,9 @@ export async function runCompetitorDiscovery(siteId, start, end, { forceDomain }
   const ownScore = overallStructuralScore(ownPageFetch.analysis);
 
   const queryTexts = topQueries.map((q) => q.dim_value);
-  const locationCode = Number(process.env.COMPETITOR_LOCATION_CODE || 2840);
-  const languageCode = process.env.COMPETITOR_LANGUAGE_CODE || 'en';
+  // This site's own real target market (see migration 159) rather than one
+  // global default for every tenant.
+  const { locationCode, languageCode } = resolveSiteLocations(site)[0];
   const businessContext = { title: ownPageFetch.analysis.title, metaDescription: ownPageFetch.analysis.metaDescription };
 
   // Two independent discovery lenses, run together rather than as a
@@ -334,10 +336,24 @@ export async function runCompetitorDiscovery(siteId, start, end, { forceDomain }
     ? [forceDomain, ...discoveredDomains.filter((d) => d !== forceDomain)].slice(0, MAX_COMPETITORS)
     : discoveredDomains;
 
-  const competitors = await Promise.all(candidateDomains.map((d) =>
+  const analyzed = await Promise.all(candidateDomains.map((d) =>
     analyzeCompetitor(d, ownPageFetch.analysis, ownDomain, ownScore, queryTexts)
       .then((c) => ({ ...c, discoverySource: sourceByDomain.get(d) || 'forced' }))
   ));
+
+  // A SERP-only candidate that comes back with zero real topical overlap
+  // (queryRelevanceOverlap above) is a domain that merely shares a SERP with
+  // this site's queries by coincidence (a directory listing, a news mention),
+  // never a real competitor — drop it here rather than just letting overlap
+  // affect sort order downstream. LLM/'both'-sourced candidates are kept even
+  // at zero overlap: the LLM lens is grounded in business reasoning, not
+  // keyword overlap, by design (see detectCompetitors' docstring above), and
+  // a forced domain (caller-specified) is always kept.
+  const competitors = analyzed.filter((c) => {
+    if (c.discoverySource !== 'serp') return true;
+    if (!c.ok) return true; // an unreachable candidate is reported, not silently dropped
+    return c.queryOverlap?.overlapCount > 0;
+  });
 
   return { ownDomain, ownScore, competitors };
 }

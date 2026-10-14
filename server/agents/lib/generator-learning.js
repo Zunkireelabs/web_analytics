@@ -1,5 +1,7 @@
 import { query } from '../../db.js';
 import { classifyAbandonReason, RETRY_POLICY } from '../../lib/attempt-classification.js';
+import { impactByGenerator } from '../../store/fix-impact.js';
+import { analystPredictionAccuracyByGenerator } from '../../store/analyst-evidence.js';
 
 // Phase 5: the system learns from outcomes instead of making the same
 // decision forever, without becoming machine-learning infrastructure.
@@ -149,19 +151,72 @@ const DEMOTE_FAILURE_RATIO = 0.4;
 // unbounded query cost grows with the site's whole lifetime otherwise.
 const WINDOW_SIZE = 30;
 
+// A demoted generator is excluded from auto-remediation's own eligible set
+// (autonomy-decision.js), which means nothing ever attempts it again to
+// produce the fresh evidence that could clear the demotion — a real,
+// observed deadlock on site 8864 (2026-09-21): schema/qa-content were
+// demoted entirely on failures from BEFORE a real token-limit bug fix
+// (33501c7/139a55c) landed, and sat demoted for three full days afterward
+// with zero attempts, because demoted is exactly what stopped them from
+// being attempted. A human had to manually re-run one item on each to prove
+// the fix and clear it.
+//
+// PROBATION_COOLDOWN_MS is how long a demoted generator may sit with no new
+// attempt before auto-remediation.js grants it exactly one probation probe
+// per run (see PROBATION_PROBE_LIMIT there) instead of skipping it outright
+// — enough to let a real fix prove itself without a human noticing and
+// intervening, while still bounded to one item so a genuinely still-broken
+// generator costs at most one wasted attempt per cooldown period, not a
+// renewed flood.
+export const PROBATION_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
 // One row per generator this site has real history for, in one query — the
 // shape autonomy-decision.js's classifyRecommendation and summarizeAutonomy
 // take as an optional parameter, so a caller acting on many recommendations
 // at once (the common case) never issues one query per item.
 export async function getLearnedConfidenceMap(siteId) {
-  const { rows } = await query(
-    `SELECT generator_id, outcome, created_at FROM (
-       SELECT generator_id, outcome, created_at,
-              row_number() OVER (PARTITION BY generator_id ORDER BY created_at DESC) AS rn
-       FROM generator_outcomes WHERE site_id = $1
-     ) windowed WHERE rn <= $2`,
-    [siteId, WINDOW_SIZE]
-  );
+  const [{ rows }, magnitudeRows, analystAccuracyRows] = await Promise.all([
+    query(
+      `SELECT generator_id, outcome, created_at FROM (
+         SELECT generator_id, outcome, created_at,
+                row_number() OVER (PARTITION BY generator_id ORDER BY created_at DESC) AS rn
+         FROM generator_outcomes WHERE site_id = $1
+       ) windowed WHERE rn <= $2`,
+      [siteId, WINDOW_SIZE]
+    ),
+    // 2026-09 lifecycle-gap audit finding #3: fix-impact.js's impactByGenerator
+    // computed real before/after-merge GSC deltas per generator but had zero
+    // callers anywhere. Merged in here (real magnitude, not a synthetic
+    // number) purely as an INFORMATIONAL field on the same map every real
+    // caller (autonomy-decision.js, auto-remediation.js) already reads —
+    // never contributes to `confidence`/`impactConfidence`/`demote` above,
+    // and never gates or demotes anything on its own. Deliberately NOT
+    // folded into a single weighted score the way impactConfidence already
+    // isn't for clicks/impressions/position/ctr (see fix-impact.js's
+    // classifyImpact comment) — inventing a normalization constant to blend
+    // an unbounded magnitude into a 0-1 ratio would be exactly that kind of
+    // invented business rule. growth-scoring.js's confidenceScore surfaces
+    // it as a visible factor for human review, not as a score adjustment.
+    impactByGenerator(siteId).catch(() => []),
+    // Same treatment, same reasoning, for a second previously-unused signal
+    // (2026-09 Data Analyst audit finding #3): analyst-outcome.js already
+    // records whether a fused conclusion's PREDICTION (further decline, or a
+    // real growth opportunity) was confirmed once fix-impact.js measures it,
+    // but that verdict never reached this shared learning map either.
+    // Informational only, same as impactMagnitude — never gates, demotes, or
+    // overrides any safety/risk/deterministic decision on its own.
+    analystPredictionAccuracyByGenerator(siteId).catch(() => []),
+  ]);
+  const magnitudeByGenerator = new Map(magnitudeRows.map((r) => [r.generator_id, {
+    measured: r.measured,
+    impressionsDelta: r.impressions_delta,
+    clicksDelta: r.clicks_delta,
+    avgPositionDelta: r.avg_position_delta == null ? null : Number(r.avg_position_delta),
+  }]));
+  const analystAccuracyByGenerator = new Map(analystAccuracyRows.map((r) => [r.generator_id, {
+    measured: r.measured,
+    confirmed: r.confirmed,
+  }]));
 
   const byGenerator = new Map();
   for (const row of rows) {
@@ -169,10 +224,17 @@ export async function getLearnedConfidenceMap(siteId) {
       byGenerator.set(row.generator_id, {
         successes: 0, failures: 0, refused: 0, infra: 0, total: 0,
         impactPositive: 0, impactNegative: 0, impactNeutral: 0,
+        lastAttemptAt: null,
       });
     }
     const bucket = byGenerator.get(row.generator_id);
     bucket.total++;
+    // Tracked regardless of outcome type — a probation probe (auto-
+    // remediation.js) needs to know when this generator was LAST tried at
+    // all, not just when it last scored, so an all-refusal or all-infra
+    // stretch still counts as "still being exercised" and never falsely
+    // looks idle.
+    if (!bucket.lastAttemptAt || row.created_at > bucket.lastAttemptAt) bucket.lastAttemptAt = row.created_at;
     if (POSITIVE.has(row.outcome)) bucket.successes++;
     else if (NEGATIVE.has(row.outcome)) bucket.failures++;
     else if (IMPACT_POSITIVE.has(row.outcome)) bucket.impactPositive++;
@@ -219,6 +281,13 @@ export async function getLearnedConfidenceMap(siteId) {
       reason: hasEnoughSamples && failureRatio >= DEMOTE_FAILURE_RATIO
         ? `${b.failures} of ${scored} recent attempts failed or were rejected — held for review until this improves`
         : null,
+      // null when this generator has no measured fix_impact rows at all —
+      // informational only, see the fetch above.
+      impactMagnitude: magnitudeByGenerator.get(generatorId) ?? null,
+      // null when this generator has no measured analyst-outcome rows at
+      // all (most generators never come from analyst-fusion.js) —
+      // informational only, see the fetch above.
+      analystPredictionAccuracy: analystAccuracyByGenerator.get(generatorId) ?? null,
     });
   }
   return result;

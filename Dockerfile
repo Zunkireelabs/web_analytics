@@ -82,12 +82,14 @@ USER root
 RUN node node_modules/playwright/cli.js install --with-deps chromium \
   && rm -rf /ms-playwright/chromium-[0-9]* \
   && chmod -R a+rX /ms-playwright \
+  && apt-get install -y --no-install-recommends procps \
   && rm -rf /var/lib/apt/lists/*
 USER node
 # App source + the built web/dist from the build stage. mcp-server/ is
-# included here too — the analytics-mcp compose service overrides CMD to run
-# it (node mcp-server/index.js) from this same image, so both services stay
-# in lockstep without a second Dockerfile.
+# included here too — the analytics-mcp and design-agent-worker compose services
+# override CMD (node mcp-server/index.js / node server/design-agent/worker.js)
+# and run from this same image, so all three stay in lockstep without a second
+# Dockerfile. procps (above) is for the design worker's pgrep healthcheck.
 COPY --chown=node:node server ./server
 COPY --chown=node:node mcp-server ./mcp-server
 COPY --chown=node:node --from=build /app/web/dist ./web/dist

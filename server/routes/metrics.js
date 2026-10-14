@@ -4,6 +4,7 @@ import {
   getMonthlyTotals, getRangeTotals,
   getGscBreakdownRange, getGa4BreakdownRange, getTopMovers, getTopPagePerQuery, getTopDeviceCountryPerQuery,
   getDataRange, getChannelsRange,
+  getAiCompareCache, saveAiCompareCache,
 } from '../store/read.js';
 import { requireAuth } from './login.js';
 import { countryName } from '../util/countries.js';
@@ -175,6 +176,14 @@ router.post('/ai-compare', async (req, res, next) => {
     ]);
     const deltaKeys = ['clicks', 'impressions', 'users', 'sessions', 'conversions'];
     const vsAtoBPct = deltasAvsB(da, db, deltaKeys);
+    const dataSignature = { a: da, b: db, vsAtoBPct };
+    const paramsKey = `${a}|${b}`;
+
+    const cached = await getAiCompareCache(site, 'month', paramsKey);
+    if (cached && JSON.stringify(cached.data_signature) === JSON.stringify(dataSignature)) {
+      return res.json({ plan: cached.plan });
+    }
+
     const system = 'You are an SEO & web-analytics strategist writing for a non-technical site owner. ' +
       'Given two months of metrics (A = earlier, B = later), write a short, specific recovery & growth action plan: ' +
       '4–6 sentences of concrete actions, prioritising the biggest drops. A lower average Search position is BETTER. ' +
@@ -182,6 +191,7 @@ router.post('/ai-compare', async (req, res, next) => {
       'never calculate your own percentage. null means no baseline to compare. Plain text, no markdown, no bullet symbols.';
     const user = `Compare month ${a} (A) vs ${b} (B).\nA: ${JSON.stringify(da)}\nB: ${JSON.stringify(db)}\nvsAtoBPct: ${JSON.stringify(vsAtoBPct)}`;
     const plan = await callLLM(system, user, { maxTokens: 450 });
+    await saveAiCompareCache(site, 'month', paramsKey, dataSignature, plan);
     res.json({ plan });
   } catch (e) { next(e); }
 });
@@ -211,6 +221,14 @@ router.post('/ai-compare-range', async (req, res, next) => {
     ]);
     const deltaKeys = ['clicks', 'impressions', 'users', 'sessions', 'conversions'];
     const vsAtoBPct = deltasAvsB(da, db, deltaKeys);
+    const dataSignature = { a: da, b: db, vsAtoBPct };
+    const paramsKey = `${a_start}|${a_end}|${b_start}|${b_end}`;
+
+    const cached = await getAiCompareCache(site, 'range', paramsKey);
+    if (cached && JSON.stringify(cached.data_signature) === JSON.stringify(dataSignature)) {
+      return res.json({ plan: cached.plan });
+    }
+
     const system = 'You are an SEO & web-analytics strategist writing for a non-technical site owner. ' +
       'Given two weeks of metrics (A = earlier, B = later), write a short, specific recovery & growth action plan: ' +
       '4–6 sentences of concrete actions, prioritising the biggest drops. A lower average Search position is BETTER. ' +
@@ -218,6 +236,7 @@ router.post('/ai-compare-range', async (req, res, next) => {
       'never calculate your own percentage. null means no baseline to compare. Plain text, no markdown, no bullet symbols.';
     const user = `Compare period ${a_start}–${a_end} (A) vs ${b_start}–${b_end} (B).\nA: ${JSON.stringify(da)}\nB: ${JSON.stringify(db)}\nvsAtoBPct: ${JSON.stringify(vsAtoBPct)}`;
     const plan = await callLLM(system, user, { maxTokens: 450 });
+    await saveAiCompareCache(site, 'range', paramsKey, dataSignature, plan);
     res.json({ plan });
   } catch (e) { next(e); }
 });

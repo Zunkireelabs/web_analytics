@@ -27,7 +27,7 @@ export async function generate({ siteId, params }) {
   const user = `Query: ${query || ''}\nPage title: ${fetched.analysis.title}\nPage text: ${fetched.analysis.bodyText.slice(0, 3000)}`;
   let items;
   try {
-    items = await callLLMForJson(SYSTEM, user, { maxTokens: 700, generatorId: meta.id, siteId });
+    items = await callLLMForJson(SYSTEM, user, { maxTokens: 1000, generatorId: meta.id, siteId });
     if (!Array.isArray(items)) throw new Error('not an array');
   } catch {
     throw Object.assign(new Error('Q&A content generation failed: model did not return valid JSON'), { status: 400 });

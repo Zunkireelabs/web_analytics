@@ -75,10 +75,14 @@ function buildPageFindings(page, score, priority) {
     });
   }
   if (!page.analysis?.hasFreshnessSignal) {
+    // Routed to 'schema' (dateModified/datePublished JSON-LD), same fix and
+    // same reasoning as geo-signals.js's own freshness-date rule — see its
+    // comment. Never expand-content's 'freshness-date' focus, which drafts a
+    // VISIBLE "Last Updated" heading + sentence as its own on-page section.
     findings.push({
-      label: 'Add publish or last-updated date (datePublished/dateModified schema, article meta tag, or visible <time> element).',
-      generatorId: 'expand-content',
-      params: { page: page.page, query: page.topQuery || '', focus: 'freshness-date' },
+      label: 'Add publish or last-updated date via schema (datePublished/dateModified JSON-LD) — invisible structured data, not a visible on-page block.',
+      generatorId: 'schema',
+      params: { page: page.page, schemaType: page.analysis?.schemaTypes?.[0] || 'Article' },
       effort: 'Low',
     });
   }

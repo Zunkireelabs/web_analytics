@@ -12,6 +12,7 @@ export const meta = {
   name: 'Trust & Compliance Agent',
   description: 'Checks the site\'s own homepage for links to a Cookie Policy, Privacy Policy, and Terms of Service — real trust signals for visitors and crawlers, not a legal compliance audit.',
   category: 'compliance',
+  requiresCapabilities: ['public-web'],
   version: 1,
   // No external data source — every signal here is read directly off the
   // site's own real homepage HTML and HTTP response, same self-sufficiency
@@ -26,20 +27,32 @@ export const meta = {
 // non-compliant (this agent has no way to know that), which is why every
 // generated finding/narrative is framed as a trust signal, never as legal
 // advice.
-const PAGE_CHECKS = [
+export const PAGE_CHECKS = [
   {
     key: 'cookie-policy', label: 'Cookie Policy',
-    hrefPattern: /cookie/i, textPattern: /cookie policy|cookies? (settings|preferences)/i,
+    pathSegmentPattern: /^(cookie-policy|cookies?|cookie-notice|cookie-statement|cookie-settings)$/i, textPattern: /cookie policy|cookies? (settings|preferences)/i,
   },
   {
     key: 'privacy-policy', label: 'Privacy Policy',
-    hrefPattern: /privacy/i, textPattern: /privacy policy|privacy notice/i,
+    pathSegmentPattern: /^(privacy|privacy-policy|privacy-notice|privacy-statement)$/i, textPattern: /privacy policy|privacy notice/i,
   },
   {
     key: 'terms-of-service', label: 'Terms of Service',
-    hrefPattern: /terms/i, textPattern: /terms of service|terms (and|&) conditions|terms of use/i,
+    pathSegmentPattern: /^(terms|terms-of-service|terms-and-conditions|terms-conditions|terms-of-use|tos)$/i, textPattern: /terms of service|terms (and|&) conditions|terms of use/i,
   },
 ];
+
+// A link counts as the policy only when its visible text names it OR a whole
+// path SEGMENT is the policy's slug — never merely because the URL contains
+// the word ("/blog/cookie-recipes", "/terms-glossary", "/learn/privacy-tips"
+// are not a Cookie Policy / Terms / Privacy page). Exported for tests.
+export function linkMatchesCheck(check, link) {
+  if (check.textPattern.test(link.text || '')) return true;
+  let pathname;
+  try { pathname = new URL(link.href || '', 'https://placeholder.invalid/').pathname; } catch { return false; }
+  return pathname.split('/').filter(Boolean)
+    .some((seg) => check.pathSegmentPattern.test(seg.replace(/\.(html?|php|aspx?)$/i, '')));
+}
 
 // origin + pathname only, trailing slash and case insensitive — enough to
 // tell "this is the same page" from "this is a different page" without
@@ -162,7 +175,7 @@ export async function run({ siteId, start, end }) {
   const homepageBodyText = normalizedBodyText(htmlResult.html);
 
   const checkResults = await Promise.all(PAGE_CHECKS.map(async (check) => {
-    const match = links.find((l) => check.hrefPattern.test(l.href) || check.textPattern.test(l.text));
+    const match = links.find((l) => linkMatchesCheck(check, l));
     if (!match) return { check, status: 'missing' };
     const linkStatus = await resolveLinkStatus(match.href, homepageUrl, homepageTitle, homepageBodyText);
     return linkStatus.ok
@@ -271,6 +284,11 @@ export async function run({ siteId, start, end }) {
   // breaker either.
   const trackerFindings = (trackerAbsenceIsProvable(trackerFacts) ? TRACKER_CHECKS : [])
     .filter((t) => !trackerFacts.trackersDetected.includes(t.label))
+    // A tenant with no real ID to ever supply (site.facebook_pixel_not_applicable,
+    // migration 165) would otherwise re-file this same unresolvable finding
+    // every detection pass forever — not a false positive, a real business
+    // fact ("we don't run Facebook/Instagram ads") that no draft can fix.
+    .filter((t) => !(t.id === 'facebook-pixel' && site.facebook_pixel_not_applicable))
     .map((t) => makeFinding({
     id: `trust-compliance:${t.id}:missing`,
     evidence: { page: homepageUrl, trackersDetected: trackerFacts.trackersDetected },

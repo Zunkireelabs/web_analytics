@@ -45,9 +45,19 @@ describe('design-integrity-guard', () => {
     assert.equal(issues.length, 0);
   });
 
-  test('generatorId outside DESIGN_CONTEXT_GENERATOR_IDS: no-op (e.g. a purely technical generator)', async () => {
+  test('generatorId in NO_MARKUP_GENERATOR_IDS: no-op (e.g. a purely technical generator)', async () => {
     const { issues } = await findDesignIntegrityIssues('meta-title', 1, { fetchSite: async () => siteWithProfile(EYEBROW_AS_BODY_PROFILE) });
     assert.equal(issues.length, 0);
+  });
+
+  // Previously excluded (outside the old DESIGN_CONTEXT_GENERATOR_IDS
+  // allowlist) even though its output includes real markup (a projected
+  // <table>, a full new page's sections) — now checked by default since it's
+  // not in NO_MARKUP_GENERATOR_IDS.
+  test('a previously-excluded markup-touching generator now gets checked', async () => {
+    const { issues } = await findDesignIntegrityIssues('content-integrity-repair', 1, { fetchSite: async () => siteWithProfile(EYEBROW_AS_BODY_PROFILE) });
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0].patternId, 'design-role-mismatch');
   });
 
   test('a consistent profile reports no issues', async () => {
@@ -55,21 +65,27 @@ describe('design-integrity-guard', () => {
     assert.equal(issues.length, 0);
   });
 
-  test('a confirmed role-mismatch is reported non-blocking by default (log-only)', async () => {
-    assert.equal(designIntegrityEnforced(), false);
-    const { issues } = await findDesignIntegrityIssues('blog-outline', 1, { fetchSite: async () => siteWithProfile(EYEBROW_AS_BODY_PROFILE) });
-    assert.equal(issues.length, 1);
-    assert.equal(issues[0].patternId, 'design-role-mismatch');
-    assert.equal(issues[0].blocking, false);
-    assert.match(issues[0].detail, /only ever uses for its cta/);
-  });
-
-  test('DESIGN_INTEGRITY_ENFORCE=true makes the same finding blocking', async () => {
-    process.env.DESIGN_INTEGRITY_ENFORCE = 'true';
+  // Enforcement is ON by default now. This is the FINAL safety check, and
+  // it only ever sees content that has already been through the repair loop
+  // (design-repair-feedback.js + generateDraft's bounded regeneration): a
+  // mismatch reaching it has survived every automatic correction the system
+  // can make, so shipping it to a live customer site is never the right
+  // answer.
+  test('a confirmed role-mismatch is BLOCKING by default (enforcement on)', async () => {
     assert.equal(designIntegrityEnforced(), true);
     const { issues } = await findDesignIntegrityIssues('blog-outline', 1, { fetchSite: async () => siteWithProfile(EYEBROW_AS_BODY_PROFILE) });
     assert.equal(issues.length, 1);
+    assert.equal(issues[0].patternId, 'design-role-mismatch');
     assert.equal(issues[0].blocking, true);
+    assert.match(issues[0].detail, /only ever uses for its cta/);
+  });
+
+  test('DESIGN_INTEGRITY_ENFORCE=false is the escape hatch back to log-only', async () => {
+    process.env.DESIGN_INTEGRITY_ENFORCE = 'false';
+    assert.equal(designIntegrityEnforced(), false);
+    const { issues } = await findDesignIntegrityIssues('blog-outline', 1, { fetchSite: async () => siteWithProfile(EYEBROW_AS_BODY_PROFILE) });
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0].blocking, false, 'still recorded and visible, just not failing the gate');
   });
 
   test('a site load failure fails open (no issues, never throws)', async () => {
@@ -89,7 +105,36 @@ describe('design-integrity-guard — runQualityGate integration', () => {
     // test above), which would also report zero issues either way. This
     // test documents the wiring/shape contract at the quality-gate level;
     // the enforcement behavior itself is covered directly above.
-    const result = await runQualityGate({ title: 'x', sections: [] }, 'blog-outline', null);
+    // featuredImage included so this test isolates the design-integrity
+    // check it documents — blog-image-guard.js's own missing-image check is
+    // covered separately in blog-image-guard.test.js.
+    const result = await runQualityGate({ title: 'x', sections: [], featuredImage: { url: 'https://images.pexels.com/photos/1/x.jpeg' } }, 'blog-outline', null);
     assert.equal(result.clean, true);
+  });
+});
+
+// A manual generate must never be withheld over a design mismatch: a person
+// clicked the button and is waiting to look at the result, so refusing to
+// produce anything is the one outcome that helps nobody. The mismatch is
+// still reported on the draft — it just doesn't withhold the draft itself.
+// Enforcement is for the UNATTENDED path, where "don't ship it" is the only
+// protection a live customer site has.
+describe('design-integrity-guard — manual generation is never blocked', () => {
+  test('enforce:false reports the mismatch but leaves it non-blocking', async () => {
+    const { issues } = await findDesignIntegrityIssues('blog-outline', 1, {
+      fetchSite: async () => siteWithProfile(EYEBROW_AS_BODY_PROFILE),
+      enforce: false,
+    });
+    assert.equal(issues.length, 1, 'the mismatch is still surfaced, not hidden');
+    assert.equal(issues[0].patternId, 'design-role-mismatch');
+    assert.equal(issues[0].blocking, false);
+  });
+
+  test('enforce:true (the unattended default) still blocks', async () => {
+    const { issues } = await findDesignIntegrityIssues('blog-outline', 1, {
+      fetchSite: async () => siteWithProfile(EYEBROW_AS_BODY_PROFILE),
+      enforce: true,
+    });
+    assert.equal(issues[0].blocking, true);
   });
 });

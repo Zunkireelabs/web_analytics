@@ -443,6 +443,74 @@ describe('createWorker — polling lifecycle', () => {
 // — componentTemplates jobs run through live-analysis-handler.js's
 // 'component-templates' mode, not the removed OpenHands handler this
 // describe block used to construct directly.
+// design-profile mode's cheap-rescan gate: live-analysis-handler.js decides
+// (by comparing the fresh capture to the stored profile) whether the LLM
+// re-derivation ran at all, and signals that here via
+// outcome.skippedProfileDerivation. This exercises the persistence branch
+// worker.js takes on each outcome shape against the real site row — the
+// handler decision itself is covered in live-analysis-handler.test.js.
+describe('design-profile job — cheap-rescan persistence branching', () => {
+  test('skippedProfileDerivation only refreshes lastCheckedAt, leaving the stored profile otherwise untouched', async () => {
+    const siteId = await makeSite();
+    const STORED_PROFILE = {
+      version: 2,
+      typography: { body: 'text-base', heading: { item: 'text-2xl font-bold' } },
+      layout: { container: 'max-w-7xl mx-auto' },
+      derivedAt: '2020-01-01T00:00:00.000Z',
+      derivedBy: 'design-agent',
+    };
+    await query(
+      `UPDATE sites SET url_file_map = $2::jsonb WHERE id = $1`,
+      [siteId, JSON.stringify({ siteRoot: { designProfile: STORED_PROFILE } })]
+    );
+
+    const jobIdRef = { current: null };
+    await retryUnlessStolen(jobIdRef, async () => {
+      const job = await createDesignAgentJob(siteId, null, { requestedBy: null, params: { mode: 'design-profile', pageUrl: 'https://x.example/' } });
+      jobIdRef.current = job.id;
+
+      const outcome = await processOneJob({
+        siteId,
+        handler: async () => ({ jobId: job.id, designProfile: STORED_PROFILE, skippedProfileDerivation: true }),
+      });
+      assert.ok(outcome, 'job was claimed by somebody else — see retryUnlessStolen');
+      assert.equal(outcome.status, 'completed');
+
+      const { rows } = await query('SELECT url_file_map FROM sites WHERE id = $1', [siteId]);
+      const saved = rows[0].url_file_map?.siteRoot?.designProfile;
+      assert.ok(saved.lastCheckedAt, 'lastCheckedAt must be set');
+      assert.equal(saved.derivedAt, '2020-01-01T00:00:00.000Z', 'derivedAt must NOT move on a skipped derivation');
+      assert.equal(saved.derivedBy, 'design-agent');
+    });
+  });
+
+  test('a real re-derivation (no skip flag) persists the new profile and stamps derivedAt', async () => {
+    const siteId = await makeSite();
+    const NEW_PROFILE = {
+      version: 2,
+      typography: { body: 'text-base', heading: { item: 'text-2xl font-bold' } },
+      layout: { container: 'max-w-7xl mx-auto' },
+    };
+
+    const jobIdRef = { current: null };
+    await retryUnlessStolen(jobIdRef, async () => {
+      const job = await createDesignAgentJob(siteId, null, { requestedBy: null, params: { mode: 'design-profile', pageUrl: 'https://x.example/' } });
+      jobIdRef.current = job.id;
+
+      const outcome = await processOneJob({
+        siteId,
+        handler: async () => ({ jobId: job.id, designProfile: NEW_PROFILE }),
+      });
+      assert.ok(outcome, 'job was claimed by somebody else — see retryUnlessStolen');
+      assert.equal(outcome.status, 'completed');
+
+      const { rows } = await query('SELECT url_file_map FROM sites WHERE id = $1', [siteId]);
+      const saved = rows[0].url_file_map?.siteRoot?.designProfile;
+      assert.ok(saved.derivedAt, 'a full derivation must stamp derivedAt');
+    });
+  });
+});
+
 describe('componentTemplates job — placeholder-contract validation on the write path', () => {
   test('a derived template that violates its placeholder contract fails the job instead of being saved', async () => {
     const siteId = await makeSite();

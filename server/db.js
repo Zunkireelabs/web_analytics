@@ -30,13 +30,26 @@ if (!process.env.DATABASE_URL) {
 // chokepoint every DB access — test or not — actually goes through, so no
 // individual test file's guard (present, absent, or silently shadowed)
 // matters.
+//
+// package.json's `test` script sets a local DATABASE_URL for the run, and
+// that is not redundant with this check — the two solve opposite halves.
+// This throw is the BACKSTOP (no test run may ever touch a real database);
+// the script is the ERGONOMICS. Without the script, the guard fires for
+// every developer who has a working .env, which is all of them: `npm test`
+// reported over a hundred failing files, one per file, each aborting at
+// import with the message below buried in TAP comment lines — long enough
+// to read as "this repo's test suite is broken" rather than "point it at a
+// local database". It was read exactly that way on 2026-09-08. Do not remove
+// the env var from the test script to "clean it up"; do not remove this
+// throw because the script makes it look unnecessary.
 if (process.env.NODE_TEST_CONTEXT) {
   const dbHost = new URL(process.env.DATABASE_URL).hostname;
   if (!/^(localhost|127\.0\.0\.1|::1)$/i.test(dbHost)) {
     throw new Error(
       `Refusing to run tests against a non-local DATABASE_URL (host: ${dbHost}). ` +
-      'Tests must run against a local database — set DATABASE_URL=postgres://test:test@localhost:5432/test ' +
-      'before running tests, or make sure nothing else in your shell/.env has already set it to a real one.'
+      'Tests must run against a local database. `npm test` sets one itself, so seeing this means the suite ' +
+      'was started some other way (a bare `node --test`, or an IDE runner) — run `npm test`, or set ' +
+      'DATABASE_URL=postgres://test:test@localhost:5432/test for the command yourself.'
     );
   }
 }
@@ -49,7 +62,13 @@ if (process.env.NODE_TEST_CONTEXT) {
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: Number(process.env.DB_POOL_MAX || 10),
-  idleTimeoutMillis: 10_000,
+  // Was a fixed 10s. pg_stat_statements (2026-08-21..10-01) showed
+  // pgbouncer.get_auth executed 220,664 times — roughly one fresh TLS+auth
+  // handshake per burst of work, because a pool that idles out after 10s has
+  // nothing left to reuse between cron ticks and UI requests. 30s keeps the
+  // connection warm across those gaps; the pool's own `max` is unchanged, so
+  // this never raises the connection ceiling, only how long an idle one lives.
+  idleTimeoutMillis: Number(process.env.DB_POOL_IDLE_MS || 30_000),
   connectionTimeoutMillis: 10_000,
   ssl: { rejectUnauthorized: false },
 });
@@ -70,8 +89,8 @@ export async function getOrCreateSite() {
   if (found.rows.length) return found.rows[0];
 
   const inserted = await query(
-    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone)
-     VALUES ($1, $2, $3, $4) RETURNING *`,
+    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, client_number)
+     VALUES ($1, $2, $3, $4, nextval('sites_client_number_seq')) RETURNING *`,
     [process.env.SITE_NAME || 'My Website', gsc, ga4, process.env.TZ || 'Asia/Kolkata']
   );
   return inserted.rows[0];
@@ -82,11 +101,16 @@ export async function getOrCreateSite() {
 // cron/job/ingest pipeline for the one site configured in this instance's
 // .env — this is for provisioning additional clients (see
 // server/scripts/create-client.js).
-export async function createClientSite({ name, websiteDomain, timezone }) {
+// propertyType: 'website' (default) or 'product' — see
+// 167_product_growth_config.sql and the Universal Product Growth mode plan.
+// A 'product' site is schedulable by job.js's listConnectedSites() without
+// GSC/GA4; per-agent eligibility is still enforced by runner.js's
+// requiresCapabilities gate regardless of which property_type this is.
+export async function createClientSite({ name, websiteDomain, timezone, propertyType }) {
   const inserted = await query(
-    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain)
-     VALUES ($1, NULL, NULL, $2, $3) RETURNING *`,
-    [name, timezone || 'Asia/Kolkata', websiteDomain || null]
+    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain, client_number, property_type)
+     VALUES ($1, NULL, NULL, $2, $3, nextval('sites_client_number_seq'), $4) RETURNING *`,
+    [name, timezone || 'Asia/Kolkata', websiteDomain || null, propertyType === 'product' ? 'product' : 'website']
   );
   return inserted.rows[0];
 }
@@ -121,7 +145,7 @@ export async function updateSiteConnection({ siteId, gscProperty, ga4PropertyId,
 // for the Action Center's "apply approved draft as a PR" flow (see
 // server/scripts/connect-repo.js, migration 028). Same partial-update shape
 // as updateSiteConnection above — only fields actually passed are touched.
-export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, githubAppInstallationId, urlFileMap }) {
+export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, githubAppInstallationId, githubAppId, githubAppPrivateKeyEnvVar, urlFileMap }) {
   const fields = [];
   const values = [];
   let i = 1;
@@ -135,6 +159,12 @@ export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUr
   if (githubPatEnvVar !== undefined) set('github_pat_env_var', githubPatEnvVar);
   // null is meaningful here — it moves a site back off the App onto its PAT.
   if (githubAppInstallationId !== undefined) set('github_app_installation_id', githubAppInstallationId);
+  // A tenant's own registered App (migration 154), distinct from the
+  // installation id above — null moves the site back onto the shared default
+  // App while leaving its installation id (still on that tenant's own repo)
+  // untouched.
+  if (githubAppId !== undefined) set('github_app_id', githubAppId);
+  if (githubAppPrivateKeyEnvVar !== undefined) set('github_app_private_key_env_var', githubAppPrivateKeyEnvVar);
   if (urlFileMap !== undefined) set('url_file_map', JSON.stringify(urlFileMap));
 
   if (!fields.length) throw new Error('updateSiteRepoConfig: nothing to update.');
@@ -146,6 +176,21 @@ export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUr
   );
   if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
   return rows[0];
+}
+
+// Uninstall-time cleanup for the GitHub App installation webhook
+// (server/routes/webhooks.js) — moves every site still pointing at a
+// deleted installation id back onto its PAT, without needing the payload's
+// `repositories` list (absent for "all repositories" installs; see the
+// webhook handler's own comment). Matches by installation id rather than
+// by repo, so it's correct even if repo_owner/repo_name were renamed after
+// the App was installed.
+export async function clearGithubAppInstallation(installationId) {
+  const { rows } = await query(
+    'UPDATE sites SET github_app_installation_id = NULL WHERE github_app_installation_id = $1 RETURNING *',
+    [installationId]
+  );
+  return rows;
 }
 
 // Persists the outcome of an audit-url-file-map.js run (migration 088), so
@@ -258,6 +303,34 @@ export async function updateSiteLearnedRepair({ siteId, enabled }) {
   return rows[0];
 }
 
+// The site's own real GA4 Measurement ID / Meta (Facebook) Pixel ID
+// (migrations 130/135) — read live at draft time by
+// generators/analytics-install.js so a client can add/correct either ID at
+// any point and have the very next draft use it, no re-detection needed.
+// Until this existed there was no route/UI that ever set these two columns
+// at all (only a raw SQL UPDATE could) — the same class of gap
+// design_agent_enabled had, for the same reason: nothing wired the DB
+// column to anything a person could actually use.
+// Either field is nullable — passing null clears that one ID without
+// touching the other; passing undefined leaves it unchanged (Field()'s
+// unfilled-input contract, same as every other optional PATCH here).
+export async function updateSiteAnalyticsIds({ siteId, ga4MeasurementId, facebookPixelId }) {
+  const fields = [];
+  const values = [];
+  let i = 1;
+  const set = (column, value) => { fields.push(`${column} = $${i++}`); values.push(value); };
+  if (ga4MeasurementId !== undefined) set('ga4_measurement_id', ga4MeasurementId || null);
+  if (facebookPixelId !== undefined) set('facebook_pixel_id', facebookPixelId || null);
+  if (!fields.length) throw new Error('updateSiteAnalyticsIds: nothing to update.');
+  values.push(siteId);
+  const { rows } = await query(
+    `UPDATE sites SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`,
+    values
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
 export async function updateSiteVisibleFaqCap({ siteId, visibleFaqCap }) {
   const { rows } = await query(
     `UPDATE sites SET visible_faq_cap = $1 WHERE id = $2 RETURNING *`,
@@ -287,6 +360,35 @@ export async function updateSiteAutoRemediation({ siteId, enabled, dailyLimit })
   );
   if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
   return rows[0];
+}
+
+// Time-boxed pause (migration 167): disables the site same as
+// updateSiteAutoRemediation({enabled: false}) above, but also records when
+// it should come back on by itself, via resumeDueAutoRemediationPauses
+// below. `resumeAt` is a Date/ISO timestamp; pass null for an indefinite
+// pause with no auto-resume (equivalent to the plain disable).
+export async function pauseSiteAutoRemediation(siteId, resumeAt) {
+  const { rows } = await query(
+    `UPDATE sites SET auto_remediation_enabled = false, auto_remediation_resume_at = $1 WHERE id = $2 RETURNING *`,
+    [resumeAt, siteId]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
+// Re-enables every site whose time-boxed pause has come due. Called once at
+// the top of each auto-remediation run (job.js) — that pass is itself the
+// server's own reliable, always-on trigger (see runAutoRemediationCatchupFor
+// AllSites's comment on cron alone not being trustworthy on a machine that
+// sleeps), so this needs no scheduling of its own to be dependable. Clears
+// resume_at back to NULL on resume so a stale timestamp can never re-fire.
+export async function resumeDueAutoRemediationPauses() {
+  const { rows } = await query(
+    `UPDATE sites SET auto_remediation_enabled = true, auto_remediation_resume_at = NULL
+     WHERE auto_remediation_enabled = false AND auto_remediation_resume_at IS NOT NULL AND auto_remediation_resume_at <= now()
+     RETURNING id, name`
+  );
+  return rows;
 }
 
 // Records staff sign-off on a site's design profile (migration 132) — pinned

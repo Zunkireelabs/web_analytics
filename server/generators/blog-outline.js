@@ -1,10 +1,18 @@
 import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
+import { coverConfigFor } from './lib/gradient-cover.js';
+import { stockPhotoWanted } from './lib/blog-image-policy.js';
 import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLMForJson } from '../llm.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
 import { usedPhotoIds } from './lib/blog-image-usage.js';
 import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
+import { pageStructureGuidance } from './lib/design-aware-composer.js';
+import { getSeoPolicy } from '../store/site-seo-policy.js';
+import { getSiteProfile } from '../store/data-analyst.js';
+import { tenantIndustries } from '../agents/lib/seo-tenant-context.js';
+import { tenantContextTextFor } from '../lib/tenant-context.js';
+import { attributionNote, globalGrowthNote, agencyCreditLine } from '../agents/lib/zunkireelabs-growth-policy.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
 // changed 2026-08-07 because that shape was shipping straight into a real PR
@@ -50,6 +58,48 @@ const MAX_EXPAND_ATTEMPTS = 3;
 // and size as qa-content.js's/direct-answer.js's own bodyText slice.
 const GROUNDING_EXCERPT_CHARS = 3000;
 
+const SANITY_CDN_HOST = 'apicdn.sanity.io';
+const SANITY_DEFAULT_API_VERSION = '2026-02-10';
+
+// Real category list a locally-generated post may tag itself with — never
+// an invented one. Read-only, via Sanity's public CDN (no token: this reads
+// the site's own already-published taxonomy, not a write) — config-driven
+// per newContentTargets['blog-outline'].categoriesSource ({projectId,
+// dataset, apiVersion?}) so no tenant's Sanity project id is ever hardcoded
+// here; a site with no categoriesSource configured (every non-Sanity-
+// migrated tenant) simply gets none offered. Best-effort: a failed or
+// unconfigured lookup means no categories are offered, never a hard failure
+// for the whole post — matches this file's existing posture for the
+// homepage-grounding fetch and image search above.
+async function fetchRealCategories(site) {
+  const source = site?.url_file_map?.newContentTargets?.['blog-outline']?.categoriesSource;
+  if (!source?.projectId || !source?.dataset) return [];
+  try {
+    const query = '*[_type=="category"]{title,"slug":slug.current}';
+    const url = `https://${source.projectId}.${SANITY_CDN_HOST}/v${source.apiVersion || SANITY_DEFAULT_API_VERSION}/data/query/${source.dataset}` +
+      `?query=${encodeURIComponent(query)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return (Array.isArray(json?.result) ? json.result : [])
+      .filter((c) => c && typeof c.title === 'string' && typeof c.slug === 'string');
+  } catch {
+    return [];
+  }
+}
+
+// Strips any inline Markdown link [text](url) whose url is NOT in the real
+// candidate set back to plain text (the label survives, the brackets/parens
+// don't) — the same "never trust a model-produced URL, only a real one we
+// already have" rule this generator's suggestedInternalLinks filter already
+// applies, extended to links embedded directly in body prose. An invented
+// or malformed link becomes inert plain text rather than a broken/wrong
+// link on the live page.
+const INLINE_LINK = /\[([^\]]+)\]\(([^)\s]+)\)/g;
+function sanitizeInlineLinks(body, candidateSet) {
+  return body.replace(INLINE_LINK, (match, label, url) => (candidateSet.has(url) ? match : label));
+}
+
 function defaultRange() {
   const end = new Date().toISOString().slice(0, 10);
   const start = new Date(Date.now() - DEFAULT_WINDOW_DAYS * 86400000).toISOString().slice(0, 10);
@@ -90,14 +140,22 @@ async function expandSections(sections, topic) {
 
 // params: { topic: string, context?: string, start?: string, end?: string }
 export async function generate({ siteId, params }) {
-  const { topic, context } = params;
+  const { topic, context, designCorrections } = params;
+  // Optional blog category the post is filed under (e.g. 'Insights' for trend
+  // explainers from trend-radar). A short plain label only — it is written into
+  // front matter by newpage-render.js, so anything else is dropped.
+  const category = typeof params.category === 'string' && /^[A-Za-z0-9 &-]{1,40}$/.test(params.category.trim())
+    ? params.category.trim() : null;
   if (!topic) throw Object.assign(new Error('topic is required'), { status: 400 });
   const { start, end } = params.start && params.end ? params : defaultRange();
 
-  const [site, otherPagesRaw] = await Promise.all([
+  const [site, otherPagesRaw, seoPolicy, siteProfile] = await Promise.all([
     getSiteById(siteId),
     getSearchPerformanceRange(siteId, start, end, 'page', CANDIDATE_LIMIT),
+    getSeoPolicy(siteId),
+    getSiteProfile(siteId),
   ]);
+  const realCategories = await fetchRealCategories(site);
   const domain = knownDomain(site);
   const otherPages = filterOwnDomainPages(otherPagesRaw, ownDomains(site));
   const candidates = otherPages.map((p) => p.dim_value);
@@ -113,8 +171,31 @@ export async function generate({ siteId, params }) {
   const grounded = fetched.ok && hasSufficientGroundingContent(fetched.analysis);
   const groundingExcerpt = grounded ? fetched.analysis.bodyText.slice(0, GROUNDING_EXCERPT_CHARS) : null;
 
+  // Every tenant's own real business/industry steers topic focus — an
+  // explicit site_seo_policy override when set (e.g. Zunkiree's own
+  // multi-industry rule), else the industry already inferred generically
+  // for THIS site from its own real GSC queries (site_profiles). Neither
+  // source existing means genuinely nothing is known yet — no fallback
+  // guess, no industry line at all (2026-09-10 multi-tenant SEO rule).
+  const industries = tenantIndustries(seoPolicy, siteProfile);
+  const industryFocus = industries?.length
+    ? `Write for readers in this business's own industry/industries where the topic allows it — their real ` +
+      `problems, services, products, software, automation, website, CRM, booking, or management needs: ` +
+      `${industries.join(', ')}. `
+    : '';
+  // Baseline for every tenant (a policy row can only ever add stricter
+  // constraints, per no_invented_data's schema default — never opt back
+  // into inventing numbers): no fabricated search-volume/demand figures.
+  const noInventedDataNote = seoPolicy?.no_invented_data !== false
+    ? 'Do not state or imply specific search-volume, ranking, or demand figures (e.g. "X searches per month") ' +
+      'unless such data is explicitly given to you below — write about the topic\'s real substance instead. '
+    : '';
+  // 2026-09-11 Zunkireelabs growth policy: exactly one of these two notes is
+  // ever non-empty for a given site, see zunkireelabs-growth-policy.js.
+  const growthNote = attributionNote(site) + globalGrowthNote(site);
+
   const system = 'You are a content strategist writing a COMPLETE, publication-ready blog post covering the given ' +
-    `topic — this is a fresh piece, not based on an existing page. ` +
+    `topic — this is a fresh piece, not based on an existing page. ` + industryFocus + noInventedDataNote + growthNote +
     (groundingExcerpt
       ? 'Any claim about this specific business (its services, offerings, or policies) must be grounded ONLY in the ' +
         '"Real site content" text given below — never invent one. General topic knowledge not specific to this ' +
@@ -122,14 +203,47 @@ export async function generate({ siteId, params }) {
       : 'Treat it as a creative draft, not a fact-check about this specific business. ') +
     `This must be a finished article a reader could publish as-is: at least ${MIN_TOTAL_WORDS} words total across ` +
     'all sections, each section a real paragraph (or several) of substantive prose — never headings with bullet ' +
-    'notes, placeholder text, or "write about X here" instructions in place of the actual writing. If internal-link ' +
-    'candidate URLs are given, you may suggest linking to them where topically relevant (choosing ONLY from that ' +
-    'list — never invent a URL). Respond with ONLY a JSON object: {"title": "...", "metaDescription": "...", ' +
+    'notes, placeholder text, or "write about X here" instructions in place of the actual writing. Section body text ' +
+    'may use light Markdown where it genuinely helps readability — **bold** for real emphasis, and a "- item" or ' +
+    '"1. item" list ONLY for content that is actually a list in real prose (steps, a feature comparison, required ' +
+    'documents) — never as a substitute for writing full paragraphs, and never a list of vague notes standing in ' +
+    'for prose. If internal-link candidate URLs are given, you may link to them inline as [anchor text](URL) where ' +
+    'topically relevant, choosing the URL ONLY from that list — never invent one; an invented URL is stripped back ' +
+    'to plain text before publishing, so there is nothing to gain from guessing. ' +
+    (realCategories.length
+      ? `This site's real content categories are: ${realCategories.map((c) => c.title).join(', ')}. If 1-3 of ` +
+        'these genuinely fit this post\'s topic, list their exact titles in "categories" — choosing ONLY from that ' +
+        'list, never inventing one; an empty array if none fit. '
+      : '') +
+    'Respond with ONLY a JSON object: {"title": "...", "metaDescription": "...", ' +
     '"sections": [{"heading": "...", "body": "..."}], "suggestedFaqTopics": ["...", "..."], ' +
-    '"suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]}';
+    '"suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]' +
+    (realCategories.length ? ', "categories": ["..."]' : '') + '}';
+  // DESIGN CONTEXT REACHES GENERATION HERE, same as landing-page.js — this
+  // site's own real, canonical (or live-observed) blog-article structure
+  // guides section shape/count for a post about a topic the site has never
+  // covered, instead of every generated post reinventing its own shape.
+  const structureGuidance = pageStructureGuidance(site, 'blog-article', { fallbackPageTypes: ['blog-listing'] });
+  // WHO this business is and what it is trying to achieve. The industry line
+  // in `system` above is the only tenant fact this prompt carried before, so
+  // a post for a product tenant was written with no idea what the product
+  // does or which goal the post is meant to serve — while a separate
+  // positioning guard then checked the finished draft against exactly those
+  // facts. 'business' is omitted because industryFocus already states it.
+  // Empty string for every tenant with nothing recorded, and until
+  // TENANT_CONTEXT_ENABLED is set, so the prompt is byte-identical by default.
+  const tenantContext = await tenantContextTextFor(site, { sections: ['goals', 'product', 'audience'] });
   const user = `Topic: ${topic}${context ? `\nContext: ${context}` : ''}` +
     (groundingExcerpt ? `\n\nReal site content (from ${homepage}):\n${groundingExcerpt}` : '') +
-    `\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}`;
+    (tenantContext ? `\n\n${tenantContext}` : '') +
+    `\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}` +
+    (structureGuidance ? `\n\n${structureGuidance}` : '')
+    // A previous attempt at THIS draft was generated and checked against the
+    // site's own design, and something didn't match. Appended last so it is
+    // the most recent instruction the model reads — see
+    // generators/lib/design-repair-feedback.js and the repair loop in
+    // routes/action-center.js's generateDraft.
+    + (designCorrections ? `\n\n${designCorrections}` : '');
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { maxTokens: 2500, generatorId: meta.id, siteId });
@@ -139,6 +253,17 @@ export async function generate({ siteId, params }) {
 
   const suggestedInternalLinks = (Array.isArray(parsed.suggestedInternalLinks) ? parsed.suggestedInternalLinks : [])
     .filter((s) => s && typeof s.anchorText === 'string' && candidateSet.has(s.targetUrl));
+
+  // Validated against the real list fetched above, never trusted verbatim —
+  // a model returning a title close-but-not-exact to a real category (typo,
+  // paraphrase, invented) is dropped rather than guessed into the nearest
+  // match. Capped at 3, same bound given in the prompt.
+  const realCategoryByTitle = new Map(realCategories.map((c) => [c.title.toLowerCase(), c]));
+  const categories = (Array.isArray(parsed.categories) ? parsed.categories : [])
+    .map((t) => (typeof t === 'string' ? realCategoryByTitle.get(t.toLowerCase().trim()) : null))
+    .filter(Boolean)
+    .slice(0, 3)
+    .map((c) => ({ slug: c.slug, title: c.title }));
 
   let sections = (Array.isArray(parsed.sections) ? parsed.sections : [])
     .filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string');
@@ -156,14 +281,39 @@ export async function generate({ siteId, params }) {
       { status: 502, userFacing: true },
     );
   }
+  sections = sections.map((s) => ({ ...s, body: sanitizeInlineLinks(s.body, candidateSet) }));
+
+  // Deterministic agency-credit line (zunkireelabs-growth-policy.js) — added
+  // as its OWN section, after sanitizeInlineLinks above, because that guard
+  // strips any inline link whose URL isn't in this post's own internal
+  // candidateSet, which would silently eat an external zunkireelabs.com
+  // link if it were part of model-authored body text instead. A fixed
+  // sentence in its own section is also never subject to the "did the model
+  // invent this" grounding concern attributionNote()'s soft in-body mention
+  // already accepts the risk of.
+  const creditLine = agencyCreditLine(site);
+  if (creditLine) sections = [...sections, { heading: 'About This Post', body: creditLine }];
 
   // Best-effort, same reasoning as the homepage-grounding fetch above: a
   // failed/disabled/no-result image search must never block an otherwise
   // complete blog draft — see lib/pexels-client.js's searchImage. Title first
-  // (most specific), then this post's own topic, then the TENANT'S industry,
-  // tried in order until one clears the relevance bar; excludePhotoIds keeps
-  // this post off every photo another post on the site already uses,
-  // including photos claimed by other drafts in the same batch.
+  // (most specific), then this post's own topic, then each SECTION's own
+  // heading, then the TENANT'S industry last (broadest), tried in order
+  // until one clears the relevance bar; excludePhotoIds keeps this post off
+  // every photo another post on the site already uses, including photos
+  // claimed by other drafts in the same batch.
+  //
+  // Section headings were added 2026-09-22 after a real miss: on a mature
+  // site (94 already-used photos), a generic post ("Exploring AI Innovations
+  // Across Diverse Industries") found nothing — title/topic/industry queries
+  // for "AI" are dominated on Pexels by robot-cliché photography, which
+  // scoreCandidate's GENERIC_STOCK_TERMS penalty correctly excludes (that
+  // penalty is the deliberate fix for an earlier toy-robot-photo bug, not
+  // something to loosen). The post's own sections are narrower and more
+  // concrete ("AI Development in Finance", "Retail Revolution: AI's Impact
+  // on Customer Experience") and reach different, non-generic corners of
+  // Pexels' catalog — confirmed live: this exact post found a real match on
+  // its own section headings after title/topic/industry all came back empty.
   //
   // The last-resort query is the site's own industry rather than
   // buildImageQueries' hardcoded 'artificial intelligence technology'
@@ -171,10 +321,18 @@ export async function generate({ siteId, params }) {
   // every non-AI tenant's weak-title posts converge on AI stock photos.
   const excludePhotoIds = imagesConfigured() ? await usedPhotoIds(site) : undefined;
   const { fallback } = await imageQueryContextFor(site);
-  const featuredImage = await searchImage(
-    buildImageQueries({ title: parsed.title, topic, fallback }),
-    { excludePhotoIds, perPage: IMAGE_CANDIDATE_POOL },
-  );
+  const sectionHeadings = sections.map((s) => s.heading).filter(Boolean);
+  // A site that opted into generated gradient covers (lib/gradient-cover.js)
+  // gets no stock photo: the cover is built at apply time from the post's slug.
+  // The exception is `featuredImage: 'insights-only'`, where Insights posts keep
+  // a Pexels photo and every other post gets the gradient (see stockPhotoWanted).
+  const blogTarget = site?.url_file_map?.newContentTargets?.['blog-outline'];
+  const featuredImage = stockPhotoWanted(blogTarget, { category, hasCover: Boolean(coverConfigFor(site)) })
+    ? await searchImage(
+      [...buildImageQueries({ title: parsed.title, topic }), ...sectionHeadings, fallback].filter(Boolean),
+      { excludePhotoIds, perPage: IMAGE_CANDIDATE_POOL },
+    )
+    : null;
 
   const content = {
     topic,
@@ -183,7 +341,19 @@ export async function generate({ siteId, params }) {
     sections,
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
+    categories,
+    ...(category ? { category } : {}),
     ...(featuredImage ? { featuredImage } : {}),
+    // The real supporting text this draft was grounded in — same
+    // convention as landing-page.js's content.groundingContext, for
+    // claim-grounding-guard.js (quality-gate.js) to check business-specific
+    // claims (client counts, pricing, "industry-leading"-style authority
+    // phrases) against. Deliberately excludes general topic/industry
+    // knowledge with no business-specific claim shape — this generator's
+    // own prompt explicitly allows writing from that when ungrounded, and
+    // the guard only flags claim-SHAPED text (a scale/price/percent/
+    // superlative pattern), not prose in general.
+    groundingContext: [context, groundingExcerpt].filter(Boolean).join('\n\n'),
   };
   return { content, summary: `Blog post draft for "${topic}" (${totalWords(sections)} words, ${sections.length} section(s))` };
 }

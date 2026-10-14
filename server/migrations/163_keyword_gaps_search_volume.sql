@@ -1,0 +1,13 @@
+-- keyword-demand.js already computes a real, measured monthly search volume
+-- from DataForSEO for every 'dataforseo_demand' gap, but it was discarded
+-- after being folded into the free-text `reason` string — nothing downstream
+-- could rank gaps by it. This column keeps the real number so
+-- qualifyAndShipContentGaps (analyst-seo-mapping.js) can cap which topics
+-- become blog-outline drafts by actual demand rather than insertion order.
+--
+-- Nullable, and deliberately never backfilled or guessed for existing rows
+-- or for 'claude_research' (LLM-guessed) gaps — there is no real number for
+-- those, and this codebase's convention throughout keyword-demand.js is
+-- "real or nothing, never a fabricated substitute". A NULL sorts last
+-- wherever this column is used for ranking.
+ALTER TABLE keyword_gaps ADD COLUMN IF NOT EXISTS search_volume INTEGER;

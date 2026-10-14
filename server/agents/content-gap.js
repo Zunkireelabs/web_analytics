@@ -3,6 +3,9 @@ import { analyzePageUrl, contentGapsFor, GAP_TYPE_TO_GENERATOR, effortForGenerat
 import { priorityByRank, impactFromPriority, makeFinding, aggregateSystemicFinding } from './lib/findings.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { listCompetitorProfiles } from '../store/competitor-profiles.js';
+import { getSeoPolicy } from '../store/site-seo-policy.js';
+import { getSiteProfile } from '../store/data-analyst.js';
+import { tenantIndustries } from './lib/seo-tenant-context.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -11,6 +14,7 @@ export const meta = {
   description: 'Analyzes the site\'s own ranking pages for on-page completeness gaps, cross-references real tracked-competitor structural signals, and suggests possibly-missing entities.',
   category: 'content',
   version: 5,
+  requiresCapabilities: ['gsc', 'public-web'],
   // True topical/SERP-based gap detection (a specific topic a competitor
   // ranks for that this site has no page for at all) still has no real data
   // source — that's a different, still-unbuilt question from what's below.
@@ -47,7 +51,37 @@ const GAP_TYPE_TO_COMPETITOR_SIGNAL = {
 };
 const MIN_TRACKED_COMPETITORS = 2; // below this, a "X of Y" ratio isn't a real market signal
 
-const MAX_PAGES = 20;
+// Raised from 20: with the merge-sync 403 fixed (classic PAT, 2026-09-16)
+// and 800+ open recommendations sitting on Zunkiree Labs' own board, 20
+// pages/day was the actual bottleneck on backlog throughput, not the
+// 100/day ship ceiling (autonomous-quota.js) — this agent alone never got
+// close to it. No external per-page quota here (unlike technical-seo.js's
+// GSC URL Inspection calls), so there's no equivalent hard ceiling to
+// respect on this side; revisit if ship-side rate-limit abandons increase.
+const MAX_PAGES = 40;
+// Pages where "subtopics this page does not cover" is not a meaningful
+// question: a team/about/contact page or a blog INDEX/pagination page is a
+// listing or brand page, not a topic page, so an LLM asked what it "lacks"
+// invents blog topics (confirmed live: 'Use Cases for AI in Education' and
+// 'Client Success Stories' suggested for /team/). Never asks the model.
+const NON_TOPICAL_PATH_RE = /\/(team|about|about-us|contact|contact-us|careers|privacy|privacy-policy|terms|cookie-policy)(\/|$)|\/blog\/page\/\d+|\/blog\/?$/i;
+export function isTopicalPage(pagePath = '') {
+  try { return !NON_TOPICAL_PATH_RE.test(new URL(pagePath, 'https://x.invalid').pathname); } catch { return true; }
+}
+
+// The model's "not covered" claim is an inference, so it is checked against
+// the very text it read: a suggested entity whose every meaningful word is
+// already on the page is covered, not a gap. Returns the suggestions that
+// survive.
+const ENTITY_STOPWORDS = new Set(['with', 'from', 'that', 'this', 'and', 'for', 'the', 'into', 'about', 'using']);
+export function dropAlreadyCovered(suggestions, bodyText) {
+  const text = String(bodyText || '').toLowerCase();
+  return (suggestions || []).filter((s) => {
+    const toks = String(s.entity || '').toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 3 && !ENTITY_STOPWORDS.has(t));
+    return !(toks.length && toks.every((t) => text.includes(t)));
+  });
+}
+
 const MAX_AI_SUGGESTION_PAGES = 6; // bounds LLM cost — entity suggestions run only for the top-impression pages
 const AI_SUGGESTION_MAX_ITEMS = 4;
 
@@ -55,12 +89,26 @@ const AI_SUGGESTION_MAX_ITEMS = 4;
 // to name likely-relevant subtopics the text doesn't seem to cover. This is
 // explicitly an inference, never a verified fact — kept in its own field,
 // never merged into the deterministic `gaps`, and always confidence-labeled.
-async function suggestMissingEntities(bodyText, queryText) {
+async function suggestMissingEntities(bodyText, queryText, seoPolicy, siteProfile) {
   if (!bodyText || !queryText) return { suggestions: [], error: 'no-context' };
+  // This tenant's own real business/industry (explicit site_seo_policy
+  // override when set, else the industry already inferred generically for
+  // THIS site from its own GSC queries via site_profiles) narrows which
+  // subtopics get suggested, without replacing the generic per-page gap
+  // analysis below. Neither source existing means no steer, not a guess
+  // (2026-09-10 multi-tenant SEO rule — dynamic per site_id, never
+  // hardcoded to one tenant).
+  const industries = tenantIndustries(seoPolicy, siteProfile);
+  const industryFocus = industries?.length
+    ? ` Prioritize subtopics real prospects in this business's own industry/industries would search for — their ` +
+      `problems, services, products, software/CRM/booking/automation/website needs — over generic ones: ` +
+      `${industries.join(', ')}.`
+    : '';
   const system = 'You are an SEO/AEO content analyst. Given a real search query and a page\'s actual fetched ' +
     `text, suggest up to ${AI_SUGGESTION_MAX_ITEMS} specific subtopics or entities commonly expected for that ` +
     'query which the text does NOT appear to cover. This is your inference from reading the page, not a verified ' +
-    'fact — never claim certainty, and if nothing clearly stands out, return fewer items or none. Respond with ' +
+    'fact — never claim certainty, and if nothing clearly stands out, return fewer items or none.' + industryFocus +
+    ' Respond with ' +
     'ONLY a JSON array (no prose, no markdown fences), each item shaped exactly as ' +
     '{"entity": "...", "confidence": "low"|"medium"|"high", "rationale": "one short sentence"}. If nothing stands out, respond with [].';
   const user = `Query: ${queryText}\n\nPage text (truncated): ${bodyText.slice(0, 3000)}`;
@@ -69,8 +117,8 @@ async function suggestMissingEntities(bodyText, queryText) {
   try {
     const parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
     if (!Array.isArray(parsed)) return { suggestions: [], error: 'unexpected-format' };
-    const clean = parsed
-      .filter((s) => s && typeof s.entity === 'string' && ['low', 'medium', 'high'].includes(s.confidence))
+    const clean = dropAlreadyCovered(parsed
+      .filter((s) => s && typeof s.entity === 'string' && ['low', 'medium', 'high'].includes(s.confidence)), bodyText)
       .slice(0, AI_SUGGESTION_MAX_ITEMS);
     return { suggestions: clean, error: null };
   } catch {
@@ -92,7 +140,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // ad-hoc check doesn't perturb the normal rotation order for every other
   // page. Same params-bypass pattern as technical-seo.js's params.pages.
   const explicitPages = params?.pages?.length ? params.pages : (params?.page ? [params.page] : null);
-  const [{ batch, impressionsByPage }, competitorProfiles] = await Promise.all([
+  const [{ batch, impressionsByPage }, competitorProfiles, seoPolicy, siteProfile] = await Promise.all([
     explicitPages
       ? getSearchPerformanceForPages(siteId, start, end, explicitPages).then((rows) => ({
         batch: explicitPages,
@@ -107,6 +155,8 @@ export async function run({ siteId, start, end, pageCache, params }) {
       // casing needed here.
       : selectCandidatePages(siteId, 'content-gap', { start, end, batchSize: MAX_PAGES }),
     listCompetitorProfiles(siteId),
+    getSeoPolicy(siteId),
+    getSiteProfile(siteId),
   ]);
 
   // Real aggregate across tracked competitors' actual crawled homepages —
@@ -136,7 +186,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     return {
       ...base,
       gaps: contentGapsFor(fetched.analysis, topQueries),
-      aiEligible: true,
+      aiEligible: isTopicalPage(page),
       fetchError: null,
       _analysis: fetched.analysis,
       _topQuery: topQueries[0] || '',
@@ -157,7 +207,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     .slice(0, MAX_AI_SUGGESTION_PAGES);
   const aiResults = await Promise.all(aiCandidates.map(async (r) => ({
     page: r.page,
-    ...(await suggestMissingEntities(r._analysis.bodyText, r._topQuery)),
+    ...(await suggestMissingEntities(r._analysis.bodyText, r._topQuery, seoPolicy, siteProfile)),
   })));
   const aiByPage = new Map(aiResults.map((a) => [a.page, a]));
 

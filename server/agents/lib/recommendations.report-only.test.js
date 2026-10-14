@@ -35,6 +35,10 @@ mock.module(resolve('../../store/read.js'), {
     getSiteById: async () => ({ id: 1, website_domain: 'example.com' }),
     getSearchPerformanceRange: async () => [],
     getQueriesForPage: async () => [],
+    // makeQueryLookup's widen-before-giving-up step (recommendations.js) —
+    // no GSC data at all here, so it must stay a no-op for this file's
+    // report-only findings, same as the un-widened getQueriesForPage above.
+    getDataRange: async () => ({ earliest: null, freshest: null, latest_visitor: null }),
   },
 });
 // Records every gate call so the test can assert a report-only finding never
@@ -50,6 +54,12 @@ mock.module(resolve('./recommendation-gates.js'), {
       },
     }),
   },
+});
+// No active goals for this file's site — goalId/goalAlignment on every item
+// must come back null, same "absence means unconfigured" convention as
+// every other optional signal here.
+mock.module(resolve('../../store/site-goals.js'), {
+  namedExports: { listActiveGoals: async () => [] },
 });
 
 const { buildRecommendations } = await import('./recommendations.js');
@@ -102,6 +112,10 @@ describe('buildRecommendations — report-only findings', () => {
     // hides every Generate affordance — without it the row would look
     // draftable and satisfy neither.
     assert.equal(item.blockedReason, 'This font-size comes from a shared CSS class, not a per-element override.');
+    // No active goals configured for this site — a report-only finding is
+    // unaffected by the Business Goals feature exactly like every other item.
+    assert.equal(item.goalId, null);
+    assert.equal(item.goalAlignment, null);
   });
 
   test('never runs a draftability gate on a report-only finding', async () => {
@@ -122,6 +136,30 @@ describe('buildRecommendations — report-only findings', () => {
     // The whole reason reportOnly is opt-in: surfacing every actionless
     // finding would bury the actionable list under context rows.
     assert.deepEqual(items, []);
+  });
+
+  test('accounts for every dropped evidence-only finding instead of discarding it silently', async () => {
+    runs = [{ agentId: 'query-intelligence', createdAt: '2026-09-03T07:00:00Z', findings: [evidenceOnlyFinding] }];
+
+    const { items, evidenceOnlyFindings } = await buildRecommendations(1);
+
+    // The row is still (correctly) not surfaced — but it is now countable.
+    // Without this, an agent that emits real defects and simply forgot to
+    // declare an action is indistinguishable from one emitting context, which
+    // is exactly how duplicate-content's byte-identical page groups were
+    // detected on every run and shown to nobody.
+    assert.deepEqual(items, []);
+    assert.equal(evidenceOnlyFindings.length, 1);
+    assert.equal(evidenceOnlyFindings[0].agentId, 'query-intelligence');
+    assert.equal(evidenceOnlyFindings[0].findingId, 'query-intelligence:top-query-shift');
+  });
+
+  test('does not count a surfaced report-only finding as evidence-only', async () => {
+    runs = [{ agentId: 'font-consistency', createdAt: '2026-09-03T07:00:00Z', findings: [reportOnlyFinding] }];
+
+    const { evidenceOnlyFindings } = await buildRecommendations(1);
+
+    assert.deepEqual(evidenceOnlyFindings, []);
   });
 
   test('marks the report-only row detected so it is not auto-closed as stale', async () => {

@@ -25,6 +25,60 @@ test('aggregates issues across all three checkers', async () => {
   assert.ok(ids.includes('schema-missing-context'));
 });
 
+test('landing-page: an ungrounded claim fails the gate with a repairable correction', async () => {
+  const content = {
+    headline: 'Grow Your Business',
+    sections: [{ heading: 'Why Us', body: 'We have served 500+ clients and are the industry-leading provider.' }],
+    groundingContext: 'This business offers AI development services in Kathmandu.',
+  };
+  const result = await runQualityGate(content, 'landing-page');
+  assert.equal(result.clean, false);
+  const claimIssues = result.issues.filter((i) => i.patternId === 'ungrounded-claim');
+  assert.equal(claimIssues.length, 2, 'both the scale claim and the superlative should be flagged');
+  assert.ok(claimIssues.every((i) => typeof i.correction === 'string' && i.correction.length > 0), 'every issue must carry a correction so the repair loop can act on it');
+});
+
+test('landing-page: claims backed by the real groundingContext pass cleanly', async () => {
+  const content = {
+    headline: 'Grow Your Business',
+    sections: [{ heading: 'Why Us', body: 'We have served 500 clients since 2018.' }],
+    groundingContext: 'Real data: this business has served 500 clients since 2018.',
+  };
+  const result = await runQualityGate(content, 'landing-page');
+  assert.equal(result.clean, true);
+});
+
+test('blog-outline: an ungrounded price claim fails the gate', async () => {
+  const content = {
+    title: 'How Much Does AI Development Cost',
+    sections: [{ heading: 'Pricing', body: 'Expect to pay around $5,000 for a typical project.' }],
+    groundingContext: 'This business builds AI systems and enterprise software.',
+  };
+  const result = await runQualityGate(content, 'blog-outline');
+  assert.equal(result.clean, false);
+  assert.ok(result.issues.some((i) => i.patternId === 'ungrounded-claim'));
+});
+
+test('direct-answer: a claim backed by the real groundingContext passes cleanly', async () => {
+  const content = {
+    title: 'AI Development in Nepal',
+    heading: 'Who builds AI systems in Kathmandu?',
+    directAnswer: 'Several companies in Kathmandu, including ones with 500 clients since 2018, build custom AI systems.',
+    supportingSections: [],
+    groundingContext: 'Real data: this business has served 500 clients since 2018.',
+  };
+  const result = await runQualityGate(content, 'direct-answer');
+  assert.equal(result.clean, true);
+});
+
+test('the claim-grounding check is scoped to CLAIM_GROUNDED_GENERATOR_IDS only — an unrelated generator with the same text is unaffected', async () => {
+  const content = {
+    sections: [{ heading: 'Why Us', body: 'We have served 500+ clients and are the industry-leading provider of real, grounded prose that is long enough to avoid other guards.' }],
+  };
+  const result = await runQualityGate(content, 'qa-content');
+  assert.equal(result.issues.some((i) => i.patternId === 'ungrounded-claim'), false);
+});
+
 test('blog-outline is no longer exempt from the gate', async () => {
   const content = { sections: [{ heading: 'Section 1', body: '[Insert real content here]' }] };
   const result = await runQualityGate(content, 'blog-outline');
@@ -84,4 +138,32 @@ test('geo-audit is exempt from LLM-misbehavior checks — repeated static findin
   const result = await runQualityGate(content, 'geo-audit');
   assert.equal(result.clean, true);
   assert.deepEqual(result.issues, []);
+});
+
+// findBareMarkupIssues (rendered-markup-guard.js) renders the draft through
+// the real marker-merge.js buildMergeValues() and flags a resulting block
+// tag with no class at all, on a site with real typography evidence to
+// check against — see that guard's own tests for the mechanism. This just
+// confirms the wiring: `site` present -> it runs and can fail the gate;
+// `site` absent -> it's silently skipped, same convention as
+// checkStructureConformance.
+test('a bare heading from a configured template fails the gate when a site (with a real design profile) is given', async () => {
+  const site = {
+    url_file_map: {
+      siteRoot: {
+        componentTemplates: { expandContent: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h2>{{HEADING}}</h2><div>{{BODY}}</div>' } },
+        designProfile: { typography: { body: 'text-lg text-gray-600', heading: { section: 'text-2xl font-bold' } } },
+      },
+    },
+  };
+  const content = { sections: [{ heading: 'H', body: 'Body text.' }] };
+  const result = await runQualityGate(content, 'expand-content', null, { site });
+  assert.equal(result.clean, false);
+  assert.ok(result.issues.some((i) => i.patternId === 'bare-unstyled-markup'));
+});
+
+test('the same content passes when no site is given — the check is skipped, not falsely clean-by-assumption', async () => {
+  const content = { sections: [{ heading: 'H', body: 'Body text.' }] };
+  const result = await runQualityGate(content, 'expand-content');
+  assert.ok(!result.issues.some((i) => i.patternId === 'bare-unstyled-markup'));
 });

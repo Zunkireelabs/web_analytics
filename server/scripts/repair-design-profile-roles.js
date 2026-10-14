@@ -42,9 +42,12 @@ import { query } from '../db.js';
 import {
   correctBodyTypography, bodySamples,
   correctHeadingTypography, headingSamplesByLevel,
-  correctLinkTypography,
+  correctLinkTypography, correctSpacing,
 } from '../design-agent/live-analysis/profile-extract.js';
-import { projectAllComponentTemplates, isProfileUsable } from '../design-agent/lib/design-profile.js';
+import {
+  projectAllComponentTemplates, isProfileUsable,
+  projectExpandContentCard, pageUsesCardSections,
+} from '../design-agent/lib/design-profile.js';
 import {
   verifyTemplateAgainstLiveSite, COMPONENT_TEMPLATE_KEY, sitePageUrl, verifyProfileRoles,
 } from '../implementers/lib/design-drift.js';
@@ -145,16 +148,20 @@ async function repairSite(site, { commit, show }) {
   const { body } = correctBodyTypography(typography.body || null, bodySamples(profile.pages));
   const { heading } = correctHeadingTypography(typography.heading || {}, headingSamplesByLevel(profile.pages));
   const { link } = correctLinkTypography(typography.link || null, profile.components || {});
+  const spacing = correctSpacing(profile.spacing, site.id);
 
   note('typography.body', typography.body, body);
   note('typography.heading.section', typography.heading?.section, heading.section);
   note('typography.heading.item', typography.heading?.item, heading.item);
   note('typography.link', typography.link, link);
+  note('spacing.section', profile.spacing?.section, spacing.section);
+  note('spacing.itemGap', profile.spacing?.itemGap, spacing.itemGap);
   if (!changes.length) console.log('  roles already correct.');
 
   const repaired = {
     ...profile,
     typography: { ...typography, body, heading, link },
+    spacing,
     repairedAt: new Date().toISOString(),
     repairedBy: 'repair-design-profile-roles',
   };
@@ -197,7 +204,13 @@ async function repairSite(site, { commit, show }) {
     const key = COMPONENT_TEMPLATE_KEY[actionType];
     if (!key) throw new Error(`No componentTemplates key for action type "${actionType}"`);
 
-    const result = await verifyTemplateAgainstLiveSite(actionType, template, { pageUrl })
+    // These are PROJECTIONS re-composed from the corrected profile a few
+    // lines above, not captures — so the structural shape check is skipped
+    // (see verifyTemplateAgainstLiveSite's header). Asking it here failed
+    // every template on every site whose components don't already exist on
+    // its homepage, and since this function REPLACES componentTemplates with
+    // only what verifies, that silently emptied them every morning.
+    const result = await verifyTemplateAgainstLiveSite(actionType, template, { pageUrl, expectsLiveExample: false })
       .catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
     if (result.ok) {
       verified[key] = result.stamped;
@@ -209,6 +222,29 @@ async function repairSite(site, { commit, show }) {
       }
     } else {
       console.log(`  ✗ ${key} — ${result.reason}${result.error ? `: ${result.error}` : ''}`);
+    }
+  }
+
+  // expand-content's page-aware card variant is not one of PROJECTORS' action
+  // types — no separate generator or gate of its own, just an alternate
+  // template marker-merge.js picks for a specific page (design-profile.js's
+  // pageUsesCardSections) — so it's derived and verified here as a targeted
+  // extra step rather than folded into the loop above. Verified against the
+  // ACTUAL card-heavy page it will render on, not this site's one default
+  // pageUrl: matching /projects/'s own card markup is the entire point of a
+  // page-aware variant, and sitePageUrl's default page is very often not it.
+  const cardPage = (repaired.pages || []).find((p) => p?.url && pageUsesCardSections(repaired, p.url));
+  if (cardPage) {
+    const cardTemplate = projectExpandContentCard(repaired);
+    if (cardTemplate) {
+      const cardResult = await verifyTemplateAgainstLiveSite('expand-content', cardTemplate, { pageUrl: cardPage.url, expectsLiveExample: false })
+        .catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
+      if (cardResult.ok) {
+        verified.expandContentCard = cardResult.stamped;
+        console.log(`  ✓ expandContentCard (verified against ${cardPage.url})`);
+      } else {
+        console.log(`  ✗ expandContentCard — ${cardResult.reason}${cardResult.error ? `: ${cardResult.error}` : ''}`);
+      }
     }
   }
 

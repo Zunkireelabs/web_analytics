@@ -1,10 +1,15 @@
 import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
-import { callLLMForJson } from '../llm.js';
-import { groundingProviderConfigured, searchGroundedSources } from '../ingest/search-grounding-providers/index.js';
-import { safeMessage } from '../lib/errors.js';
 import { getSiteById } from '../store/read.js';
-import { hasAuthorProfile, authorByline, organizationByline } from './lib/author-profile.js';
+import { callLLMForJson } from '../llm.js';
+import { groundingProviderConfigured, searchGroundedSources, queryTokens } from '../ingest/search-grounding-providers/index.js';
+import { safeMessage } from '../lib/errors.js';
 import { filterCompetitorCandidates } from '../agents/lib/competitor-policy.js';
+import { attributionNote } from '../agents/lib/zunkireelabs-growth-policy.js';
+import { checkExpandContentStructuralFit } from './lib/expand-content-structural-fit.js';
+import { tenantContextTextFor } from '../lib/tenant-context.js';
+import { loadExpandStructurePrior } from '../design-agent/lib/expand-structure-loader.js';
+import { structurePlanText } from '../design-agent/lib/expand-structure-spec.js';
+import { classifyPageType } from '../design-agent/live-analysis/schema.js';
 
 // Real citation search is opt-in, separate from TAVILY_API_KEY simply being
 // set — citation search would silently start spending Tavily's quota the
@@ -25,8 +30,8 @@ const CITATION_FETCH_COUNT = 8;
 export const meta = {
   id: 'expand-content',
   name: 'Content Expansion Generator',
-  description: 'Drafts additional body sections for an existing page, grounded in its real content. Supports focused expansions for GEO signals: author-byline, freshness-date, comparison-content, external-citations.',
-  recommendationTags: ['author-byline', 'freshness-date', 'comparison-content', 'external-citations'],
+  description: 'Drafts additional body sections for an existing page, grounded in its real content. Supports focused expansions for GEO signals: comparison-content, external-citations. (author-byline and freshness-date are both retired — see the schema generator instead.)',
+  recommendationTags: ['comparison-content', 'external-citations'],
 };
 
 const SYSTEM_GENERAL = 'You are a content strategist. Given a page\'s real body text and (if available) its target query, draft ' +
@@ -59,11 +64,18 @@ const SYSTEM_GENERAL = 'You are a content strategist. Given a page\'s real body 
 // renderComparisonTable can build the table with the site's OWN styling
 // (or a plain zero-CSS default), the same way every other structured
 // content type here already works — never trusting model-authored markup.
+// The example keys below are deliberately generic ("this_option"/
+// "alternative") — an earlier version used a real brand name ("zunkiree_
+// labs") as the example key, and the model copied that literal key/value
+// verbatim into a live client page as a real table column header (PR #32,
+// admizz-web-dev, 2026-09-15), instead of treating it as a placeholder shape
+// to fill with THIS page's own real comparison. Never put any brand name —
+// this platform's own or a client's — in a few-shot example key/value here.
 const SYSTEM_COMPARISON = 'You are a content strategist. Given a page\'s real body text and target query, draft a comparison/alternatives section. ' +
   'Write 1-2 grounded lead-in sentences for "body", and — only if there are at least 2 real, meaningfully different points of comparison grounded ' +
   'in the page text — also include a "table" field: an array of plain objects, one per comparison row, every object using the exact same keys in the ' +
-  'same order (e.g. [{"feature": "...", "zunkiree_labs": "...", "alternative": "..."}, ...]). Every table VALUE must be a short plain string, never markdown or HTML. ' +
-  'Do NOT invent specific competitor names or features not in the page text — use placeholders with guidance, and omit "table" entirely rather than fabricate rows. ' +
+  'same order (e.g. [{"feature": "...", "this_option": "...", "alternative": "..."}, ...]). Every table VALUE must be a short plain string, never markdown or HTML. ' +
+  'Do NOT invent specific competitor names, brand names, or features not in the page text — use placeholders with guidance, and omit "table" entirely rather than fabricate rows. ' +
   'Respond with ONLY a JSON array: [{"heading": "...", "body": "...", "table": [...]}, ...] ("table" may be omitted per item)';
 
 // Caps and validates the optional structured "table" field SYSTEM_COMPARISON
@@ -96,16 +108,85 @@ export function sanitizeTable(table) {
   return rows.length >= 2 ? rows : undefined; // a "table" of one row isn't a comparison
 }
 
+// Safety net for SYSTEM_CITATIONS_GROUNDED's "exactly one section" instruction:
+// the model can still return one section per source instead of one section
+// covering all of them (this shipped to zunkireelabs' /about/ as three
+// separate, visually-repeated "References" <h2> headings stacked down the
+// page — a 2026-09-17 incident). Collapsing same-focus sections here means a
+// prompt slip never reaches a live page, regardless of the model's
+// compliance that run.
+export function mergeCitationSections(sections) {
+  if (sections.length <= 1) return sections;
+  return [{
+    heading: sections[0].heading,
+    body: sections.map((s) => s.body).join('\n'),
+    table: sections.find((s) => s.table)?.table,
+  }];
+}
+
 // Used when real search results are available for the external-citations focus
 // (see CITATION_SEARCH_ENABLED below) — grounded in an actual candidate list
 // the same way generators/internal-links.js grounds anchor suggestions in
 // real on-site URLs, so the model is citing real pages, not inventing them.
 const SYSTEM_CITATIONS_GROUNDED = 'You are a content strategist. Given a page\'s real body text and a list of REAL, already-verified ' +
-  'source candidates (title + URL) provided below, draft an external citations/references section. ' +
+  'source candidates (title + URL) provided below, draft ONE SINGLE external citations/references section covering ' +
+  'ALL of them — never one section per source. ' +
   'Cite ONLY sources from that candidate list, using markdown links in the exact form [Source Title](URL) with the ' +
   'exact URL given — NEVER invent a URL and NEVER cite anything not in the list. If none of the candidates are ' +
   'actually relevant to the page topic, write the section without a link rather than forcing an irrelevant citation. ' +
-  'Respond with ONLY a JSON array: [{"heading": "...", "body": "..."}, ...]';
+  'Respond with ONLY a JSON array containing EXACTLY ONE object, its "body" a markdown bullet list ("- " per line) ' +
+  'with one bullet per cited source: [{"heading": "References", "body": "- [Source Title](URL): one-sentence note\\n- ..."}]';
+
+// Default path for external-citations: the references list is assembled
+// directly from the verified search results — no model call. The model's only
+// job on this path was to turn a list it was told to copy ("cite ONLY from
+// this list, exact URLs") into bullets, and 29 pages of that is 29 paid calls
+// for formatting. Relevance and trust are decided by rules instead: a result
+// must share a meaningful word with the page's query/title, and is ranked
+// ahead when it comes from an institutional or reference domain. Set
+// CITATION_SECTION_MODE=llm to restore the written-notes version.
+const CITATION_SECTION_MODE = process.env.CITATION_SECTION_MODE || 'deterministic';
+const MIN_SOURCE_SCORE = 0.4;
+// Company-directory / traffic-estimate / lead-database pages rank for almost
+// any "X companies" query and are never a source worth citing (confirmed in a
+// live sample: a RocketReach "competitors of <some training company>" page
+// matched an "IT companies in Nepal" query on the words "IT" and "Nepal").
+const LOW_VALUE_HOST_RE = /(^|\.)(rocketreach\.co|zoominfo\.com|similarweb\.com|owler\.com|craft\.co|apollo\.io|lusha\.com|cbinsights\.com|growjo\.com|tracxn\.com|pinterest\.[a-z.]+|quora\.com|reddit\.com)$/i;
+const TRUSTED_HOST_RE = /(\.gov(\.[a-z]{2})?|\.edu(\.[a-z]{2})?|\.ac\.[a-z]{2}|\.org|wikipedia\.org|nature\.com|mckinsey\.com|gartner\.com|forrester\.com|oecd\.int|worldbank\.org)$/i;
+
+export function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
+}
+
+// A source is relevant when it shares at least one meaningful word with the
+// page topic (query + title) in its own title or excerpt, and — when the
+// provider supplies a relevance score — clears a floor. Both are conservative:
+// dropping a good source costs one fewer bullet, keeping a bad one is a wrong
+// citation on a live page.
+export function isRelevantSource(source, topicTokens) {
+  if (typeof source.score === 'number' && source.score < MIN_SOURCE_SCORE) return false;
+  if (LOW_VALUE_HOST_RE.test(hostOf(source.url))) return false;
+  const hay = queryTokens(`${source.title || ''} ${source.content || ''}`);
+  // At least two topic words (or all of them for a one/two-word topic), so a
+  // result matching only a generic word like "IT" or the country name is out.
+  let hits = 0;
+  for (const t of topicTokens) if (hay.has(t)) hits++;
+  return hits >= Math.min(2, topicTokens.size) && hits > 0;
+}
+
+export function buildReferencesSections(sources, topicTokens, count = CITATION_COUNT) {
+  const seenHosts = new Set();
+  const picked = (sources || [])
+    .filter((s) => s?.title && s?.url && /^https?:\/\//i.test(s.url) && isRelevantSource(s, topicTokens))
+    .map((s) => ({ s, trusted: TRUSTED_HOST_RE.test(hostOf(s.url)) }))
+    .sort((a, b) => Number(b.trusted) - Number(a.trusted))
+    .map((x) => x.s)
+    .filter((s) => { const h = hostOf(s.url); if (seenHosts.has(h)) return false; seenHosts.add(h); return true; })
+    .slice(0, count);
+  if (!picked.length) return [];
+  const bullet = (s) => `- [${String(s.title).replace(/[\[\]\n]/g, ' ').replace(/\s+/g, ' ').trim()}](${s.url}) — ${hostOf(s.url)}`;
+  return [{ heading: 'References', body: picked.map(bullet).join('\n') }];
+}
 
 const FOCUS_SYSTEMS = {
   'comparison-content': SYSTEM_COMPARISON,
@@ -116,71 +197,106 @@ export async function generate({ siteId, params }) {
   const { page, query, focus } = params || {};
   if (!page) throw Object.assign(new Error('page is required'), { status: 400, userFacing: true });
 
+  // Retired platform-wide (2026-09-24, explicit owner decision): an
+  // "About the Author" section — whether a real configured individual
+  // (authorByline) or the organization-name fallback (organizationByline)
+  // — is no longer drafted for ANY site, regardless of require_visible_byline.
+  // Previously the organization fallback bypassed require_visible_byline
+  // entirely (see git history), so a site whose own policy said "no visible
+  // byline" (require_visible_byline: false — the column's default, true for
+  // every site that hasn't explicitly opted in) still got an unwanted
+  // "About the Author: By the [Site Name] Team" section on every
+  // expand-content run. Author EEAT signals still ship via schema.js's
+  // Article-type author markup (Person or Organization) — this only retires
+  // the VISIBLE section, same as before for a site with
+  // require_visible_byline off. Checked before the page fetch below (unlike
+  // every other focus): this refusal needs no page content at all, so there
+  // is nothing to gain from fetching first.
+  if (focus === 'author-byline') {
+    throw Object.assign(
+      new Error('Visible "About the Author" sections are retired platform-wide — author EEAT signals are handled by schema markup (schema.js) instead. Refusing to draft a visible byline section.'),
+      { status: 400, userFacing: true },
+    );
+  }
+
   const fetched = await analyzePageUrl(page);
   if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400, userFacing: true });
   requireGroundedContent(fetched.analysis, { generatorId: meta.id });
 
-  // EEAT — a site with a real configured author (sites.author_name,
-  // migration 090) never needs the LLM to draft a "[Author Name]"
-  // placeholder byline: the real name is already known, so this is a
-  // deterministic transform, not a generation. Only drafted when the site's
-  // own policy actually wants a VISIBLE byline (require_visible_byline) —
-  // a site that wants author EEAT via schema only (schema.js already
-  // handles that for Article-like types) gets a clear refusal instead of an
-  // unwanted visible section, same "fail honestly instead of drafting
-  // filler" principle external-citations already uses below.
-  if (focus === 'author-byline') {
-    const site = await getSiteById(siteId);
-    if (hasAuthorProfile(site)) {
-      if (!site.require_visible_byline) {
-        throw Object.assign(
-          new Error('This site\'s author profile is configured for schema-only attribution (require_visible_byline is off) — refusing to add an unwanted visible byline section. Schema author markup is already handled by the schema generator.'),
-          { status: 400, userFacing: true },
-        );
-      }
-      const byline = authorByline(site);
-      const content = { page, sections: [{ heading: 'About the Author', body: byline }], focus };
-      return { content, summary: `Author byline for ${page}: "${byline}"` };
-    }
-    // No individual author configured: fall back to the site's own real
-    // organization name (organizationByline — schema.org's `author` accepts
-    // an Organization as validly as a Person), not an LLM call. This used
-    // to ask the LLM to write "By [Author Name], [Role]" — a fake persona
-    // on a real business's page, which is worse for EEAT than no byline,
-    // not better — and content-scaffolding-guard.js's author-placeholder
-    // pattern exists specifically to reject exactly that bracket text, so
-    // this focus failed the Quality Gate on EVERY attempt, for EVERY site
-    // with no individual author configured — a guaranteed, permanent
-    // failure surfaced as a generic "try again shortly" error, not the
-    // flaky case that message implies. A site can still configure a real
-    // named individual (Settings) later to get authorByline() above
-    // instead; this is fully automatic in the meantime, zero manual step.
-    const byline = organizationByline(site);
-    const content = { page, sections: [{ heading: 'About the Author', body: byline }], focus };
-    return { content, summary: `Author byline for ${page}: "${byline}"` };
-  }
-
   if (focus === 'freshness-date') {
-    // The section body IS the published page copy (see renderExpandedHtml
-    // in marker-merge.js) — it must read as a real sentence a visitor would
-    // see, not implementer instructions to whoever applies this draft. This
-    // used to append "Add a visible <time> element... set datePublished/
-    // dateModified..." as if that were prose; it shipped verbatim to a live
-    // page (careers.njk, PR #50) instead of being read as a to-do.
-    const today = new Date().toISOString().slice(0, 10);
-    const content = {
-      page,
-      sections: [{
-        heading: 'Last Updated',
-        body: `This page was last updated on ${today}.`,
-      }],
-      focus,
-    };
-    return { content, summary: `Freshness-date section for ${page}: dateModified ${today}` };
+    // RETIRED 2026-09-20. This used to draft a VISIBLE "Last Updated"
+    // heading + sentence as its own on-page EXPANDEDCONTENT section.
+    // Confirmed live on site 8864 (chayceproperties.com, 2026-09-20): that
+    // section shipped as an unclassed, unstyled <h1> on 6+ pages — exactly
+    // the "flat, bolted-on generated content" failure CLAUDE.md's design-
+    // preservation rule exists to prevent, on top of being a block nobody
+    // asked to see on the page. The same real, honest freshness fact
+    // (today's date) still reaches AI engines/Google via the 'schema'
+    // generator's datePublished/dateModified JSON-LD (see geo-signals.js's
+    // freshness-date rule, now routed there) — invisible structured data,
+    // never visible prose. This focus refuses outright rather than drafting
+    // anything, so no caller (manual UI, MCP tool, or an unattended chain)
+    // can ever produce a visible "Last Updated" block again.
+    throw Object.assign(
+      new Error('The "freshness-date" focus is retired — it used to draft a VISIBLE "Last Updated" section, which broke design on ' +
+        'live sites. Use the "schema" generator instead (datePublished/dateModified JSON-LD, invisible structured data).'),
+      { status: 400, userFacing: true },
+    );
   }
 
+  // Structural pre-check BEFORE any LLM call — see expand-content-structural
+  // -fit.js's header for the real incident this closes (116 abandoned drafts
+  // on one site alone, each paying for a generation that could never be
+  // inserted). Placed after the author-byline/freshness-date branches
+  // above, which either need no repo access at all (freshness-date) or
+  // already do their own site fetch (author-byline) — this only runs on the
+  // path that actually needs to write free-form prose into the page. A null
+  // result means the check itself couldn't run (no repo, no file mapping,
+  // fetch failed) — proceeds unchanged, same as findRealFaqDataSource's
+  // contract, so this never blocks a site this check simply cannot reach.
+  const siteForStructuralCheck = await getSiteById(siteId);
+  const structuralFit = await checkExpandContentStructuralFit(siteForStructuralCheck, page);
+  if (structuralFit && !structuralFit.ok) {
+    throw Object.assign(new Error(structuralFit.detail), { status: 400, userFacing: true });
+  }
+
+  let structurePrior = null;
   let system = focus && FOCUS_SYSTEMS[focus] ? FOCUS_SYSTEMS[focus] : SYSTEM_GENERAL;
   let user = `Query: ${query || ''}\nPage title: ${fetched.analysis.title}\nPage text: ${fetched.analysis.bodyText.slice(0, 3000)}`;
+
+  // Same 2026-09-11 Zunkireelabs growth policy blog-outline.js's fresh posts
+  // already carry (zunkireelabs-growth-policy.js) — a soft, contextual-only
+  // instruction, never forced, applied here too so an expand-content section
+  // on an EXISTING page can naturally mention Zunkireelabs when the page's
+  // own topic genuinely touches web dev/SEO/AI/CRM/etc. Skipped for
+  // external-citations below, which overwrites `system` entirely with a
+  // grounded-sources-only prompt that must not carry any other instruction.
+  if (focus !== 'external-citations') {
+    const site = await getSiteById(siteId);
+    system += attributionNote(site);
+    // Expanded prose is written INTO an existing page, so the page's own text
+    // is the primary grounding and stays first in `user`. The verified facts
+    // are appended as a secondary source for the case the page excerpt is
+    // thin — a product page that lists feature names with no explanation is
+    // exactly where expansion is requested and exactly where the model has
+    // least to work from. Deliberately not applied to external-citations,
+    // whose prompt is replaced wholesale below and must carry no other
+    // instruction.
+    const tenantContext = await tenantContextTextFor(site, { sections: ['product'] });
+    if (tenantContext) user += `\n\n${tenantContext}`;
+
+    // Opt-in structure reference, expand-content ONLY (the loader asserts
+    // that). Adds a section plan — how many sections, in what role order, no
+    // table where the site draws none — to the prompt. Facts, wording,
+    // citations and any table payload are untouched, and for a tenant that has
+    // not opted in this is a no-op. The tenant's own page evidence wins per
+    // field inside the prior.
+    structurePrior = await loadExpandStructurePrior(site, {
+      actionType: 'expand-content', pageType: classifyPageType(page, { propertyType: site?.property_type }),
+    });
+    const plan = structurePlanText(structurePrior);
+    if (plan) user += `\n\n${plan}`;
+  }
 
   // external-citations has no ungrounded mode: a citation is either backed
   // by a real, verified URL, or it doesn't get drafted at all — writing
@@ -188,6 +304,7 @@ export async function generate({ siteId, params }) {
   // behavior) isn't a safe placeholder like schema.js's [NEEDS INPUT]
   // marker, it's indistinguishable published body text, and it shipped
   // straight to a live page. Fail honestly instead of drafting filler.
+  let sourcesForSection = [];
   if (focus === 'external-citations') {
     if (!CITATION_SEARCH_ENABLED || !groundingProviderConfigured()) {
       throw Object.assign(new Error('External citations require real search grounding (ENABLE_CONTENT_CITATION_SEARCH + TAVILY_API_KEY) — refusing to draft an ungrounded citations section.'), { status: 400, userFacing: true, refusal: true, reason: 'citation-grounding-not-configured' });
@@ -203,11 +320,17 @@ export async function generate({ siteId, params }) {
       // decide not to cite. Government/research/documentation/publication
       // sources are untouched; only a host matching this site's own active
       // competitor_profiles is removed. See agents/lib/competitor-policy.js.
-      const { allowed, removed } = await filterCompetitorCandidates(rawSources, siteId);
+      // The site's own pages are never a citation: a "source" that is the
+      // page itself (confirmed in a live sample) or a sibling page is an
+      // internal link, not external authority, and defeats the signal.
+      const ownHost = hostOf(siteForStructuralCheck?.website_domain ? (/^https?:/.test(siteForStructuralCheck.website_domain) ? siteForStructuralCheck.website_domain : `https://${siteForStructuralCheck.website_domain}`) : page);
+      const external = rawSources.filter((s) => { const h = hostOf(s.url); return h && ownHost && h !== ownHost && !h.endsWith(`.${ownHost}`); });
+      const { allowed, removed } = await filterCompetitorCandidates(external, siteId);
       if (removed.length) {
         console.warn(`[expand-content] filtered ${removed.length} competitor source(s) from citation candidates for site ${siteId}: ${removed.map((s) => s.url).join(', ')}`);
       }
       sources = allowed.slice(0, CITATION_COUNT);
+      sourcesForSection = allowed; // the no-LLM path filters for relevance itself, so it needs the wider competitor-free list
     } catch (err) {
       // Honest failure, not a system fault: Tavily being unavailable/out of
       // quota is an external-dependency state, not a bug in this code, so
@@ -239,17 +362,37 @@ export async function generate({ siteId, params }) {
   }
 
   let sections;
-  try {
+  if (focus === 'external-citations' && CITATION_SECTION_MODE !== 'llm') {
+    // No model call: see buildReferencesSections. An empty result (nothing
+    // relevant survived) falls through to the same honest refusal below.
+    const topic = queryTokens(`${query || ''} ${fetched.analysis.title || ''}`);
+    sections = buildReferencesSections(sourcesForSection, topic);
+    if (!sections.length) {
+      throw Object.assign(new Error('None of the real search results was relevant enough to cite for this page — refusing to draft a references section.'), { status: 400, userFacing: true, refusal: true, reason: 'citation-grounding-no-relevant-sources' });
+    }
+  } else try {
     sections = await callLLMForJson(system, user, {
-      maxTokens: 900, generatorId: meta.id, siteId, validate: Array.isArray,
+      maxTokens: 1200, generatorId: meta.id, siteId, validate: Array.isArray,
     });
   } catch {
     throw Object.assign(new Error('Content expansion failed: model did not return valid JSON'), { status: 400, userFacing: true });
   }
   sections = sections
     .filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string')
-    .slice(0, 4)
+    // 4 is the long-standing cap; a tenant's own structure can only tighten it.
+    .slice(0, Math.min(4, structurePrior?.sectionCount?.max ?? 4))
     .map((s) => ({ ...s, table: sanitizeTable(s.table) }));
+
+  if (focus === 'external-citations') sections = mergeCitationSections(sections);
+
+  if (!sections.length) {
+    // The empty-section quality-gate check only inspects sections that
+    // exist — an empty array has none to flag, so `clean: true` would
+    // otherwise let a zero-section draft persist and sit stuck forever.
+    // Refuse here instead, same as the no-sources case above, so the
+    // generator's normal retry/reject loop handles it.
+    throw Object.assign(new Error('Content expansion produced no usable sections — the model returned an empty result or nothing matched the expected shape.'), { status: 400, userFacing: true, refusal: true, reason: 'expand-content-empty-sections' });
+  }
 
   const content = { page, sections, focus: focus || 'general' };
   const focusLabel = focus ? ` (${focus})` : '';

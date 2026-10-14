@@ -5,11 +5,17 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 
 let appIsConfigured = true;
 let mintedFor = [];
+let appConfiguredCalls = [];
+let mintedWithCredentials = [];
 
 mock.module(resolve('./app-auth.js'), {
   namedExports: {
-    appConfigured: () => appIsConfigured,
-    getInstallationToken: async (id) => { mintedFor.push(id); return `ghs_for_${id}`; },
+    appConfigured: (credentials) => { appConfiguredCalls.push(credentials); return appIsConfigured; },
+    getInstallationToken: async (id, opts) => {
+      mintedFor.push(id);
+      mintedWithCredentials.push(opts?.credentials ?? null);
+      return `ghs_for_${id}`;
+    },
   },
 });
 
@@ -26,6 +32,8 @@ function setEnv(vars) {
 beforeEach(() => {
   appIsConfigured = true;
   mintedFor = [];
+  appConfiguredCalls = [];
+  mintedWithCredentials = [];
   setEnv({
     GITHUB_PAT: 'pat_shared_default',
     TENANT_B_PAT: 'pat_tenant_b',
@@ -40,6 +48,12 @@ afterEach(() => {
 const patSite = { id: 1, github_pat_env_var: 'GITHUB_PAT' };
 const perTenantPatSite = { id: 2, github_pat_env_var: 'TENANT_B_PAT' };
 const appSite = { id: 3, github_app_installation_id: 777 };
+const ownAppSite = {
+  id: 4,
+  github_app_installation_id: 888,
+  github_app_id: 999,
+  github_app_private_key_env_var: 'GITHUB_APP_PRIVATE_KEY_B64_TENANT_C',
+};
 
 describe('githubTokenEnvVar', () => {
   test('is per-site, defaulting to GITHUB_PAT rather than hardcoding it', () => {
@@ -93,6 +107,41 @@ describe('resolveGithubToken — GitHub App path', () => {
     assert.equal(usesGithubApp({ github_app_installation_id: 0 }), true);
     assert.equal(usesGithubApp({ github_app_installation_id: null }), false);
     assert.equal(usesGithubApp({}), false);
+  });
+});
+
+describe('resolveGithubToken — per-client App path (migration 154)', () => {
+  test('a site with its own App id passes its own credentials through, not the shared default', async () => {
+    setEnv({ GITHUB_APP_PRIVATE_KEY_B64_TENANT_C: 'a2V5LW1hdGVyaWFs' });
+
+    const token = await resolveGithubToken(ownAppSite);
+
+    assert.equal(token, 'ghs_for_888');
+    assert.deepEqual(appConfiguredCalls, [{ appId: 999, privateKeyB64: 'a2V5LW1hdGVyaWFs' }]);
+    assert.deepEqual(mintedWithCredentials, [{ appId: 999, privateKeyB64: 'a2V5LW1hdGVyaWFs' }]);
+  });
+
+  test('a site with no github_app_id passes null credentials — uses the shared default App', async () => {
+    await resolveGithubToken(appSite);
+    assert.deepEqual(appConfiguredCalls, [null]);
+    assert.deepEqual(mintedWithCredentials, [null]);
+  });
+
+  // The whole point: a site that declared its own App must never sign with
+  // the shared default App's key against its own (different) App id — that
+  // fails confusingly at GitHub instead of here. So a missing key env var
+  // must NOT fall back to using the global default key with this site's id.
+  test('a site with its own App id but a missing key env var reports unconfigured, never mixes in the default key', async () => {
+    setEnv({ GITHUB_APP_PRIVATE_KEY_B64_TENANT_C: null, GITHUB_APP_PRIVATE_KEY_B64: 'ZGVmYXVsdC1rZXk=' });
+    // appConfigured is mocked in this file, so drive it the way the real one
+    // (app-auth.test.js) actually behaves for a null privateKeyB64: unconfigured.
+    appIsConfigured = false;
+
+    const token = await resolveGithubToken(ownAppSite);
+
+    assert.deepEqual(appConfiguredCalls, [{ appId: 999, privateKeyB64: null }]);
+    assert.equal(token, null, 'must return null rather than mint with someone else\'s key');
+    assert.deepEqual(mintedFor, [], 'must never even attempt to mint with mismatched credentials');
   });
 });
 

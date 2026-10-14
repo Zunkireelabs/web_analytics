@@ -2,7 +2,8 @@ import { getRepoTree, getFileContent } from '../github/client.js';
 import { detectTechnology } from './detect-technology.js';
 import { discoverPageStructure } from './discover-page-structure.js';
 import { discoverRoutes } from './discover-routes.js';
-import { recordFinding, summarize } from '../store/site-understanding.js';
+import { discoverFilesystemRoutes } from './filesystem-routes.js';
+import { recordFinding, summarize as summarizeSite } from '../store/site-understanding.js';
 import { autoConfigure } from './auto-configure.js';
 // Reused, never reimplemented (§3/§4): structural-detect.js already performs
 // semantic container detection, and design-profile.js already defines and
@@ -60,11 +61,21 @@ export async function runDiscovery(site, {
   fetchTree = getRepoTree,
   fetchFile = getFileContent,
   persist = recordFinding,
+  // Injectable so a caller (or a test) never needs the real DB-backed
+  // implementation — same reasoning as every other dependency here.
+  summarize = summarizeSite,
   // Synchronous (path) -> string|null reader over a checked-out copy of the
-  // repo. Optional: without it, discovery still runs but route and insertion
-  // detection are skipped rather than guessed, since both require real file
-  // content and neither may be inferred from paths alone.
+  // repo. Optional: filesystem-router route detection (Next.js/Astro, see
+  // filesystem-routes.js) never needs this — the directory structure alone
+  // is real routing evidence for those frameworks. Without it, only the
+  // front-matter/directory-data route detection (Eleventy-style) and the
+  // insertion-point sampling are skipped, rather than guessed, since both
+  // genuinely need real file content.
   readFile = null,
+  // Injectable so a caller/test can observe or fake the actual DB write
+  // autoConfigure performs — passed straight through, same default as that
+  // module's own signature.
+  saveConfig,
 } = {}) {
   if (!site?.repo_owner || !site?.repo_name) {
     // Not a failure of discovery — there is simply nothing to inspect yet.
@@ -80,6 +91,39 @@ export async function runDiscovery(site, {
 
   const tech = detectTechnology({ files, packageJsonRaw: pkgRaw });
   const structure = discoverPageStructure({ files, templateLanguages: tech.templateLanguages });
+
+  // Auto-provision `readFile` when the caller didn't supply one, so a plain
+  // `runDiscovery(site)` call (connect-repo.js, the assistant capability)
+  // gets real route/insertion-point detection for free instead of silently
+  // degrading — this exact gap (nothing ever passed `readFile` in practice)
+  // is why discovery never actually derived routes for any onboarded site.
+  // Bounded like every other bulk-fetch in this codebase (see
+  // audit-url-file-map.js's own PAGE_LIMIT) so a huge repo can't turn one
+  // onboarding call into thousands of API requests.
+  const READFILE_PREFETCH_CAP = 400;
+  let effectiveReadFile = readFile;
+  if (!effectiveReadFile) {
+    const candidates = new Set();
+    // Insertion-point sampling (below) reads exactly one file per page type,
+    // capped at 8 — matches that loop's own `.slice(0, 8)`.
+    for (const pt of structure.pageTypes.slice(0, 8)) if (pt.files[0]) candidates.add(pt.files[0]);
+    // Filesystem-router frameworks (Next.js/Astro) never need file content
+    // for route discovery at all (see filesystem-routes.js) — only the
+    // front-matter/directory-data path below (Eleventy/Jekyll/Hugo-style)
+    // needs every page-content file, plus each directory's own `<dir>/<dir>.json`
+    // defaults file (indexDirectoryDefaults reads those specifically).
+    if (!['nextjs', 'astro'].includes(tech.framework?.id)) {
+      for (const pt of structure.pageTypes) for (const f of pt.files) candidates.add(f);
+      for (const ds of structure.dataSources) if (ds.path.endsWith('.json')) candidates.add(ds.path);
+    }
+    const capped = [...candidates].slice(0, READFILE_PREFETCH_CAP);
+    const contentMap = new Map();
+    await Promise.all(capped.map(async (f) => {
+      try { const file = await fetchFile(site, f, branch); contentMap.set(f, file ? file.content : null); }
+      catch { contentMap.set(f, null); }
+    }));
+    effectiveReadFile = (p) => (contentMap.has(p) ? contentMap.get(p) : null);
+  }
 
   const findings = [];
   const record = async (row) => {
@@ -161,13 +205,60 @@ export async function runDiscovery(site, {
   }
 
   // ---- routes -----------------------------------------------------------
-  // Only page-bearing files are worth reading; `readFile` is supplied by the
-  // caller so a checked-out tarball can back this with one API call instead
-  // of one per file.
+  // Two independent evidence sources, both real, neither a guess:
+  //   - filesystem-routes.js needs no file CONTENT at all for Next.js App
+  //     Router / Pages Router / Astro — their directory structure IS the
+  //     routing table (see that module's own comment for why this differs
+  //     from the Eleventy case below), so it always runs, `readFile` or not.
+  //   - discoverRoutes (front-matter/directory-data permalinks) is the
+  //     Eleventy/Jekyll/Hugo-style case, where the routing convention is
+  //     configurable build config the repo tree alone cannot prove — this
+  //     genuinely needs each candidate file's own content, so it only runs
+  //     when the caller can supply `readFile`.
+  // A repo only ever matches one of the two (gated by framework id inside
+  // filesystem-routes.js), so there is no double-counting to reconcile.
   const pageFiles = structure.pageTypes.flatMap((pt) => pt.files);
-  const routeResult = readFile
-    ? discoverRoutes({ files, pageFiles, readFile })
+  const fsRoutes = discoverFilesystemRoutes({ frameworkId: tech.framework?.id, files });
+  const legacyRoutes = effectiveReadFile
+    ? discoverRoutes({ files, pageFiles, readFile: effectiveReadFile })
     : { routes: [], families: [], unresolved: [] };
+  const routeResult = {
+    routes: [...fsRoutes.staticRoutes, ...legacyRoutes.routes],
+    families: [...fsRoutes.families, ...legacyRoutes.families],
+    unresolved: [...fsRoutes.unresolved, ...legacyRoutes.unresolved],
+  };
+
+  // Exact, single-URL static routes (one page.tsx = one page, no dynamic
+  // segment) — batched into one finding per framework's evidence, so 100
+  // static App Router pages record as one auditable unit instead of 100.
+  //
+  // Recorded (and so auto-configured into `pages{}`) BEFORE the dynamic
+  // `patterns[]` families below — not just cosmetic ordering. Next.js/Astro
+  // both let a static segment and a dynamic catch-all coexist in the same
+  // directory (`app/about/page.tsx` next to `app/[slug]/page.tsx`), and the
+  // FRAMEWORK gives the static one priority at request time. If the
+  // `[slug]` pattern were written first, this finding's own "already
+  // resolvable, skip" check (below) would see /about already resolving
+  // (via the wrong catch-all) and never write its real, correct entry —
+  // real incident, site #8862: 64 of 74 static routes were silently
+  // shadowed this way on the first run. Writing exact entries first side-
+  // steps it entirely: resolveFile always checks `pages{}` before
+  // `patterns[]`, so even if this were skipped, real static content stays
+  // correctly resolvable — but staying correct is not the same as staying
+  // WRITTEN, and only the config that actually gets written here is later
+  // auditable/inspectable per-page.
+  if (fsRoutes.staticRoutes.length) {
+    await record({
+      category: 'static-routes',
+      subject: `filesystem-routes:${tech.framework?.id || 'unknown'}`,
+      finding: { routes: fsRoutes.staticRoutes.map(({ route, file }) => ({ route, file })) },
+      evidence: fsRoutes.staticRoutes.map(({ file, evidence }) => ({ kind: 'filesystem-route', detail: evidence, source: file })),
+      confidence: 0.97,
+      // Each entry is one page, one exact URL — the same low blast radius
+      // resolveFile already treats one `patterns[]` entry as.
+      risk: 'low',
+    });
+  }
 
   for (const family of routeResult.families) {
     await record({
@@ -175,7 +266,7 @@ export async function runDiscovery(site, {
       subject: family.directory,
       finding: {
         directory: family.directory, routePattern: family.routePattern,
-        count: family.count, sampleRoutes: family.sampleRoutes,
+        count: family.count ?? null, sampleRoutes: family.sampleRoutes,
         // The shared template every route in this family renders through is
         // the natural `patterns[].file` target.
         templateFile: family.templateFile || null,
@@ -191,10 +282,10 @@ export async function runDiscovery(site, {
   // answers a question about the TEMPLATE's shape, which files in a family
   // share. Sampling keeps onboarding to a handful of reads while still
   // resting on real file content rather than convention.
-  if (readFile) {
+  if (effectiveReadFile) {
     for (const pt of structure.pageTypes.slice(0, 8)) {
       const sample = pt.files[0];
-      const content = readFile(sample);
+      const content = effectiveReadFile(sample);
       if (!content) continue;
       let detected = null;
       try { detected = detectInsertionPoint(content, sample); } catch { detected = null; }
@@ -259,7 +350,7 @@ export async function runDiscovery(site, {
   // Runs last, over findings the autonomy policy already cleared, and only
   // writes what it can then read back through the real resolvers.
   const projectable = findings.filter((f) => f.decision.autoConfigure);
-  const configured = await autoConfigure(site, projectable);
+  const configured = await autoConfigure(site, projectable, saveConfig !== undefined ? { saveConfig } : {});
 
   const summary = await summarize(site.id);
   return {

@@ -1,9 +1,12 @@
-import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget, resolveMissingPageTarget } from './lib/url-file-map.js';
+import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget, resolveMissingPageTarget, slugifyTitle } from './lib/url-file-map.js';
 import { deriveNewContentContract, deriveContractFromSourceFile } from './lib/newcontent-contract.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
-import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
-import { siteHasUsableDesignProfile, checkDesignIntegrityGate } from './lib/design-drift.js';
+import { renderLandingPageBody, renderBlogOutlineBody, renderBlogOutlineBodyTsx, renderTranslationBody, renderTranslationBodyTsx, renderDirectAnswerBody, renderDirectAnswerBodyTsx, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
+import { buildGradientCover } from '../generators/lib/gradient-cover.js';
+import { siteHasUsableDesignProfile, checkDesignIntegrityGate, getDesignProfile } from './lib/design-drift.js';
+import { runDesignGates } from './lib/design-gates.js';
+import { findRootArrayBounds, spliceMarkedArray, assertValidContent } from './adapters/lib/js-data-splice.js';
 
 export const meta = {
   id: 'frontend',
@@ -76,14 +79,16 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     // `layout: base.njk` on a directory whose pages declare none (or declare a
     // different one) drops the new page out of its template exactly the way it
     // did on zunkireelabs.com's blog. resolveNewContentLayout stays as the
-    // fallback for a directory with no readable siblings. No fieldNames: this
-    // renderer emits nothing but layout/permalink/title/description, none of
-    // which is aliased per site.
+    // fallback for a directory with no readable siblings. fieldNames is also
+    // threaded through now (renderLandingPageBody only ever WRITES an image
+    // field when fieldNames.featuredImage came from real sibling evidence —
+    // see its own comment — so a directory with no image convention still
+    // gets exactly today's behavior).
     const contract = await deriveNewContentContract(site, {
       ...resolveNewContentTargetConfig(site, 'landing-page'),
     }, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'landing-page') : contract.layout;
-    return { ok: true, filePath, body: renderLandingPageBody(content, site, { permalink, layout }), contentFormat: 'markdown' };
+    return { ok: true, filePath, body: renderLandingPageBody(content, site, { permalink, layout, fieldNames: contract.fieldNames }), contentFormat: 'markdown' };
   }
 
   if (actionType === 'blog-outline') {
@@ -93,19 +98,40 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["blog-outline"] configured — add e.g. {"dir":"src/blog","extension":".md"} via `npm run connect-repo` before this can be applied.' };
     }
     const permalink = resolveNewContentUrl(site, 'blog-outline', title);
+
+    // A `filename` on the target config (url-file-map.js's
+    // resolveNewContentTarget) means this site routes by directory — a
+    // Next.js App Router page, not a flat Eleventy-style file — so the real
+    // page component is JSX, never Markdown+front-matter, which would be
+    // invalid TypeScript in a .tsx file and fail the client's build outright.
+    const targetConfig = resolveNewContentTargetConfig(site, 'blog-outline');
+    if (targetConfig.filename) {
+      return {
+        ok: true,
+        filePath,
+        body: renderBlogOutlineBodyTsx(content, site, { canonicalUrl: permalink }),
+        contentFormat: 'jsx',
+      };
+    }
+
     // Siblings first: the posts already in this directory are the authority on
     // whether a post declares its own layout and what it calls its hero image.
     // resolveNewContentLayout stays as the fallback for a directory with no
     // readable siblings. See newcontent-contract.js for why.
-    const contract = await deriveNewContentContract(site, {
-      ...resolveNewContentTargetConfig(site, 'blog-outline'),
-    }, repoDeps);
+    const contract = await deriveNewContentContract(site, targetConfig, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'blog-outline') : contract.layout;
+    // Opt-in generated gradient cover: an SVG committed next to the post in the
+    // same atomic commit, referenced from its front matter. A site that did not
+    // opt in gets null here and keeps whatever image the generator found. A
+    // draft that already carries an image (an Insights post's Pexels photo under
+    // `featuredImage: 'insights-only'`) keeps it: the cover is for posts without one.
+    const cover = content.featuredImage ? null : buildGradientCover(site, { slug: filePath.split('/').pop().replace(/\.[^.]+$/, '') });
     return {
       ok: true,
       filePath,
-      body: renderBlogOutlineBody(content, site, { permalink, layout, fieldNames: contract.fieldNames }),
+      body: renderBlogOutlineBody(cover ? { ...content, featuredImage: cover.featuredImage } : content, site, { permalink, layout, fieldNames: contract.fieldNames }),
       contentFormat: 'markdown',
+      ...(cover ? { extraFiles: [cover.file] } : {}),
     };
   }
 
@@ -150,14 +176,28 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["direct-answer"] configured — add e.g. {"dir":"src/answers","extension":".md"} via `npm run connect-repo` before this can be applied.' };
     }
     const permalink = resolveNewContentUrl(site, 'direct-answer', title);
+
+    // Same directory-per-page signal as blog-outline: a `filename` on the
+    // target config means this site routes by directory (Next.js App
+    // Router), so the real page must be JSX, not Markdown+front-matter.
+    const directAnswerTargetConfig = resolveNewContentTargetConfig(site, 'direct-answer');
+    if (directAnswerTargetConfig.filename) {
+      return {
+        ok: true,
+        filePath,
+        body: renderDirectAnswerBodyTsx(content, site, { canonicalUrl: permalink }),
+        contentFormat: 'jsx',
+      };
+    }
+
     // Same sibling-derived contract as blog-outline: on this platform's own
     // first client both types write into the very same src/blog directory, so
     // a layout that is wrong for one is wrong for the other.
     const contract = await deriveNewContentContract(site, {
-      ...resolveNewContentTargetConfig(site, 'direct-answer'),
+      ...directAnswerTargetConfig,
     }, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'direct-answer') : contract.layout;
-    return { ok: true, filePath, body: renderDirectAnswerBody(content, site, { permalink, layout }), contentFormat: 'markdown' };
+    return { ok: true, filePath, body: renderDirectAnswerBody(content, site, { permalink, layout, fieldNames: contract.fieldNames }), contentFormat: 'markdown' };
   }
 
   // No permalink for a translation: its target is a language-suffixed sibling
@@ -171,6 +211,18 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
       return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches the source page "${content.page || '(none)'}" — add one via \`npm run connect-repo\` before this can be applied.` };
     }
     const filePath = resolveTranslationTarget(sourcePath, content.targetLanguage);
+
+    // Same directory-per-page signal as blog-outline/direct-answer above.
+    const translationTargetConfig = resolveNewContentTargetConfig(site, 'translation');
+    if (translationTargetConfig.filename) {
+      return {
+        ok: true,
+        filePath,
+        body: renderTranslationBodyTsx(content, site),
+        contentFormat: 'jsx',
+      };
+    }
+
     // No permalink (see above), but a translated page is still a brand-new
     // file that needs the site's real chrome around it — and unlike every
     // other type here, this one already knows the exact file it must look
@@ -228,6 +280,52 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No merge strategy for action type "${actionType}".` };
 }
 
+// Appends this new post's listing metadata to the site's own "generated
+// posts" manifest — url_file_map.newContentTargets['blog-outline'].manifestFile
+// (e.g. Admizz's src/data/generated-posts.json) — in the SAME commit as the
+// post file itself, so a post can never be created successfully without
+// also being discoverable by the blog listing page (which does a plain
+// static import of this file — no runtime fs scan, no dynamic import,
+// deterministic on Vercel). Reuses the same tested "managed flat-array"
+// splice (spliceMarkedArray/findRootArrayBounds) data-array-content.js's
+// flat-array shape already uses for FAQ items, keyed by `slug` instead of
+// question/answer, tagged `_aiManaged` so re-applying never disturbs a
+// hand-authored manifest entry.
+//
+// Only sites that configured a manifestFile get this second write — every
+// other tenant's blog-outline (markdown/Eleventy) keeps today's
+// single-file behavior unchanged, since their static-site generator
+// discovers new pages by directory/collection, not a manifest.
+//
+// Returns null (nothing to do) when unconfigured, or {ok:false,...} on a
+// genuine failure — callers must treat a failure here as fatal to the whole
+// apply, never push the post file without its manifest entry landing in the
+// same commit.
+export async function computeGeneratedPostsManifestUpdate(site, entry, fetchFile, beforeRef) {
+  const manifestPath = site.url_file_map?.newContentTargets?.['blog-outline']?.manifestFile;
+  if (!manifestPath) return null;
+
+  const file = await fetchFile(site, manifestPath, beforeRef);
+  const content = file ? file.content : '[]';
+  const arrayRange = findRootArrayBounds(content, 'json-array');
+  if (!arrayRange) {
+    return { ok: false, reason: 'invalid-edit', error: `${manifestPath} does not contain a valid top-level JSON array — refusing to guess its shape.` };
+  }
+  const interior = content.slice(arrayRange.start, arrayRange.end);
+  let existing;
+  try { existing = interior.trim() ? JSON.parse(`[${interior}]`) : []; } catch {
+    return { ok: false, reason: 'invalid-edit', error: `${manifestPath} is not valid JSON — refusing to guess its shape.` };
+  }
+  const aiManaged = existing.filter((it) => it && it._aiManaged);
+  const nextSet = [...aiManaged.filter((it) => it.slug !== entry.slug), entry];
+  const newContent = spliceMarkedArray(content, arrayRange, nextSet, 'json-array');
+  const check = assertValidContent(newContent, 'json-array');
+  if (!check.ok) {
+    return { ok: false, reason: 'invalid-edit', error: `Auto-generated edit would break ${manifestPath}'s syntax (${check.error}) — refused to apply.` };
+  }
+  return { ok: true, filePath: manifestPath, newContent };
+}
+
 // Pushes a real branch (forked from the site's default branch) with the
 // real new-file content — not merged yet (see mergeToStage below). Staff
 // reviews the real diff (Draft Preview panel, unchanged — same
@@ -249,9 +347,29 @@ export async function apply(site, draft) {
   // profile (which would mean re-deriving wrapInSiteProse's own branching
   // here and risking the two drifting apart) — a confirmed role-mismatch
   // quarantines this one draft, never the whole site's other pages.
+  // Design gates (completeness, then a real render comparison): fail closed
+  // in 'enforce', record-and-ship in 'log', absent in 'off'. See
+  // lib/design-gates.js for the policy and design_gate_decisions (186) for the
+  // log-only evidence that decides when it is safe to enforce.
+  const designGate = await runDesignGates(site, draft, resolved, {
+    // Tier B of the page-role resolver: what the target directory's own
+    // human-written posts declare. Cached per directory by the contract module.
+    deriveContract: async (s, actionType) => {
+      const cfg = resolveNewContentTargetConfig(s, actionType);
+      return cfg.dir ? deriveNewContentContract(s, cfg) : null;
+    },
+  });
+  if (!designGate.ok) return designGate;
+
   if (siteHasUsableDesignProfile(site)) {
     const gate = await checkDesignIntegrityGate(site, { actionType: draft.action_type, findingId: draft.finding_id });
     if (!gate.ok) {
+      // Kept for this tenant so the same mismatch is recognised next time.
+      await (await import('../store/design-knowledge.js')).recordDesignFailure(site.id, {
+        patternId: 'design-integrity-failed', generatorId: draft.action_type,
+        detail: gate.error || `${gate.field} uses classes this site only ever uses for its ${gate.observedAs}.`,
+        draftId: draft.id ?? null, validation: { passed: false, gate: 'integrity' },
+      }).catch(() => {});
       return {
         ok: false, reason: 'design-integrity-failed',
         error: gate.error || `${gate.field} uses classes this site only ever uses for its ${gate.observedAs}.`,
@@ -261,10 +379,39 @@ export async function apply(site, draft) {
 
   const batchInfo = await getOrInitBatchBranch(site);
   if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
-  return pushDraftBranch(site, draft, [{
+
+  const files = [{
     path: resolved.filePath, content: resolved.body,
     contentFormat: resolved.contentFormat, actionType: draft.action_type,
-  }], batchInfo);
+  }];
+  for (const f of resolved.extraFiles || []) files.push({ ...f, actionType: draft.action_type });
+
+  // blog-outline + filename-mode (App Router directory-per-post) is the
+  // only combination with a manifest to update — see
+  // computeGeneratedPostsManifestUpdate's own comment.
+  if (draft.action_type === 'blog-outline' && resolved.contentFormat === 'jsx') {
+    const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
+    const title = draft.content?.title || draft.content?.topic || 'Untitled';
+    const manifestUpdate = await computeGeneratedPostsManifestUpdate(site, {
+      slug: slugifyTitle(title),
+      title,
+      excerpt: draft.content?.metaDescription || null,
+      imageUrl: draft.content?.featuredImage?.url || null,
+      imageAlt: draft.content?.featuredImage?.alt || null,
+      categories: Array.isArray(draft.content?.categories) ? draft.content.categories : [],
+      publishedAt: new Date().toISOString(),
+      href: resolveNewContentUrl(site, 'blog-outline', title),
+    }, getFileContent, beforeRef);
+    if (manifestUpdate) {
+      // Fatal to the whole apply — never push the post file without its
+      // manifest entry landing in the same commit (see the atomic-workflow
+      // requirement in this function's own doc comment above).
+      if (!manifestUpdate.ok) return manifestUpdate;
+      files.push({ path: manifestUpdate.filePath, content: manifestUpdate.newContent, actionType: draft.action_type });
+    }
+  }
+
+  return pushDraftBranch(site, draft, files, batchInfo);
 }
 
 // branch_pushed -> PR opened into the site's default branch (human merges

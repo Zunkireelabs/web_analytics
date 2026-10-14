@@ -2,6 +2,9 @@ import { getAgent } from './registry.js';
 import { saveAgentRun } from '../store/agent-runs.js';
 import { emitAgentStart, emitAgentDone } from './lib/activity-bus.js';
 import { safeMessage } from '../lib/errors.js';
+import { getSiteById } from '../store/read.js';
+import { hasRequiredCapabilities } from '../lib/site-capabilities.js';
+import { runAsDryRun } from './lib/dry-run-context.js';
 
 // The one place that invokes an agent, times it, and persists the result —
 // agents themselves never touch agent_runs. Set persist:false for in-process
@@ -14,7 +17,7 @@ import { safeMessage } from '../lib/errors.js';
 // the nightly cron, or the orchestrator's fan-out, passes through here, so
 // this is the one spot that can honestly say "an agent actually started/
 // finished" for the orchestration page's live diagram.
-export async function runAgent(id, input, { persist = true } = {}) {
+export async function runAgent(id, input, { persist = true, dryRun = false } = {}) {
   const agent = await getAgent(id);
   if (!agent) {
     const err = new Error(`Unknown agent "${id}"`);
@@ -22,11 +25,37 @@ export async function runAgent(id, input, { persist = true } = {}) {
     throw err;
   }
 
+  // Capability gate: an agent whose meta.requiresCapabilities aren't met by
+  // this site is not scheduled at all — never run-then-insufficient-data
+  // (see the Universal Product Growth mode plan). No agent_runs row is
+  // written and no activity event fires, so a capability-ineligible agent
+  // stays silent rather than noisy in the Command Center.
+  if (agent.meta.requiresCapabilities?.length) {
+    const site = await getSiteById(input.siteId);
+    if (!hasRequiredCapabilities(site, agent.meta.requiresCapabilities)) {
+      return {
+        status: 'skipped',
+        facts: null,
+        narrative: null,
+        message: `Skipped — this site doesn't have: ${agent.meta.requiresCapabilities.join(', ')}`,
+        generatedAt: new Date().toISOString(),
+        tookMs: 0,
+      };
+    }
+  }
+
   const startedAt = Date.now();
   emitAgentStart(input.siteId, agent.meta.id);
   let output;
   try {
-    output = await agent.run(input);
+    // `dryRun` (NOT `persist`) is what makes a run side-effect free: persist:false
+    // only skips the agent_runs row and is used by real runs too (bulk-audit
+    // chunks, the on-demand re-check). The agent sees it as an input flag, and
+    // shared store helpers see it through the dry-run context. `input` itself
+    // stays untouched so the stored run input is exactly what the caller asked for.
+    output = dryRun
+      ? await runAsDryRun(() => agent.run({ ...input, dryRun: true }))
+      : await agent.run(input);
   } catch (err) {
     const tookMs = Date.now() - startedAt;
     emitAgentDone(input.siteId, agent.meta.id, { status: 'error', tookMs });

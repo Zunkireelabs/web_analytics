@@ -15,7 +15,8 @@ import {
   Users,
   HeartPulse,
   LineChart,
-  ChevronDown
+  ChevronDown,
+  Target,
 } from 'lucide-react';
 
 const PURPLE = '#6C63FF';
@@ -36,6 +37,12 @@ const GROWTH_TOOLS_NAV = [
   { to: '/action-center', label: 'Action Center', icon: Zap },
   { to: '/ai-orchestration', label: 'Orchestration', icon: Network },
 ];
+
+// Universal Product Growth mode's one new nav entry (see ClientOnboarding.jsx's
+// PROPERTY_TYPES) — shown only when the current site's own property_type is
+// 'product', never for a 'website' site. Generic across any product tenant,
+// not specific to whichever product is first onboarded with it.
+const DEMAND_NAV_ITEM = { to: '/demand', label: 'Demand', icon: Target };
 
 // Staff-only pages — operate across every client's site, not just the
 // session's own. Both routes' entire API surface is requirePlatformRole
@@ -62,7 +69,7 @@ const PLATFORM_ADMIN_NAV = [
 // lands on a page whose own sidebar entry is hidden behind a collapsed
 // section.
 const NAV_SECTIONS = [
-  { id: 'growth', links: GROWTH_TOOLS_NAV },
+  { id: 'growth', links: [...GROWTH_TOOLS_NAV, DEMAND_NAV_ITEM] },
   { id: 'internal', links: INTERNAL_NAV },
   { id: 'platform', links: PLATFORM_ADMIN_NAV },
 ];
@@ -88,6 +95,14 @@ export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, on
   const loc = useLocation();
   const isActive = (to) => loc.pathname === to;
   const [collapsed, setCollapsed] = useState(loadCollapsedSections);
+
+  // property_type is the third nav-filter dimension alongside isPlatformAdmin/
+  // isInternal above (Universal Product Growth mode) — sites is server-scoped
+  // to the session's own site, so this is always that site, not a staff pick.
+  const currentSite = sites?.find((s) => s.id === siteId) || sites?.[0] || null;
+  const growthToolsNav = currentSite?.property_type === 'product'
+    ? [...GROWTH_TOOLS_NAV, DEMAND_NAV_ITEM]
+    : GROWTH_TOOLS_NAV;
 
   const toggleSection = (id) => {
     setCollapsed((prev) => {
@@ -177,7 +192,7 @@ export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, on
             {NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
 
             <SidebarSection id="growth" label="Growth Tools" tint="text-[#6C63FF] hover:text-[#6C63FF]/80"
-              links={GROWTH_TOOLS_NAV} isActive={isActive} open={!collapsed.growth} onToggle={toggleSection} />
+              links={growthToolsNav} isActive={isActive} open={!collapsed.growth} onToggle={toggleSection} />
 
             {isPlatformAdmin && (
               <SidebarSection id="internal" label="Internal Console" tint="text-[#6C63FF] hover:text-[#6C63FF]/80"

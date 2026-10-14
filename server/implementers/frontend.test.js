@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveTargetAndBody, FRONTEND_ACTION_TYPES, COMPLIANCE_ACTION_TYPES } from './frontend.js';
+import { apply, resolveTargetAndBody, FRONTEND_ACTION_TYPES, COMPLIANCE_ACTION_TYPES, computeGeneratedPostsManifestUpdate } from './frontend.js';
 
 describe('resolveTargetAndBody — generation-time-prepared fast path', () => {
   test('a draft with rendered_body/target_file_path already set is returned verbatim, no recomputation', async () => {
@@ -150,6 +150,115 @@ describe('resolveTargetAndBody — layout comes from the repo, not from config',
   });
 });
 
+describe('computeGeneratedPostsManifestUpdate — blog-outline generated-posts manifest', () => {
+  const site = { url_file_map: { newContentTargets: { 'blog-outline': { manifestFile: 'src/data/generated-posts.json' } } } };
+  const entry = { slug: 'my-new-post', title: 'My New Post', excerpt: 'x', imageUrl: null, imageAlt: null, publishedAt: '2026-09-15T00:00:00.000Z', href: '/blogs/my-new-post' };
+
+  test('unconfigured site (no manifestFile) -> null, nothing to do', async () => {
+    const result = await computeGeneratedPostsManifestUpdate({ url_file_map: {} }, entry, async () => null, 'main');
+    assert.equal(result, null);
+  });
+
+  test('manifest file does not exist yet -> creates it with just this entry', async () => {
+    const result = await computeGeneratedPostsManifestUpdate(site, entry, async () => null, 'main');
+    assert.equal(result.ok, true);
+    assert.equal(result.filePath, 'src/data/generated-posts.json');
+    const parsed = JSON.parse(result.newContent);
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0].slug, 'my-new-post');
+    assert.equal(parsed[0]._aiManaged, true);
+  });
+
+  test('appends to an existing manifest, hand-authored entries preserved untouched', async () => {
+    const existing = JSON.stringify([
+      { slug: 'hand-authored-post', title: 'Hand Authored' },
+      { slug: 'older-generated-post', title: 'Older', _aiManaged: true },
+    ]);
+    const result = await computeGeneratedPostsManifestUpdate(site, entry, async () => ({ content: existing }), 'main');
+    assert.equal(result.ok, true);
+    const parsed = JSON.parse(result.newContent);
+    assert.equal(parsed.length, 3);
+    assert.ok(parsed.some((p) => p.slug === 'hand-authored-post' && !p._aiManaged));
+    assert.ok(parsed.some((p) => p.slug === 'older-generated-post'));
+    assert.ok(parsed.some((p) => p.slug === 'my-new-post'));
+  });
+
+  test('re-applying the SAME post (same slug) updates in place rather than duplicating', async () => {
+    const existing = JSON.stringify([{ ...entry, title: 'Stale Title', _aiManaged: true }]);
+    const result = await computeGeneratedPostsManifestUpdate(site, entry, async () => ({ content: existing }), 'main');
+    assert.equal(result.ok, true);
+    const parsed = JSON.parse(result.newContent);
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0].title, 'My New Post');
+  });
+
+  test('malformed existing manifest -> honest invalid-edit, never guesses', async () => {
+    const result = await computeGeneratedPostsManifestUpdate(site, entry, async () => ({ content: '{ not an array' }), 'main');
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'invalid-edit');
+  });
+
+  test('a fresh parse of the written content succeeds — the write is valid JSON', async () => {
+    const first = await computeGeneratedPostsManifestUpdate(site, entry, async () => null, 'main');
+    const second = await computeGeneratedPostsManifestUpdate(
+      site, { ...entry, slug: 'second-post', title: 'Second Post' },
+      async () => ({ content: first.newContent }), 'main',
+    );
+    assert.equal(second.ok, true);
+    assert.equal(JSON.parse(second.newContent).length, 2);
+  });
+});
+
+// A Next.js App Router site (Admizz's shape): `filename` on a newContentTargets
+// entry means "route by directory," same signal blog-outline already forks on.
+const APP_ROUTER_SITE = {
+  id: 2,
+  repo_owner: 'Zunkireelabs',
+  repo_name: 'admizz-web-dev',
+  repo_default_branch: 'main',
+  url_file_map: {
+    pages: { '/about': { file: 'src/app/about/page.tsx' } },
+    newContentTargets: {
+      'direct-answer': { dir: 'src/app/answers', extension: '.tsx', filename: 'page.tsx', urlPattern: '/answers/{slug}' },
+      translation: { dir: 'src/app', extension: '.tsx', filename: 'page.tsx' },
+    },
+  },
+};
+
+describe('resolveTargetAndBody — direct-answer/translation fork to the TSX (App Router) renderer', () => {
+  test('direct-answer with `filename` configured returns JSX, importing GeneratedDirectAnswer', async () => {
+    const draft = {
+      action_type: 'direct-answer',
+      content: { query: 'What GPA do I need to study in Canada?', directAnswer: 'A minimum GPA of 2.5 for most colleges.' },
+    };
+    const result = await resolveTargetAndBody(APP_ROUTER_SITE, draft);
+    assert.equal(result.ok, true);
+    assert.equal(result.contentFormat, 'jsx');
+    assert.match(result.body, /import GeneratedDirectAnswer from "@\/components\/GeneratedDirectAnswer";/);
+    assert.match(result.body, /alternates: \{ canonical: "\/answers\/what-gpa-do-i-need-to-study-in-canada" \}/);
+  });
+
+  test('direct-answer with no `filename` configured still returns markdown, unaffected', async () => {
+    const site = { url_file_map: { newContentTargets: { 'direct-answer': { dir: 'src/answers', extension: '.md' } } } };
+    const draft = { action_type: 'direct-answer', content: { query: 'What GPA?', directAnswer: 'A minimum GPA of 2.5.' } };
+    const result = await resolveTargetAndBody(site, draft);
+    assert.equal(result.ok, true);
+    assert.equal(result.contentFormat, 'markdown');
+  });
+
+  test('translation with `filename` configured returns JSX, importing GeneratedTranslation, no canonical', async () => {
+    const draft = {
+      action_type: 'translation',
+      content: { page: 'https://example.com/about', targetLanguage: 'French', translatedTitle: 'À propos', translatedContent: 'Bonjour' },
+    };
+    const result = await resolveTargetAndBody(APP_ROUTER_SITE, draft, repoDeps({ 'src/app/about/page.tsx': 'export default function Page() { return null; }' }));
+    assert.equal(result.ok, true);
+    assert.equal(result.contentFormat, 'jsx');
+    assert.match(result.body, /import GeneratedTranslation from "@\/components\/GeneratedTranslation";/);
+    assert.doesNotMatch(result.body, /alternates:/);
+  });
+});
+
 describe('FRONTEND_ACTION_TYPES / COMPLIANCE_ACTION_TYPES', () => {
   test('FRONTEND_ACTION_TYPES matches meta.handles exactly', async () => {
     const { meta } = await import('./frontend.js');
@@ -158,5 +267,35 @@ describe('FRONTEND_ACTION_TYPES / COMPLIANCE_ACTION_TYPES', () => {
 
   test('every compliance action type is also a frontend action type', () => {
     for (const t of COMPLIANCE_ACTION_TYPES) assert.ok(FRONTEND_ACTION_TYPES.has(t), `${t} should be in FRONTEND_ACTION_TYPES`);
+  });
+});
+
+describe('apply — design completeness gate (DESIGN_GATE_FAIL_CLOSED)', () => {
+  // The prepared-body fast path means apply() reaches the gate without any
+  // repo access, so a refusal here is provably BEFORE anything is pushed.
+  const draft = {
+    action_type: 'blog-outline', finding_id: 'f',
+    rendered_body: '---\ntitle: "x"\n---\nbody', target_file_path: 'src/blog/x.md', content: { title: 'x' },
+  };
+  const withFlag = async (fn) => {
+    process.env.DESIGN_GATE_FAIL_CLOSED = 'true';
+    try { return await fn(); } finally { delete process.env.DESIGN_GATE_FAIL_CLOSED; }
+  };
+
+  test('a site with no design profile at all is held, not shipped unguarded', async () => {
+    // Today the integrity gate is skipped entirely when there is no usable
+    // profile, so this case had no guard at all.
+    const r = await withFlag(() => apply({ url_file_map: {} }, draft));
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'design-incomplete');
+    assert.match(r.error, /no-design-profile/);
+    assert.equal(r.designAssessment.repairable, true);
+  });
+
+  test('a profile that lacks what the draft renders is held with the exact missing field', async () => {
+    const site = { url_file_map: { siteRoot: { designProfile: { version: 2, typography: { body: 'b' } } } } };
+    const r = await withFlag(() => apply(site, draft));
+    assert.equal(r.reason, 'design-incomplete');
+    assert.match(r.error, /typography\.heading\.item/);
   });
 });

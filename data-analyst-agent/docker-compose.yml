@@ -6,12 +6,9 @@ services:
       dockerfile: Dockerfile
     networks:
       - hosting
-      - default
     restart: unless-stopped
     env_file:
       - .env
-    depends_on:
-      - db
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 30s
@@ -32,20 +29,10 @@ services:
       - "traefik.http.middlewares.data-analyst-agent-prod-redirect.redirectscheme.scheme=https"
       - "traefik.http.services.data-analyst-agent-prod.loadbalancer.server.port=8000"
 
-  # This service's OWN Postgres — entirely separate from the existing
-  # Node app's Neon database. This service never connects to Neon.
-  db:
-    container_name: data-analyst-agent-db-prod
-    image: postgres:16-alpine
-    networks:
-      - default
-    restart: unless-stopped
-    environment:
-      - POSTGRES_DB=data_analyst_agent
-      - POSTGRES_USER=data_analyst_agent
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-    volumes:
-      - db_data:/var/lib/postgresql/data
+  # No dedicated Postgres here — prod connects to the same database as
+  # staging (STAGING_DATA_ANALYST_DATABASE_URL, set in the deploy workflow's
+  # .env write), Sadin's explicit call on 2026-10-14. See deploy.yml's
+  # comment on this service's env block for the reasoning.
 
   # Nightly pipeline — ingestion AND the analysis pass (stats, anomalies,
   # forecasts, insights, recommendations) both run in-process now, scheduled
@@ -69,9 +56,6 @@ services:
   # itself (see scripts/run_nightly_pipeline.py):
   #   0 6 * * 1 docker compose -f /path/to/docker-compose.yml exec -T app python -m scripts.run_weekly_briefing
   #   0 6 1 * * docker compose -f /path/to/docker-compose.yml exec -T app python -m scripts.run_monthly_briefing
-
-volumes:
-  db_data:
 
 networks:
   hosting:

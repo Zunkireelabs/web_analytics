@@ -1,6 +1,6 @@
 import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
-import { ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
+import { ownDomains, filterOwnDomainPages, hostnameOf } from '../agents/lib/site-domain.js';
 import { callLLMForJson } from '../llm.js';
 
 export const meta = {
@@ -19,9 +19,9 @@ function defaultRange() {
   return { start, end };
 }
 
-// params: { page: string, start?: string, end?: string }
+// params: { page: string, start?: string, end?: string, mustLinkTo?: string }
 export async function generate({ siteId, params }) {
-  const { page } = params;
+  const { page, mustLinkTo } = params;
   if (!page) throw Object.assign(new Error('page is required'), { status: 400 });
   const { start, end } = params.start && params.end ? params : defaultRange();
 
@@ -34,10 +34,26 @@ export async function generate({ siteId, params }) {
   requireGroundedContent(fetched.analysis, { generatorId: meta.id });
 
   const domain = ownDomains(site);
-  // Real candidate targets only — excludes the source page itself.
-  const candidates = filterOwnDomainPages(otherPagesRaw, domain)
-    .map((p) => p.dim_value)
-    .filter((url) => url !== page);
+
+  let candidates;
+  if (mustLinkTo) {
+    // Query-cannibalization resolution (query-intelligence.js's
+    // pickCannibalizationWinner): the target is already decided by real
+    // GSC-evidence scoring, not left for the model to pick — restricting the
+    // candidate list to exactly that one URL routes it through the SAME
+    // grounded-anchor-text/hallucination-safety pipeline as every other
+    // internal-links draft (no bespoke content-injection path), while making
+    // it structurally impossible for the model to link anywhere else.
+    if (domain && !domain.includes(hostnameOf(mustLinkTo))) {
+      throw Object.assign(new Error(`"${mustLinkTo}" is not on this site's own domain (${domain.join(', ')}) — refusing to link to a page we can't confirm is real.`), { status: 400 });
+    }
+    candidates = [mustLinkTo];
+  } else {
+    // Real candidate targets only — excludes the source page itself.
+    candidates = filterOwnDomainPages(otherPagesRaw, domain)
+      .map((p) => p.dim_value)
+      .filter((url) => url !== page);
+  }
   const candidateSet = new Set(candidates);
 
   if (!candidates.length) {

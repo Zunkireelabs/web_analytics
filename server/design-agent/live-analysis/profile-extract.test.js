@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { correctBodyTypography, bodySamples, correctHeadingTypography, headingSamplesByLevel, correctLinkTypography } from './profile-extract.js';
+import { correctBodyTypography, bodySamples, correctHeadingTypography, headingSamplesByLevel, headingPageSamplesByContext, correctLinkTypography, correctPageTypeTextHierarchy, correctSpacing } from './profile-extract.js';
 
 // The real classes and computed styles captured from zunkireelabs.com on
 // 2026-08-31. The eyebrow is the site's most consistent body-role paragraph —
@@ -165,6 +165,51 @@ describe('correctHeadingTypography', () => {
     assert.equal(correctHeadingTypography({}, noH3).heading.item, H2);
   });
 
+  test('an item heading is never left LARGER than the section heading above it', () => {
+    // admizzeducation.com's real defect: no h3 anywhere, so `item` fell back to
+    // the h2 pool — but the central pick for `item` landed on an oversized
+    // display h2 (50px) while `section` landed on the real section heading
+    // (42px). FAQ questions then shipped bigger than the section titles above
+    // them. Both values are this site's own real evidence; the rule only asks
+    // whether they agree with each other.
+    const DISPLAY_H2 = 'text-[28px] sm:text-[36px] md:text-[50px] font-bold leading-[1.15]';
+    const SECTION_H2 = 'text-3xl md:text-[42px] font-bold leading-tight';
+    const { heading, corrected } = correctHeadingTypography(
+      { section: SECTION_H2, item: DISPLAY_H2 }, new Map(),
+    );
+    assert.equal(heading.item, SECTION_H2, 'capped to the real section class, never an invented smaller one');
+    assert.ok(corrected.includes('item:capped-to-section'));
+  });
+
+  test('the cap works on SEMANTIC class names too, using real measured pixels not the class string', () => {
+    // chayceproperties.com's real shape: typography.heading uses semantic
+    // classes ('home-h2') with no parseable size in the name at all — the
+    // class-name-only reading (maxTextPx) sees null for both sides and can
+    // never fire on this site. The real captured samples carry the actual
+    // computed font-size regardless of naming convention, so this has to be
+    // what the hierarchy check reads for it to mean anything here: a card
+    // heading genuinely marked up as a literal <h3> but styled bigger (48px)
+    // than the real section heading (34px) — same shape as Admizz's defect,
+    // expressed in a naming convention maxTextPx can't parse at all.
+    const pages = [page([
+      h('h2', 'section-title', '34px'),
+      h('h3', 'card-title-oversized', '48px'),
+    ])];
+    const { heading, corrected } = correctHeadingTypography({}, headingSamplesByLevel(pages));
+    assert.equal(heading.item, 'section-title', 'capped to the real section class, which maxTextPx could never have picked either');
+    assert.ok(corrected.includes('item:capped-to-section'));
+  });
+
+  test('an item heading SMALLER than the section heading is left exactly as it is', () => {
+    const SECTION_H2 = 'text-3xl md:text-[42px] font-bold';
+    const ITEM_H3 = 'text-xl md:text-2xl font-semibold';
+    const { heading, corrected } = correctHeadingTypography(
+      { section: SECTION_H2, item: ITEM_H3 }, new Map(),
+    );
+    assert.equal(heading.item, ITEM_H3);
+    assert.deepEqual(corrected, []);
+  });
+
   test('an uppercase eyebrow marked up as an h2 is not a heading candidate', () => {
     const EYEBROW_H2 = 'text-sm uppercase tracking-widest text-gray-500 font-medium mb-4';
     const H2 = 'text-3xl md:text-4xl font-normal text-gray-900';
@@ -178,8 +223,42 @@ describe('correctHeadingTypography', () => {
   test('chrome headings are excluded, and no evidence leaves the pick alone', () => {
     const pages = [page([h('h2', 'footer-heading')], 'footer')];
     const { heading, corrected } = correctHeadingTypography({ section: 'kept', item: 'kept-too' }, headingSamplesByLevel(pages));
-    assert.deepEqual(heading, { section: 'kept', item: 'kept-too' });
+    assert.deepEqual(heading, { section: 'kept', item: 'kept-too', page: {} });
     assert.deepEqual(corrected, []);
+  });
+
+  // The real gap this whole feature closes: a site can legitimately run a
+  // bigger <h1> in its hero than on an interior page (this platform's first
+  // client does — 60px on landing-style templates, 48px elsewhere), and that
+  // is a real per-template decision, not drift. headingPageSamplesByContext
+  // splits real <h1> samples by whether their OWN section is a hero so both
+  // values get recorded, on any site, from that site's own real evidence.
+  test('hero and standard h1 samples are recorded separately, from real section.role evidence', () => {
+    const heroH1 = 'text-6xl font-black';
+    const standardH1 = 'text-4xl font-bold';
+    const pages = [
+      { sections: [{ role: 'hero', textHierarchy: [h('h1', heroH1, '60px')] }] },
+      { sections: [{ role: 'content', textHierarchy: [h('h1', standardH1, '48px')] }] },
+      { sections: [{ role: 'content', textHierarchy: [h('h1', standardH1, '48px')] }] },
+    ];
+    const byContext = headingPageSamplesByContext(pages);
+    assert.equal(byContext.hero.length, 1);
+    assert.equal(byContext.hero[0].classes, heroH1);
+    assert.equal(byContext.standard.length, 2);
+    assert.ok(byContext.standard.every((s) => s.classes === standardH1));
+
+    const { heading, corrected } = correctHeadingTypography({}, new Map(), byContext);
+    assert.equal(heading.page.hero, heroH1);
+    assert.equal(heading.page.standard, standardH1);
+    assert.deepEqual(corrected.sort(), ['page.hero', 'page.standard']);
+  });
+
+  test('an h1 with no hero-section evidence leaves heading.page.hero alone (no evidence is not a defect)', () => {
+    const pages = [page([h('h1', 'text-4xl font-bold', '48px')])];
+    const { heading, corrected } = correctHeadingTypography({}, new Map(), headingPageSamplesByContext(pages));
+    assert.equal(heading.page.hero, undefined);
+    assert.equal(heading.page.standard, 'text-4xl font-bold');
+    assert.deepEqual(corrected, ['page.standard']);
   });
 });
 
@@ -203,5 +282,116 @@ describe('correctLinkTypography', () => {
     const { link, corrected } = correctLinkTypography(TEXT_LINK, { button: { primary: BUTTON, secondary: TEXT_LINK } });
     assert.equal(link, TEXT_LINK);
     assert.equal(corrected, false);
+  });
+});
+
+// The real defect this closes: the model's pageTypePatterns summary regularly
+// returned a 'subheading' entry with only prose styleNotes and no classes (or
+// an unobserved one), so marker-merge.js's groundedInlineHeadingClass — the
+// only consumer of this field — could never find a real class to restyle a
+// stripped inline-page heading with, and shipped a bare unstyled <h2> on
+// every blog/article page an expand-content/faq section landed on.
+describe('correctPageTypeTextHierarchy', () => {
+  const REAL_SUBHEADING = 'text-xl font-semibold text-slate-800';
+  const subheadingItem = (classes) => ({ role: 'subheading', tag: 'h2', classes, style: { fontSize: '20px', textTransform: 'none', letterSpacing: 'normal' } });
+  const segPage = (pageType, items) => ({ pageType, sections: [{ role: 'content', textHierarchy: items }] });
+
+  test('an unobserved (hallucinated) subheading class is replaced with the real one for that page type', () => {
+    const patterns = {
+      'blog-article': { textHierarchy: [{ role: 'subheading', classes: 'text-4xl font-black', styleNotes: 'Bold section titles.' }] },
+    };
+    const segmentedPages = [
+      segPage('blog-article', [subheadingItem(REAL_SUBHEADING)]),
+      segPage('blog-article', [subheadingItem(REAL_SUBHEADING)]),
+    ];
+    const { pageTypePatterns, corrected } = correctPageTypeTextHierarchy(patterns, segmentedPages);
+    assert.equal(pageTypePatterns['blog-article'].textHierarchy[0].classes, REAL_SUBHEADING);
+    assert.deepEqual(corrected, ['blog-article']);
+  });
+
+  test('a genuinely observed subheading class is left alone', () => {
+    const patterns = {
+      'blog-article': { textHierarchy: [{ role: 'subheading', classes: REAL_SUBHEADING, styleNotes: 'ok' }] },
+    };
+    const segmentedPages = [segPage('blog-article', [subheadingItem(REAL_SUBHEADING)])];
+    const { pageTypePatterns, corrected } = correctPageTypeTextHierarchy(patterns, segmentedPages);
+    assert.equal(pageTypePatterns['blog-article'].textHierarchy[0].classes, REAL_SUBHEADING);
+    assert.deepEqual(corrected, []);
+  });
+
+  test('no real evidence for that page type leaves classes null — never invented', () => {
+    const patterns = {
+      'blog-article': { textHierarchy: [{ role: 'subheading', classes: 'text-4xl font-black', styleNotes: 'Bold section titles.' }] },
+    };
+    const { pageTypePatterns, corrected } = correctPageTypeTextHierarchy(patterns, []);
+    assert.equal(pageTypePatterns['blog-article'].textHierarchy[0].classes, null);
+    assert.deepEqual(corrected, []);
+  });
+
+  test('non-subheading roles (heading, body, link) are left untouched', () => {
+    const patterns = {
+      'blog-article': { textHierarchy: [{ role: 'heading', styleNotes: 'Direct.' }, { role: 'body', styleNotes: 'Dense.' }] },
+    };
+    const { pageTypePatterns, corrected } = correctPageTypeTextHierarchy(patterns, []);
+    assert.deepEqual(pageTypePatterns['blog-article'].textHierarchy, patterns['blog-article'].textHierarchy);
+    assert.deepEqual(corrected, []);
+  });
+});
+
+describe('correctSpacing', () => {
+  test('a fixed height stored as section spacing is dropped, not persisted as design knowledge', () => {
+    // admizzeducation.com's profile held spacing.section: 'h-[70px]' — its
+    // navbar height — which then composed into every projected component
+    // wrapper, including the <dl> holding six Q&A pairs.
+    assert.deepEqual(correctSpacing({ section: 'h-[70px]', itemGap: 'gap-2.5' }), { section: null, itemGap: 'gap-2.5' });
+  });
+
+  test('real spacing is untouched', () => {
+    const real = { section: 'py-16 md:py-24', itemGap: 'space-y-4' };
+    assert.deepEqual(correctSpacing(real), real);
+  });
+
+  test('a value carrying real spacing alongside a height is not a pure mistake and is kept', () => {
+    assert.deepEqual(correctSpacing({ section: 'h-[70px] py-8' }), { section: 'h-[70px] py-8' });
+  });
+
+  test('missing/empty spacing stays empty', () => {
+    assert.deepEqual(correctSpacing(null), {});
+    assert.deepEqual(correctSpacing({}), {});
+  });
+});
+
+describe('buildPromptPages keeps the extraction prompt under the model rate limit', () => {
+  const sec = (n, classes = `c${n}`) => ({
+    role: 'content', classes, alignment: 'left', width: 'full',
+    textHierarchy: [{ role: 'h2', tag: 'h2', classes: `t-${classes}`, style: 'x' }], components: [], spacing: {},
+  });
+  const page = (url, pageType, sections) => ({ url, pageType, title: url, sections });
+
+  test('drops sections repeated across pages (site chrome)', async () => {
+    const { buildPromptPages } = await import('./profile-extract.js');
+    const out = buildPromptPages([
+      page('/a', 'home', [sec(0, 'nav'), sec(1)]),
+      page('/b', 'blog', [sec(0, 'nav'), sec(2)]),
+    ]);
+    assert.equal(out.flatMap((p) => p.sections).filter((s) => s.classes === 'nav').length, 1);
+  });
+
+  test('every pageType appears before a second page of any type', async () => {
+    const { buildPromptPages } = await import('./profile-extract.js');
+    const out = buildPromptPages([
+      page('/1', 'blog', [sec(1)]), page('/2', 'blog', [sec(2)]), page('/3', 'home', [sec(3)]),
+    ], 700);
+    assert.deepEqual(out.slice(0, 2).map((p) => p.pageType).sort(), ['blog', 'home']);
+  });
+
+  test('output never exceeds the character budget', async () => {
+    const { buildPromptPages } = await import('./profile-extract.js');
+    const pages = Array.from({ length: 40 }, (_, i) => page(`/p${i}`, `t${i % 5}`, Array.from({ length: 30 }, (_, j) => sec(i * 100 + j))));
+    const out = buildPromptPages(pages, 6000);
+    assert.ok(out.length > 0);
+    assert.ok(JSON.stringify(out).length <= 6000 + 200 * out.length);
+    const { PROMPT_PAGES_CHAR_BUDGET } = await import('./profile-extract.js');
+    assert.ok(JSON.stringify(buildPromptPages(pages)).length <= PROMPT_PAGES_CHAR_BUDGET);
   });
 });

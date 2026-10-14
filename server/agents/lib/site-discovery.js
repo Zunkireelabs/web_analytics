@@ -1,6 +1,7 @@
 import * as cheerio from 'cheerio';
 import { fetchTextIfExists, isPrivateOrLocalHost, analyzePageUrl } from './page-content.js';
 import { listSitemaps } from '../../ingest/gsc-technical.js';
+import { ownDomains } from './site-domain.js';
 
 // Real site-wide page discovery — so ai-visibility/content-gap/technical-seo
 // aren't limited to only pages that already have GSC search traffic. Two
@@ -51,21 +52,27 @@ export function parseUrlsetXml(xmlText) {
 // having to re-fetch separately — fetchSitemapUrls/discoverFromSitemaps
 // below are thin projections of this, so every existing URL-only caller
 // (job.js, technical-seo.js, bulk-audit.js) is unaffected.
-async function fetchSitemapEntries(path, depth = 0) {
+//
+// `state` (optional) is set to { failed: true } whenever any sitemap or child
+// sitemap could not be read, so a caller that diffs against the result
+// (agents/sitemap.js) can tell "the sitemap is empty/partial because the
+// fetch failed" from "the sitemap really lacks these URLs". Every other
+// caller ignores it and gets the same [] fallback as before.
+async function fetchSitemapEntries(path, depth = 0, state = null) {
   let hostname;
-  try { hostname = new URL(path).hostname; } catch { return []; }
-  if (isPrivateOrLocalHost(hostname)) return [];
+  try { hostname = new URL(path).hostname; } catch { if (state) state.failed = true; return []; }
+  if (isPrivateOrLocalHost(hostname)) { if (state) state.failed = true; return []; }
 
   const fetched = await fetchTextIfExists(path);
-  if (!fetched.ok) return [];
+  if (!fetched.ok) { if (state) state.failed = true; return []; }
 
   const $ = cheerio.load(fetched.text, { xmlMode: true });
   const isIndex = $('sitemapindex').length > 0;
 
   if (isIndex) {
-    if (depth >= 1) return []; // one level of recursion only, hard stop
+    if (depth >= 1) { if (state) state.failed = true; return []; } // one level of recursion only, hard stop
     const childPaths = $('sitemapindex > sitemap > loc').map((_, el) => $(el).text().trim()).get().filter(Boolean);
-    const children = await Promise.all(childPaths.map((p) => fetchSitemapEntries(p, depth + 1)));
+    const children = await Promise.all(childPaths.map((p) => fetchSitemapEntries(p, depth + 1, state)));
     return children.flat();
   }
 
@@ -83,10 +90,21 @@ async function fetchSitemapUrls(path, depth = 0) {
 // against page_inventory and to preserve existing entries' metadata when
 // drafting an additive sitemap update.
 export async function discoverSitemapEntries(site) {
-  const sitemapResult = await listSitemaps(site);
-  if (!sitemapResult.ok || !sitemapResult.sitemaps.length) return [];
+  return (await discoverSitemapEntriesChecked(site)).entries;
+}
 
-  const perSitemap = await Promise.all(sitemapResult.sitemaps.map((s) => fetchSitemapEntries(s.path)));
+// Same data as discoverSitemapEntries plus whether the read was COMPLETE:
+// { ok, entries, reason }. ok is false when the sitemap list call failed,
+// no sitemap is registered, any (child) sitemap could not be fetched, or
+// nothing parsed — in all of those the entry list is empty or partial, and
+// diffing page_inventory against it would call every URL "missing".
+export async function discoverSitemapEntriesChecked(site) {
+  const sitemapResult = await listSitemaps(site);
+  if (!sitemapResult.ok) return { ok: false, entries: [], reason: 'sitemap list could not be read' };
+  if (!sitemapResult.sitemaps.length) return { ok: false, entries: [], reason: 'no sitemap registered' };
+
+  const state = { failed: false };
+  const perSitemap = await Promise.all(sitemapResult.sitemaps.map((s) => fetchSitemapEntries(s.path, 0, state)));
   const seen = new Set();
   const entries = [];
   for (const entry of perSitemap.flat()) {
@@ -94,7 +112,12 @@ export async function discoverSitemapEntries(site) {
     seen.add(entry.loc);
     entries.push(entry);
   }
-  return entries.slice(0, MAX_SITEMAP_URLS);
+  const capped = entries.slice(0, MAX_SITEMAP_URLS);
+  if (!capped.length) return { ok: false, entries: [], reason: 'sitemap fetched but contained no URLs' };
+  if (state.failed) return { ok: false, entries: capped, reason: 'one or more sitemap files could not be fetched' };
+  // A sitemap truncated at the cap is also partial.
+  if (entries.length > MAX_SITEMAP_URLS) return { ok: false, entries: capped, reason: 'sitemap larger than the read cap' };
+  return { ok: true, entries: capped, reason: null };
 }
 
 // Every real URL from every sitemap GSC knows about for this site, deduped,
@@ -187,9 +210,38 @@ export async function crawlSite(site, { maxPages = MAX_CRAWL_PAGES, maxDepth = M
   const robotsFetch = await fetchTextIfExists(`${origin}/robots.txt`);
   const robots = parseRobotsDisallowRules(robotsFetch.ok ? robotsFetch.text : '');
 
+  // `origin` (new URL(...).origin) never carries a trailing slash by
+  // definition — but every OTHER URL this crawl discovers comes from a real
+  // `<a href="...">` on the page, which this site (like most) writes WITH
+  // one for a directory-style path. Seeding the crawl with the bare origin
+  // meant the homepage was the one page_inventory entry recorded without a
+  // trailing slash, so it landed as its own separate row from "/" instead
+  // of the same page — confirmed live on Chayce Properties (2026-09-18):
+  // both "https://chayceproperties.com" and ".../" in page_inventory for
+  // the same homepage.
+  const rootUrl = `${origin}/`;
+
+  // page-content.js's internalLinks is "same host as the page it was found
+  // ON", not "same host as this site's real origin" — correct for that
+  // function's own callers, but wrong to trust blindly here: if the frontier
+  // ever follows ONE link to a different hostname (a staging/dev subdomain
+  // accidentally referenced somewhere), analyzePageUrl treats THAT page's
+  // own outbound links as "internal" too, and the crawl silently wanders
+  // into — and starts generating real Action Center recommendations for —
+  // an entire subdomain that was never this site's real, public surface.
+  // Confirmed live on site 1: dev-web.zunkireelabs.com (the site's own
+  // staging environment) got crawled and audited as if it were production.
+  // Restricting every frontier push to a hostname this site actually claims
+  // as its own — ownDomains(site) when configured (a legitimate product
+  // subdomain, e.g. a booking engine on its own hostname, still gets
+  // followed), falling back to just the origin's own hostname otherwise —
+  // is the single choke point that keeps the crawl inside the site's real,
+  // intended surface regardless of what an arbitrary page happens to link to.
+  const allowedHosts = new Set(ownDomains(site) || [new URL(origin).hostname]);
+
   const discovered = new Set();
-  const visited = new Set([origin]);
-  let frontier = [{ url: origin, depth: 0 }];
+  const visited = new Set([rootUrl]);
+  let frontier = [{ url: rootUrl, depth: 0 }];
 
   while (frontier.length && discovered.size < maxPages) {
     const batch = frontier.splice(0, concurrency);
@@ -206,6 +258,9 @@ export async function crawlSite(site, { maxPages = MAX_CRAWL_PAGES, maxDepth = M
 
       for (const href of fetched.analysis.internalLinks || []) {
         if (visited.has(href) || visited.size >= maxPages) continue;
+        let hostname;
+        try { hostname = new URL(href).hostname; } catch { continue; }
+        if (!allowedHosts.has(hostname)) continue;
         visited.add(href);
         nextFrontier.push({ url: href, depth: depth + 1 });
       }

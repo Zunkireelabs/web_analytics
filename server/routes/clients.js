@@ -2,7 +2,7 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requirePlatformRole } from './login.js';
 
-import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteLearnedRepair, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, updateSiteAutoRemediation, updateSiteDesignReview, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
+import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteLearnedRepair, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, updateSiteAutoRemediation, updateSiteDesignReview, updateSiteAnalyticsIds, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
 import {
   getDesignProfile, siteHasUsableDesignProfile, designReviewFingerprint,
   verifyProfileRoles, checkTypographyRole, TYPOGRAPHY_ROLE_SOURCE, observedClassesByRole,
@@ -18,14 +18,24 @@ import { PERMISSION_LEVELS } from '../../mcp-server/permissions.js';
 import { getUserByEmail, createUser } from '../store/users.js';
 import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed, setSignupRequestCreatedSite } from '../store/signup-requests.js';
 import { getLatestAgentRuns } from '../store/agent-runs.js';
+import { getProductGrowthConfig, saveProductGrowthConfig, setProspectDiscoveryEnabled, ensureCrmWebhookToken } from '../store/product-growth-config.js';
+import { GOAL_TYPES, createGoal, listGoals, getGoal, updateGoal, setGoalStatus } from '../store/site-goals.js';
+import { getProductFunnel } from '../store/product-funnel.js';
+import { provisionProductTenant } from '../lib/product-onboarding.js';
+import { callLLMForJson } from '../llm.js';
 import { setOnboardingBaseline } from '../store/upsert.js';
 import { safeMessage } from '../lib/errors.js';
 import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
-import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite, queueDesignAgentDerivationForSite, queueDesignProfileDerivationForOnboarding } from '../job.js';
+import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite, queueDesignAgentDerivationForSite, queueDesignProfileDerivationForOnboarding, runGeoAuditIfDue } from '../job.js';
 import { buildReviewReport } from '../agents/lib/review-report.js';
+import { buildBaselineReport } from '../agents/lib/baseline-report.js';
 import { buildDesignReviewReport } from '../agents/lib/design-review.js';
 import { buildGrowthSummary } from '../agents/lib/growth-summary.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
+import { runDiscovery } from '../discovery/run-discovery.js';
+import { auditSite } from '../scripts/audit-url-file-map.js';
+import { persistDerivedContentConfig } from '../lib/derive-repo-content-config.js';
+import { ensureAnalystClient, assessTenantReadiness } from '../lib/tenant-provisioning.js';
 
 // Client provisioning, exposed as real routes for the first time this
 // session — previously only reachable via server/scripts/create-client.js /
@@ -57,9 +67,14 @@ router.get('/internal/clients', async (req, res, next) => {
     const sites = (await listSites()).filter((s) => !TEST_FIXTURE_SITE_NAMES.has(s.name));
     res.json(sites.map((s) => ({
       id: s.id, name: s.name, websiteDomain: s.website_domain, timezone: s.timezone,
+      propertyType: s.property_type,
       connected: !!(s.gsc_property && s.ga4_property_id),
       baselined: !!s.onboarded_at,
       repoConnected: !!(s.repo_owner && s.repo_name),
+      repoOwner: s.repo_owner,
+      repoName: s.repo_name,
+      githubPatEnvVar: s.github_pat_env_var,
+      githubAppInstallationId: s.github_app_installation_id,
       onboardedAt: s.onboarded_at, createdAt: s.created_at,
       oauthMaxPermissionLevel: s.oauth_max_permission_level,
       visibleFaqCap: s.visible_faq_cap,
@@ -70,6 +85,8 @@ router.get('/internal/clients', async (req, res, next) => {
       requireVisibleByline: s.require_visible_byline,
       autoRemediationEnabled: s.auto_remediation_enabled,
       autoRemediationDailyLimit: s.auto_remediation_daily_limit,
+      ga4MeasurementId: s.ga4_measurement_id,
+      facebookPixelId: s.facebook_pixel_id,
       status: s.status,
       deactivatedAt: s.deactivated_at,
       deletedAt: s.deleted_at,
@@ -99,16 +116,26 @@ router.get('/internal/clients/growth-summary', async (req, res, next) => {
 // which doesn't happen at the same moment as deciding to onboard them.
 router.post('/internal/clients', async (req, res, next) => {
   try {
-    const { name, websiteDomain, timezone, email, password } = req.body || {};
+    const {
+      name, websiteDomain, timezone, email, password, propertyType,
+      // Product-mode fields, all optional. Passing none keeps this route's
+      // behaviour exactly as it was; passing any means the tenant is
+      // provisioned in the same request instead of through three separate
+      // admin routes nobody is reminded to visit.
+      industry, markets, icpSignals, conversionEvent, goals, capabilities,
+    } = req.body || {};
     if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required.' });
     if (!email || !password) return res.status(400).json({ error: 'email and password are required for the client\'s first login.' });
     if (String(password).length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    if (propertyType !== undefined && propertyType !== 'website' && propertyType !== 'product') {
+      return res.status(400).json({ error: 'propertyType must be "website" or "product".' });
+    }
 
     const normalizedEmail = String(email).trim().toLowerCase();
     const existing = await getUserByEmail(normalizedEmail);
     if (existing) return res.status(409).json({ error: `A user with email "${normalizedEmail}" already exists.` });
 
-    const site = await createClientSite({ name: String(name).trim(), websiteDomain, timezone });
+    const site = await createClientSite({ name: String(name).trim(), websiteDomain, timezone, propertyType });
     try {
       const passwordHash = await bcrypt.hash(password, 10);
       await createUser({ siteId: site.id, email: normalizedEmail, passwordHash });
@@ -119,17 +146,48 @@ router.post('/internal/clients', async (req, res, next) => {
       return res.status(500).json({ error: `Site #${site.id} was created, but ${message} — finish it via \`npm run create-client -- <email> <password> --site-id ${site.id}\`.`, siteId: site.id });
     }
 
+    // Provision the product side in the same request. Everything here is
+    // independently optional and every step reports its own outcome, so a
+    // partially-known tenant is provisioned as far as it can be rather than
+    // created and then left inert — which was the previous behaviour, and
+    // the reason a product tenant could log in fine and ship nothing.
+    //
+    // Never fails the creation: the site and the login already exist and are
+    // the irreversible part. `provisioning` is returned so the console can
+    // show exactly what landed and what still needs a human.
+    let provisioning = null;
+    if (site.property_type === 'product') {
+      provisioning = await provisionProductTenant(site, {
+        industry: typeof industry === 'string' ? industry : null,
+        markets: Array.isArray(markets) ? markets : null,
+        icpSignals: Array.isArray(icpSignals) ? icpSignals : null,
+        conversionEvent: typeof conversionEvent === 'string' ? conversionEvent : null,
+        goals: Array.isArray(goals) ? goals : [],
+        capabilities: Array.isArray(capabilities) ? capabilities : [],
+      }).catch((err) => {
+        const { message } = safeMessage('clients.provisionProductTenant', err, 'product provisioning could not run');
+        return { ok: false, steps: [], failed: [{ step: 'provisioning', ok: false, error: message }] };
+      });
+    }
+
     await recordAuditEvent(req, {
       action: 'tenant.created',
       targetType: 'site',
       targetId: String(site.id),
       tenantSiteId: site.id,
       tenantName: site.name,
-      metadata: { name: site.name, websiteDomain: site.website_domain, email: normalizedEmail },
+      metadata: {
+        name: site.name, websiteDomain: site.website_domain, email: normalizedEmail,
+        ...(provisioning ? { provisioned: provisioning.ok, provisioningFailed: provisioning.failed.map((s) => s.step) } : {}),
+      },
       success: true,
     });
 
-    res.status(201).json({ id: site.id, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, connected: false });
+    res.status(201).json({
+      id: site.id, clientNumber: site.client_number, name: site.name, websiteDomain: site.website_domain,
+      timezone: site.timezone, propertyType: site.property_type, connected: false,
+      ...(provisioning ? { provisioning } : {}),
+    });
   } catch (e) { next(e); }
 });
 
@@ -197,7 +255,7 @@ router.post('/internal/signup-requests/:id/approve', async (req, res, next) => {
       success: true,
     });
 
-    res.status(201).json({ id: site.id, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, connected: false });
+    res.status(201).json({ id: site.id, clientNumber: site.client_number, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, propertyType: site.property_type, connected: false });
   } catch (e) { next(e); }
 });
 
@@ -248,6 +306,19 @@ async function runBaselineSequence(siteId, site) {
     console.error(`[clients] site ${siteId} onboarding design-profile derivation failed to queue:`, err.message);
   });
 
+  // Register the Data Analyst side of this tenant before anything reads it.
+  // The Python nightly pipeline (ingest -> stats -> anomalies -> forecasts ->
+  // insights -> forecast_risk recommendations) iterates `clients` rows keyed
+  // by this same site id, and nothing in the Node onboarding path ever
+  // created that row — so every tenant onboarded through this flow silently
+  // had no forecasting at all. Best-effort like every other step here: a
+  // failure must not fail onboarding, but it is logged loudly rather than
+  // swallowed, and assessTenantReadiness reports it as a blocking gap.
+  const analyst = await ensureAnalystClient(site);
+  if (!analyst.ok) {
+    console.error(`[clients] site ${siteId} Data Analyst client not provisioned (${analyst.reason}) — this tenant will have no forecasts or anomaly detection until it is.`);
+  }
+
   // Real site structure first — independent of GSC/GA4 having any data
   // yet, works off the live site itself (sitemap + crawl).
   const discovery = await runSiteDiscoveryIfDue(site).catch((err) => {
@@ -273,6 +344,32 @@ async function runBaselineSequence(siteId, site) {
   const [execRun] = await getLatestAgentRuns(siteId, ['executive-report']);
   if (execRun) await setOnboardingBaseline(siteId, execRun.id);
 
+  // AI-visibility score for the baseline report's "How AI Search Engines
+  // See You" page — must run AFTER ingestion above (it reads this site's
+  // real GSC page performance, getSearchPerformanceRange) and BEFORE
+  // buildBaselineReport below (which reads this run back via
+  // getLatestAgentRuns). Otherwise every newly onboarded site's day-0
+  // report would show "not yet measured" for that page until the next
+  // Monday's weekly geo-audit cron caught up — the exact page this report
+  // exists to make a strong first impression with. Awaited, not fire-and-
+  // forget: it scores at most 20 already-fetched top pages (geo-audit.js's
+  // MAX_PAGES), not a full-site crawl, so it's the same order of latency as
+  // the ingestion/analysis steps already awaited above. Best-effort — same
+  // "must never fail onboarding itself" discipline as every step here.
+  await runGeoAuditIfDue(site).catch((err) => {
+    console.error(`[clients] site ${siteId} onboarding GEO audit failed:`, err.message);
+  });
+
+  // The client-facing "day 0" document (server/migrations/150_baseline_reports.sql) —
+  // a single LLM call, not a slow crawl, so this is awaited like
+  // ingestion/analysis above rather than fire-and-forget like the full site
+  // audit below. A failure here must never fail onboarding itself; staff can
+  // retry via the "Generate Now" route or generate-baseline-report.js.
+  const baselineReport = await buildBaselineReport(siteId).catch((err) => {
+    console.error(`[clients] site ${siteId} baseline report generation failed:`, err.message);
+    return null;
+  });
+
   // Real "where you stand today" findings for Milestones — fire-and-forget
   // like the manual /site-audit trigger: resolves once the audit_runs row
   // exists, the actual crawl+audit keeps running well past this request's
@@ -288,7 +385,12 @@ async function runBaselineSequence(siteId, site) {
 
   return {
     site: { id: finalSite.id, name: finalSite.name, onboardedAt: finalSite.onboarded_at, baselineRunId: finalSite.baseline_run_id },
-    discovery, ingestion, analysis, healthScore,
+    discovery, ingestion, analysis, healthScore, baselineReport, analyst,
+    // What this tenant still needs before it runs end to end, in the same
+    // response that reports onboarding "succeeded" — so a half-provisioned
+    // tenant is visible at the moment it is created, not weeks later when
+    // nothing has shipped.
+    readiness: await assessTenantReadiness(finalSite).catch(() => null),
   };
 }
 
@@ -381,8 +483,24 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
     const existing = await getSiteById(siteId);
     if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
 
-    const { repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, urlFileMap } = req.body || {};
+    const { repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, githubAppInstallationId, urlFileMap } = req.body || {};
     if (!repoOwner || !repoName) return res.status(400).json({ error: 'repoOwner and repoName are required.' });
+
+    // Mirrors connect-repo.js's own validation: an integer id, or null/'none'
+    // to move the site back onto its PAT. Left undefined, the existing value
+    // (often auto-populated by the GitHub App installation webhook, see
+    // webhooks.js) is untouched.
+    let parsedGithubAppInstallationId;
+    if (githubAppInstallationId === undefined) {
+      parsedGithubAppInstallationId = undefined;
+    } else if (githubAppInstallationId === null || githubAppInstallationId === '' || githubAppInstallationId === 'none') {
+      parsedGithubAppInstallationId = null;
+    } else {
+      parsedGithubAppInstallationId = Number(githubAppInstallationId);
+      if (!Number.isInteger(parsedGithubAppInstallationId)) {
+        return res.status(400).json({ error: 'githubAppInstallationId must be an integer (or null/"none" to clear it).' });
+      }
+    }
 
     // A real HTTP surface (not a trusted local CLI operator) — validate the
     // hand-authored mapping actually parses before it's saved, same
@@ -403,7 +521,7 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
       }
     }
 
-    let site = await updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, urlFileMap: parsedUrlFileMap });
+    let site = await updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, githubAppInstallationId: parsedGithubAppInstallationId, urlFileMap: parsedUrlFileMap });
 
     // Full onboarding autonomy: a genuinely first-time repo connection
     // automatically grants the same consent the platform_admin-only
@@ -433,20 +551,61 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
       console.error(`[clients] could not queue design-profile derivation for site ${site.id}:`, err.message)
     );
 
+    // Automatic repo discovery (mirrors connect-repo.js's CLI path — see its
+    // own comment): inspects the connected repo, detects its real framework
+    // and routing structure, and writes only what it can prove by reading
+    // the result back through the production resolvers. Runs whether or not
+    // this request supplied a hand-authored urlFileMap, so a UI-driven
+    // connect gets the same automatic mapping the CLI does — no separate
+    // manual step. Best-effort: must not fail the connect-repo request.
+    let lastDiscovery = null;
+    try {
+      lastDiscovery = await runDiscovery(site);
+      if (lastDiscovery.ok) site = (await getSiteById(siteId)) || site;
+    } catch (err) {
+      console.error(`[clients] repo discovery failed for site ${site.id}:`, err.message);
+    }
+
+    // renderCapabilities + newContentTargets, derived from that same
+    // discovery result — same as connect-repo.js's CLI path (see its own
+    // comment). Previously only reachable by hand-authoring urlFileMap, which
+    // is the single largest source of blocked autonomous work in production
+    // (missing newContentTargets entries for landing-page/blog/legal pages).
+    // Best-effort: must not fail the connect-repo request.
+    if (lastDiscovery?.ok) {
+      try {
+        const content = await persistDerivedContentConfig(site, lastDiscovery);
+        if (content.applied) site = content.site || site;
+      } catch (err) {
+        console.error(`[clients] render-capability/new-content-target derivation failed for site ${site.id}:`, err.message);
+      }
+    }
+
+    // Same config-completeness check connect-repo.js's CLI already ran
+    // automatically — this HTTP route never had it, so a UI-driven connect
+    // could look "done" while still missing every generator's target.
+    try {
+      await auditSite(siteId);
+    } catch (err) {
+      console.error(`[clients] config-completeness check failed for site ${site.id}:`, err.message);
+    }
+
     await recordAuditEvent(req, {
       action: 'tenant.repo_connected',
       targetType: 'site',
       targetId: String(siteId),
       tenantSiteId: siteId,
       tenantName: site.name,
-      metadata: { repoOwner, repoName, repoDefaultBranch: repoDefaultBranch || null, techStack: techStack || null },
+      metadata: { repoOwner, repoName, repoDefaultBranch: repoDefaultBranch || null, techStack: techStack || null, githubAppInstallationId: site.github_app_installation_id },
       success: true,
     });
 
     res.json({
       id: site.id, repoOwner: site.repo_owner, repoName: site.repo_name,
+      githubAppInstallationId: site.github_app_installation_id,
       autoRemediationEnabled: site.auto_remediation_enabled,
       autoRemediationDailyLimit: site.auto_remediation_daily_limit,
+      readiness: await assessTenantReadiness(site).catch(() => null),
     });
   } catch (e) { next(e); }
 });
@@ -519,6 +678,264 @@ router.post('/internal/clients/:id/visible-faq-cap', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// Universal Product Growth mode config (167_product_growth_config.sql) —
+// only meaningful for a 'product' site, but readable/writable regardless
+// (a 'website' site just never has anything read it). Generic across any
+// product tenant: conversionEvent is free text (not hardcoded to
+// booked_demo), markets/industries/icpSignals are arrays the site owner
+// configures, crmConfig is opaque JSON for whichever external CRM is wired
+// up. GET returns null fields when no row exists yet — same "absence means
+// nothing configured, not an error" convention as site_seo_policy.
+router.get('/internal/clients/:id/product-growth-config', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const config = await getProductGrowthConfig(siteId);
+    res.json(config || {
+      conversionEvent: null, markets: [], industries: [], icpSignals: [], crmConfig: {}, outreachEnabled: false,
+    });
+  } catch (e) { next(e); }
+});
+
+router.post('/internal/clients/:id/product-growth-config', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { conversionEvent, markets, industries, icpSignals, crmConfig, outreachEnabled } = req.body || {};
+    await saveProductGrowthConfig(siteId, { conversionEvent, markets, industries, icpSignals, crmConfig, outreachEnabled });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.product_growth_config_updated',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: existing.name,
+      metadata: { conversionEvent, outreachEnabled: !!outreachEnabled },
+      success: true,
+    });
+
+    res.json(await getProductGrowthConfig(siteId));
+  } catch (e) { next(e); }
+});
+
+// Own opt-in flag for prospect-discovery.js (Phase 3) — deliberately a
+// separate route from the general config save above so it's never bundled
+// into the same form submit as free-text fields, same "explicit opt-in,
+// never inferred" discipline the Product Growth spec requires.
+router.post('/internal/clients/:id/prospect-discovery', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { enabled } = req.body || {};
+    await setProspectDiscoveryEnabled(siteId, !!enabled);
+
+    await recordAuditEvent(req, {
+      action: 'tenant.prospect_discovery_toggled',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: existing.name,
+      metadata: { enabled: !!enabled },
+      success: true,
+    });
+
+    res.json(await getProductGrowthConfig(siteId));
+  } catch (e) { next(e); }
+});
+
+// Business Goals API (Stage 1 of the goal-driven-prioritization plan — see
+// server/agents/lib/goal-alignment.js). Stage 2, the settings-drawer "Goals"
+// tab (web/src/components/ClientDrawer.jsx), calls this CRUD surface, which
+// follows the exact same shape as product-growth-config above (existence
+// check -> validate -> store call -> audit event) and the same per-site
+// scoping every store/site-goals.js function already enforces.
+router.get('/internal/clients/:id/goals', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    res.json(await listGoals(siteId));
+  } catch (e) { next(e); }
+});
+
+// Progress for a PRODUCT site's goals: the funnel counts (demos booked,
+// trial signups, converted) read from prospects / trial_signups, with the
+// headline picked from product_growth_config.conversion_event. 404 for a
+// website tenant — it has no product funnel, and this must never invent one.
+router.get('/internal/clients/:id/goals/progress', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+    if (existing.property_type !== 'product') {
+      return res.status(404).json({ error: 'Goal progress from the product funnel is only available for product sites.' });
+    }
+    const funnel = await getProductFunnel(siteId, { days: req.query.days });
+    res.json({ goals: await listGoals(siteId), funnel });
+  } catch (e) { next(e); }
+});
+
+router.post('/internal/clients/:id/goals', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { goalType, objective, targetBusinessArea, targetPagePatterns, primaryMetric, description, importance } = req.body || {};
+    if (!GOAL_TYPES.includes(goalType)) return res.status(400).json({ error: `goalType must be one of: ${GOAL_TYPES.join(', ')}` });
+    if (!objective || !String(objective).trim()) return res.status(400).json({ error: 'objective is required.' });
+
+    const goal = await createGoal(siteId, { goalType, objective, targetBusinessArea, targetPagePatterns, primaryMetric, description, importance });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.goal_created',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: existing.name,
+      metadata: { goalId: goal.id, goalType, objective: goal.objective },
+      success: true,
+    });
+
+    res.status(201).json(goal);
+  } catch (e) { next(e); }
+});
+
+router.patch('/internal/clients/:id/goals/:goalId', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const goalId = Number(req.params.goalId);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+    const existingGoal = await getGoal(siteId, goalId);
+    if (!existingGoal) return res.status(404).json({ error: `No goal ${goalId} found for site ${siteId}.` });
+
+    const { goalType, objective, targetBusinessArea, targetPagePatterns, primaryMetric, description, importance } = req.body || {};
+    if (goalType !== undefined && !GOAL_TYPES.includes(goalType)) return res.status(400).json({ error: `goalType must be one of: ${GOAL_TYPES.join(', ')}` });
+    if (objective !== undefined && !String(objective).trim()) return res.status(400).json({ error: 'objective cannot be blank.' });
+
+    const goal = await updateGoal(siteId, goalId, { goalType, objective, targetBusinessArea, targetPagePatterns, primaryMetric, description, importance });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.goal_updated',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: existing.name,
+      metadata: { goalId },
+      success: true,
+    });
+
+    res.json(goal);
+  } catch (e) { next(e); }
+});
+
+// Own dedicated toggle, same "explicit, single-purpose action" shape as
+// prospect-discovery above — a settings UI can pause/reactivate a goal
+// without resending its full form.
+router.post('/internal/clients/:id/goals/:goalId/status', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const goalId = Number(req.params.goalId);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+    const existingGoal = await getGoal(siteId, goalId);
+    if (!existingGoal) return res.status(404).json({ error: `No goal ${goalId} found for site ${siteId}.` });
+
+    const { status } = req.body || {};
+    if (status !== 'active' && status !== 'paused') return res.status(400).json({ error: "status must be 'active' or 'paused'." });
+
+    const goal = await setGoalStatus(siteId, goalId, status);
+
+    await recordAuditEvent(req, {
+      action: 'tenant.goal_status_changed',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: existing.name,
+      metadata: { goalId, status },
+      success: true,
+    });
+
+    res.json(goal);
+  } catch (e) { next(e); }
+});
+
+// Stage 2b of the Business Goals plan: the custom-goal AI structure preview.
+// Free text in, a proposed structure out — deliberately NEVER writes to
+// site_goals. The brief is explicit an AI-structured goal must go through an
+// explicit user Confirm step (the real POST /goals above, with
+// goalType: 'custom') before it's saved; this endpoint only proposes.
+const GOAL_STRUCTURE_SYSTEM = 'You turn a business owner\'s free-text description of a goal into a structured SEO/growth ' +
+  'goal a recommendation-prioritization system can match findings against. Respond with ONLY a JSON object: ' +
+  '{"objective": string, "targetBusinessArea": string|null, "targetPagePatterns": string[], "primaryMetric": string|null}. ' +
+  '"objective" is a specific, one-sentence restatement of the goal (not the raw input verbatim). "targetBusinessArea" is a ' +
+  'short label for the part of the business this serves (e.g. "Booking software product line"), or null if the text gives ' +
+  'no real signal for one — never invent one. "targetPagePatterns" is 0-5 URL path patterns (bare paths like "/pricing" or ' +
+  'prefix globs like "/blog/*") ONLY if the text names or clearly implies specific pages or a site section — an empty array ' +
+  'is correct and expected when it does not, never guess a pattern. "primaryMetric" is a short label for what "success" ' +
+  'looks like (e.g. "Organic bookings"), or null if unclear.';
+
+export function validGoalStructureProposal(p) {
+  return !!p && typeof p.objective === 'string' && p.objective.trim().length > 0
+    && (p.targetBusinessArea === null || typeof p.targetBusinessArea === 'string')
+    && Array.isArray(p.targetPagePatterns) && p.targetPagePatterns.every((s) => typeof s === 'string')
+    && (p.primaryMetric === null || typeof p.primaryMetric === 'string');
+}
+
+router.post('/internal/clients/:id/goals/structure-preview', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { description } = req.body || {};
+    if (!description || !String(description).trim()) return res.status(400).json({ error: 'description is required.' });
+
+    const proposal = await callLLMForJson(GOAL_STRUCTURE_SYSTEM, String(description).trim(), {
+      maxTokens: 300, generatorId: 'goal-structure-preview', siteId, validate: validGoalStructureProposal,
+    });
+
+    res.json({
+      objective: proposal.objective.trim(),
+      targetBusinessArea: proposal.targetBusinessArea?.trim() || null,
+      targetPagePatterns: proposal.targetPagePatterns.map((s) => s.trim()).filter(Boolean),
+      primaryMetric: proposal.primaryMetric?.trim() || null,
+    });
+  } catch (e) { next(e); }
+});
+
+// Generates (or returns the existing) per-site bearer token an external CRM
+// presents to server/routes/crm-webhook.js — platform_admin only, inherited
+// from this router's own requirePlatformRole gate, since this is a real
+// secret with real access to this tenant's prospect data.
+router.post('/internal/clients/:id/crm-webhook-token', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const token = await ensureCrmWebhookToken(siteId);
+
+    await recordAuditEvent(req, {
+      action: 'tenant.crm_webhook_token_issued',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: existing.name,
+      success: true,
+    });
+
+    res.json({ crmWebhookToken: token });
+  } catch (e) { next(e); }
+});
 
 // Consent for cross-client learned repair (migration 099): may this site be
 // fixed automatically using a repair whose evidence comes from a DIFFERENT
@@ -727,6 +1144,67 @@ router.post('/internal/clients/:id/author-profile', async (req, res, next) => {
       id: site.id, authorName: site.author_name, authorRole: site.author_role,
       authorUrl: site.author_url, requireVisibleByline: site.require_visible_byline,
     });
+  } catch (e) { next(e); }
+});
+
+// The site's own real GA4 Measurement ID / Meta (Facebook) Pixel ID
+// (migrations 130/135) — read live at draft time by
+// generators/analytics-install.js. Until this route existed, nothing in the
+// product could set either column (same gap design_agent_enabled had — a DB
+// column with no route/UI ever wired to it), so a tenant's Action Center
+// could never actually install analytics even once these were configured,
+// because they were never configured through anything but a hand-written
+// SQL UPDATE.
+const GA4_MEASUREMENT_ID_PATTERN = /^G-[A-Z0-9]+$/i;
+const FACEBOOK_PIXEL_ID_PATTERN = /^\d{10,20}$/;
+
+// Exported (same pattern as validateAutoRemediationRequest above) so the
+// shape rules are unit-testable without an Express request. Same
+// idPattern/idHint generators/analytics-install.js itself validates against
+// at draft time — a value rejected here would only ever have shipped a
+// tracking script that silently collects nothing, so it's worth refusing at
+// the door instead of at the far end of a PR.
+export function validateAnalyticsIdsRequest({ ga4MeasurementId, facebookPixelId }) {
+  if (ga4MeasurementId && !GA4_MEASUREMENT_ID_PATTERN.test(ga4MeasurementId.trim())) {
+    return 'ga4MeasurementId must look like a GA4 Measurement ID, e.g. "G-XXXXXXXXXX".';
+  }
+  if (facebookPixelId && !FACEBOOK_PIXEL_ID_PATTERN.test(facebookPixelId.trim())) {
+    return 'facebookPixelId must be a numeric Meta Pixel ID, e.g. "123456789012345".';
+  }
+  return null;
+}
+
+router.post('/internal/clients/:id/analytics-ids', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { ga4MeasurementId, facebookPixelId } = req.body || {};
+    // Empty string clears the field (routed through as null by
+    // updateSiteAnalyticsIds) — only a genuinely non-empty value is shape-
+    // checked, same "don't validate what you're not keeping" rule the rest
+    // of this route file already follows.
+    const invalid = validateAnalyticsIdsRequest({ ga4MeasurementId, facebookPixelId });
+    if (invalid) return res.status(400).json({ error: invalid });
+
+    const site = await updateSiteAnalyticsIds({
+      siteId,
+      ga4MeasurementId: ga4MeasurementId !== undefined ? (ga4MeasurementId ? ga4MeasurementId.trim() : null) : undefined,
+      facebookPixelId: facebookPixelId !== undefined ? (facebookPixelId ? facebookPixelId.trim() : null) : undefined,
+    });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.analytics_ids_updated',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { ga4MeasurementIdSet: !!site.ga4_measurement_id, facebookPixelIdSet: !!site.facebook_pixel_id },
+      success: true,
+    });
+
+    res.json({ id: site.id, ga4MeasurementId: site.ga4_measurement_id, facebookPixelId: site.facebook_pixel_id });
   } catch (e) { next(e); }
 });
 

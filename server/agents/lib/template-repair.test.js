@@ -18,7 +18,16 @@ const LIVE_CSS = [
   '.py-12{padding:3rem 0}', '.divide-y>:not([hidden]){border-top-width:1px}', '.divide-gray-200{border-color:#e5e7eb}',
 ].join('\n');
 
-const PAGE_HTML = '<html><head><link rel="stylesheet" href="/assets/main.css"></head><body></body></html>';
+// Body actually contains real examples of every shape this test file
+// verifies (FAQ/QA's shared accordion shape, plus internalLinks' distinct
+// `<ul>` shape) — structural verification checks this too now, not just
+// class-existence (see design-drift.js's checkTemplateStructuralMatch).
+const INTERNAL_LINKS_WRAPPER = '<section class="py-12"><ul class="space-y-3">{{ROWS}}</ul></section>';
+const INTERNAL_LINKS_ROW = '<li><a href="{{URL}}" class="text-lg">{{ANCHOR_TEXT}}</a></li>';
+const PAGE_HTML = '<html><head><link rel="stylesheet" href="/assets/main.css"></head><body>'
+  + FAQ_WRAPPER.replace('{{ROWS}}', FAQ_ROW.replace('{{QUESTION}}', 'Q?').replace('{{ANSWER}}', 'A.'))
+  + INTERNAL_LINKS_WRAPPER.replace('{{ROWS}}', INTERNAL_LINKS_ROW.replace('{{URL}}', '/page').replace('{{ANCHOR_TEXT}}', 'Page'))
+  + '</body></html>';
 
 let saved;
 let audited;
@@ -89,12 +98,12 @@ describe('repairSiteTemplates — verifying what is merely unstamped', () => {
     assert.equal(saved, null);
   });
 
-  test('leaves an already-verified template completely alone', async () => {
+  test('leaves a RECENTLY-verified template alone (inside the re-verification window)', async () => {
     const site = siteWith({
       expandContent: {
         wrapper: '<section class="py-12">{{ROWS}}</section>',
         row: '<div class="py-5"><h3>{{HEADING}}</h3><p>{{BODY}}</p></div>',
-        verifiedAt: '2026-08-13T06:14:04.118Z', verifiedBy: 'freshness-check', verifiedRef: 'https://zunkireelabs.com',
+        verifiedAt: new Date().toISOString(), verifiedBy: 'freshness-check', verifiedRef: 'https://zunkireelabs.com',
       },
     });
     let fetched = false;
@@ -105,7 +114,43 @@ describe('repairSiteTemplates — verifying what is merely unstamped', () => {
 
     assert.equal(counts.skipped, 1);
     assert.equal(counts.verified, 0);
-    assert.equal(fetched, false, 'a verified template must cost nothing — that is what the stamp is for');
+    assert.equal(fetched, false, 'a freshly-verified template must cost nothing until its re-verification window is up');
+    assert.equal(saved, null);
+  });
+
+  // Real gap this closes: before this, a template's stamp meant "verified,
+  // permanently" — this file only ever re-checked templates with NO stamp at
+  // all, so a real client redesign that changed a component's DOM shape
+  // (with its old class names still live in the new CSS — classes get reused
+  // across unrelated components constantly) would never be caught once a
+  // template had passed its one-time initial verification.
+  test('re-checks a template past its re-verification window, and invalidates its stamp on a real defect', async () => {
+    const oldStamp = { verifiedAt: '2026-08-01T00:00:00.000Z', verifiedBy: 'freshness-check', verifiedRef: 'https://zunkireelabs.com' };
+    const site = siteWith({
+      // Live CSS/HTML fixtures (LIVE_CSS/PAGE_HTML) don't contain this
+      // shape at all — simulating a component whose real markup changed
+      // since the old stamp was written.
+      faq: { wrapper: '<section class="py-12"><dl class="does-not-exist-anymore">{{ROWS}}</dl></section>', row: '<div>{{QUESTION}}{{ANSWER}}</div>', ...oldStamp },
+    });
+
+    const counts = await repairSiteTemplates(1, deps(site));
+
+    assert.equal(counts.skipped, 0, 'past the re-verification window, it must not be skipped');
+    assert.equal(counts.verified, 0);
+    assert.equal(counts.invalidated, 1);
+    assert.equal(saved.urlFileMap.siteRoot.componentTemplates.faq.verifiedAt, null, 'a real defect must clear the stamp, not leave a known-wrong one trusted');
+  });
+
+  test('a RECENTLY-verified template with a real defect is still checked (age gate is the only reason to skip)', async () => {
+    const site = siteWith({
+      faq: { wrapper: '<section class="py-12"><dl class="does-not-exist-anymore">{{ROWS}}</dl></section>', row: '<div>{{QUESTION}}{{ANSWER}}</div>', verifiedAt: new Date().toISOString(), verifiedBy: 'freshness-check', verifiedRef: 'https://zunkireelabs.com' },
+    });
+    const counts = await repairSiteTemplates(1, deps(site));
+    // A fresh stamp means "skip", full stop — this documents that the age
+    // gate is the ONLY signal here, not a claim that recent+defective is a
+    // realistic combination (it isn't: the stamp is only ever written right
+    // after a passing check).
+    assert.equal(counts.skipped, 1);
     assert.equal(saved, null);
   });
 

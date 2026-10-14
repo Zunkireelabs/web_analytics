@@ -16,6 +16,7 @@
 // future provider's error format.
 
 import { randomUUID } from 'node:crypto';
+import { query } from '../db.js';
 
 // The one legitimate way code may put a specific message in front of a
 // customer — e.g. "this page isn't mapped in url_file_map yet, run
@@ -39,8 +40,49 @@ export class UserFacingError extends Error {
 // developer can find the real error later without the customer ever seeing
 // it. `context` is a short string identifying the call site (e.g.
 // 'github-ops.pushDraftBranch'), not customer-facing.
+//
+// STORM SUPPRESSION. A failing integration repeats the SAME error on every
+// poll/cron tick. One token-permission 403 (getCheckRunsForRef) wrote 44,121
+// identical internal_errors rows in six days — 45MB of a 57MB table, in a
+// database whose whole free-plan allowance is 500MB. Ordinary behavior is
+// unchanged: every failure gets its own record and its own ref, so two
+// failures can always be told apart. Only a STORM is capped: once the same
+// error (same context, message, underlying cause and call site) has been
+// recorded DEDUPE_MAX_PER_WINDOW times inside DEDUPE_WINDOW_MS, further
+// occurrences in that window reuse the latest recorded ref instead of
+// inserting. The "ref: <id>" promise holds — it still resolves to a real row
+// for the same error — and console output stays complete, since logs are where
+// per-occurrence timing already lives. In-memory on purpose: no extra DB read
+// on the error path, and a restart just resets the window (extra rows, never
+// lost ones). Bounded so a flood of DISTINCT errors can't grow it.
+const DEDUPE_WINDOW_MS = 10 * 60 * 1000;
+const DEDUPE_MAX_PER_WINDOW = 3;
+const DEDUPE_MAX_KEYS = 500;
+const recentErrors = new Map(); // key -> { windowStart, count, lastId }
+
+export function __resetInternalErrorDedupe() { recentErrors.clear(); }
+
 export function logInternal(context, err) {
+  const message = err?.message || String(err);
+  // The cause is part of the identity: wrappers (UserFacingError around a
+  // Docker/LLM failure) share one generic message while the real, distinct
+  // diagnostic lives in err.cause. So is the top of the stack: the same message
+  // raised from two different call paths is two different bugs.
+  const stackSig = String(err?.stack || '').split('\n').slice(1, 3).map((l) => l.trim()).join('|');
+  const key = `${context}\u0000${message}\u0000${err?.cause?.message || ''}\u0000${stackSig}`;
+  const now = Date.now();
+  let entry = recentErrors.get(key);
+  if (!entry || now - entry.windowStart >= DEDUPE_WINDOW_MS) entry = { windowStart: now, count: 0, lastId: null };
+  if (entry.count >= DEDUPE_MAX_PER_WINDOW) {
+    console.error(`[internal-error:${entry.lastId}] ${context} (repeat storm, not re-recorded):`, message);
+    return entry.lastId;
+  }
   const id = randomUUID().slice(0, 8);
+  entry.count += 1;
+  entry.lastId = id;
+  recentErrors.delete(key); // re-insert at the end so Map order tracks recency
+  recentErrors.set(key, entry);
+  if (recentErrors.size > DEDUPE_MAX_KEYS) recentErrors.delete(recentErrors.keys().next().value);
   console.error(`[internal-error:${id}] ${context}:`, err?.stack || err?.message || err);
   // err.cause is where the ACTUAL diagnostic detail often lives — e.g.
   // openhands-handler.js wraps every Design Agent failure in a
@@ -55,7 +97,29 @@ export function logInternal(context, err) {
   // message on every failed run, even with direct server access, because
   // this line never printed the one thing (Docker daemon vs LLM auth) that
   // would have told an engineer what to actually fix.
-  if (err?.cause) console.error(`[internal-error:${id}] caused by:`, err.cause?.stack || err.cause?.message || err.cause);
+  const causeStack = err?.cause ? (err.cause?.stack || err.cause?.message || String(err.cause)) : null;
+  if (causeStack) console.error(`[internal-error:${id}] caused by:`, causeStack);
+
+  // Console output alone is only as durable as the container's log
+  // retention — a customer-facing "ref: <id>" promises a developer can look
+  // it up later, and once logs rotate that promise is broken (confirmed:
+  // Chayce Properties draft #1741's "ref: b6cfde8a" was unresolvable 13 days
+  // later, log evidence long gone). Best-effort and fire-and-forget: a
+  // failure to persist this record must never mask, delay, or throw over
+  // the original error logInternal exists to report.
+  // Wrapped in Promise.resolve() because a handful of test suites mock this
+  // module's `query` with a synchronous fake (returns a plain object, not a
+  // Promise) — real db.js's query is always a Promise, but this call must
+  // not assume that to stay fire-and-forget-safe either way.
+  Promise.resolve(query(
+    `INSERT INTO internal_errors (id, context, message, stack, cause_message, cause_stack)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (id) DO NOTHING`,
+    [id, context, err?.message || String(err), err?.stack || null, err?.cause?.message || null, causeStack]
+  )).catch((persistErr) => {
+    console.error(`[internal-error:${id}] could not persist this error record:`, persistErr.message);
+  });
+
   return id;
 }
 
@@ -92,7 +156,30 @@ const LEAK_PATTERNS = [
   /\b(ECONNREFUSED|ETIMEDOUT|ENOTFOUND|ECONNRESET|EAI_AGAIN)\b/,
   /\b(openai|anthropic|google (custom )?search|github api|postgres|pg_)\b.{0,40}(failed|error|rejected|denied)/i,
   /request failed\b/i,
+  // `TypeError: message` only ever appears in err.stack/err.toString() — a
+  // real Error's own `.message` NEVER carries the class-name prefix, so this
+  // pattern alone never matches the single most common shape of an uncaught
+  // internal crash reaching this boundary: the bare V8/Node built-in message
+  // (confirmed live, 2026-09-09: "Cannot read properties of null (reading
+  // 'id')" reached an Action Center card verbatim, unredacted, because it
+  // is exactly this shape). The patterns below match those bare messages
+  // directly, with no class-name prefix to depend on.
   /\b(TypeError|ReferenceError|SyntaxError|RangeError):/,
+  // Matches both Node's current wording ("...properties of null (reading
+  // 'x')") and the older pre-2020 V8 form ("...property 'x' of undefined") —
+  // the property name and quoting differ between them, so this only pins the
+  // stable prefix rather than the whole phrase.
+  /\bCannot read propert(?:y|ies)\b/i,
+  /\bis not a function\b/i,
+  /\bis not defined\b/i,
+  /\bis not iterable\b/i,
+  /\bis not a valid\b/i,
+  /\bundefined is not an object\b/i,
+  /\bMaximum call stack size exceeded\b/i,
+  /\bAssignment to constant variable\b/i,
+  /\bCannot convert (?:undefined|null|object) to\b/i,
+  /\bInvalid array length\b/i,
+  /\bout of memory\b/i,
 ];
 
 export function sanitizeForCustomer(text, fallback = null) {

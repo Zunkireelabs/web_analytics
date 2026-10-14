@@ -1,12 +1,13 @@
-import { knownDomain, hostnameOf, filterOwnDomainPages } from './site-domain.js';
+import { knownDomain, hostnameOf } from './site-domain.js';
 import {
   getRelatedQueriesForTopic, getProductCapabilities, setGapClassification, getKeywordClusters, getKeywordGaps,
   recordCapabilityVisibilitySnapshot, getRecentCapabilityVisibilitySnapshots,
-  appendKeywordGapEvidenceSnapshot, updateKeywordGapStatus,
+  appendKeywordGapEvidenceSnapshot, updateKeywordGapStatus, getKeywordGapsInCluster,
 } from '../../store/data-analyst.js';
-import { listPageInventory } from '../../store/page-inventory.js';
+import { getLearnedGapConfidence, temperPriorityBoost } from './gap-learning.js';
+import { classifyGapCoverage, isCoverageFresh } from './keyword-coverage-service.js';
+import { foldText, baseLang, LOCATION_CODE_TO_MARKET } from './keyword-coverage.js';
 import { buildGrowthOpportunities } from './growth-opportunities.js';
-import { analyzePageUrl, hasSufficientGroundingContent } from './page-content.js';
 import { findOpenRecommendation, insertRecommendation, refreshRecommendationBlockState } from '../../store/recommendations.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
 import { riskTierForGenerator } from './risk-tiers.js';
@@ -14,6 +15,20 @@ import { impactFromPriority } from './findings.js';
 import { getSiteById } from '../../store/read.js';
 import { createRecommendationGates } from './recommendation-gates.js';
 import { callLLMForJson } from '../../llm.js';
+import { PACED_GENERATORS } from './ship-pacing.js';
+import { claimForItem } from './work-claims.js';
+import { loadTenantContext } from '../../lib/tenant-context.js';
+import { isTopicScorerEnabled, topicKeyFor } from './topic-scorer.js';
+// gap-action-resolver.js is intentionally NOT a static import here — it
+// pulls in decision-engine.js's/decision-evidence.js's full dependency
+// chain (llm.js, store/recommendations.js's listOpenRecommendations,
+// agent-memory.js, the Data Analyst client), which several existing tests
+// for THIS file mock only a narrow subset of via mock.module. A static
+// import made those tests fail at module-load time even though
+// DECISION_ENGINE_GAP_ANNOTATIONS defaults off and nothing in this file
+// would have actually called it. Loaded lazily in decisionEngineAnnotation
+// below instead, so "the flag is off" means zero import cost too, not just
+// zero call cost.
 // generateDraft is the exact same shared Generate -> Quality-Gate-Validate
 // -> auto-fix -> Validate-again pipeline every other Action Center entry
 // point already uses (manual "Generate" click, the MCP tool, seoDraftEligibility
@@ -23,6 +38,7 @@ import { callLLMForJson } from '../../llm.js';
 // gives keyword-gap-approved recommendations the exact same
 // Design-fit-before-Action-Center guarantee with no new code of its own.
 import { generateDraft } from '../../routes/action-center.js';
+import { countDraftsBySourceToday, countDraftsBySourceAndTypeThisWeek, hasRecentDraftOfType } from '../../store/drafts.js';
 
 // Maps an Analyst (data-analyst-agent) insight onto the existing Action
 // Center draft-generation pipeline — a completely separate system keyed by
@@ -77,24 +93,80 @@ const RELEVANCE_SYSTEM = 'You classify a single search topic against a list of a
   'is related background/how-to for one of them but not a direct search for the product itself. "unrelated" means ' +
   'it doesn\'t match any listed capability.';
 
-export async function classifyGapRelevance(siteId, gap) {
-  const capabilities = await getProductCapabilities(siteId, 'verified');
-  if (!capabilities.length) return null;
+// What the classifier can be told about this tenant, best evidence first.
+//
+// Verified capability rows are the strongest ground truth, and used to be the
+// ONLY accepted source: no rows meant an immediate null, which left
+// product_relevance null, which disqualified the gap in gapDraftEligibility.
+// The effect was silent and total — a tenant whose admin had never filled in
+// the capabilities form could not ship a single keyword gap, forever, with no
+// finding anywhere saying why. Product tenants are exactly the ones least
+// likely to have those rows, since nothing in onboarding creates them.
+//
+// The fallbacks below are genuinely weaker evidence, so they are reported as
+// such: `source` and `confidence` ride along with the verdict, and
+// gapDraftEligibility demands more corroboration from a low-confidence one
+// rather than treating weak evidence as no evidence.
+export async function describeTenantForRelevance(siteId, { loadContext = loadTenantContext } = {}) {
+  const capabilities = await getProductCapabilities(siteId, 'verified').catch(() => []);
+  if (capabilities.length) {
+    const list = capabilities
+      .map((c) => {
+        const industries = Array.isArray(c.industries) && c.industries.length ? ` [industries: ${c.industries.join(', ')}]` : '';
+        return `- ${c.name}${c.category ? ` (${c.category})` : ''}${c.description ? `: ${c.description}` : ''}${industries}`;
+      })
+      .join('\n');
+    return { text: list, source: 'verified-capabilities', confidence: 'high' };
+  }
 
-  const capabilityList = capabilities
-    .map((c) => {
-      const industries = Array.isArray(c.industries) && c.industries.length ? ` [industries: ${c.industries.join(', ')}]` : '';
-      return `- ${c.name}${c.category ? ` (${c.category})` : ''}${c.description ? `: ${c.description}` : ''}${industries}`;
-    })
-    .join('\n');
-  const user = `Topic: "${gap.topic}"${gap.reason ? `\nContext: ${gap.reason}` : ''}\n\nVerified capabilities:\n${capabilityList}`;
+  const ctx = await loadContext(siteId).catch(() => null);
+  if (!ctx) return null;
+
+  // Other verified knowledge kinds (migration 176: flow, pricing, audience,
+  // proof). A tenant that has described how its product works but never
+  // filled in the capabilities list specifically still knows what it sells.
+  if (ctx.productKnowledge?.length) {
+    const list = ctx.productKnowledge
+      .map((r) => `- ${r.name}${r.kind ? ` (${r.kind})` : ''}${r.description ? `: ${r.description}` : ''}`)
+      .join('\n');
+    return { text: list, source: 'product-knowledge', confidence: 'medium' };
+  }
+
+  // Growth config and goals: captured at onboarding rather than inferred
+  // from Search Console, which makes them the only sources available to a
+  // product tenant with no GSC at all.
+  const lines = [];
+  if (ctx.industries?.length) lines.push(`- Industry: ${ctx.industries.join(', ')}`);
+  if (ctx.markets?.length) lines.push(`- Markets served: ${ctx.markets.join(', ')}`);
+  if (ctx.icpSignals) {
+    const signals = Array.isArray(ctx.icpSignals) ? ctx.icpSignals : [ctx.icpSignals];
+    if (signals.length) lines.push(`- Ideal customers: ${signals.join(', ')}`);
+  }
+  for (const g of (ctx.goals || []).slice(0, 3)) {
+    if (g.objective) lines.push(`- Business goal: ${g.objective}`);
+  }
+  if (lines.length) return { text: lines.join('\n'), source: 'tenant-profile', confidence: 'low' };
+
+  // Genuinely nothing known about this tenant. Still null, but now it means
+  // what it says instead of standing in for "the capabilities form is empty".
+  return null;
+}
+
+export async function classifyGapRelevance(siteId, gap, deps = {}) {
+  const described = await describeTenantForRelevance(siteId, deps);
+  if (!described) return null;
+
+  const heading = described.source === 'verified-capabilities'
+    ? 'Verified capabilities'
+    : 'What is known about this business';
+  const user = `Topic: "${gap.topic}"${gap.reason ? `\nContext: ${gap.reason}` : ''}\n\n${heading}:\n${described.text}`;
 
   try {
     const parsed = await callLLMForJson(RELEVANCE_SYSTEM, user, { maxTokens: 150, generatorId: 'gap-relevance-classifier', siteId });
     const searchIntent = ['informational', 'commercial', 'transactional'].includes(parsed?.search_intent) ? parsed.search_intent : null;
     const productRelevance = ['direct', 'supporting', 'unrelated'].includes(parsed?.product_relevance) ? parsed.product_relevance : null;
     if (!searchIntent || !productRelevance) return null;
-    return { searchIntent, productRelevance };
+    return { searchIntent, productRelevance, source: described.source, confidence: described.confidence };
   } catch (e) {
     console.warn(`[analyst-seo-mapping] gap relevance classification failed for gap ${gap.id}: ${e.message}`);
     return null;
@@ -118,65 +190,21 @@ export async function classifyGapRelevance(siteId, gap) {
 // topic).
 const STOPWORDS = new Set(['the', 'a', 'an', 'for', 'and', 'or', 'to', 'of', 'in', 'on', 'is', 'are', 'how', 'what', 'why', 'does', 'do']);
 function significantWords(text) {
-  return (text || '')
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
+  // Unicode-aware: the old [^a-z0-9] split turned "KI-Entwicklung" or Devanagari
+  // into an empty word set, so those keywords were never matched to anything.
+  return (foldText(text).match(/[\p{L}\p{N}]+/gu) || [])
     .filter((w) => w.length > 2 && !STOPWORDS.has(w));
 }
 
-const MAX_SIMILARITY_CANDIDATES = 5;
-const EXISTING_PAGE_SYSTEM = 'You check whether a candidate existing page already substantially covers a target search ' +
-  'topic — not just mentions it in passing. Respond with ONLY a JSON object: {"covered_by": "<the exact URL from the ' +
-  'list that covers it>"} if one does, or {"covered_by": null} if none of the given pages substantially cover the topic. ' +
-  'Never pick a URL not in the given list.';
-
+// The URL of an existing page that already covers (or is already built around)
+// this gap's topic, or null. Kept for callers that only need that one answer; it
+// holds NO matching logic of its own anymore — the verdict comes from
+// keyword-coverage-service.js, which also separates "covered" from a topic that
+// is only covered in another language, country or intent. persist:false so a
+// lookup never writes a verdict; force so it is never served from a stale cache.
 export async function findExistingPageMatch(siteId, gap) {
-  const topicWords = new Set(significantWords(gap.topic));
-  if (!topicWords.size) return null;
-
-  const rawPages = await listPageInventory(siteId, { limit: 500 }).catch(() => []);
-  // page_inventory is crawl/sitemap-discovered and carries no domain
-  // filtering of its own — knownDomain (primary domain only), same scoping
-  // as every other finding-generating agent (candidate-pages.js's own
-  // comment). Without this, a topic could get "covered_by" a real page on a
-  // registered-but-separate additional_own_domain (edgex./zenly.zunkireelabs.com)
-  // or a foreign one entirely — gap confirmed 2026-08-24.
-  const site = await getSiteById(siteId).catch(() => null);
-  const domain = site ? knownDomain(site) : null;
-  const pages = domain ? filterOwnDomainPages(rawPages, domain, (r) => r.page) : rawPages;
-  const scored = pages
-    .map((p) => {
-      const urlWords = significantWords(p.page.replace(/^https?:\/\/[^/]+/, ''));
-      const overlap = urlWords.filter((w) => topicWords.has(w)).length;
-      return { page: p.page, overlap };
-    })
-    .filter((p) => p.overlap > 0)
-    .sort((a, b) => b.overlap - a.overlap)
-    .slice(0, MAX_SIMILARITY_CANDIDATES);
-  if (!scored.length) return null;
-
-  const fetched = await Promise.all(scored.map(async ({ page }) => {
-    const result = await analyzePageUrl(page).catch(() => ({ ok: false }));
-    if (!result.ok || !hasSufficientGroundingContent(result.analysis)) return null;
-    return { page, excerpt: result.analysis.bodyText.slice(0, 800) };
-  }));
-  const candidates = fetched.filter(Boolean);
-  if (!candidates.length) return null;
-
-  const user = `Target topic: "${gap.topic}"\n\nCandidate pages:\n${candidates
-    .map((c, i) => `${i + 1}. ${c.page}\n${c.excerpt}`)
-    .join('\n\n')}`;
-
-  try {
-    const parsed = await callLLMForJson(EXISTING_PAGE_SYSTEM, user, { maxTokens: 100, generatorId: 'gap-existing-page-check', siteId });
-    const coveredBy = typeof parsed?.covered_by === 'string' ? parsed.covered_by : null;
-    // Never trust a URL the model didn't actually see — same "grounded only
-    // in what's given" discipline the generators use.
-    return coveredBy && candidates.some((c) => c.page === coveredBy) ? coveredBy : null;
-  } catch (e) {
-    console.warn(`[analyst-seo-mapping] existing-page check failed for gap ${gap.id}: ${e.message}`);
-    return null;
-  }
+  const r = await classifyGapCoverage(siteId, gap, { persist: false, force: true });
+  return ['duplicate', 'covered'].includes(r.status) ? r.url : null;
 }
 
 // Cheap, deterministic (no LLM) phrasing detection — this is a SHAPE signal,
@@ -234,6 +262,22 @@ export function gapDraftEligibility(gap) {
   const findingId = `keyword-gap:${gap.id}`;
   const shape = detectContentShape(gap.topic);
 
+  // Coverage verdict (keyword-coverage.js). SAME TOPIC IS NOT SAME TARGET, so
+  // only the verdicts that really mean "nothing new to write" stop a draft:
+  //   duplicate  -> a page is already built around this exact keyword
+  //   uncertain  -> not enough evidence; shown to a human, never auto-drafted
+  // covered falls through to the existing_page_match rule below (FAQ or nothing).
+  // market_gap / intent_gap / opportunity are real opportunities and fall through
+  // to normal generator selection — with market grounding added where it applies.
+  if (gap.coverage_status === 'duplicate' || gap.coverage_status === 'uncertain') return null;
+
+  // A keyword in another language must not be drafted into the site's default-
+  // language collection. That is exactly how German and Dutch posts ended up
+  // under /blog/ with lang="en" and no alternates. Until a locale-aware content
+  // target exists for the language, the right outcome is a visible
+  // "localize" opportunity (see recommendedActionForGap), not an English-route draft.
+  if (gap.language_code && baseLang(gap.language_code) !== 'en') return null;
+
   // Already covered by a real existing page — the strongest possible
   // "nothing to draft" signal, checked first regardless of shape/value. The
   // one exception: a question-shaped topic against that same page is a real
@@ -272,11 +316,56 @@ export function gapDraftEligibility(gap) {
     // NOT the comparison case: an article/page that happens to answer a
     // question well is a correct fulfillment of that topic, not a stand-in
     // for missing infrastructure the way a comparison topic is.
-    shapeHint: shape === 'question'
-      ? 'This is a QUESTION-phrased query. Lead with a direct, concise answer to the literal question before any ' +
-        'supporting detail — do not bury the answer under a generic introduction.'
-      : null,
+    shapeHint: [
+      shape === 'question'
+        ? 'This is a QUESTION-phrased query. Lead with a direct, concise answer to the literal question before any ' +
+          'supporting detail — do not bury the answer under a generic introduction.'
+        : null,
+      groundingNote(gap),
+    ].filter(Boolean).join(' ') || null,
   };
+}
+
+const MARKET_NAMES = { US: 'United States', IN: 'India', GB: 'United Kingdom', AU: 'Australia', CA: 'Canada', NP: 'Nepal', CH: 'Switzerland', NL: 'Netherlands', DE: 'Germany' };
+
+// What a market-specific or dated draft must NOT do. These are the failure modes
+// seen in a real batch: one template with the country name swapped, Nepali firms
+// listed as competitors in the UK and Canada, and last year's year in the title.
+export function groundingNote(gap, now = new Date()) {
+  const parts = [`Current year: ${now.getFullYear()}. Never put an older year in the title or body, and do not state events, dates or statistics you were not given.`];
+  const ev = gap?.coverage_evidence || {};
+  const market = (ev.gapMarkets && ev.gapMarkets[0]) || (gap?.coverage_status === 'market_gap' ? LOCATION_CODE_TO_MARKET[gap?.location_code] : null);
+  if (market && MARKET_NAMES[market]) {
+    parts.push(
+      `Target market: ${MARKET_NAMES[market]}. Write for that market's audience. Only state market-specific facts (regulations, institutions, ` +
+      'named companies, prices) that appear in the provided grounding; if none do, stay general instead of inventing them. ' +
+      'Do not present companies from other countries as competitors or examples for this market, and do not reuse a client result as a general claim.'
+    );
+  }
+  return parts.join(' ');
+}
+
+// The action a human should expect for a gap, derived from the SAME rules that
+// decide whether a draft is created — so the UI can never promise "Would create:
+// Blog post" for something the backend will not draft. kind is one of:
+// 'none' | 'faq' | 'landing-page' | 'blog-post' | 'localize' | 'refresh' | 'review' | 'comparison-page'.
+export function recommendedActionForGap(gap) {
+  if (!gap?.topic) return { kind: 'none', label: 'No action', reason: 'Missing topic.' };
+  const cov = gap.coverage_status || null;
+  const ev = gap.coverage_evidence || {};
+  const near = ev.nearestUrl || gap.existing_page_match || null;
+  if (cov === 'language_gap' || (gap.language_code && baseLang(gap.language_code) !== 'en')) {
+    return { kind: 'localize', label: `Localize (${gap.language_code || 'other language'})`, reason: gap.coverage_reason || 'Needs a localized page under its own language URL; not auto-drafted into the English blog.' };
+  }
+  if (cov === 'uncertain') return { kind: 'review', label: 'Review: not enough evidence', reason: gap.coverage_reason || 'Coverage could not be established.' };
+  if (cov === 'duplicate') return { kind: 'none', label: 'No action: already targeted', reason: gap.coverage_reason || (near ? `Already targeted by ${near}.` : 'Already targeted.') };
+  if ((cov === 'covered' || cov === 'duplicate') && ev.needsRefresh) return { kind: 'refresh', label: 'Refresh the existing page', reason: ev.staleReason || gap.coverage_reason };
+  const e = gapDraftEligibility(gap);
+  if (!e) return { kind: 'none', label: 'No action', reason: gap.coverage_reason || 'Nothing new to add.' };
+  if (e.requiresFutureInfrastructure) return { kind: 'comparison-page', label: 'Comparison page (not supported yet)', reason: e.note };
+  if (e.generatorId === 'faq') return { kind: 'faq', label: 'Add an FAQ to the existing page', reason: gap.coverage_reason || null, page: e.existingPage };
+  if (e.generatorId === 'landing-page') return { kind: 'landing-page', label: 'Create a landing page', reason: gap.coverage_reason || null };
+  return { kind: 'blog-post', label: 'Create a blog post', reason: gap.coverage_reason || null };
 }
 
 // The eligibility gapDraftEligibility above would compute, overridden for one
@@ -302,6 +391,30 @@ export function requestedBlogEligibility(gap) {
     findingId: `keyword-gap:${gap.id}`,
     shapeHint: classified?.shapeHint ?? null,
   };
+}
+
+// Real "build topic cluster" support (multi-tenant growth spec): when
+// find_gaps (data-analyst-agent) grouped this gap with 2+ siblings under one
+// topic_cluster name (persisted + normalized server-side, see migration 156
+// and _normalize_clusters), tells the generator about its real siblings —
+// grounded ONLY in the other gaps' own real topic strings, never invented —
+// so a pillar page is written broad enough to link out, and a supporting
+// article stays narrow instead of re-covering the pillar. Returns null for
+// an ungrouped gap (topic_cluster is the common case, per find_gaps' own
+// "don't force it" instruction) or when this gap's siblings can't be read.
+async function buildClusterContext(siteId, gap) {
+  const siblings = await getKeywordGapsInCluster(siteId, gap.topic_cluster, gap.id).catch(() => []);
+  if (!siblings.length) return null;
+  if (gap.cluster_role === 'pillar') {
+    const supporting = siblings.filter((s) => s.cluster_role === 'supporting').map((s) => s.topic);
+    return supporting.length
+      ? `This is the PILLAR page for the topic cluster "${gap.topic_cluster}" — write it broad enough to naturally reference, and later link out to, its planned supporting articles: ${supporting.join(', ')}.`
+      : null;
+  }
+  const pillar = siblings.find((s) => s.cluster_role === 'pillar');
+  return pillar
+    ? `This is a SUPPORTING article in the topic cluster "${gap.topic_cluster}" — its pillar page covers "${pillar.topic}". Stay focused on this narrower angle rather than re-covering the pillar's full breadth; reference the pillar topic naturally where relevant.`
+    : null;
 }
 
 // Turns an approved keyword gap into a real, actionable Action Center
@@ -339,29 +452,46 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
   // dismissed draft reuses what's already known rather than re-judging
   // against a possibly-changed capability set or page inventory).
   const needsClassification = gap.search_intent == null || gap.product_relevance == null;
-  const needsPageCheck = gap.existing_page_match == null;
+  // Coverage is cached on the gap (coverage_checked_at), so a re-approval inside
+  // the TTL costs nothing; only an unchecked or expired verdict is re-judged.
+  const needsPageCheck = !isCoverageFresh(gap);
   if (needsClassification || needsPageCheck) {
-    const [classification, existingPageMatch] = await Promise.all([
-      needsClassification ? classifyGapRelevance(siteId, gap).catch(() => null) : null,
-      needsPageCheck ? findExistingPageMatch(siteId, gap).catch(() => null) : null,
-    ]);
-    if (classification || existingPageMatch) {
+    // Classification first: the coverage engine needs the keyword's search
+    // intent to tell an intent gap from a covered topic.
+    const classification = needsClassification ? await classifyGapRelevance(siteId, gap).catch(() => null) : null;
+    if (classification) {
       // A direct product match with commercial/transactional intent outranks
       // whatever difficulty-based priority the clustering agent originally
       // guessed — commercial demand for something Zunkiree actually sells
       // matters more than raw keyword volume (product-visibility growth
       // objective, "commercial intent must matter"). Anything else keeps its
       // existing priority untouched (setGapClassification's COALESCE).
-      const isCommercialIntent = classification && (classification.searchIntent === 'commercial' || classification.searchIntent === 'transactional');
-      const boostedPriority = isCommercialIntent && classification.productRelevance === 'direct' ? 'high' : undefined;
+      const isCommercialIntent = classification.searchIntent === 'commercial' || classification.searchIntent === 'transactional';
+      const naiveBoost = isCommercialIntent && classification.productRelevance === 'direct' ? 'high' : undefined;
+      // Real learning loop, not just a static rule: THIS site's own measured
+      // GSC impact from past commercial+direct gaps can withhold a boost the
+      // static rule above would otherwise always grant — see gap-learning.js.
+      const learnedGapMap = naiveBoost ? await getLearnedGapConfidence(siteId).catch(() => new Map()) : null;
+      const boostedPriority = naiveBoost
+        ? temperPriorityBoost(learnedGapMap, classification.searchIntent, classification.productRelevance, naiveBoost)
+        : undefined;
       const updated = await setGapClassification(siteId, gap.id, {
-        searchIntent: classification?.searchIntent, productRelevance: classification?.productRelevance,
-        priority: boostedPriority, existingPageMatch,
+        searchIntent: classification.searchIntent, productRelevance: classification.productRelevance, priority: boostedPriority,
       }).catch(() => null);
       if (updated) {
+        gap = { ...gap, search_intent: updated.search_intent, product_relevance: updated.product_relevance, priority: updated.priority };
+      }
+    }
+    if (needsPageCheck) {
+      const coverage = await classifyGapCoverage(siteId, gap).catch((e) => {
+        console.warn(`[analyst-seo-mapping] coverage check failed for gap ${gap.id}: ${e.message}`);
+        return null;
+      });
+      if (coverage) {
         gap = {
-          ...gap, search_intent: updated.search_intent, product_relevance: updated.product_relevance,
-          priority: updated.priority, existing_page_match: updated.existing_page_match,
+          ...gap, coverage_status: coverage.status, coverage_reason: coverage.reason, coverage_evidence: coverage.evidence,
+          language_code: coverage.languageCode ?? gap.language_code,
+          existing_page_match: ['duplicate', 'covered'].includes(coverage.status) ? coverage.url : null,
         };
       }
     }
@@ -376,7 +506,8 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
         .map((q) => `"${q.dim_value}" (${q.impressions} impr, ${q.clicks} clicks, pos ${q.avg_position ?? '—'})`)
         .join('; ')}.`
     : 'No matching real GSC queries found for this topic in the last 90 days — a true zero-coverage gap.';
-  const reason = [gap.reason, evidence].filter(Boolean).join(' ');
+  const clusterContext = gap.topic_cluster ? await buildClusterContext(siteId, gap) : null;
+  const reason = [gap.reason, evidence, clusterContext].filter(Boolean).join(' ');
 
   // No real generator exists for this shape (see gapDraftEligibility's own
   // doc comment) — recorded as a real, visible, blocked recommendation
@@ -389,6 +520,14 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
     const params = { topic: gap.topic, context: reason };
     const page = recommendationPageKey({ generatorId, params });
     const existing = await findOpenRecommendation(siteId, page, generatorId);
+    // Only annotated on first creation, never on a re-detection of an
+    // already-open recommendation — a decision-engine call every time this
+    // gap is re-seen would pay LLM cost for the same already-blocked card
+    // over and over with nothing new to say.
+    const decision = existing ? null : await decisionEngineAnnotation(gap, siteId);
+    const blockedReason = decision
+      ? `${eligibility.note} Cross-domain evidence review: ${decision.rationale}`
+      : eligibility.note;
     const recommendationId = existing
       ? existing.id
       : (await insertRecommendation(siteId, {
@@ -401,14 +540,14 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
           detectingAgent: 'analyst-keyword-gaps',
           priority: gap.priority,
           riskTier: 'manual',
-          blockedReason: eligibility.note,
+          blockedReason,
           // label only, value left null — see the comment on the main insert
           // below for why a real number is not invented here.
           expectedImpact: { label: impactFromPriority(gap.priority), basis: 'estimate', value: null },
         })).id;
     return {
       eligible: true, created: !existing, recommendationId, draftId: null,
-      blockedReason: eligibility.note, requiresFutureInfrastructure: true,
+      blockedReason, requiresFutureInfrastructure: true,
     };
   }
 
@@ -457,6 +596,23 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
       riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(eligibility.generatorId),
     });
   } else {
+    // Claim the topic before creating anything (migration 180). This is the
+    // producer the ledger matters most for: a keyword gap and the daily
+    // roster can both decide the same topic needs a page, by different
+    // generators, and the recommendations index cannot see that collision
+    // because the generator is part of its key.
+    //
+    // The gap's own coverage verdict (migration 179) is passed through so
+    // arbitration knows which way to rank: on an already-covered topic a new
+    // page is cannibalization and expanding or linking wins; on a genuine
+    // gap the new page wins.
+    const claim = await claimForItem(
+      siteId, { generatorId: eligibility.generatorId, params }, 'keyword-gap',
+      { coverageStatus: gap.coverage_status ?? null },
+    );
+    if (!claim.ok) {
+      return { eligible: false, dropped: `claimed-by-${claim.heldBy?.producer ?? 'another-producer'}` };
+    }
     recommendationId = (await insertRecommendation(siteId, {
       page,
       recommendationType: eligibility.generatorId,
@@ -591,13 +747,16 @@ export function seoDraftEligibility(site, insight) {
 // the gaps PUT route — which also runs relevance classification and the
 // existing-page check gapDraftEligibility needs. Mirrors
 // generatorForDecliningPage below: a CTR/click gap is a presentation problem
-// (title/meta), everything else here is a coverage/depth problem
-// (expand-content) — no generator here needs to guess a topic, same
-// discipline as seoDraftEligibility.
+// (title/meta), a real click/position DROP on a page that already had
+// traffic is a staleness problem (refresh-content — corrects/updates what's
+// already there, grounded in the real trend numbers), everything else here
+// is a coverage/depth problem (expand-content, which only ever ADDS new
+// subtopics) — no generator here needs to guess a topic, same discipline as
+// seoDraftEligibility.
 const OPPORTUNITY_GENERATORS = {
   'quick-win': (opp) => ({ generatorId: 'meta-title', params: { page: opp.page, query: opp.query } }),
   'page1-opportunity': (opp) => ({ generatorId: 'expand-content', params: { page: opp.page } }),
-  declining: (opp) => ({ generatorId: 'expand-content', params: { page: opp.page } }),
+  declining: (opp) => ({ generatorId: 'refresh-content', params: { page: opp.page, query: opp.query, trend: opp.trend || null } }),
   'content-expansion': (opp) => ({ generatorId: 'expand-content', params: { page: opp.page } }),
 };
 
@@ -778,7 +937,8 @@ export async function refreshPendingKeywordGapObservations(siteId) {
   let observed = 0;
   let classified = 0;
 
-  for (const gap of gaps) {
+  for (const listed of gaps) {
+    let gap = listed; // reassigned below once classification lands
     try {
       const relatedQueries = await getRelatedQueriesForTopic(siteId, gap.topic);
       const impressions = relatedQueries.reduce((sum, q) => sum + (Number(q.impressions) || 0), 0);
@@ -794,19 +954,19 @@ export async function refreshPendingKeywordGapObservations(siteId) {
       console.warn(`[analyst-seo-mapping] weekly evidence snapshot failed for gap ${gap.id}: ${e.message}`);
     }
 
-    const needsClassification = gap.search_intent == null || gap.product_relevance == null || gap.existing_page_match == null;
-    if (!needsClassification) continue;
+    const needsClassification = gap.search_intent == null || gap.product_relevance == null;
+    const needsCoverage = !isCoverageFresh(gap);
+    if (!needsClassification && !needsCoverage) continue;
     try {
-      const [classification, existingPageMatch] = await Promise.all([
-        gap.search_intent == null || gap.product_relevance == null ? classifyGapRelevance(siteId, gap).catch(() => null) : null,
-        gap.existing_page_match == null ? findExistingPageMatch(siteId, gap).catch(() => null) : null,
-      ]);
-      if (classification || existingPageMatch) {
-        await setGapClassification(siteId, gap.id, {
-          searchIntent: classification?.searchIntent, productRelevance: classification?.productRelevance, existingPageMatch,
-        });
-        classified++;
+      const classification = needsClassification ? await classifyGapRelevance(siteId, gap).catch(() => null) : null;
+      if (classification) {
+        await setGapClassification(siteId, gap.id, { searchIntent: classification.searchIntent, productRelevance: classification.productRelevance });
+        gap = { ...gap, search_intent: classification.searchIntent, product_relevance: classification.productRelevance };
       }
+      // Cached verdicts are skipped above; a checked "no match" is now a real,
+      // cacheable answer, so unmatched gaps are no longer re-fetched every week.
+      if (needsCoverage) await classifyGapCoverage(siteId, gap);
+      classified++;
     } catch (e) {
       console.warn(`[analyst-seo-mapping] weekly classification refresh failed for gap ${gap.id}: ${e.message}`);
     }
@@ -867,6 +1027,139 @@ export function isoWeekStart(d = new Date()) {
   return utc.toISOString().slice(0, 10);
 }
 
+// THE source string every draft this pipeline creates is tagged with (see
+// createActionCenterRecommendationForGap's generateDraft call). Deliberately
+// distinct from auto-remediation.js's 'auto-remediation' so the two lanes
+// stay separately attributable — which is exactly why this one needs its own
+// cap below rather than inheriting that one's.
+const GAP_DRAFT_SOURCE = 'analyst-keyword-gap';
+
+// Phase 7 of the "one intelligence" consolidation plan (fix/system) — the
+// one call site where decision-engine actually gets invoked from the real
+// ship cycle, and ONLY for the two cases gap-action-resolver.js itself
+// already restricts to (requiresFutureInfrastructure, landing-page MANUAL
+// tier). Explicitly opt-in and OFF by default: with this unset, neither
+// branch below changes at all — same eligibility, same blockedReason, same
+// routing, zero decision-engine calls, zero added cost or latency to the
+// Monday ship cycle. This is annotation only, never routing: it enriches
+// what a human sees on an already-blocked/already-manual recommendation,
+// it never ships anything gapDraftEligibility didn't already decide to
+// create, and a decision-engine failure here is swallowed (try/catch) so a
+// down LLM provider can never break gap shipping.
+const DECISION_ENGINE_GAP_ANNOTATIONS = process.env.DECISION_ENGINE_GAP_ANNOTATIONS === 'true';
+
+async function decisionEngineAnnotation(gap, siteId) {
+  if (!DECISION_ENGINE_GAP_ANNOTATIONS) return null;
+  try {
+    const { gapActionResolver } = await import('./gap-action-resolver.js');
+    const { decision } = await gapActionResolver.resolveGapAction(gap, siteId);
+    return decision;
+  } catch (err) {
+    console.warn(`[analyst-seo-mapping] decision-engine annotation failed for gap ${gap.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// Daily ceiling for THIS pipeline. It had none at all until now, and that was
+// a real hole in the platform's shipping limits rather than a deliberate
+// exemption: auto-remediation.js caps itself by counting drafts with
+// source='auto-remediation' (countDraftsBySourceToday), and job.js's
+// platform-wide AUTO_REMEDIATION_GLOBAL_DAILY_CEILING counts the same source
+// — so every draft opened here was invisible to both, and a single Monday
+// ship cycle could open unbounded PRs no limit ever saw. The per-gap evidence
+// gates above (two observations, non-decreasing demand, one-week-old) bound
+// WHICH gaps qualify, but nothing bounded HOW MANY shipped in one pass.
+//
+// 20/day matches the analyst allocation auto-remediation.js already reserves
+// for evidence-driven work (its ANALYST_MAX), so the two analyst-side lanes
+// carry the same daily weight rather than one being implicitly unlimited.
+// Over-cap gaps are NOT dropped: they stay 'pending_review' (the status
+// change below only happens for gaps this pass actually ships), so the next
+// run reconsiders them with their evidence intact — carried forward, exactly
+// like auto-remediation's own over-budget candidates.
+const CONTENT_GAP_DAILY_MAX = Number(process.env.ANALYST_CONTENT_GAP_DAILY_MAX || 20);
+
+// Net-new blog topics are ranked by REAL search volume and thinned to this
+// pool before anything else applies — the daily/weekly caps below answer
+// "how much", this answers "which ones, when there's more demand evidence
+// than there is publishing capacity". search_volume is only ever real
+// (keyword-demand.js never fabricates one for an LLM-guessed gap), so an
+// LLM-guessed topic sorts to the back of the pool rather than being dropped
+// outright — it can still ship once nothing with measured demand outranks it.
+const MAX_BLOG_TOPIC_POOL = 5;
+
+// blog-outline already has a publishing cadence (ship-pacing.js's
+// blog_min_gap_days) enforced on auto-remediation.js's daily sweep of
+// already-open recommendations. This pipeline never goes through that sweep
+// — it creates AND ships a recommendation in the same call
+// (createActionCenterRecommendationForGap) — so without its own check here a
+// single Monday run could ship several blog-outline drafts at once, the
+// exact "several years' worth of blog posts in one run" class of bug
+// ship-pacing.js's own header comment describes for a different path. Reused
+// from PACED_GENERATORS rather than re-declared, so the two enforcement
+// points can't drift on the gap length or the per-site override column.
+const BLOG_PACING = PACED_GENERATORS.find((p) => p.generatorId === 'blog-outline');
+
+// On-page keyword updates (a gap matching an EXISTING page, drafted as an faq
+// addition — see gapDraftEligibility) had no cadence gate at all until now,
+// only the shared CONTENT_GAP_DAILY_MAX above. Capped to 10/week so they
+// batch on a predictable weekly rhythm instead of shipping immediately
+// whenever a gap happens to qualify.
+const FAQ_WEEKLY_MAX = 10;
+
+// Highest-volume first, the ordering this pipeline has always used.
+function byVolumeDesc(gaps) {
+  return [...gaps].sort((a, b) => (b.search_volume ?? -1) - (a.search_volume ?? -1));
+}
+
+// The volume ordering, or the shared topic queue's score when the scorer is
+// on. Separated out so the ordering decision is one readable function rather
+// than a branch inside an already long pipeline, and so the fallback is
+// unmissable: EVERY failure path returns the volume ordering.
+async function rankBlogPool(siteId, blogEligible, { dryRun }) {
+  if (!blogEligible.length || !isTopicScorerEnabled()) return byVolumeDesc(blogEligible);
+
+  try {
+    const { buildTopicQueue } = await import('./topic-queue.js');
+    const { queued } = await buildTopicQueue(siteId, blogEligible.map((gap) => ({
+      topic: gap.topic,
+      origin: 'keyword-gap',
+      intent: 'new-blog',
+      // The volume on the row is REAL — DataForSEO's, recorded at discovery
+      // — so it is handed over as a measured signal rather than re-fetched
+      // and re-billed. A NULL volume is an LLM guess, and says so.
+      demand: gap.search_volume
+        ? { available: true, providerId: 'keyword-gaps', searchVolume: Number(gap.search_volume), volumeTrend: null, asOf: null }
+        : null,
+      llmEstimatedVolume: gap.search_volume ? null : 1,
+      // This gap already has its own coverage verdict and relevance
+      // classification; passing them avoids a second, possibly disagreeing
+      // classification of the same topic.
+      coverageStatus: gap.coverage_status ?? null,
+      relevance: gap.product_relevance
+        ? { productRelevance: gap.product_relevance, confidence: gap.relevance_confidence || 'medium' }
+        : null,
+    })), { limit: blogEligible.length, deps: dryRun ? { persist: async () => 0 } : {} });
+
+    const rankByTopic = new Map(queued.map((q, i) => [q.topicKey, i]));
+    const ranked = [...blogEligible].sort((a, b) => {
+      const ra = rankByTopic.get(topicKeyFor(a.topic));
+      const rb = rankByTopic.get(topicKeyFor(b.topic));
+      // A gap the queue dropped (covered, claimed, suppressed) has no rank
+      // and sorts last — it is still reported by the loop below with its own
+      // reason rather than silently disappearing.
+      if (ra == null && rb == null) return (b.search_volume ?? -1) - (a.search_volume ?? -1);
+      if (ra == null) return 1;
+      if (rb == null) return -1;
+      return ra - rb;
+    });
+    return ranked;
+  } catch (err) {
+    console.warn(`[analyst-seo-mapping] topic scoring unavailable for site ${siteId}, falling back to volume order: ${err.message}`);
+    return byVolumeDesc(blogEligible);
+  }
+}
+
 export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, now = new Date() } = {}) {
   const resolvedSite = site || await getSiteById(siteId);
   const gaps = await getKeywordGaps(siteId, 'pending_review');
@@ -886,6 +1179,15 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, 
   // collector again. A same-week gap must be unshippable because of what it
   // is, not because of which job won a race.
   const currentWeek = isoWeekStart(now);
+  // Gather window is 2 full weeks, not 1: a gap must have survived two
+  // week-boundary crossings of evidence-gathering before it can ship, not
+  // just one. Computed as the week-start 14 days before this week's own
+  // Monday, so a gap first discovered any day in "two weeks ago"'s ISO week
+  // or earlier is eligible; anything discovered in the week right before
+  // this one still has to wait one more Monday.
+  const twoWeeksAgo = new Date(now);
+  twoWeeksAgo.setUTCDate(twoWeeksAgo.getUTCDate() - 14);
+  const gatherCutoffWeek = isoWeekStart(twoWeeksAgo);
 
   const candidates = gaps.filter((gap) =>
     (gap.observation_count || 1) >= 2 &&
@@ -898,16 +1200,81 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, 
     // this column as ::text precisely so this comparison can't be knocked a day
     // (and therefore a week) out by node-postgres parsing a DATE to local
     // midnight. Both sides are already Monday-normalized, so a plain
-    // lexicographic < is the whole test.
+    // lexicographic <= is the whole test.
     gap.first_discovery_week != null &&
-    gap.first_discovery_week < currentWeek &&
+    gap.first_discovery_week <= gatherCutoffWeek &&
     hasStableOrGrowingDemand(gap)
   );
+
+  // Measured once, before the loop, against drafts THIS pipeline already
+  // opened today (its own source, its own lane). A dryRun still reports what
+  // it would have been bounded to, so the cap is visible without shipping.
+  const spentToday = dryRun ? 0 : await countDraftsBySourceToday(siteId, GAP_DRAFT_SOURCE, resolvedSite?.timezone || 'UTC');
+  let remaining = Math.max(0, CONTENT_GAP_DAILY_MAX - spentToday);
+
+  const timezone = resolvedSite?.timezone || 'UTC';
+
+  // Rank this run's blog-outline-eligible candidates and keep only the top
+  // MAX_BLOG_TOPIC_POOL — computed once, up front, so the main loop below
+  // can treat "in the pool" as a plain lookup.
+  //
+  // Two orderings, same cap and same one-slot-per-run discipline:
+  //
+  //   * By default, by real search volume. A NULL search_volume
+  //     (LLM-guessed) sorts last (-1), never first.
+  //   * With TOPIC_SCORER_ENABLED, by the shared topic queue's score
+  //     (agents/lib/topic-queue.js), which is volume PLUS whether the topic
+  //     is also trending right now, how much coverage headroom it has, and
+  //     whether it serves an active goal. Volume alone cannot see any of
+  //     that — which is why a topic that is both genuinely trending and
+  //     genuinely searched previously had no advantage at all over one that
+  //     was merely high-volume.
+  //
+  // Falls back to the volume ordering on any failure: a scoring problem must
+  // not stop this week's one blog post from shipping.
+  const blogEligible = candidates.filter((gap) => gapDraftEligibility(gap)?.generatorId === 'blog-outline');
+  const rankedBlogPool = (await rankBlogPool(siteId, blogEligible, { dryRun }))
+    .slice(0, MAX_BLOG_TOPIC_POOL);
+  const blogPoolIds = new Set(rankedBlogPool.map((gap) => gap.id));
+  // The one slot this run may fill always goes to the pool's best-ranked
+  // member, never to whichever pool member the main loop below happens to
+  // reach first (candidates are ordered by created_at, not by rank).
+  const chosenBlogGapId = rankedBlogPool[0]?.id ?? null;
+  const blogGapDays = resolvedSite?.[BLOG_PACING.gapColumn] ?? BLOG_PACING.defaultGapDays;
+  // Same dryRun convention as spentToday above: a dry run reports against a
+  // fully-open cadence/budget rather than the real, already-spent one.
+  const blogOnCooldown = dryRun ? false : await hasRecentDraftOfType(siteId, 'blog-outline', blogGapDays, timezone);
+
+  const faqShippedThisWeek = dryRun ? 0 : await countDraftsBySourceAndTypeThisWeek(siteId, GAP_DRAFT_SOURCE, 'faq', timezone);
+  let faqRemainingThisWeek = Math.max(0, FAQ_WEEKLY_MAX - faqShippedThisWeek);
 
   const results = [];
   for (const gap of candidates) {
     const eligibility = gapDraftEligibility(gap);
     if (!eligibility) { results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: 'no-draft-eligibility' }); continue; }
+
+    if (eligibility.generatorId === 'blog-outline') {
+      if (!blogPoolIds.has(gap.id)) {
+        results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: `blog-topic-pool-cap (top ${MAX_BLOG_TOPIC_POOL} by search volume)`, generatorId: eligibility.generatorId, deferred: true });
+        continue;
+      }
+      if (blogOnCooldown) {
+        results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: `blog-cadence-gap (min ${blogGapDays}d)`, generatorId: eligibility.generatorId, deferred: true });
+        continue;
+      }
+      // Only the pool's single highest-volume member gets this run's one
+      // slot — never just whichever pool member the loop reaches first,
+      // which follows created_at order, not volume.
+      if (gap.id !== chosenBlogGapId) {
+        results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: 'blog-one-per-run', generatorId: eligibility.generatorId, deferred: true });
+        continue;
+      }
+    }
+
+    if (eligibility.generatorId === 'faq' && faqRemainingThisWeek <= 0) {
+      results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: `on-page-weekly-cap (max ${FAQ_WEEKLY_MAX}/week)`, generatorId: eligibility.generatorId, deferred: true });
+      continue;
+    }
 
     // LANDING PAGES ARE NEVER AUTO-APPROVED HERE, no matter how strong the
     // evidence — a dedicated product/use-case page is a bigger commitment
@@ -924,12 +1291,31 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, 
     // else about the candidate's evidence changes; only landing-page's
     // routing is held back.
     if (eligibility.generatorId === 'landing-page') {
-      results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: 'landing-page-needs-human-approval', generatorId: eligibility.generatorId });
+      // Annotation only, same as the requiresFutureInfrastructure branch
+      // above — logged on this run's result for whoever reviews the ship
+      // cycle output; does not change riskTier, does not change the
+      // pending_review status, does not let a landing page through without
+      // the human click-through described in the comment above.
+      const decision = await decisionEngineAnnotation(gap, siteId);
+      results.push({
+        gapId: gap.id, topic: gap.topic, qualified: false, reason: 'landing-page-needs-human-approval',
+        generatorId: eligibility.generatorId, ...(decision ? { decisionEngineContext: decision } : {}),
+      });
       continue;
     }
 
     if (dryRun) {
       results.push({ gapId: gap.id, topic: gap.topic, qualified: true, generatorId: eligibility.generatorId, dryRun: true });
+      continue;
+    }
+
+    // Budget checked HERE, after every cheap disqualification above, so a
+    // pass full of non-eligible or landing-page gaps doesn't burn budget it
+    // never spent. Deferred gaps keep status 'pending_review' (the approve
+    // below is what would have moved them), so nothing is lost — the next
+    // run picks them up with their evidence and week attribution unchanged.
+    if (remaining <= 0) {
+      results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: 'daily-cap-reached', generatorId: eligibility.generatorId, deferred: true });
       continue;
     }
 
@@ -939,10 +1325,20 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, 
     // never operates on stale field values.
     const updated = await updateKeywordGapStatus(siteId, gap.id, 'approved');
     const outcome = await createActionCenterRecommendationForGap(siteId, updated || gap);
+    remaining -= 1;
+    if (eligibility.generatorId === 'faq') faqRemainingThisWeek -= 1;
     results.push({ gapId: gap.id, topic: gap.topic, qualified: true, generatorId: eligibility.generatorId, ...outcome });
   }
 
-  return { siteId: resolvedSite?.id ?? siteId, pending: gaps.length, candidates: candidates.length, shipped: results.filter((r) => r.qualified && !dryRun).length, dryRun, results };
+  return {
+    siteId: resolvedSite?.id ?? siteId, pending: gaps.length, candidates: candidates.length,
+    shipped: results.filter((r) => r.qualified && !dryRun).length,
+    deferred: results.filter((r) => r.deferred).length,
+    dailyLimit: CONTENT_GAP_DAILY_MAX, spentToday,
+    blogTopicPoolMax: MAX_BLOG_TOPIC_POOL, blogGapDays, blogOnCooldown,
+    faqWeeklyMax: FAQ_WEEKLY_MAX, faqShippedThisWeek,
+    dryRun, results,
+  };
 }
 
 function analystReason(insight, predicted) {

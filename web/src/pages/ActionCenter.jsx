@@ -29,7 +29,8 @@ import {
   ShieldAlert,
   XCircle,
   RefreshCw,
-  Lock
+  Lock,
+  Target
 } from 'lucide-react';
 
 const GENERATOR_META = {
@@ -161,6 +162,17 @@ function blockedMetaFor(item) {
   return BLOCKED_KIND_META[item?.blockedKind] || BLOCKED_KIND_META['our-config'];
 }
 
+// Server: goal-alignment.js's five levels, on recommendations.goal_alignment
+// (set at sync time by recommendation-coordinator.js, only when the site has
+// an active goal). 'none'/'insufficient_evidence'/no active goal all read as
+// "not tied to a goal" here — the distinction between them is a detector
+// detail, not something the user acts on differently.
+const GOAL_ALIGNMENT_META = {
+  strong: { className: 'bg-emerald-50/70 border-emerald-150 text-emerald-700', textClassName: 'text-emerald-900/85' },
+  partial: { className: 'bg-sky-50/70 border-sky-150 text-sky-700', textClassName: 'text-sky-900/85' },
+  weak: { className: 'bg-slate-50/70 border-slate-150 text-slate-600', textClassName: 'text-slate-700/85' },
+};
+
 // Where a recommendation is in its life (server: recommendation-coordinator.js's
 // deriveLifecycle). One card now persists through the whole lifecycle instead
 // of vanishing the moment a draft exists and reappearing later as a brand-new
@@ -248,6 +260,11 @@ export default function ActionCenter() {
   const [tab, setTab] = useState('recommendations'); // 'recommendations' | 'drafts' | 'implemented'
   const [recs, setRecs] = useState(null); // null = loading
   const [drafts, setDrafts] = useState(null);
+  // Exact tab-badge counts, loaded independently of `drafts` itself — the
+  // unfiltered drafts list is capped server-side (listDraftsForBoard), so a
+  // badge derived from that capped list would silently undercount once a
+  // site's history grew past the cap. null = loading, never rendered as 0.
+  const [draftCounts, setDraftCounts] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [range, setRange] = useState({ start: daysAgo(7), end: daysAgo(0) });
   const [generatingId, setGeneratingId] = useState(null);
@@ -298,7 +315,16 @@ export default function ActionCenter() {
   const loadDrafts = () => api.actionCenter.drafts({}, siteId).then((data) => {
     setDrafts(data);
     if (data && data.length > 0) setSelectedDraftItem(data[0]);
-  }).catch(() => setDrafts([]));
+  }).catch((e) => {
+    setDrafts([]);
+    // Previously silent — a failed fetch here used to read as "Drafts (0)
+    // / Done (0)", indistinguishable from a genuinely empty board. Real
+    // counts (below) no longer depend on this call succeeding, but the
+    // list itself failing to load is still worth telling a human about.
+    setError(e.message || 'Could not load drafts');
+  });
+
+  const loadDraftCounts = () => api.actionCenter.draftCounts(siteId).then(setDraftCounts).catch(() => {});
 
   const [todayStats, setTodayStats] = useState(null); // null | { shipped, failed, batchLimit }
   // The server's real cap (routes/action-center.js's SAFE_FIX_BATCH_LIMIT),
@@ -308,8 +334,8 @@ export default function ActionCenter() {
   const safeFixBatchLimit = todayStats?.batchLimit ?? null;
   const loadTodayStats = () => api.actionCenter.todayExecutionStats(siteId).then(setTodayStats).catch(() => {});
 
-  useEffect(() => { loadRecs(); loadDrafts(); loadTodayStats(); }, [siteId]);
-  useEffect(() => { if (tab === 'drafts' || tab === 'implemented') loadDrafts(); }, [tab]);
+  useEffect(() => { loadRecs(); loadDrafts(); loadDraftCounts(); loadTodayStats(); }, [siteId]);
+  useEffect(() => { if (tab === 'drafts' || tab === 'implemented') { loadDrafts(); loadDraftCounts(); } }, [tab]);
 
   // Deep link from a notification's "where the agent decided how to fix
   // it" click (NotificationBell.jsx's targetFor) — ?openDraft=<id> lands
@@ -370,6 +396,7 @@ export default function ActionCenter() {
       // list immediately instead of only in the Drafts tab.
       loadRecs();
       loadDrafts();
+      loadDraftCounts();
     } catch (e) {
       setError(`${item.tag}: ${e.message || 'Generation failed'}`);
     } finally {
@@ -418,6 +445,7 @@ export default function ActionCenter() {
           setExecutingSafeFixes(false);
           loadRecs();
           loadDrafts();
+          loadDraftCounts();
           loadTodayStats();
         }
       } catch {
@@ -447,6 +475,7 @@ export default function ActionCenter() {
         setExecutingSafeFixes(false);
         loadRecs();
         loadDrafts();
+        loadDraftCounts();
         loadTodayStats();
       } else {
         pollExecutionJob(result.job.id);
@@ -494,6 +523,7 @@ export default function ActionCenter() {
       const result = await api.actionCenter.bulkApproveDrafts(undefined, siteId);
       setBulkApproveResult(result);
       loadDrafts();
+      loadDraftCounts();
       loadTodayStats();
     } catch (e) {
       setError(e.message || 'Approve All Pending failed');
@@ -544,6 +574,7 @@ export default function ActionCenter() {
       setSelectedRecommendation(null);
       loadRecs();
       loadDrafts();
+      loadDraftCounts();
       loadTodayStats();
     } catch (e) {
       setError(`${item.tag}: ${e.message || 'Approve & Ship failed'}`);
@@ -595,7 +626,11 @@ export default function ActionCenter() {
   const highPriorityCount = (recs?.items || []).filter((i) => i.priority === 'high').length;
   const safeEligibleCount = (recs?.items || []).filter((i) => i.riskTier === 'safe').length;
   const pendingApprovalCount = (drafts || []).filter((d) => d.status === 'submitted_for_approval').length;
-  const implementedThisWeekCount = (drafts || []).filter((d) => d.status === 'implemented' && d.implemented_at >= daysAgo(7)).length;
+  // From the accurate server-side count, not the (now-capped, most-recent-
+  // 150) implemented list — a site shipping more than that in a week would
+  // otherwise silently undercount here.
+  const implementedThisWeekCount = draftCounts?.implementedThisWeek
+    ?? (drafts || []).filter((d) => d.status === 'implemented' && d.implemented_at >= daysAgo(7)).length;
 
   // Selected category items mapping
   const activeItems = activeCategory ? (grouped[activeCategory] || []) : [];
@@ -715,8 +750,12 @@ export default function ActionCenter() {
         <div className="lg:col-span-5 bg-slate-100/90 p-1.5 rounded-2xl border border-slate-200/80 flex shadow-sm items-center justify-between">
           {[
             { key: 'recommendations', label: 'Recs', count: recs?.items.length },
-            { key: 'drafts', label: 'Drafts', count: nonImplementedDrafts?.length },
-            { key: 'implemented', label: 'Done', count: implementedDrafts.length }
+            // From the accurate server-side counts (drafts/counts), not the
+            // board list's own length — that list is capped server-side
+            // (listDraftsForBoard) so history can't grow the page unbounded
+            // again the way it did before; the badges must still be right.
+            { key: 'drafts', label: 'Drafts', count: draftCounts?.nonImplemented ?? nonImplementedDrafts?.length },
+            { key: 'implemented', label: 'Done', count: draftCounts?.implemented ?? implementedDrafts.length }
           ].map((t) => (
             <button 
               key={t.key} 
@@ -1075,7 +1114,7 @@ export default function ActionCenter() {
             <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden flex-1 flex flex-col min-h-[300px]">
               <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
                 <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Implemented History</span>
-                <span className="text-[10px] font-bold text-slate-405 font-mono">{implementedDrafts.length} total</span>
+                <span className="text-[10px] font-bold text-slate-405 font-mono">{draftCounts?.implemented ?? implementedDrafts.length} total</span>
               </div>
 
               {drafts === null ? (
@@ -1237,6 +1276,30 @@ export default function ActionCenter() {
                             <div className="min-w-0">
                               <div className={`text-[10px] font-black uppercase tracking-widest mb-1 ${blue ? 'text-sky-700' : 'text-amber-700'}`}>{meta.heading}</div>
                               <p className={`text-xs font-medium leading-relaxed ${blue ? 'text-sky-900/85' : 'text-amber-900/85'}`}>{selectedRecommendation.blockedReason}</p>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Never hides the card or its Generate/Fix button either way —
+                          this only ever adds context, it doesn't gate the action. */}
+                      {(() => {
+                        const level = selectedRecommendation.goalAlignment?.level;
+                        const meta = GOAL_ALIGNMENT_META[level];
+                        if (!meta) {
+                          return (
+                            <div className="flex items-start gap-2.5 rounded-2xl p-4 border bg-slate-50/50 border-slate-150">
+                              <Target size={13} className="shrink-0 mt-0.5 text-slate-400" />
+                              <p className="text-xs font-medium text-slate-500">Not tied to an active business goal</p>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className={`flex items-start gap-2.5 rounded-2xl p-4 border ${meta.className}`}>
+                            <Target size={13} className="shrink-0 mt-0.5" />
+                            <div className="min-w-0">
+                              <div className="text-[10px] font-black uppercase tracking-widest mb-1">Why this matters to your goal</div>
+                              <p className={`text-xs font-medium leading-relaxed ${meta.textClassName}`}>{selectedRecommendation.goalAlignment.rationale}</p>
                             </div>
                           </div>
                         );
@@ -1434,8 +1497,8 @@ export default function ActionCenter() {
           draft={activeDraft}
           siteId={siteId}
           onClose={() => setActiveDraft(null)}
-          onSaved={(updated) => { setActiveDraft(updated); loadDrafts(); if (updated.rolled_back_at) loadRecs(); }}
-          onDeleted={() => { setActiveDraft(null); loadDrafts(); loadRecs(); }}
+          onSaved={(updated) => { setActiveDraft(updated); loadDrafts(); loadDraftCounts(); if (updated.rolled_back_at) loadRecs(); }}
+          onDeleted={() => { setActiveDraft(null); loadDrafts(); loadDraftCounts(); loadRecs(); }}
         />
       )}
     </div>

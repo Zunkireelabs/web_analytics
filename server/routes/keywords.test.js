@@ -29,6 +29,7 @@ mock.module(resolve('../agents/lib/analyst-seo-mapping.js'), {
     },
     buildProductTopicMap: async () => ({ capabilities: [], unmapped: { clusters: [], gaps: [] } }),
     opportunityDraftEligibility: (site, opportunity) => opportunityAction,
+    recommendedActionForGap: (gap) => ({ kind: gap.coverage_status === 'duplicate' ? 'none' : 'blog-post', label: 'stub' }),
   },
 });
 
@@ -52,10 +53,11 @@ mock.module(resolve('../store/read.js'), {
 });
 
 let updatedGap;
+let gapRows = [];
 mock.module(resolve('../store/data-analyst.js'), {
   namedExports: {
     getKeywordClusters: async () => [],
-    getKeywordGaps: async () => [],
+    getKeywordGaps: async () => gapRows,
     updateKeywordGapStatus: async () => updatedGap,
     getSiteProfile: async () => null,
     getLatestKeywordNarrative: async () => null,
@@ -243,5 +245,24 @@ describe('POST /internal/keywords/:siteId/growth-opportunities/generate-draft', 
     let error;
     await handler({ params: { siteId: '1' }, body: { opportunity: { type: 'page1-opportunity', page: 'https://example.com/p' } } }, res, (e) => { error = e; });
     assert.equal(error?.message, 'quality gate failed');
+  });
+});
+
+describe('GET /internal/keywords/:siteId/gaps', () => {
+  test('annotates every gap with the action the backend would really take', async () => {
+    gapRows = [{ id: 1, topic: 'a', coverage_status: 'duplicate' }, { id: 2, topic: 'b', coverage_status: 'opportunity' }];
+    const res = mockRes();
+    await findRoute('get', '/internal/keywords/:siteId/gaps')({ params: { siteId: '1' }, query: {} }, res, (e) => { throw e; });
+    assert.deepEqual(res.body.map((g) => g.recommended_action.kind), ['none', 'blog-post']);
+    assert.equal(res.body[0].coverage_status, 'duplicate'); // original fields preserved
+    gapRows = [];
+  });
+});
+
+describe('POST /internal/keywords/:siteId/translate', () => {
+  test('rejects a non-array body instead of calling anything', async () => {
+    let err;
+    await findRoute('post', '/internal/keywords/:siteId/translate')({ params: { siteId: '1' }, body: { terms: 'bedrijf' } }, mockRes(), (e) => { err = e; });
+    assert.equal(err.status, 400);
   });
 });

@@ -1,6 +1,28 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { hostnameOf, knownDomain, ownDomains, filterOwnDomainPages } from './site-domain.js';
+import { hostnameOf, knownDomain, ownDomains, filterOwnDomainPages, siteOriginFor } from './site-domain.js';
+
+describe('siteOriginFor', () => {
+  test('prefers website_domain, adding https:// when no scheme is given', () => {
+    assert.equal(siteOriginFor({ website_domain: 'zunkireelabs.com' }), 'https://zunkireelabs.com');
+  });
+
+  test('an already-schemed website_domain is used as-is (origin only, no path)', () => {
+    assert.equal(siteOriginFor({ website_domain: 'https://zunkireelabs.com/some/path' }), 'https://zunkireelabs.com');
+  });
+
+  test('falls back to gsc_property, stripping the sc-domain: prefix', () => {
+    assert.equal(siteOriginFor({ website_domain: null, gsc_property: 'sc-domain:zunkireelabs.com' }), 'https://zunkireelabs.com');
+  });
+
+  test('null when neither is set — never guesses', () => {
+    assert.equal(siteOriginFor({}), null);
+  });
+
+  test('null on an unparseable value rather than throwing', () => {
+    assert.equal(siteOriginFor({ website_domain: 'not a url at all :::' }), null);
+  });
+});
 
 // Regression coverage for a real report: a `sc-domain:` GSC property
 // returns EVERY subdomain Search Console has data for. website_domain

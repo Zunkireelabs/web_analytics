@@ -36,14 +36,38 @@ export function hasDangerousReference(fileContent, id) {
   return jsRef.test(fileContent);
 }
 
-// Repo-wide check, same searchCodeForString mechanism broken-link-fix's
-// code-search fallback already uses — any OTHER file mentioning this id at
-// all (as a literal string) is treated as a possible cross-file reference,
-// since a full fetch-and-classify of every candidate isn't worth the extra
-// API calls for what's meant to be the conservative, narrow-scope path.
-export async function hasExternalReferences(site, id, ownFilePath, searchCodeForString) {
-  const candidates = await searchCodeForString(site, id, { maxResults: 5 });
-  return candidates.some((path) => path !== ownFilePath);
+// Repo-wide check, same App-token-compatible repo-local search
+// broken-link-fix's Layer 2 fallback already uses (see backend.js's
+// computeBrokenLinkFixMerge and repo-local-search.js's own header comment)
+// — any OTHER file mentioning this id at all (as a literal string) is
+// treated as a possible cross-file reference, since a full fetch-and-classify
+// of every candidate isn't worth the extra API calls for what's meant to be
+// the conservative, narrow-scope path.
+//
+// Used to call github/client.js's searchCodeForString, GitHub's /search/code
+// endpoint — which silently returns empty results for a GitHub App
+// installation token on a private repo (a real platform limitation, not a
+// bug in how it was called; see repo-local-search.js's header for the
+// discussion link) and otherwise needs a separate classic PAT with "repo"
+// scope. Every site here authenticates as an App installation, so this
+// safety check failed outright — refusing the whole draft with a "no PAT
+// configured" error — on any repo, forever, until someone provisioned a
+// second credential nothing else in this codebase needs. Swapped to the
+// same Trees+Contents-based search everything else already uses instead.
+export async function hasExternalReferences(site, id, ownFilePath, ref, searchRepoLocalForStrings) {
+  let result;
+  try {
+    result = await searchRepoLocalForStrings(site, ref, [id]);
+  } catch {
+    // Couldn't complete the check (missing credential, unreadable repo,
+    // etc.) — fail safe. Refusing to rename (treating "unknown" as "an
+    // external reference might exist") is the conservative direction for a
+    // safety check whose whole job is ruling out cross-file impact; the
+    // alternative would let a search outage silently turn into "confirmed
+    // safe to rename".
+    return true;
+  }
+  return result.matches.some((path) => path !== ownFilePath);
 }
 
 // Every <svg>...</svg> block in the file, in document order — non-greedy
@@ -65,6 +89,26 @@ function allSvgBlocks(fileContent) {
 // the generator's own occurrences array (also document order, per
 // page-content.js's scan), and refuse rather than guess when the counts
 // don't match.
+// Decides what a live scope count that doesn't match the drafted plan's
+// occurrence count actually MEANS — split out as a pure function (no file
+// content, just the two counts) so it's testable without a real repo, and so
+// backend.js's computeDuplicateIdFixMerge doesn't have to inline this
+// judgment call. `null` scopes (findIdScopesInOrder found none at all) is
+// always 'changed' — never 'resolved', since zero occurrences is not the
+// same claim as "the duplicate was fixed", it could just as easily mean the
+// id itself was renamed away or removed entirely.
+//
+// Exactly 1 live occurrence, down from a drafted count of 2+, is the one
+// case that ISN'T ambiguous: one occurrence of an id is by definition not a
+// duplicate, so there is nothing left for this fix to do. Every other
+// mismatch (any other live count, or a live count with `scopes === null`)
+// stays 'changed' — genuinely can't tell what happened, so it's still
+// reported as "the file has changed since it was scanned", not guessed at.
+export function classifyScopeCountMismatch(scopes, draftedOccurrenceCount) {
+  if (scopes && scopes.length === 1 && draftedOccurrenceCount > 1) return 'resolved';
+  return 'changed';
+}
+
 export function findIdScopesInOrder(fileContent, id) {
   const escaped = escapeRegExp(id);
   const idAttr = new RegExp(`id=(["'])${escaped}\\1`, 'g');

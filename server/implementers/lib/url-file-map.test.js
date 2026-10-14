@@ -2,7 +2,35 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isPageMapped, resolveFile, resolveHostScope, resolveNewContentTarget, resolveNewContentUrl, resolveNewContentLayout,
+  resolveMarkers, resolveTranslationTarget,
 } from './url-file-map.js';
+
+describe('resolveTranslationTarget', () => {
+  test('a normal file gets a language-code suffix sibling, same as any other framework', () => {
+    assert.equal(resolveTranslationTarget('src/pages/about.njk', 'Spanish'), 'src/pages/about.es.njk');
+  });
+
+  test('null source path -> null, no guessing', () => {
+    assert.equal(resolveTranslationTarget(null, 'Spanish'), null);
+  });
+
+  // Next.js App Router reserves the literal filename `page.tsx` as its route
+  // marker — `page.fr.tsx` is not a recognized route at all, so a naive
+  // suffix (correct for every other framework above) would silently never
+  // be served. This must produce a sibling DIRECTORY instead.
+  test('Next.js App Router: page.tsx gets a language-suffixed sibling DIRECTORY, not a suffixed file', () => {
+    assert.equal(resolveTranslationTarget('src/app/about/page.tsx', 'French'), 'src/app/about-fr/page.tsx');
+  });
+
+  test('Next.js App Router: nested route segments are handled the same way', () => {
+    assert.equal(resolveTranslationTarget('src/app/study-in-canada/page.tsx', 'Spanish'), 'src/app/study-in-canada-es/page.tsx');
+  });
+
+  test('Next.js App Router: also covers page.jsx and page.js, not just page.tsx', () => {
+    assert.equal(resolveTranslationTarget('src/app/about/page.jsx', 'French'), 'src/app/about-fr/page.jsx');
+    assert.equal(resolveTranslationTarget('src/app/about/page.js', 'French'), 'src/app/about-fr/page.js');
+  });
+});
 
 // Regression coverage for a real report: zunkireelabs-web's `/compare/:slug`
 // pattern configures `adapters` for faq/meta-title only (no `file`, no
@@ -11,6 +39,53 @@ import {
 // failed every time someone tried to apply it ("No url_file_map entry
 // matches..."). isPageMapped is the pre-check that lets
 // agents/lib/recommendations.js skip creating that recommendation at all.
+// None of these marker names are a genuine per-tenant naming choice — there
+// is exactly one real field per action type, fixed by the generator itself,
+// and no tenant has a real reason to want a different name for e.g. "the FAQ
+// marker" — so every marker-merge action type falls back to a built-in
+// platform default rather than requiring a human to hand-author
+// `defaults.placements` first. Real incidents this generalizes:
+// site #8862 had ga4/facebook-pixel IDs configured in the database but no
+// placements config at all, so every analytics-install draft failed "no
+// markers configured" regardless (fixed first, for that one action type
+// only) — then the SAME site, being the first Next.js/App-Router site ever
+// connected, hit the identical failure for all 9 other marker-merge action
+// types, because only Zunkiree Labs (Eleventy) had ever hand-authored a
+// `defaults.placements` block. Generalizing the platform default to every
+// marker-merge type (not just analytics-install) is the actual fix — see
+// MARKER_FIELD_BY_ACTION_TYPE in url-file-map.js.
+describe('resolveMarkers — every marker-merge action type has a built-in platform default', () => {
+  test('falls back to the platform default when nothing is configured', () => {
+    const site = { url_file_map: {} };
+    assert.deepEqual(resolveMarkers(site, null, 'analytics-install'), {
+      analyticsScriptGa4: 'ANALYTICSSCRIPTGA4',
+      analyticsScriptFacebookPixel: 'ANALYTICSSCRIPTFACEBOOKPIXEL',
+    });
+    // meta-title has two real fields, not one — see PLATFORM_DEFAULT_MARKERS'
+    // own comment for the bug this fixed (description silently had no
+    // default marker at all, so it could never be written).
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'meta-title'), { title: 'TITLE', description: 'METADESCRIPTION' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'faq'), { faq: 'FAQ' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'schema'), { schema: 'SCHEMA' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'internal-links'), { links: 'INTERNALLINKS' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'canonical'), { canonical: 'CANONICAL' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'open-graph'), { openGraph: 'OPENGRAPH' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'expand-content'), { expandedContent: 'EXPANDEDCONTENT' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'qa-content'), { qaContent: 'QACONTENT' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'breadcrumbs'), { breadcrumbSchema: 'BREADCRUMBSCHEMA' });
+  });
+
+  test('an explicit site-level default still wins over the platform default', () => {
+    const site = { url_file_map: { defaults: { placements: { 'analytics-install': { markers: { analyticsScriptGa4: 'CUSTOM_GA4' } } } } } };
+    assert.deepEqual(resolveMarkers(site, null, 'analytics-install'), { analyticsScriptGa4: 'CUSTOM_GA4' });
+  });
+
+  test('an action type outside the marker-merge set still returns no platform default', () => {
+    const site = { url_file_map: {} };
+    assert.equal(resolveMarkers(site, 'https://example.com/', 'blog-outline'), null);
+  });
+});
+
 describe('isPageMapped', () => {
   const site = {
     url_file_map: {

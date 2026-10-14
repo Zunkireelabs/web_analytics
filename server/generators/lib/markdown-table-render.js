@@ -11,7 +11,7 @@ import { projectTable } from '../../design-agent/lib/design-profile.js';
 // not two that can drift apart. See newpage-render.js's
 // projectMarkdownTablesInBody, the generation-side caller.
 
-function escapeHtml(s) {
+export function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
@@ -78,19 +78,99 @@ export function findMarkdownTables(body) {
   return tables;
 }
 
+// Same GFM table shape as findMarkdownTables above, but for a table the
+// model flattened onto ONE line — its rows joined by spaces instead of real
+// newlines. Seen in practice: a section `body` returned as a single JSON
+// string value routinely arrives with its embedded line breaks collapsed to
+// spaces, so a table the model wrote with real rows in its own draft still
+// reaches here as one run like
+// `| Feature | X | Y | |---|---|---| | Row1 | ... |` — no `\n` anywhere for
+// findMarkdownTables' line-based scan to split on, so it ships as raw pipe
+// text with no visible structure at all.
+//
+// The only place two pipe characters appear with nothing but whitespace
+// between them, in a well-formed pipe table, is exactly at a row boundary —
+// the previous row's own closing pipe immediately followed by the next
+// row's own opening pipe (an ordinary interior cell separator always has
+// real cell content on at least one side). Walking those boundaries
+// directly in the ORIGINAL text — never a reflowed/normalized copy — means
+// the exact substring to replace is always a real, untouched slice of
+// `body`, so a later `body.replace(table.raw, ...)` can never silently
+// no-op because a normalized copy no longer matches the source
+// byte-for-byte.
+const ROW_BOUNDARY_RE = /\|[ \t]+\|/g;
+// A real cell's worth of text between two boundaries; a much larger gap (or
+// one crossing a paragraph break) means the two matches are unrelated pipe
+// characters elsewhere in the body, not consecutive rows of one table.
+const MAX_ROW_GAP = 400;
+
+function buildFlattenedTableFromBoundaries(body, boundaries) {
+  const first = boundaries[0];
+  const last = boundaries[boundaries.length - 1];
+  const prefix = body.slice(0, first.index);
+  const suffixStart = last.index + last[0].length;
+  const suffix = body.slice(suffixStart);
+
+  // Row 0's OWN opening pipe is the first pipe in `prefix` — anything
+  // before it (e.g. "Here is a breakdown: ") is lead-in prose, left alone.
+  const leadPipe = prefix.indexOf('|');
+  // The last row's OWN closing pipe is the last pipe in `suffix` —
+  // anything after it is trailing prose, also left alone.
+  const trailPipe = suffix.lastIndexOf('|');
+  if (leadPipe === -1 || trailPipe === -1) return null;
+
+  const rowTexts = [prefix.slice(leadPipe) + first[0][0]];
+  for (let i = 0; i < boundaries.length - 1; i += 1) {
+    const mid = body.slice(boundaries[i].index + boundaries[i][0].length, boundaries[i + 1].index);
+    rowTexts.push(boundaries[i][0].slice(-1) + mid + boundaries[i + 1][0][0]);
+  }
+  rowTexts.push(last[0].slice(-1) + suffix.slice(0, trailPipe + 1));
+
+  if (!rowTexts.some((t) => SEPARATOR_LINE_RE.test(t.trim()))) return null; // no real separator row — not a table
+  const dataRows = rowTexts.filter((t) => !SEPARATOR_LINE_RE.test(t.trim())).map(splitRow);
+  if (dataRows.length < 2 || !dataRows.every((r) => r.length === dataRows[0].length && r.length >= 2)) return null;
+
+  return { rows: dataRows, raw: body.slice(leadPipe, suffixStart + trailPipe + 1) };
+}
+
+export function findFlattenedMarkdownTables(body) {
+  if (!body) return [];
+  const boundaries = [...body.matchAll(ROW_BOUNDARY_RE)];
+  const tables = [];
+  let k = 0;
+  while (k < boundaries.length) {
+    let end = k;
+    while (
+      end + 1 < boundaries.length
+      && boundaries[end + 1].index - (boundaries[end].index + boundaries[end][0].length) <= MAX_ROW_GAP
+      && !body.slice(boundaries[end].index + boundaries[end][0].length, boundaries[end + 1].index).includes('\n\n')
+    ) {
+      end += 1;
+    }
+    const table = buildFlattenedTableFromBoundaries(body, boundaries.slice(k, end + 1));
+    if (table) tables.push(table);
+    k = end + 1;
+  }
+  return tables;
+}
+
 // Replaces every real markdown table in `body` with the tenant-projected
 // HTML table `projectTable`'s own tokens produce — the same call
 // content-integrity-repair.js's raw-text-table fix already makes for
 // existing pages, now applied at generation time too. `profile` may be null
 // (no design profile derived yet); buildTableHtml's own null-styles fallback
-// already handles that safely.
+// already handles that safely. Real multi-line GFM tables are converted
+// first; findFlattenedMarkdownTables then catches whatever survived that
+// pass as a same-line-joined table (see its own comment above).
 export function projectMarkdownTablesInBody(body, profile) {
   if (!body) return body;
-  const tables = findMarkdownTables(body);
-  if (!tables.length) return body;
   const styles = projectTable(profile);
   let result = body;
-  for (const table of tables) {
+
+  for (const table of findMarkdownTables(result)) {
+    result = result.replace(table.raw, buildTableHtml(table.rows, styles));
+  }
+  for (const table of findFlattenedMarkdownTables(result)) {
     result = result.replace(table.raw, buildTableHtml(table.rows, styles));
   }
   return result;

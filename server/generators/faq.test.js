@@ -30,13 +30,17 @@ mock.module(resolve('../agents/lib/page-content.js'), {
 // involved at all. Mocking llm.js here means the real `openai` module is
 // simply never imported in this test process, sidestepping the bug rather
 // than working around it.
+let llmForJsonResult;
 mock.module(resolve('../llm.js'), {
   namedExports: {
-    callLLMForJson: async () => { throw new Error('callLLMForJson should not be called by these tests'); },
+    callLLMForJson: async (system) => {
+      if (llmForJsonResult !== undefined) return llmForJsonResult;
+      throw new Error(`callLLMForJson should not be called by these tests (system: ${system.slice(0, 40)}...)`);
+    },
   },
 });
 
-const { generate, meta } = await import('./faq.js');
+const { generate, meta, generateFaqItemsFromEvidence } = await import('./faq.js');
 
 // Only exercises the input-validation path, which throws before ever
 // calling the LLM — no real network/API key needed, same convention as the
@@ -85,5 +89,38 @@ describe('faq generator — real-data grounding (2026-08-25 fix)', () => {
       generate({ siteId: 1, params: { page: 'https://zunkireelabs.com/resources/', query: 'resources' } }),
       /already has real FAQ content/,
     );
+  });
+});
+
+// generateFaqItemsFromEvidence is the reusable core content-integrity-
+// repair.js's 'faq-topic-mismatch'/'faq-cross-page-inconsistency' fixes call
+// directly (bypassing findRealFaqDataSource's organic-FAQ refusal gate,
+// which exists to stop THIS generator drafting a SECOND FAQ, not to stop a
+// repair correcting an existing one). Covered here since it's exported from
+// this file.
+describe('generateFaqItemsFromEvidence', () => {
+  test('asks for and returns exactly `expectedCount` items when given', async () => {
+    llmForJsonResult = [
+      { question: 'Q1?', answer: 'A1.' },
+      { question: 'Q2?', answer: 'A2.' },
+      { question: 'Q3?', answer: 'A3.' }, // model over-answers; must be trimmed to expectedCount
+    ];
+    const items = await generateFaqItemsFromEvidence({ subject: 'Careers', expectedCount: 2 });
+    assert.equal(items.length, 2);
+    assert.equal(items[0].question, 'Q1?');
+    llmForJsonResult = undefined;
+  });
+
+  test('filters out malformed entries before applying the count/default cap', async () => {
+    llmForJsonResult = [{ question: 'Q1?', answer: 'A1.' }, { question: 123, answer: 'bad' }, { notQuestion: true }];
+    const items = await generateFaqItemsFromEvidence({ subject: 'Careers' });
+    assert.equal(items.length, 1);
+    llmForJsonResult = undefined;
+  });
+
+  test('throws a 400 when the model does not return valid JSON', async () => {
+    llmForJsonResult = 'not an array';
+    await assert.rejects(() => generateFaqItemsFromEvidence({ subject: 'Careers' }), /model did not return valid json/i);
+    llmForJsonResult = undefined;
   });
 });

@@ -11,6 +11,7 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 process.env.ENABLE_CONTENT_CITATION_SEARCH = 'true';
 process.env.TAVILY_API_KEY = 'test-key';
 process.env.TAVILY_MAX_QUERIES_PER_DAY = '100';
+process.env.CITATION_SECTION_MODE = 'llm'; // this file covers the LLM-written variant; the default no-LLM path is in expand-content-references.test.js
 
 // LLM is fully mocked, same convention as faq.test.js/internal-links.test.js
 // (avoids ever importing the real `openai` package in this process — see
@@ -67,6 +68,7 @@ mock.module(resolve('../agents/lib/competitor-policy.js'), {
 
 const { generate } = await import('./expand-content.js');
 const { _resetQuotaForTests } = await import('../ingest/search-grounding-providers/tavily.js');
+const { clearSearchCache } = await import('../ingest/search-grounding-providers/index.js');
 
 const PAGE_URL = 'https://example.com/citations-page';
 const PAGE_HTML = '<html><head><title>Real Page</title></head><body><main><p>'
@@ -98,7 +100,7 @@ function mockFetch({ tavilyStatus = 200, tavilyBody, pageOk = true } = {}) {
 describe('expand-content generator — external-citations, real path through Tavily', () => {
   test('successful search: calls the real Tavily endpoint (not Google CSE/SerpApi) and grounds the LLM prompt in its results', async () => {
     const original = globalThis.fetch;
-    _resetQuotaForTests();
+    _resetQuotaForTests(); clearSearchCache(); // the shared-search cache would otherwise serve one test's results to the next
     lastLlmCall = null;
     googleCseCalled = false;
     serpapiCalled = false;
@@ -165,7 +167,7 @@ describe('expand-content generator — external-citations, real path through Tav
 
   test('Tavily failure (network/outage): records an honest refusal, not a fabricated citation, and never falls back', async () => {
     const original = globalThis.fetch;
-    _resetQuotaForTests();
+    _resetQuotaForTests(); clearSearchCache(); // the shared-search cache would otherwise serve one test's results to the next
     googleCseCalled = false;
     serpapiCalled = false;
     globalThis.fetch = async (url) => {
@@ -190,7 +192,7 @@ describe('expand-content generator — external-citations, real path through Tav
 
   test('Tavily quota/rate-limit response (432): records an honest refusal, does not retry, does not fall back', async () => {
     const original = globalThis.fetch;
-    _resetQuotaForTests();
+    _resetQuotaForTests(); clearSearchCache(); // the shared-search cache would otherwise serve one test's results to the next
     googleCseCalled = false;
     serpapiCalled = false;
     let tavilyCallCount = 0;
@@ -220,7 +222,7 @@ describe('expand-content generator — external-citations, real path through Tav
 
   test('no source candidates found: refuses honestly rather than drafting an ungrounded citations section', async () => {
     const original = globalThis.fetch;
-    _resetQuotaForTests();
+    _resetQuotaForTests(); clearSearchCache(); // the shared-search cache would otherwise serve one test's results to the next
     const { fn } = mockFetch({ tavilyBody: { results: [] } });
     globalThis.fetch = fn;
     try {
@@ -235,9 +237,34 @@ describe('expand-content generator — external-citations, real path through Tav
     } finally { globalThis.fetch = original; }
   });
 
+  test('LLM returns zero usable sections: refuses honestly rather than persisting an empty draft (regression — sections=[] used to sail through the quality gate silently, since it only inspects sections that exist)', async () => {
+    const original = globalThis.fetch;
+    const originalLlmResponse = llmResponse;
+    _resetQuotaForTests(); clearSearchCache(); // the shared-search cache would otherwise serve one test's results to the next
+    const { fn } = mockFetch({
+      tavilyBody: {
+        results: [
+          { title: 'Real Source', url: 'https://real-source.example.com/article', content: 'A real extracted excerpt about renewable energy.' },
+        ],
+      },
+    });
+    globalThis.fetch = fn;
+    llmResponse = [];
+    try {
+      await assert.rejects(
+        () => generate({ siteId: 1, params: { page: PAGE_URL, focus: 'external-citations' } }),
+        (err) => {
+          assert.equal(err.refusal, true);
+          assert.equal(err.reason, 'expand-content-empty-sections');
+          return true;
+        },
+      );
+    } finally { globalThis.fetch = original; llmResponse = originalLlmResponse; }
+  });
+
   test('competitor filtering runs BEFORE the model sees candidates: a filtered-out source never reaches the prompt, an allowed one does', async () => {
     const original = globalThis.fetch;
-    _resetQuotaForTests();
+    _resetQuotaForTests(); clearSearchCache(); // the shared-search cache would otherwise serve one test's results to the next
     lastLlmCall = null;
     lastFilterCall = null;
     // Simulate the filter removing one of Tavily's raw results as a

@@ -36,6 +36,9 @@ function fakeQuery(text, params = []) {
   if (sql.startsWith('UPDATE recommendations SET')) {
     return { rows: rows || [] };
   }
+  if (sql.startsWith('INSERT INTO recommendations')) {
+    return { rows: [{ id: 1 }] };
+  }
   throw new Error(`recommendations.test.js fake query: unhandled SQL shape: ${sql}`);
 }
 
@@ -47,7 +50,7 @@ mock.module(resolve('../db.js'), {
 });
 const {
   closeStaleRecommendations, mergeIntoRecommendation, refreshRecommendationBlockState, listOpenSafeRecommendations,
-  classifyBlockedKind, markRecommendationsUnfixable,
+  classifyBlockedKind, markRecommendationsUnfixable, insertRecommendation, listOpenRecommendations,
 } = await import('./recommendations.js');
 
 beforeEach(() => { issued = []; rows = []; updated = null; });
@@ -101,6 +104,118 @@ describe('closeStaleRecommendations — broken-link-fix key matching', () => {
     ]);
     const closedCount = await closeStaleRecommendations(1, stillDetected, {
       linkCrawlCheckedKeys: new Set(['https://www.zunkireelabs.com/']),
+    });
+
+    assert.equal(closedCount, 0);
+    assert.equal(updated, null);
+  });
+});
+
+// Regression for a real bug fixed 2026-09-10: a recommendation sourced
+// entirely from an agent OUTSIDE this sync pass's own detection roster
+// (analyst-insights, analyst-keyword-gaps, growth-opportunities — none of
+// which run as part of buildRecommendations/syncFromGrounded) was being
+// superseded on the very next unrelated Node grounded-agent sync, because
+// the old rotation-batch guard's `.every()` was vacuously true for an agent
+// id that could never appear in batchRotatedAgentIds in the first place.
+// Confirmed via a direct call to the real function before the fix (not just
+// reasoning about the code): a fabricated analyst-insights row was closed
+// even though nothing had re-verified it at all.
+describe('closeStaleRecommendations — authoritativeAgentIds (rows outside this pass\'s own roster)', () => {
+  test('a row whose only detecting_agent is outside authoritativeAgentIds is never closed, regardless of batchRotatedAgentIds/agentCheckedKeys', async () => {
+    rows = [{
+      id: 999,
+      page: 'https://example.com/declining-page',
+      recommendation_type: 'expand-content',
+      detecting_agents: ['analyst-insights'],
+    }];
+    updated = null;
+
+    const closedCount = await closeStaleRecommendations(1, new Set(), {
+      agentCheckedKeys: new Set(['technical-seo::https://example.com/declining-page']),
+      batchRotatedAgentIds: new Set(['technical-seo', 'security-headers']),
+      authoritativeAgentIds: new Set(['technical-seo', 'security-headers', 'meta-title']),
+    });
+
+    assert.equal(closedCount, 0);
+    assert.equal(updated, null);
+  });
+
+  test('a row whose detecting_agent IS in authoritativeAgentIds is still closed once genuinely re-verified clean, same as before this fix', async () => {
+    rows = [{
+      id: 1000,
+      page: 'https://example.com/fixed-page',
+      recommendation_type: 'meta-title',
+      detecting_agents: ['technical-seo'],
+    }];
+    updated = null;
+
+    const closedCount = await closeStaleRecommendations(1, new Set(), {
+      agentCheckedKeys: new Set(['technical-seo::https://example.com/fixed-page']),
+      batchRotatedAgentIds: new Set(['technical-seo', 'security-headers']),
+      authoritativeAgentIds: new Set(['technical-seo', 'security-headers', 'meta-title']),
+    });
+
+    assert.equal(closedCount, 1);
+    assert.deepEqual(updated, [1000]);
+  });
+
+  test('with no authoritativeAgentIds given at all, behavior is unchanged from before this fix (defensive default for any other future caller)', async () => {
+    rows = [{
+      id: 1001,
+      page: 'https://example.com/no-roster-given',
+      recommendation_type: 'expand-content',
+      detecting_agents: ['analyst-insights'],
+    }];
+    updated = null;
+
+    const closedCount = await closeStaleRecommendations(1, new Set(), {
+      batchRotatedAgentIds: new Set(['technical-seo']),
+    });
+
+    // No authoritativeAgentIds means the guard is skipped entirely, same
+    // as the pre-fix code path — 'analyst-insights' is not in
+    // batchRotatedAgentIds so it still closes. Documented here so a
+    // caller that omits the new param does not silently believe it is
+    // protected by it.
+    assert.equal(closedCount, 1);
+  });
+});
+
+// agents/lib/recommendation-gates.js's ensureLocationServiceRecovery is a
+// narrow, deliberate exception to "only the coordinator writes
+// recommendations": it inserts a 'location-service-bootstrap' row directly,
+// with detecting_agent 'location-service-gap-resolver' — a synthetic id that
+// is NOT, and must never become, a member of RECOMMENDATION_AGENT_IDS (the
+// only roster syncFromGrounded ever passes as authoritativeAgentIds). This
+// locks that in with the REAL roster, not a synthetic one: if someone later
+// adds 'location-service-gap-resolver' to RECOMMENDATION_AGENT_IDS (e.g.
+// mistaking it for a real detecting agent), this test starts failing and
+// says why, instead of silently letting the very next unrelated Node
+// grounded-agent sync supersede every bootstrap recommendation on its first
+// pass — before auto-remediation ever gets to ship it.
+describe('closeStaleRecommendations — location-service-bootstrap rows survive a normal sync', () => {
+  test('a location-service-bootstrap row is never closed by silence from the real RECOMMENDATION_AGENT_IDS roster', async () => {
+    const { RECOMMENDATION_AGENT_IDS } = await import('../agents/lib/insights.js');
+    assert.ok(
+      !RECOMMENDATION_AGENT_IDS.includes('location-service-gap-resolver'),
+      'location-service-gap-resolver must stay outside the Node grounded-agent roster — it is not one of those agents'
+    );
+
+    rows = [{
+      id: 2000,
+      page: 'https://example.com/locations/round-rock/drain-cleaning/',
+      recommendation_type: 'location-service-bootstrap',
+      detecting_agents: ['location-service-gap-resolver'],
+    }];
+    updated = null;
+
+    // Same call shape syncFromGrounded actually makes — an unrelated
+    // grounded-agent sync that never even looked at this page/type.
+    const closedCount = await closeStaleRecommendations(1, new Set(), {
+      agentCheckedKeys: new Set(),
+      batchRotatedAgentIds: new Set(RECOMMENDATION_AGENT_IDS),
+      authoritativeAgentIds: new Set(RECOMMENDATION_AGENT_IDS),
     });
 
     assert.equal(closedCount, 0);
@@ -243,6 +358,13 @@ describe('markRecommendationsUnfixable — direct evidence, not absence of it', 
     assert.equal(count, 1);
   });
 
+  test('regression: also sets risk_tier to manual in the same statement — migration 108\'s recommendations_blocked_is_manual CHECK (blocked_reason IS NULL OR risk_tier = \'manual\') otherwise throws for any row whose risk_tier was not already \'manual\' (e.g. \'safe\'), aborting the rest of syncFromGrounded for the site', async () => {
+    const dropped = [{ generatorId: 'alt-text', page: 'https://x.com/docs/gone/', reason: 'gone' }];
+    await markRecommendationsUnfixable(1, dropped);
+    const update = issued.find((q) => q.sql.includes("status = 'unfixable'"));
+    assert.match(update.sql, /risk_tier\s*=\s*'manual'/, 'must set risk_tier = manual in the same UPDATE that sets blocked_reason');
+  });
+
   test('an empty drop list is a no-op — no query issued', async () => {
     issued = [];
     await markRecommendationsUnfixable(1, []);
@@ -253,5 +375,110 @@ describe('markRecommendationsUnfixable — direct evidence, not absence of it', 
     await markRecommendationsUnfixable(1, [{ generatorId: 'schema', page: 'https://x.com/x/' }]);
     const update = issued.find((q) => q.sql.includes("status = 'unfixable'"));
     assert.match(update.params[3], /cannot be resolved to a real source/);
+  });
+});
+
+describe('goal_id / goal_alignment — Stage 1 of the Business Goals plan', () => {
+  test('insertRecommendation writes goal_id/goal_alignment, defaulting to null when omitted', async () => {
+    await insertRecommendation(1, {
+      page: '/x', recommendationType: 'faq', issue: 'x', reason: 'x', params: {}, findingId: 'f1', detectingAgent: 'a', priority: 'medium',
+    });
+    const insert = issued.find((q) => q.sql.startsWith('INSERT INTO recommendations'));
+    assert.match(insert.sql, /goal_id, goal_alignment/);
+    assert.equal(insert.params[14], null);
+    assert.equal(insert.params[15], null);
+  });
+
+  test('insertRecommendation serializes a real goal alignment', async () => {
+    await insertRecommendation(1, {
+      page: '/x', recommendationType: 'faq', issue: 'x', reason: 'x', params: {}, findingId: 'f1', detectingAgent: 'a', priority: 'medium',
+      goalId: 42, goalAlignment: { level: 'strong', rationale: 'r' },
+    });
+    const insert = issued.find((q) => q.sql.startsWith('INSERT INTO recommendations'));
+    assert.equal(insert.params[14], 42);
+    assert.equal(JSON.parse(insert.params[15]).level, 'strong');
+  });
+
+  test('mergeIntoRecommendation writes goal_id/goal_alignment unconditionally, not COALESCE — a paused goal must clear the prior alignment', async () => {
+    await mergeIntoRecommendation(7, { findingId: 'f1', agentId: 'a', riskTier: 'safe', goalId: null, goalAlignment: null });
+    const merge = issued.find((q) => q.sql.includes('finding_ids ='));
+    assert.match(merge.sql, /goal_id = \$12/);
+    assert.match(merge.sql, /goal_alignment = \$13/);
+    assert.doesNotMatch(merge.sql, /goal_id = COALESCE/);
+    assert.doesNotMatch(merge.sql, /goal_alignment = COALESCE/);
+    assert.equal(merge.params[11], null);
+    assert.equal(merge.params[12], null);
+  });
+
+  test('mergeIntoRecommendation serializes a real goal alignment', async () => {
+    await mergeIntoRecommendation(7, { findingId: 'f1', agentId: 'a', riskTier: 'safe', goalId: 9, goalAlignment: { level: 'partial', rationale: 'r2' } });
+    const merge = issued.find((q) => q.sql.includes('finding_ids ='));
+    assert.equal(merge.params[11], 9);
+    assert.equal(JSON.parse(merge.params[12]).level, 'partial');
+  });
+});
+
+describe('decision_id — scoped Decision Engine integration (DEFAULT bucket only)', () => {
+  test('insertRecommendation writes decision_id, defaulting to null when omitted', async () => {
+    await insertRecommendation(1, {
+      page: '/x', recommendationType: 'faq', issue: 'x', reason: 'x', params: {}, findingId: 'f1', detectingAgent: 'a', priority: 'medium',
+    });
+    const insert = issued.find((q) => q.sql.startsWith('INSERT INTO recommendations'));
+    assert.match(insert.sql, /decision_id/);
+    assert.equal(insert.params[16], null);
+  });
+
+  test('insertRecommendation writes a real decision_id', async () => {
+    await insertRecommendation(1, {
+      page: '/x', recommendationType: 'faq', issue: 'x', reason: 'x', params: {}, findingId: 'f1', detectingAgent: 'a', priority: 'medium',
+      decisionId: 77,
+    });
+    const insert = issued.find((q) => q.sql.startsWith('INSERT INTO recommendations'));
+    assert.equal(insert.params[16], 77);
+  });
+
+  // Deliberately the OPPOSITE semantics of goal_id/goal_alignment above: a
+  // decide() call is bounded/rare (default-bucket-decision.js's
+  // MAX_DECISION_ENGINE_CALLS_PER_RUN), so a finding whose decision didn't
+  // make this run's cap must keep whatever decision_id a prior run already
+  // recorded, not have it wiped back to NULL — see mergeIntoRecommendation's
+  // own comment.
+  test('mergeIntoRecommendation COALESCEs decision_id — omitting it never clears a prior decision', async () => {
+    await mergeIntoRecommendation(7, { findingId: 'f1', agentId: 'a', riskTier: 'safe' });
+    const merge = issued.find((q) => q.sql.includes('finding_ids ='));
+    assert.match(merge.sql, /decision_id = COALESCE\(\$14, decision_id\)/);
+    assert.equal(merge.params[13], null);
+  });
+
+  test('mergeIntoRecommendation writes a fresh decision_id when this run\'s batch produced one', async () => {
+    await mergeIntoRecommendation(7, { findingId: 'f1', agentId: 'a', riskTier: 'safe', decisionId: 55 });
+    const merge = issued.find((q) => q.sql.includes('finding_ids ='));
+    assert.equal(merge.params[13], 55);
+  });
+});
+
+describe('listOpenRecommendations — effective-priority ORDER BY', () => {
+  test('the SQL score matches goal-alignment.js\'s PRIORITY_TIER_SCORE/GOAL_ALIGNMENT_BOOST exactly', async () => {
+    // Golden-string lock: server/agents/lib/goal-alignment.js's exported
+    // constants (PRIORITY_TIER_SCORE: high 30/medium 20/low 10,
+    // GOAL_ALIGNMENT_BOOST: strong 12/partial 6/weak 2/none+insufficient 0)
+    // are duplicated here as literal SQL because this ORDER BY must stay
+    // pure SQL — this test is what catches the two drifting apart.
+    const { PRIORITY_TIER_SCORE, GOAL_ALIGNMENT_BOOST } = await import('../agents/lib/goal-alignment.js');
+    await listOpenRecommendations(1);
+    const select = issued.find((q) => q.sql.startsWith('SELECT * FROM recommendations WHERE site_id = $1 AND status'));
+    assert.match(select.sql, new RegExp(`WHEN 'high' THEN ${PRIORITY_TIER_SCORE.high}`));
+    assert.match(select.sql, new RegExp(`WHEN 'medium' THEN ${PRIORITY_TIER_SCORE.medium}`));
+    assert.match(select.sql, new RegExp(`WHEN 'low' THEN ${PRIORITY_TIER_SCORE.low}`));
+    assert.match(select.sql, new RegExp(`WHEN 'strong' THEN ${GOAL_ALIGNMENT_BOOST.strong}`));
+    assert.match(select.sql, new RegExp(`WHEN 'partial' THEN ${GOAL_ALIGNMENT_BOOST.partial}`));
+    assert.match(select.sql, new RegExp(`WHEN 'weak' THEN ${GOAL_ALIGNMENT_BOOST.weak}`));
+  });
+
+  test('orders by the combined score descending, never touching WHERE/eligibility', async () => {
+    await listOpenRecommendations(1);
+    const select = issued.find((q) => q.sql.startsWith('SELECT * FROM recommendations WHERE site_id = $1 AND status'));
+    assert.match(select.sql, /WHERE site_id = \$1 AND status = 'open' ORDER BY/, 'the WHERE clause is unchanged — goal alignment only affects ORDER BY');
+    assert.match(select.sql, /\) DESC,/, 'the combined score sorts descending — higher effective priority first');
   });
 });

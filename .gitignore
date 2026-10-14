@@ -16,3 +16,9 @@ dist/
 
 # Local macOS launchd deployment files (machine-specific paths)
 deploy/*.plist
+
+# The daily design-profile role-correction pass (server/scripts/
+# repair-design-profile-roles.js) writes a timestamped backup of the
+# pre-correction profile to CWD before it edits sites.url_file_map — real
+# output, not source, and not meant to accumulate in the repo root.
+design-profile-backup-site-*.json

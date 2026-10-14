@@ -4,7 +4,7 @@
 // simplest and safest shape for a single-repo, PAT-scoped pilot (see
 // server/implementers/ for what calls these).
 
-import { resolveGithubToken, githubTokenEnvVar, isFineGrainedToken } from './credentials.js';
+import { resolveGithubToken, githubTokenEnvVar, isFineGrainedToken, usesGithubApp } from './credentials.js';
 
 const API_BASE = 'https://api.github.com';
 
@@ -26,7 +26,41 @@ const API_BASE = 'https://api.github.com';
 
 async function authHeaders(site, { forSearch = false } = {}) {
   const token = await resolveGithubToken(site, { forSearch });
-  if (!token) throw new Error(`No GitHub PAT set in env var "${githubTokenEnvVar(site)}"`);
+  if (!token) {
+    // Code search NEVER consults the App path (credentials.js's searchToken
+    // — a fine-grained/App token silently returns 0 results from GitHub's
+    // search API), so usesGithubApp(site) is irrelevant here even when the
+    // App itself is perfectly configured for every other operation. Blaming
+    // "GitHub App is not configured" in that case would send whoever reads
+    // this error looking at the wrong credential entirely.
+    let message;
+    if (forSearch) {
+      message = `No classic PAT with "repo" scope set for code search — set ${githubTokenEnvVar(site)}_SEARCH (or the global GITHUB_SEARCH_PAT) to enable the code-search fallback.`;
+    } else if (usesGithubApp(site)) {
+      // A null token on the App path means the relevant App id/private-key
+      // env var are unset (see credentials.js's usesGithubApp/appConfigured).
+      // Which ones depends on whether this site has its own registered App
+      // (migration 154: site.github_app_id + site.github_app_private_key_env_var)
+      // or uses the shared default — naming the WRONG pair here sent whoever
+      // read this error (or a draft's abandoned_reason) looking at
+      // GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY_B64 for a site whose real
+      // missing secret was its own dedicated env var the whole time
+      // (confirmed live: 21 qa-content/schema drafts abandoned for
+      // chayceproperties.com with this exact generic message, while its own
+      // GITHUB_APP_PRIVATE_KEY_B64_CHAYCE was the actual gap).
+      message = site.github_app_id != null
+        ? `GitHub App ${site.github_app_id} is not configured for this site — set ${site.github_app_private_key_env_var || '(no github_app_private_key_env_var set on this site)'}`
+        : 'GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64';
+    } else {
+      message = `No GitHub PAT set in env var "${githubTokenEnvVar(site)}"`;
+    }
+    // Tagged so a caller wrapping this in its own safeMessage() fallback
+    // (which always substitutes its own fixed string — see errors.js —
+    // never the real message) can still tell "genuinely unconfigured
+    // credential" apart from "real transient failure" and choose an
+    // accurate fallback instead of a generic one for both.
+    throw Object.assign(new Error(message), { reason: 'missing-credential' });
+  }
   return {
     Authorization: `token ${token}`,
     Accept: 'application/vnd.github+json',
@@ -75,11 +109,36 @@ const RATE_LIMIT_MAX_WAIT_MS = 60_000;
 export const RATE_LIMIT_RESERVE = 100;
 
 // Last rate-limit state GitHub reported, from whichever call saw it most
-// recently. Module-level because it is a property of the TOKEN's budget, not
-// of any one request, and every call in this file shares that budget.
+// recently — one entry per CREDENTIAL, not one shared value and not one per
+// site. It is a property of the token's budget, and every call authenticating
+// with that same token shares it — which used to mean "every call in this
+// file", back when every site shared one PAT. That stopped being true the
+// moment a second real tenant (client #2, 2026-09-07) got its own credential:
+// a single shared value would let one site's exhausted budget falsely halt
+// an unrelated site's run (or mask the first site's real exhaustion behind a
+// second site's healthy one), reported through auto-remediation.js's
+// pre-ship getLastKnownRateLimit() check. Keyed by rateLimitKey(site) below —
+// the resolved credential identity — rather than site.id, so two sites that
+// deliberately still share one PAT (the common case before a tenant gets its
+// own GitHub App installation) correctly see one shared, accurate budget,
+// exactly as GitHub itself enforces it.
 // `remaining: null` means no authenticated call has been made yet this
-// process — never treated as "plenty left".
-let lastRateLimit = { remaining: null, reset: null, at: null };
+// process on that credential — never treated as "plenty left".
+const lastRateLimitByCredential = new Map();
+
+// Exported (not just used internally for the in-memory map above) so a
+// caller outside this file can key a lock on the same identity — see
+// job.js's per-credential ship lock. Two sites resolving to the same string
+// here share one real GitHub budget; anything that reasons about that
+// budget, in-memory tracking or a cross-process lock alike, must derive the
+// identity from this one function or the two will disagree.
+export function rateLimitKey(site) {
+  return usesGithubApp(site) ? `app:${site.github_app_installation_id}` : `pat:${githubTokenEnvVar(site)}`;
+}
+
+function getRateLimitState(site) {
+  return lastRateLimitByCredential.get(rateLimitKey(site)) || { remaining: null, reset: null, at: null };
+}
 
 // `res.headers.get()` returns null for a header that isn't there, and
 // `Number(null)` is 0 — NOT NaN. A `Number.isFinite` guard therefore does
@@ -103,7 +162,7 @@ function headerNumber(res, name) {
  * failed yet, so don't pre-emptively halt a healthy run), but any observed
  * value under the reserve does.
  */
-export function getLastKnownRateLimit() {
+export function getLastKnownRateLimit(site) {
   // `low` MUST expire. The budget refills at `reset`, but nothing re-reads it
   // on its own: auto-remediation's pre-check breaks the loop BEFORE making any
   // GitHub call, so a run that starts low makes zero requests, learns nothing,
@@ -111,10 +170,11 @@ export function getLastKnownRateLimit() {
   // Once latched, the autonomous loop could never recover from within itself.
   // A reset that has already passed means the observation is simply out of
   // date — report not-low and let the next real response say what's true.
-  const expired = lastRateLimit.reset != null && lastRateLimit.reset.getTime() <= Date.now();
+  const state = getRateLimitState(site);
+  const expired = state.reset != null && state.reset.getTime() <= Date.now();
   return {
-    ...lastRateLimit,
-    low: !expired && lastRateLimit.remaining != null && lastRateLimit.remaining < RATE_LIMIT_RESERVE,
+    ...state,
+    low: !expired && state.remaining != null && state.remaining < RATE_LIMIT_RESERVE,
   };
 }
 
@@ -127,16 +187,16 @@ export function getLastKnownRateLimit() {
 // discover-file-mapping.js's auto-heal), the very first item of a run would
 // leave every subsequent item's pre-check reading "low" and halt the run
 // after one ship. Tracking core only keeps this state meaning one thing.
-function recordRateLimitHeaders(res, { forSearch = false } = {}) {
+function recordRateLimitHeaders(site, res, { forSearch = false } = {}) {
   if (forSearch) return;
   const remaining = headerNumber(res, 'x-ratelimit-remaining');
   if (remaining === null) return;
   const reset = headerNumber(res, 'x-ratelimit-reset');
-  lastRateLimit = {
+  lastRateLimitByCredential.set(rateLimitKey(site), {
     remaining,
     reset: reset === null ? null : new Date(reset * 1000),
     at: new Date(),
-  };
+  });
 }
 
 // How long to wait before retrying, or null if this response is not a rate
@@ -180,8 +240,8 @@ async function rateLimitWaitMs(res) {
 // WITHOUT regex-matching a provider message that changes without notice —
 // see lib/failure-classification.js, which maps `rateLimited` onto its
 // EXTERNAL_SERVICE class (the one class it treats as auto-retryable).
-function rateLimitError(path, waitMs) {
-  const reset = lastRateLimit.reset;
+function rateLimitError(site, path, waitMs) {
+  const reset = getRateLimitState(site).reset;
   const err = new Error(
     `GitHub rate limit reached for ${path}${reset ? ` (resets ${reset.toISOString()})` : ''} — `
     + `retried ${RATE_LIMIT_MAX_RETRIES}x, still limited.`,
@@ -228,7 +288,7 @@ async function githubRequest(site, method, path, body, { forSearch = false } = {
     } finally {
       clearTimeout(timeout);
     }
-    recordRateLimitHeaders(res, { forSearch });
+    recordRateLimitHeaders(site, res, { forSearch });
 
     const rateLimit = await rateLimitWaitMs(res);
     if (rateLimit == null) return res;
@@ -241,7 +301,7 @@ async function githubRequest(site, method, path, body, { forSearch = false } = {
     // already ruled out wastes wall-clock a cron pass can't spare, for no
     // chance of succeeding — the eventual throw was never in doubt.
     if (attempt >= RATE_LIMIT_MAX_RETRIES || trueWaitMs > attemptsLeft * RATE_LIMIT_MAX_WAIT_MS) {
-      throw rateLimitError(path, waitMs);
+      throw rateLimitError(site, path, waitMs);
     }
 
     console.warn(`[github] rate limited on ${method} ${path}; waiting ${Math.round(waitMs / 1000)}s (attempt ${attempt + 1}/${RATE_LIMIT_MAX_RETRIES})`);
@@ -414,9 +474,28 @@ export async function mergeBranchFromBase(site, branch, base) {
     commit_message: `Sync ${branch} with ${base}`,
   });
   if (res.status === 204) return { ok: true, conflicted: false, synced: false };
-  if (res.status === 201) return { ok: true, conflicted: false, synced: true };
+  // `sha` (the new merge commit) lets the caller diff beforeSha...sha via
+  // compareCommits below to see exactly what the merge changed — a *clean*
+  // (non-409) git merge can still silently corrupt a marker-based field, see
+  // implementers/lib/marker-merge.js's findMarkerCorruption for why.
+  if (res.status === 201) return { ok: true, conflicted: false, synced: true, sha: (await res.json()).sha };
   if (res.status === 409) return { ok: false, conflicted: true };
   throw new Error(`mergeBranchFromBase failed (${res.status}): ${await res.text()}`);
+}
+
+// Files changed between two refs (commit SHAs, branch names, or tags) — used
+// by getOrInitBatchBranch (implementers/lib/github-ops.js) right after a
+// clean mergeBranchFromBase to see exactly which files that sync touched,
+// so they can be checked for marker corruption without re-scanning the
+// entire repo. GitHub's compare API caps `files` at 300 entries per
+// response (silently, via `.diff_url`) — acceptable here since a same-day
+// batch sync only ever touches the handful of files that day's drafts
+// wrote to, nothing close to that limit in practice.
+export async function compareCommits(site, base, head) {
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`);
+  if (!res.ok) throw new Error(`compareCommits failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  return { files: (data.files || []).map((f) => f.filename) };
 }
 
 // Atomically writes N files to `branch` as ONE commit via the Git Data API
@@ -438,8 +517,18 @@ export async function mergeBranchFromBase(site, branch, base) {
 // pointed to by any ref) and only moves the ref once, at the end, via
 // updateRef — so GitHub (and therefore Vercel's per-push preview build)
 // only sees the branch move once per batch, not once per commit.
-export async function createCommitObject(site, parentSha, files, message) {
-  const commitRes = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/git/commits/${parentSha}`);
+//
+// `treeBaseSha` (defaults to `parentSha`, unchanged for every existing
+// caller): the commit whose TREE this new commit's content builds on top
+// of, when it differs from the commit this new commit's PARENT link points
+// to. The one real caller of that split is github-ops.js's same-day squash
+// (endBatchPush) — the new commit's tree must include everything already
+// accumulated on today's batch branch (treeBaseSha = the branch's current
+// tip), but its parent must skip past today's earlier batch commit(s)
+// straight to the site's real pre-today base (parentSha), so the branch
+// ends up with exactly one commit for the day instead of a chain.
+export async function createCommitObject(site, parentSha, files, message, { treeBaseSha = parentSha } = {}) {
+  const commitRes = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/git/commits/${treeBaseSha}`);
   if (!commitRes.ok) throw new Error(`createCommitObject (read commit) failed (${commitRes.status}): ${await commitRes.text()}`);
   const baseTree = (await commitRes.json()).tree.sha;
 
@@ -457,12 +546,30 @@ export async function createCommitObject(site, parentSha, files, message) {
   return (await newCommitRes.json()).sha;
 }
 
+// The first line of `sha`'s own commit message — used only by github-ops.js's
+// same-day squash to recover an earlier batch commit's real human-readable
+// entry list before folding it into a combined message, so squashing never
+// silently drops the record of what an earlier-today invocation shipped.
+export async function getCommitMessage(site, sha) {
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/git/commits/${sha}`);
+  if (!res.ok) throw new Error(`getCommitMessage failed (${res.status}): ${await res.text()}`);
+  const { message } = await res.json();
+  return (message || '').split('\n')[0];
+}
+
 // Moves `branch`'s ref to point at `sha` — the actual "push" GitHub (and
 // Vercel's GitHub integration) sees as a new event. Split out so a caller
 // batching several createCommitObject calls can do this exactly once, for
 // the whole batch, instead of once per commit.
-export async function updateRef(site, branch, sha) {
-  const res = await githubRequest(site, 'PATCH', `/repos/${repoPath(site)}/git/refs/heads/${branch}`, { sha });
+//
+// `force` (default false, unchanged for every existing caller): GitHub
+// rejects a non-fast-forward ref update unless this is set. The one caller
+// that ever needs it is github-ops.js's same-day squash, whose replacement
+// commit is NOT a descendant of the commit it replaces (same tree content,
+// different parent) — an ordinary fast-forward update would be refused.
+export async function updateRef(site, branch, sha, { force = false } = {}) {
+  const body = force ? { sha, force: true } : { sha };
+  const res = await githubRequest(site, 'PATCH', `/repos/${repoPath(site)}/git/refs/heads/${branch}`, body);
   if (!res.ok) throw new Error(`updateRef failed (${res.status}): ${await res.text()}`);
 }
 
@@ -595,4 +702,33 @@ export async function listOpenPullRequestsForBranch(site, branch) {
   const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/pulls?state=open&head=${encodeURIComponent(head)}`);
   if (!res.ok) throw new Error(`listOpenPullRequestsForBranch failed (${res.status}): ${await res.text()}`);
   return res.json();
+}
+
+// Commit SUBJECTS on `branch` that are not on the repo's base branch — i.e.
+// exactly what this branch would contribute if a PR were opened for it.
+//
+// Exists so a recovery pass can answer "did this specific draft's commit
+// actually reach GitHub?" with EVIDENCE rather than by reading an error
+// string. That distinction is the whole bug this was written for: a batch
+// whose endBatchPush succeeded but whose PR call then failed leaves drafts
+// carrying a PR-stage error, and lib/draft-ship-state.js reads any
+// apply_error on 'branch_pushed' as proof the commit was never pushed — true
+// for a push-stage failure, false here, and the difference decides between
+// re-opening one PR and regenerating every draft from scratch.
+//
+// pushDraftBranch writes the subject `Action Center: apply <type> draft #<id>`,
+// so the draft id is recoverable from the subject alone; no commit sha needs
+// to be persisted for this to work on rows that predate it.
+//
+// Uses /compare rather than /commits so the answer is inherently "ahead of
+// base" — a branch sitting exactly at base returns an empty list instead of
+// base's entire history, which is the honest reading of "this branch has
+// nothing to open a PR for".
+export async function listCommitSubjectsAheadOfBase(site, branch, { base = null } = {}) {
+  const from = base || defaultBranchName(site);
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/compare/${encodeURIComponent(from)}...${encodeURIComponent(branch)}`);
+  if (res.status === 404) return null; // branch (or base) is gone — caller decides
+  if (!res.ok) throw new Error(`listCommitSubjectsAheadOfBase failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  return (data.commits || []).map((c) => (c.commit?.message || '').split('\n')[0]);
 }

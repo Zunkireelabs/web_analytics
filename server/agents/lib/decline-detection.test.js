@@ -96,3 +96,31 @@ describe('detectDeclines', () => {
     assert.equal(detectDeclines(current, prior).declines.size, 0);
   });
 });
+
+describe('detectDeclines — leading map', () => {
+  test('a page with CTR decay but no decline goes in `leading`, never in `declines`', () => {
+    const prior = m([['/a', { impressions: 1000, clicks: 50, ctr: 0.05, avgPosition: 4 }]]);
+    const current = m([['/a', { impressions: 1500, clicks: 50, ctr: 0.05, avgPosition: 4 }]]);
+
+    const { declines, leading } = detectDeclines(current, prior);
+    assert.equal(declines.has('/a'), false);
+    assert.ok(leading.get('/a'));
+    assert.deepEqual(leading.get('/a').families, ['ctr-decay-leading']);
+    assert.equal(leading.get('/a').impressionsLost, 0);
+  });
+
+  test('a page that is genuinely declining is never also listed as leading', () => {
+    const prior = m([['/a', { impressions: 2000, clicks: 100, ctr: 0.05 }]]);
+    const current = m([['/a', { impressions: 400, clicks: 20, ctr: 0.05 }]]);
+
+    const { declines, leading } = detectDeclines(current, prior);
+    assert.ok(declines.has('/a'));
+    assert.equal(leading.has('/a'), false);
+  });
+
+  test('a quiet page produces neither', () => {
+    const prior = m([['/a', { impressions: 1000, clicks: 50, ctr: 0.05, avgPosition: 4 }]]);
+    const { declines, leading } = detectDeclines(prior, prior);
+    assert.equal(declines.size + leading.size, 0);
+  });
+});

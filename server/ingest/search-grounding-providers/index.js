@@ -34,8 +34,34 @@ export function groundingProviderConfigured() {
 // propagate as-is — expand-content.js wraps them with safeMessage() into a
 // customer-safe "citation search is temporarily unavailable" failure rather
 // than crashing the whole draft.
+// Pages on one topic ask near-identical queries ("best it companies in nepal"
+// / "top it companies nepal"), and every uncached call spends Tavily quota. A
+// result set is reused for any later query on the same topic — token-set
+// similarity, not exact string — for a day. In-memory on purpose: a restart
+// only costs a few repeat searches, and nothing stale can outlive the process.
+const SEARCH_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const SIMILARITY_THRESHOLD = 0.6;
+const QUERY_STOPWORDS = new Set(['the', 'a', 'an', 'of', 'in', 'to', 'for', 'and', 'on', 'is', 'are', 'what', 'how', 'best', 'top']);
+const searchCache = []; // { tokens:Set, num, results, at }
+
+export function queryTokens(query) {
+  return new Set(String(query || '').toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 1 && !QUERY_STOPWORDS.has(t)));
+}
+function jaccard(a, b) {
+  if (!a.size || !b.size) return 0;
+  let inter = 0; for (const t of a) if (b.has(t)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+export function clearSearchCache() { searchCache.length = 0; }
+
 export async function searchGroundedSources(query, num = 3) {
   const provider = getConfiguredGroundingProvider();
   if (!provider) throw new Error('No search-grounding provider is configured.');
-  return provider.searchSources(query, num);
+  const tokens = queryTokens(query);
+  const now = Date.now();
+  const hit = searchCache.find((c) => now - c.at < SEARCH_CACHE_TTL_MS && c.num >= num && jaccard(tokens, c.tokens) >= SIMILARITY_THRESHOLD);
+  if (hit) return hit.results.slice(0, num);
+  const results = await provider.searchSources(query, num);
+  if (tokens.size) searchCache.push({ tokens, num, results, at: now });
+  return results;
 }
