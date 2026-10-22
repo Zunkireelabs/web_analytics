@@ -1,13 +1,21 @@
 import { useEffect, useState } from 'react';
-import { Activity } from 'lucide-react';
 import { api } from '../api.js';
-import PageHeader from '../components/PageHeader.jsx';
+import PageToolbar from '../components/PageToolbar.jsx';
+import PageIntro from '../components/layout/PageIntro.jsx';
+import KpiStrip from '../components/layout/KpiStrip.jsx';
+import Section from '../components/layout/Section.jsx';
+import Badge from '../components/Badge.jsx';
+import { fmtDay } from '../lib/format.js';
+import { STATUS } from '../lib/palette.js';
 import PerformanceTrendCard from '../components/PerformanceTrendCard.jsx';
 import GrowthTrendCard from '../components/GrowthTrendCard.jsx';
 import GrowthProjectionCard from '../components/GrowthProjectionCard.jsx';
 import SiteAuditSummaryCard from '../components/SiteAuditSummaryCard.jsx';
 import GrowthPlanNarrativeCard from '../components/GrowthPlanNarrativeCard.jsx';
 import BaselineReportCard from '../components/BaselineReportCard.jsx';
+
+// Chevron for the client picker (same as .fld select in index.css).
+const CHEVRON = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none' stroke='%238a8a8a' stroke-width='1.6'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E\")";
 
 // Client-facing "how much have we actually grown you" view — real data
 // only, strictly anchored to the site's real onboarding baseline (see
@@ -81,137 +89,118 @@ export default function GrowthReport({ isInternal = false }) {
   const categories = Object.entries(data?.siteAudit?.findingsByCategory || {});
   const totalFindings = categories.reduce((sum, [, list]) => sum + list.length, 0);
 
-  return (
-    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 space-y-8 fade-up">
-      <PageHeader title="Milestones" icon="🌱"
-        subtitle="Real progress since your onboarding baseline — every number here traces to a real, already-verified source." />
+  const onboardedYear = data?.onboardedAt ? String(data.onboardedAt).slice(0, 4) : '';
+  const healthTone = siteHealth >= 80 ? STATUS.good.text : siteHealth >= 50 ? STATUS.warning.text : STATUS.critical.text;
+  const healthSub = siteHealth >= 80 ? 'optimal site health' : siteHealth >= 50 ? 'moderate site health' : 'critical fixes required';
+  const kpis = data?.available ? [
+    { label: 'Baseline', value: `${fmtDay(data.onboardedAt)} ${onboardedYear}`, sub: 'onboarding date' },
+    ...(siteHealth != null ? [{
+      label: 'Health at baseline',
+      value: <><span style={{ color: healthTone }}>{siteHealth}</span><span className="text-[13px] text-faint font-normal">/100</span></>,
+      sub: healthSub,
+    }] : []),
+    { label: 'Findings', value: totalFindings, sub: 'from the latest site audit' },
+  ] : [];
 
-      {isInternal && clients.length > 0 && (
-        <div className="flex items-center gap-2">
-          <label htmlFor="milestones-client-picker" className="text-xs font-bold text-slate-500 uppercase tracking-widest">Client</label>
-          <select id="milestones-client-picker" value={selectedSiteId ?? ''}
-            onChange={(e) => setSelectedSiteId(e.target.value ? Number(e.target.value) : null)}
-            className="text-xs font-bold bg-white border border-slate-200/80 rounded-xl px-2.5 py-2 text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 shadow-sm transition">
-            {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </div>
-      )}
+  return (
+    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12 fade-up">
+      <PageToolbar>
+        {isInternal && clients.length > 0 && (
+          <>
+            <label htmlFor="milestones-client-picker" className="text-[13px] text-faint">Client</label>
+            <select id="milestones-client-picker" value={selectedSiteId ?? ''}
+              onChange={(e) => setSelectedSiteId(e.target.value ? Number(e.target.value) : null)}
+              className="h-8 pl-2.5 pr-8 rounded-control bg-white text-[13px] font-medium text-fg appearance-none"
+              style={{
+                boxShadow: 'var(--ring)',
+                backgroundImage: CHEVRON,
+                backgroundRepeat: 'no-repeat',
+                backgroundPosition: 'right 10px center',
+              }}>
+              {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </>
+        )}
+        {data?.available && (
+          <span className="ml-auto hidden md:inline-flex"><Badge tone="green" dot>Active monitoring</Badge></span>
+        )}
+      </PageToolbar>
+
+      <PageIntro
+        title={data?.available ? `Progress since the ${fmtDay(data.onboardedAt)} ${onboardedYear} baseline` : 'Milestones'}
+        subtitle="Every number here traces to a real, already-verified source." />
 
       {error ? (
-        <div className="card p-6 text-sm text-slate-500 text-center">Unable to load your growth report right now.</div>
+        <div className="rounded-card bg-[#fdecec] text-[#b42318] text-sm px-4 py-3">Unable to load your growth report right now.</div>
       ) : data === null ? (
-        <div className="card p-8 text-center text-sm text-slate-400">Loading…</div>
+        <KpiStrip cols={3} loading items={[{}, {}, {}]} />
       ) : !data.available ? (
-        <div className="card p-10 text-center space-y-2">
-          <p className="text-2xl">🌱</p>
-          <p className="text-sm font-semibold text-slate-700">{data.message}</p>
-        </div>
+        <div className="card px-4 py-10 text-center text-sm text-text">{data.message}</div>
       ) : (
         <>
-          {/* Executive KPI Ribbon */}
-          <div className="card-dark p-4 px-6 shadow-md">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-2xl bg-indigo-600/90 text-white grid place-items-center shadow-md shadow-indigo-500/25 shrink-0">
-                  <Activity size={20} />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-base font-black tracking-tight">Onboarding Baseline Established</h3>
-                    <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400 bg-emerald-500/20 px-2 py-0.5 rounded-full border border-emerald-500/30">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Active Monitoring
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-400 font-medium mt-0.5">
-                    Baseline: <strong className="text-white">{data.onboardedAt}</strong> ➔ Today
-                  </p>
-                </div>
-              </div>
+          <KpiStrip cols={3} items={kpis} />
 
-              <div className="flex flex-wrap items-center gap-3">
-                {siteHealth != null && (
-                  <div className="px-3.5 py-1.5 rounded-xl bg-white/10 border border-white/10 text-center">
-                    <span className="block text-[9px] font-black uppercase tracking-widest text-slate-400">Health Baseline</span>
-                    <span className={`text-sm font-black ${siteHealth >= 80 ? 'text-emerald-400' : siteHealth >= 50 ? 'text-amber-400' : 'text-rose-400'}`}>
-                      {siteHealth}/100
-                    </span>
-                  </div>
-                )}
-                <div className="px-3.5 py-1.5 rounded-xl bg-white/10 border border-white/10 text-center">
-                  <span className="block text-[9px] font-black uppercase tracking-widest text-slate-400">Total Findings</span>
-                  <span className="text-sm font-black text-white">{totalFindings}</span>
-                </div>
-              </div>
-            </div>
+          <div className="mt-8">
+            <BaselineReportCard report={baselineReport} siteId={isInternal ? selectedSiteId : undefined}
+              isInternal={isInternal} onGenerated={loadBaselineReport} />
           </div>
 
-          <BaselineReportCard report={baselineReport} siteId={isInternal ? selectedSiteId : undefined}
-            isInternal={isInternal} onGenerated={loadBaselineReport} />
-
-          {/* Section 1: Where You Stand Today */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-indigo-600" />
-              <h2 className="text-xs font-black text-slate-900 uppercase tracking-widest">Where You Stand Today</h2>
-            </div>
+          <Section className="mt-8" label="Site audit" title="Where you stand today" subtitle="The latest full crawl of your site">
             <SiteAuditSummaryCard siteAudit={data.siteAudit} loading={false} />
-          </div>
+          </Section>
 
-          {/* Section 2: Growth Plan & Performance — combined narrative,
-              AI projections, and historical trends in one compact section
-              (previously two separate stacked sections). */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-[#6C63FF]" />
-              <h2 className="text-xs font-black text-slate-900 uppercase tracking-widest">Your Growth Plan & Performance Trends</h2>
-            </div>
-            <div className="space-y-4">
+          {/* Growth Plan & Performance — combined narrative, AI projections,
+              and historical trends in one compact section (previously two
+              separate stacked sections). */}
+          <Section className="mt-8" label="Growth" title="Growth plan and trends" subtitle="Three-month projections, then the real history behind them">
+            <div className="space-y-6">
               <GrowthPlanNarrativeCard growthPlan={data.growthPlan} loading={false} />
 
-              {/* Compact AI projections — 6 metrics in one tight row instead
-                  of two full-width 3-up grids. */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-                <GrowthProjectionCard title="Health Score" icon="💚" color="#10b981" compact
-                  projection={data.healthScore.projection} />
-                <GrowthProjectionCard title="Weekly Clicks" icon="📈" color="#6C63FF" unit="/week" compact
-                  projection={data.performance.clicksProjection} />
-                <GrowthProjectionCard title="Weekly Impressions" icon="👁️" color="#f59e0b" unit="/week" compact
-                  projection={data.performance.impressionsProjection} />
-                <GrowthProjectionCard title="Competitor Readiness" icon="🏁" color="#f59e0b" compact
-                  projection={data.competitorTrend?.projection} />
-                <GrowthProjectionCard title="Authority Score" icon="🔗" color="#8b5cf6" compact
-                  projection={data.authorityTrend?.projection} />
-                <GrowthProjectionCard title="AI Recommendation Rate" icon="✦" color="#6C63FF" unit="%" compact
-                  projection={data.aiRecommendationTrend?.projection} />
+              {/* Compact AI projections — 6 metrics in one hairline strip (gap-px on
+                  the inner grid draws the lines; .card is unlayered, so the bg-border
+                  can't go on the card itself). */}
+              <div className="card overflow-hidden">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-border">
+                  <GrowthProjectionCard title="Health Score" compact
+                    projection={data.healthScore.projection} />
+                  <GrowthProjectionCard title="Weekly Clicks" unit="/week" compact
+                    projection={data.performance.clicksProjection} />
+                  <GrowthProjectionCard title="Weekly Impressions" unit="/week" compact
+                    projection={data.performance.impressionsProjection} />
+                  <GrowthProjectionCard title="Competitor Readiness" compact
+                    projection={data.competitorTrend?.projection} />
+                  <GrowthProjectionCard title="Authority Score" compact
+                    projection={data.authorityTrend?.projection} />
+                  <GrowthProjectionCard title="AI Recommendation Rate" unit="%" compact
+                    projection={data.aiRecommendationTrend?.projection} />
+                </div>
               </div>
 
               {/* Historical trend charts, side-by-side where reasonable. */}
-              <div className="grid lg:grid-cols-2 gap-4">
+              <div className="grid lg:grid-cols-2 gap-6">
                 <PerformanceTrendCard series={data.performance.series} targets={data.performance.targets} loading={false} onTargetSaved={load} showClicksProjectionNote />
-                <GrowthTrendCard id="health" title="Website Health Score" icon="💚" color="#10b981"
+                <GrowthTrendCard id="health" title="Website Health Score"
                   data={data.healthScore} emptyMessage="Not enough health-score history yet." onTargetSaved={load} />
               </div>
 
-              <div className="grid lg:grid-cols-3 gap-4">
+              <div className="grid lg:grid-cols-3 gap-6">
                 <GrowthTrendCard id="competitor" title="Competitor Readiness"
                   subtitle={data.competitorTrend?.domain ? `vs. ${data.competitorTrend.domain}` : undefined}
-                  icon="🏁" color="#f59e0b" data={data.competitorTrend}
+                  data={data.competitorTrend}
                   emptyMessage="No tracked competitor has enough history yet." onTargetSaved={load} />
-                <GrowthTrendCard id="authority" title="Authority Score" icon="🔗" color="#8b5cf6"
+                <GrowthTrendCard id="authority" title="Authority Score"
                   subtitle={data.authorityTrend?.dataSource === 'commoncrawl' ? 'Coarser estimate (free Common Crawl data — referring domains only)' : undefined}
                   data={data.authorityTrend} emptyMessage="Needs real DataForSEO backlink data (or free Common Crawl data) — neither connected yet." onTargetSaved={load} />
-                <GrowthTrendCard id="ai-rec" title="AI Recommendation Rate" unit="%" icon="✦" color="#6C63FF"
+                <GrowthTrendCard id="ai-rec" title="AI Recommendation Rate" unit="%"
                   data={data.aiRecommendationTrend} emptyMessage="No AI recommendation checks have run yet." onTargetSaved={load}
                   action={data.aiRecommendationTrend?.configured && !data.aiRecommendationTrend?.available
                     ? { label: 'Run First AI Recommendation Check', run: () => api.runAiRecommendation() }
                     : undefined} />
               </div>
             </div>
-          </div>
+          </Section>
         </>
       )}
     </div>
   );
 }
-
-

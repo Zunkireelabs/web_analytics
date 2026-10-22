@@ -2,7 +2,7 @@ import { STATUS } from '../../lib/palette.js';
 import Sparkline from '../Sparkline.jsx';
 
 const DELTA_COLOR = { good: STATUS.good.text, bad: STATUS.critical.text };
-const LG_GRID = { 4: 'lg:grid-cols-4', 5: 'lg:grid-cols-5' };
+const LG_GRID = { 3: 'lg:grid-cols-3', 4: 'lg:grid-cols-4', 5: 'lg:grid-cols-5', 6: 'lg:grid-cols-6' };
 
 // Hairlines between cells: a top border on every cell past the first row and a
 // left border on every cell past the first column, per breakpoint, so there is
