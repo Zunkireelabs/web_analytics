@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
-import PageHeader from '../components/PageHeader.jsx';
-import StatCard from '../components/StatCard.jsx';
+import { Link } from 'react-router-dom';
+import PageToolbar from '../components/PageToolbar.jsx';
+import PageIntro from '../components/layout/PageIntro.jsx';
+import KpiStrip from '../components/layout/KpiStrip.jsx';
+import Section from '../components/layout/Section.jsx';
+import SegmentedTabs from '../components/SegmentedTabs.jsx';
+import Button from '../components/Button.jsx';
+import { fmtDay, fmtRange } from '../lib/format.js';
 import PerformanceTrendCard from '../components/PerformanceTrendCard.jsx';
 import MoversList from '../components/MoversList.jsx';
 import ExecutiveSummaryPanel from '../components/ExecutiveSummaryPanel.jsx';
@@ -31,8 +37,8 @@ const MOVER_COMPARISON_LABEL = { daily: 'yesterday', weekly: 'the prior week', m
 
 function periodLabel(data) {
   if (!data) return '';
-  if (data.period === 'daily') return data.date || '';
-  if (data.period === 'weekly') return data.start && data.end ? `${data.start} – ${data.end}` : '';
+  if (data.period === 'daily') return data.date ? `${fmtDay(data.date)} ${data.date.slice(0, 4)}` : '';
+  if (data.period === 'weekly') return data.start && data.end ? fmtRange(data.start, data.end) : '';
   if (data.period === 'monthly' && data.ym) {
     const [y, m] = data.ym.split('-').map(Number);
     return `${MONTH_NAMES[m - 1]} ${y}`;
@@ -77,53 +83,41 @@ export default function Reports({ siteId }) {
   const findings = insights?.agentFindings || [];
   const recommendations = insights?.recommendations || [];
 
+  const label = periodLabel(data);
+  const introTitle = loading || !data ? 'Reports'
+    : data.period === 'daily' ? `Daily report · ${fmtDay(data.date)}`
+    : data.period === 'weekly' ? `Weekly report · ${label}`
+    : `Monthly report · ${label}`;
+
+  // No previous-period values exist for these tiles, so no deltas — the sub is
+  // the period the numbers cover.
+  const kpis = [
+    { label: 'Clicks', value: m?.clicks == null ? '—' : fmtInt(m.clicks), sub: label },
+    { label: 'Impressions', value: m?.impressions == null ? '—' : fmtInt(m.impressions), sub: label },
+    { label: 'Avg position', value: m?.position == null ? '—' : fmtFloat(m.position), sub: 'lower is better' },
+    { label: 'Users', value: m?.users == null ? '—' : fmtInt(m.users), sub: label },
+    { label: 'Sessions', value: m?.sessions == null ? '—' : fmtInt(m.sessions), sub: label },
+  ];
+
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6 font-sans fade-up relative">
-
-      {/* Decorative Glows */}
-      <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 overflow-hidden no-print">
-        <div className="absolute top-0 right-1/4 w-[600px] h-[600px] rounded-full blur-[145px] bg-indigo-500/10 opacity-50 pulse-glow" />
-        <div className="absolute bottom-10 left-1/4 w-[500px] h-[500px] rounded-full blur-[125px] bg-purple-500/8 opacity-45 pulse-glow" />
-      </div>
-
-      <PageHeader title="Reports" subtitle="Your AI Executive Briefing" icon="🗒️"
-        right={
-          <div className="flex flex-wrap items-center gap-2">
-            {!loading && data?.docUrl && (
-              <a href={data.docUrl} target="_blank" rel="noreferrer"
-                className="text-xs font-extrabold px-3.5 py-2 rounded-xl text-slate-700 hover:text-slate-900 border border-slate-200/80 bg-white/70 hover:bg-white shadow-sm transition hover:scale-[1.01] active:scale-[0.99] duration-150">
-                View Google Doc ↗
-              </a>
-            )}
-            <button 
-              type="button" 
-              onClick={() => window.print()}
-              className="text-xs font-extrabold px-3.5 py-2 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.99] shadow-sm hover:shadow-indigo-500/20 active-pill-shadow hover:brightness-105"
-              style={{ background: 'linear-gradient(135deg, #6C63FF, #8b5cf6)' }}
-            >
-              Export PDF
-            </button>
-          </div>
-        } />
-
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex bg-slate-100/80 p-1 rounded-2xl border border-slate-200/30 w-fit">
-          {PERIODS.map((p) => (
-            <button key={p.key} onClick={() => setPeriod(p.key)}
-              className={`text-sm px-4 py-1.5 font-semibold rounded-xl transition ${
-                period === p.key
-                  ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/10'
-                  : 'text-slate-600 hover:bg-white/50 hover:text-slate-800'
-              }`}>
-              {p.label}
-            </button>
-          ))}
+    <div className="max-w-[1360px] mx-auto px-4 md:px-8 pt-8 pb-16 fade-up">
+      <PageToolbar>
+        <div className="no-print max-w-full overflow-x-auto no-scrollbar">
+          <SegmentedTabs options={PERIODS.map((p) => ({ value: p.key, label: p.label }))} value={period} onChange={setPeriod} />
         </div>
-        {!loading && data && <p className="text-[11px] text-slate-400">{periodLabel(data)}</p>}
-      </div>
+        {!loading && data && label && <span className="hidden md:inline text-[13px] text-faint ml-2">Report for {label}</span>}
+        <div className="ml-auto flex gap-2 no-print">
+          {!loading && data?.docUrl && (
+            <a href={data.docUrl} target="_blank" rel="noreferrer" className="btn btn--light">View Google Doc ↗</a>
+          )}
+          <Button variant="primary" onClick={() => window.print()}>Export PDF</Button>
+        </div>
+      </PageToolbar>
+
+      <PageIntro title={introTitle} subtitle="Your AI executive briefing, with how search moved over the period." />
 
       {error ? (
-        <div className="card p-6 text-sm text-slate-500 text-center">Unable to load this report right now.</div>
+        <div className="rounded-card bg-[#fdecec] text-[#b42318] text-sm px-4 py-3 mb-6">Unable to load this report right now.</div>
       ) : (
         <>
           {/* source/generatedAt are deliberately omitted — /report-summary
@@ -132,44 +126,42 @@ export default function Reports({ siteId }) {
               imply a freshness timestamp this page doesn't really have. */}
           <ExecutiveSummaryPanel text={data?.narrative} />
 
-          {/* Always 2 cols (even below sm) so 5 cards stacked one-per-row
-              doesn't turn into a long mobile scroll. */}
-          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
-            <StatCard label="Clicks" icon="🖱" color="#8b5cf6" value={m?.clicks} format={fmtInt} loading={loading} />
-            <StatCard label="Impressions" icon="👁" color="#6C63FF" value={m?.impressions} format={fmtInt} loading={loading} />
-            <StatCard label="Avg position" hint="lower is better" icon="🏅" color="#f59e0b"
-              value={m?.position} lowerIsBetter format={fmtFloat} loading={loading} />
-            <StatCard label="Users" icon="👥" color="#10b981" value={m?.users} format={fmtInt} loading={loading} />
-            <StatCard label="Sessions" icon="⏱" color="#14b8a6" value={m?.sessions} format={fmtInt} loading={loading} />
+          <div className="mt-6">
+            <KpiStrip items={kpis} loading={loading} cols={5} />
           </div>
 
-          <div className="grid lg:grid-cols-3 gap-4">
-            <div className="lg:col-span-2">
+          <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr] mt-10 items-start">
+            <div className="min-w-0">
               <PerformanceTrendCard series={data?.series} loading={loading} />
             </div>
-            <ReportHistoryRail history={data?.history} />
+            <Section className="min-w-0" title="Report history" subtitle="Clicks per period, newest first">
+              <ReportHistoryRail history={data?.history} />
+            </Section>
           </div>
 
           {!loading && data?.movers && (data.movers.gainers.length > 0 || data.movers.droppers.length > 0) && (
-            <MoversList gainers={data.movers.gainers} droppers={data.movers.droppers} comparisonLabel={MOVER_COMPARISON_LABEL[period]} />
-          )}
-
-          {findings.length > 0 && (
-            <div className="space-y-4">
-              <h2 className="text-[15px] font-bold text-slate-900">AI Agent Findings</h2>
-              <AgentFindingsHub findings={findings} />
+            <div className="mt-10">
+              <MoversList gainers={data.movers.gainers} droppers={data.movers.droppers} comparisonLabel={MOVER_COMPARISON_LABEL[period]} />
             </div>
           )}
 
+          {findings.length > 0 && (
+            <Section className="mt-10" title="Agent findings" subtitle={`${findings.length} agents reported`}>
+              <AgentFindingsHub findings={findings} />
+            </Section>
+          )}
+
           {recommendations.length > 0 && (
-            <div id="recommendations-section" className="scroll-mt-6">
-              <h2 className="text-[15px] font-bold text-slate-900 mb-3">Priority Recommendations</h2>
-              <div className="space-y-2.5">
-                {recommendations.map((r) => (
-                  <RecommendationCard key={r.id} title={r.title} reason={r.reason}
-                    impact={r.impact} effort={r.effort} category={r.category} />
-                ))}
-              </div>
+            <div id="recommendations-section" className="scroll-mt-6 mt-10">
+              <Section title="Priority recommendations" subtitle="What to do next, by expected impact"
+                action={<Link to="/action-center" className="btn btn--light no-print">Open Action Center</Link>}>
+                <div className="card overflow-hidden">
+                  {recommendations.map((r) => (
+                    <RecommendationCard key={r.id} title={r.title} reason={r.reason}
+                      impact={r.impact} effort={r.effort} category={r.category} />
+                  ))}
+                </div>
+              </Section>
             </div>
           )}
         </>

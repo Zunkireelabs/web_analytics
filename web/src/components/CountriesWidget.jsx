@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ComposableMap, Geographies, Geography } from 'react-simple-maps';
+import KpiStrip from './layout/KpiStrip.jsx';
 
 const GEO_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json';
 
@@ -18,13 +19,13 @@ const FLAG = {
   Australia: '🇦🇺', Germany: '🇩🇪', France: '🇫🇷', Netherlands: '🇳🇱', Singapore: '🇸🇬',
   Turkey: '🇹🇷', Japan: '🇯🇵', Poland: '🇵🇱', Brazil: '🇧🇷', Spain: '🇪🇸', Italy: '🇮🇹',
 };
-const flag = (c) => FLAG[c] || '🌐';
+const flag = (c) => FLAG[c] || '🏳️';
 
-// Sequential single-hue ramp (indigo, light→dark) — magnitude by rank tier, not a
+// Sequential single-hue ramp (orange, light→dark) — magnitude by rank tier, not a
 // continuous scale. With only a handful of countries carrying any clicks, a
 // continuous fit crushes everyone but #1 into the same near-invisible shade.
-const NO_DATA_FILL = '#eef1f6';
-const TIERS = ['#c7d2fe', '#818cf8', '#6366f1', '#4338ca']; // low → high
+const NO_DATA_FILL = '#ebe9e6';
+const TIERS = ['#fbe3d3', '#f2a679', '#e07a3f', '#d54e00']; // low → high
 const tierFor = (rank, total) => {
   if (rank === 0) return TIERS[3];
   if (total <= 4) return TIERS[Math.max(0, 3 - rank)];
@@ -97,49 +98,28 @@ export default function CountriesWidget({ rows }) {
 
   if (sorted.length === 0) {
     return (
-      <div className="card p-6 fade-up">
-        <div className="flex items-center gap-2 mb-1">
-          <span className="w-9 h-9 rounded-xl grid place-items-center text-white" style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>🌍</span>
-          <div className="leading-tight">
-            <div className="font-bold text-slate-900">Top Countries by Clicks</div>
-            <div className="text-[11px] text-slate-400">Where your search clicks come from</div>
-          </div>
-        </div>
-        <div className="text-sm text-slate-400 py-10 text-center">No country data for this range yet.</div>
-      </div>
+      <div className="card text-sm text-faint py-10 text-center">No country data for this range yet.</div>
     );
   }
 
-  return (
-    <div className="relative rounded-[22px] overflow-hidden border border-white/60 shadow-xl"
-      style={{ background: 'linear-gradient(135deg, rgba(108,99,255,0.06), rgba(255,255,255,0.85))', backdropFilter: 'blur(12px)' }}>
-      {/* header + stat strip */}
-      <div className="p-5 pb-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="w-9 h-9 rounded-xl grid place-items-center text-white" style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>🌍</span>
-            <div className="leading-tight">
-              <div className="font-bold text-slate-900">Top Countries by Clicks</div>
-              <div className="text-[11px] text-slate-400">Where your search clicks come from</div>
-            </div>
-          </div>
-          {/* This card is real GSC data + plain threshold checks, not an LLM call — no "AI" badge. */}
-        </div>
+  const kpis = [
+    { label: 'Countries reached', value: countries },
+    { label: 'Total clicks', value: total.toLocaleString() },
+    { label: 'Top country', value: top ? <span>{flag(top.country)} {top.country}</span> : '—', sub: top ? `${topShare}% of clicks` : undefined },
+    { label: 'Global reach', value: <span>{reach}<span className="text-sm text-faint font-normal ml-0.5">/100</span></span> },
+  ];
+  const ring = { boxShadow: 'inset 0 0 0 1px var(--border-2)' };
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mt-4">
-          <Stat label="Countries reached" value={countries} />
-          <Stat label="Total clicks" value={total.toLocaleString()} />
-          <Stat label="Top country" value={top ? <span>{flag(top.country)} {top.country}</span> : '—'} />
-          <Stat label="Global reach" value={<span>{reach}<span className="text-sm text-slate-400">/100</span></span>} />
-        </div>
-      </div>
+  return (
+    <div className="card overflow-hidden">
+      {/* This card is real GSC data + plain threshold checks, not an LLM call — no "AI" badge. */}
+      <KpiStrip items={kpis} bare />
 
       {/* map (left) + ranked table (right) — side by side, sharing one tier scale */}
-      <div className="grid lg:grid-cols-[1.3fr_1fr] gap-0">
+      <div className="grid gap-4 lg:grid-cols-[1.3fr_1fr] p-4 border-t border-border">
         {/* map: tier-shaded + legend so the shading is actually legible */}
-        <div className="relative p-3" ref={wrap} onMouseMove={onMove} onClick={() => setTip(null)}>
-          <div className="flex items-center justify-between px-2 mb-1">
-            <div className="text-[11px] font-semibold text-slate-500">Global reach</div>
+        <div className="relative rounded-control bg-[#fcfcfb] p-3 min-w-0" style={ring} ref={wrap} onMouseMove={onMove} onClick={() => setTip(null)}>
+          <div className="flex justify-end px-1 mb-1">
             <Legend />
           </div>
           <ComposableMap projectionConfig={{ scale: 145 }} width={800} height={420} style={{ width: '100%', height: 'auto' }}>
@@ -155,7 +135,7 @@ export default function CountriesWidget({ rows }) {
                     onClick={(e) => onTapCountry(e, r)}
                     style={{
                       default: { outline: 'none' },
-                      hover: { fill: clicks > 0 ? '#312e81' : '#dbe2ea', outline: 'none', cursor: clicks > 0 ? 'pointer' : 'default' },
+                      hover: { fill: clicks > 0 ? '#a63c00' : '#dcd9d5', outline: 'none', cursor: clicks > 0 ? 'pointer' : 'default' },
                       pressed: { outline: 'none' },
                     }} />
                 );
@@ -164,72 +144,56 @@ export default function CountriesWidget({ rows }) {
           </ComposableMap>
 
           {tip && (
-            <div className="pointer-events-none absolute z-10 bg-slate-900 text-white text-[11px] rounded-lg px-2.5 py-1.5 shadow-lg"
+            <div className="pointer-events-none absolute z-10 bg-fg text-white text-xs rounded-control px-2.5 py-1.5"
               style={{ left: Math.min(tip.x + 12, 520), top: tip.y + 12 }}>
-              <div className="font-semibold">{flag(tip.name)} {tip.name}</div>
-              <div className="text-slate-300">{tip.clicks} clicks · {tip.impr.toLocaleString()} impr · {tip.impr ? ((tip.clicks / tip.impr) * 100).toFixed(1) : '0.0'}% CTR</div>
+              <div className="font-medium">{flag(tip.name)} {tip.name}</div>
+              <div className="text-faint-2">{tip.clicks} clicks · {tip.impr.toLocaleString()} impr · {tip.impr ? ((tip.clicks / tip.impr) * 100).toFixed(1) : '0.0'}% CTR</div>
             </div>
           )}
         </div>
 
         {/* ranked table: the exact numbers behind the map's shading */}
-        <div className="p-5 pl-2 lg:border-l border-slate-100">
-          <div className="flex items-center justify-between mb-2">
-            <div className="text-[11px] font-semibold text-slate-500">Ranked by clicks</div>
-            <div className="text-[10px] text-slate-400">Top {Math.min(8, sorted.length)} of {sorted.length}</div>
-          </div>
-          <div className="divide-y divide-slate-50">
-            {sorted.slice(0, 8).map((r, i) => {
-              const clicks = Number(r.clicks) || 0;
-              const impr = Number(r.impressions) || 0;
-              const ctr = impr > 0 ? (clicks / impr) * 100 : null;
-              const share = Math.max(clicks > 0 ? (clicks / maxClicks) * 100 : 0, clicks > 0 ? 3 : 0);
-              return (
-                <div key={i} className="flex items-center gap-2.5 rounded-xl px-2 py-2.5 hover:bg-white/70 transition">
-                  <span className="w-6 h-6 rounded-lg grid place-items-center text-[11px] font-bold shrink-0"
-                    style={i < 3 ? { background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)', color: '#fff' } : { background: '#f1f5f9', color: '#94a3b8' }}>{i + 1}</span>
-                  <span className="text-base shrink-0">{flag(r.country)}</span>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span className="text-sm text-slate-700 truncate">{r.country}</span>
-                      <span className="text-sm font-bold text-slate-900 tabular-nums shrink-0">{clicks.toLocaleString()}</span>
-                    </div>
-                    <div className="flex items-center gap-2 mt-1.5">
-                      <span className="h-1.5 flex-1 rounded-full bg-slate-100 overflow-hidden">
-                        <span className="block h-full rounded-full" style={{ width: `${share}%`, background: fillFor(r) }} />
-                      </span>
-                      <span className="text-[10px] text-slate-400 tabular-nums shrink-0">
-                        {ctr != null ? `${ctr.toFixed(1)}% CTR` : `${impr.toLocaleString()} impr`}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+        <div className="rounded-control overflow-hidden min-w-0 self-start" style={ring}>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th className="rank">#</th>
+                <th>Country</th>
+                <th className="num">Clicks</th>
+                <th className="num hidden sm:table-cell">CTR</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.slice(0, 8).map((r, i) => {
+                const clicks = Number(r.clicks) || 0;
+                const impr = Number(r.impressions) || 0;
+                const ctr = impr > 0 ? (clicks / impr) * 100 : null;
+                const share = Math.max(clicks > 0 ? (clicks / maxClicks) * 100 : 0, clicks > 0 ? 4 : 0);
+                return (
+                  <tr key={i}>
+                    <td className="rank">{i + 1}</td>
+                    <td className="bar max-w-0 w-full">
+                      <i style={{ width: `${share}%` }} />
+                      <span className="block truncate">{flag(r.country)} {r.country}</span>
+                    </td>
+                    <td className="num">{clicks.toLocaleString()}</td>
+                    <td className="num hidden sm:table-cell">{ctr != null ? `${ctr.toFixed(1)}%` : `${impr.toLocaleString()} impr`}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div className="tbl-foot"><span>Top {Math.min(8, sorted.length)} of {sorted.length}</span></div>
         </div>
       </div>
 
       {/* Plain threshold checks over real country rows, not an LLM call — no "AI" badge. */}
       {top && (
-        <div className="m-3 mt-2 rounded-2xl border p-4 flex items-start gap-3"
-          style={{ borderColor: '#E5F5EC', background: '#f8fafc' }}>
-          <span className="w-8 h-8 rounded-lg grid place-items-center text-slate-500 text-xs shrink-0 bg-white border border-slate-200">📊</span>
-          <p className="text-sm text-slate-700 leading-relaxed">
-            <span className="font-semibold">{flag(top.country)} {top.country}</span> generated <b>{topShare}%</b> of total clicks this period.
-            {ctrOpp && <> {ctrOpp.country} showed high impression volume relative to clicks — a <b>CTR optimization opportunity</b>.</>}
-          </p>
-        </div>
+        <p className="mx-4 mb-4 rounded-control bg-muted px-3.5 py-3 text-[13px] text-text">
+          <span className="font-medium text-fg">{flag(top.country)} {top.country}</span> generated <span className="font-medium text-fg">{topShare}%</span> of total clicks this period.
+          {ctrOpp && <> {ctrOpp.country} showed high impression volume relative to clicks — a <span className="font-medium text-fg">CTR optimization opportunity</span>.</>}
+        </p>
       )}
-    </div>
-  );
-}
-
-function Stat({ label, value }) {
-  return (
-    <div className="rounded-2xl bg-white/70 border border-white px-3 py-2.5">
-      <div className="text-lg font-bold text-slate-900 leading-tight">{value}</div>
-      <div className="text-[11px] text-slate-400 mt-0.5">{label}</div>
     </div>
   );
 }
@@ -237,11 +201,10 @@ function Stat({ label, value }) {
 // Legend for the map's sequential shading — a color scale needs a key to read.
 function Legend() {
   return (
-    <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
+    <div className="flex items-center gap-1.5 text-xs text-faint">
       <span>Fewer</span>
       <span className="flex gap-0.5">
-        <i className="w-3 h-3 rounded-sm" style={{ background: NO_DATA_FILL }} />
-        {TIERS.map((c) => <i key={c} className="w-3 h-3 rounded-sm" style={{ background: c }} />)}
+        {TIERS.map((c) => <i key={c} className="w-3 h-3 rounded-[3px]" style={{ background: c }} />)}
       </span>
       <span>More clicks</span>
     </div>

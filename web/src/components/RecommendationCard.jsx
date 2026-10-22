@@ -1,55 +1,22 @@
-import { CATEGORY } from './AgentCard.jsx';
-import { Target, Globe, FileText, Brain } from 'lucide-react';
-import { STATUS } from '../lib/palette.js';
+import Badge from './Badge.jsx';
 
-const ICONS = {
-  seo: Target,
-  geo: Globe,
-  content: FileText,
-  meta: Brain,
-};
+// Impact reads as a status (high impact is good); effort is only context, so
+// low effort stays calm (grey) rather than green.
+const IMPACT_TONE = { High: 'green', Medium: 'amber', Low: 'grey' };
+const EFFORT_TONE = { Low: 'grey', Medium: 'amber', High: 'red' };
 
-const IMPACT = {
-  High: { color: STATUS.good.color, bg: STATUS.good.tint, border: STATUS.good.ring },
-  Medium: { color: STATUS.warning.color, bg: STATUS.warning.tint, border: STATUS.warning.ring },
-  Low: { color: STATUS.neutral.color, bg: STATUS.neutral.tint, border: STATUS.neutral.ring },
-};
-const EFFORT_COLOR = { Low: STATUS.good.color, Medium: STATUS.warning.color, High: STATUS.critical.color };
-
-export default function RecommendationCard({ title, reason, impact, effort, category }) {
-  const cat = CATEGORY[category] || CATEGORY.seo;
-  const imp = IMPACT[impact] || IMPACT.Low;
-  const Icon = ICONS[category] || Target;
-  
+// One hairline-separated row; the parent supplies the surrounding .card.
+export default function RecommendationCard({ title, reason, impact, effort }) {
   return (
-    <div className="flex rounded-2xl border border-slate-200/60 bg-white/70 backdrop-blur-md overflow-hidden transition-all duration-200 hover:border-slate-350 hover:bg-white hover:shadow-sm">
-      <div className="w-[3px] shrink-0" style={{ background: imp.color }} />
-      <div className="flex items-start gap-3.5 p-4 flex-1 min-w-0">
-        <span className="w-8 h-8 rounded-xl grid place-items-center text-sm shrink-0"
-          style={{ background: `${cat.color}12`, color: cat.color }}>
-          <Icon size={15} strokeWidth={2.5} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="text-xs font-bold text-slate-800 leading-snug">{title}</div>
-          <div className="text-[11px] font-semibold text-slate-400 mt-1 leading-relaxed">{reason}</div>
-        </div>
-        <div className="flex flex-col items-end gap-1.5 shrink-0">
-          <span className="text-[9px] font-black px-2.5 py-0.5 rounded-full border whitespace-nowrap uppercase tracking-wider" 
-            style={{ background: imp.bg, borderColor: imp.border, color: imp.color }}>
-            Impact: {impact}
-          </span>
-          <Pill label="Effort" value={effort} color={EFFORT_COLOR[effort]} />
-        </div>
+    <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-x-4 px-4 py-3.5 border-b border-border last:border-0">
+      <div className="min-w-0">
+        <div className="text-sm font-medium text-fg">{title}</div>
+        <div className="text-[13px] text-text mt-0.5">{reason}</div>
+      </div>
+      <div className="mt-2 sm:mt-0 flex flex-row sm:flex-col items-start sm:items-end gap-1 sm:row-span-2 sm:col-start-2 sm:row-start-1">
+        <Badge tone={IMPACT_TONE[impact] || 'grey'}>Impact: {impact}</Badge>
+        <Badge tone={EFFORT_TONE[effort] || 'grey'}>Effort: {effort}</Badge>
       </div>
     </div>
-  );
-}
-
-function Pill({ label, value, color }) {
-  return (
-    <span className="text-[9px] font-black px-2.5 py-0.5 rounded-full border whitespace-nowrap uppercase tracking-wider"
-      style={{ background: `${color}08`, borderColor: `${color}15`, color }}>
-      {label}: {value}
-    </span>
   );
 }

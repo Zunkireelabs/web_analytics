@@ -290,6 +290,8 @@
 @media print {
   aside,
   nav,
+  header,
+  .page-toolbar,
   button,
   .no-print,
   a[href^="http"]:after {
