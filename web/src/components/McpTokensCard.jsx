@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
-import { KeyRound, Copy, Check, Ban, Info, Lock, Plus, ChevronDown } from 'lucide-react';
-import Drawer from './Drawer.jsx';
-
-const labelCls = 'block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5';
-const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
+import { KeyRound, Copy, Check, Info, Plus, ChevronDown } from 'lucide-react';
+import Modal from './Modal.jsx';
+import RichSelect from './RichSelect.jsx';
+import Button from './Button.jsx';
+import Badge from './Badge.jsx';
+import Field from './Field.jsx';
+import SettingsCard from './settings/SettingsCard.jsx';
+import { fmtDay } from '../lib/format.js';
 
 // Kept in sync by hand with mcp-server/permissions.js's PERMISSION_LEVELS —
 // no shared frontend/backend constants module exists in this repo to
@@ -28,25 +31,29 @@ function connectSnippet(token) {
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
   return (
-    <button
-      type="button"
+    <Button
+      variant="light"
+      size="sm"
+      className="shrink-0"
       onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
-      className="shrink-0 text-[10px] font-black uppercase tracking-wider px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 transition flex items-center gap-1.5"
     >
-      {copied ? <Check size={12} /> : <Copy size={12} />}
+      {copied ? <Check size={13} /> : <Copy size={13} />}
       {copied ? 'Copied' : 'Copy'}
-    </button>
+    </Button>
   );
 }
 
-export default function McpTokensCard() {
+// "21 Oct 2026" from an ISO timestamp.
+const fmtDate = (iso) => `${fmtDay(String(iso).slice(0, 10))} ${String(iso).slice(0, 4)}`;
+
+export default function McpTokensCard({ projectDomain }) {
   const [tokens, setTokens] = useState(null);
   const [error, setError] = useState(null);
   const [label, setLabel] = useState('');
   const [tier, setTier] = useState('read_only');
   const [creating, setCreating] = useState(false);
   const [justCreated, setJustCreated] = useState(null); // { token, label } — shown once
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
 
   // Automation/Admin require re-entering the account password first — a
@@ -61,8 +68,8 @@ export default function McpTokensCard() {
 
   useEffect(() => { load(); }, []);
 
-  const closeDrawer = () => {
-    setDrawerOpen(false);
+  const closeModal = () => {
+    setModalOpen(false);
     setJustCreated(null);
     setLabel('');
     setTier('read_only');
@@ -125,66 +132,60 @@ export default function McpTokensCard() {
     }
   };
 
-  return (
-    <div className="bg-white/70 border border-slate-200/50 backdrop-blur-md shadow-sm rounded-2xl p-6">
-      <div className="flex items-center justify-between gap-3 flex-wrap mb-1">
-        <h2 className="text-sm font-black text-slate-900 flex items-center gap-2">
-          <KeyRound size={15} className="text-[#6C63FF]" /> API Tokens
-        </h2>
-        <button type="button" onClick={() => setDrawerOpen(true)}
-          className="text-[10px] font-black uppercase tracking-wider px-3.5 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-650 transition flex items-center gap-1.5">
-          <Plus size={11} /><span>Create Token</span>
-        </button>
-      </div>
-      <p className="text-xs text-slate-450 font-semibold mb-4">
-        Connect Claude, ChatGPT, or any MCP-capable AI client to your analytics.
-      </p>
+  const ring = { boxShadow: '0 0 0 1px var(--input)' };
 
-      {error && !drawerOpen && (
-        <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mb-4">
+  return (
+    <SettingsCard icon={KeyRound} title="API tokens"
+      description="Connect Claude, ChatGPT, or any MCP-capable AI client to this project"
+      action={<Button variant="light" onClick={() => setModalOpen(true)}><Plus size={14} />Create token</Button>}>
+      {error && !modalOpen && (
+        <div className="mx-5 my-3 rounded-control bg-[#fdecec] text-[#b42318] text-[13px] px-3 py-2">
           {error}
         </div>
       )}
 
       {!tokens ? (
-        <p className="text-xs text-slate-400 font-semibold">Loading…</p>
+        <div>
+          {[0, 1].map((i) => (
+            <div key={i} className="px-5 py-3 border-b border-border last:border-0"><div className="h-5 bg-muted rounded-control animate-pulse" /></div>
+          ))}
+        </div>
       ) : tokens.length === 0 ? (
-        <p className="text-xs text-slate-400 font-semibold">No tokens yet.</p>
+        <div className="px-5 py-8 text-center text-[13px] text-faint">No tokens yet.</div>
       ) : (
-        <div className="space-y-1.5">
+        <div>
           {tokens.map((t) => {
             const tierInfo = TIERS.find((tier) => tier.value === t.permission_level);
             const isOpen = expandedId === t.id;
             return (
-              <div key={t.id} className="border border-slate-100 rounded-xl overflow-hidden hover:bg-slate-50/60 hover:shadow-sm transition">
-                <div className="w-full flex items-center justify-between gap-3 px-3.5 py-2.5">
+              <div key={t.id} className="border-b border-border last:border-0">
+                <div className="flex items-center gap-3 px-5 py-3">
                   <button type="button" onClick={() => setExpandedId(isOpen ? null : t.id)}
-                    className="min-w-0 flex items-center gap-2 flex-1 text-left">
-                    <ChevronDown size={12} className={`text-slate-400 shrink-0 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+                    aria-expanded={isOpen}
+                    className="flex items-start gap-2 flex-1 min-w-0 text-left">
+                    <ChevronDown size={12} className={`text-faint mt-1 shrink-0 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
                     <div className="min-w-0">
-                      <p className="text-xs font-bold text-slate-800 truncate flex items-center gap-2 flex-wrap">
-                        {t.label || 'Unnamed token'}
-                        <span className="font-mono font-medium text-slate-400">{t.token_prefix}••••••</span>
-                        <span className="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-500">
-                          {tierInfo?.label || t.permission_level}
-                        </span>
-                      </p>
-                      <p className="text-[10px] font-semibold text-slate-400 mt-0.5">
-                        {t.revoked_at ? 'Revoked' : t.last_used_at ? `Last used ${new Date(t.last_used_at).toLocaleDateString()}` : 'Never used'}
-                        {' · '}Created {new Date(t.created_at).toLocaleDateString()}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[13px] font-medium text-fg">{t.label || 'Unnamed token'}</span>
+                        <span className="font-mono text-[12px] text-faint">{t.token_prefix}••••••</span>
+                        <Badge tone="outline">{tierInfo?.label || t.permission_level}</Badge>
+                        {t.revoked_at && <Badge tone="red">Revoked</Badge>}
+                      </div>
+                      <p className="text-xs text-faint mt-0.5">
+                        {t.revoked_at ? 'Revoked' : t.last_used_at ? `Last used ${fmtDate(t.last_used_at)}` : 'Never used'}
+                        {' · '}Created {fmtDate(t.created_at)}
                       </p>
                     </div>
                   </button>
                   {!t.revoked_at && (
-                    <button type="button" onClick={() => revoke(t.id)}
-                      className="shrink-0 text-slate-400 hover:text-rose-600 transition p-1.5" title="Revoke token">
-                      <Ban size={14} />
-                    </button>
+                    <Button variant="ghost" size="sm" className="hover:text-[#b42318]" onClick={() => revoke(t.id)} title="Revoke token">
+                      Revoke
+                    </Button>
                   )}
                 </div>
                 {isOpen && (
-                  <div className="px-3.5 pb-3 pt-0.5 border-t border-slate-100 mt-0.5">
-                    <p className="text-[11px] font-semibold text-slate-500 leading-relaxed">{tierInfo?.hint}</p>
+                  <div className="px-5 pb-3 pl-10 -mt-1 text-[13px] text-text">
+                    {tierInfo?.hint}
                   </div>
                 )}
               </div>
@@ -193,100 +194,82 @@ export default function McpTokensCard() {
         </div>
       )}
 
-      <Drawer isOpen={drawerOpen} onClose={closeDrawer} title="Create API Token" subtitle="Issue a scoped token for an AI client." icon={KeyRound} maxWidth="max-w-lg">
-        <div className="flex items-start gap-2 bg-indigo-50/60 border border-indigo-100 rounded-xl px-3.5 py-3 mb-5 text-[11px] font-semibold text-indigo-900 leading-relaxed">
-          <Info size={14} className="shrink-0 mt-0.5" />
-          <span>
-            Even a Read Only token sends your analytics data to whichever AI client
-            or provider you connect it to — that's inherent to how MCP works, not
-            something this app can prevent. Only issue tokens to AI tools you trust
-            with this data.
-          </span>
-        </div>
-
+      <Modal isOpen={modalOpen} onClose={closeModal} icon={KeyRound} title="Create API token"
+        subtitle={<>Issue a scoped token for an AI client on <span className="text-fg font-medium">{projectDomain || 'this project'}</span></>}
+        maxWidth="max-w-[520px]"
+        footer={justCreated ? (
+          <Button variant="primary" onClick={closeModal}>Done</Button>
+        ) : !confirmingPassword ? (
+          <>
+            <Button variant="light" onClick={closeModal}>Cancel</Button>
+            <Button type="submit" form="token-form" variant="primary" disabled={creating}>
+              {creating ? 'Creating…' : 'Create token'}
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button variant="light" onClick={() => { setConfirmingPassword(false); setPassword(''); setError(null); }}>Cancel</Button>
+            <Button type="submit" form="confirm-form" variant="primary" disabled={verifying || creating}>
+              {verifying || creating ? 'Confirming…' : 'Confirm & create'}
+            </Button>
+          </>
+        )}>
         {error && (
-          <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mb-4">
+          <div className="rounded-control bg-[#fdecec] text-[#b42318] text-[13px] px-3 py-2">
             {error}
           </div>
         )}
 
         {justCreated ? (
-          <div className="bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3.5 space-y-2.5">
-            <p className="text-[10px] font-black uppercase tracking-widest text-emerald-700">
+          <div className="rounded-card px-4 py-4 space-y-3" style={{ background: 'var(--green-tint)', boxShadow: '0 0 0 1px #c6ebd5' }}>
+            <p className="text-sm font-medium text-green">
               Token created — shown once, copy it now
             </p>
             <div className="flex items-center gap-2">
-              <code className="flex-1 text-xs font-mono text-slate-800 bg-white border border-emerald-200 rounded-lg px-3 py-2 overflow-x-auto whitespace-nowrap">
+              <code className="flex-1 font-mono text-[12px] text-fg bg-white rounded-control px-3 py-2 overflow-x-auto whitespace-nowrap" style={ring}>
                 {justCreated.token}
               </code>
               <CopyButton text={justCreated.token} />
             </div>
-            <p className="text-[10px] font-bold text-emerald-800 uppercase tracking-wide pt-1">Connect with Claude Code</p>
+            <p className="text-[13px] font-medium text-fg pt-1">Connect with Claude Code</p>
             <div className="flex items-start gap-2">
-              <pre className="flex-1 text-[11px] font-mono text-slate-700 bg-white border border-emerald-200 rounded-lg px-3 py-2 overflow-x-auto whitespace-pre">
+              <pre className="flex-1 font-mono text-[12px] text-fg bg-white rounded-control px-3 py-2 overflow-x-auto whitespace-pre" style={ring}>
 {connectSnippet(justCreated.token)}
               </pre>
               <CopyButton text={connectSnippet(justCreated.token)} />
             </div>
-            <button type="button" onClick={closeDrawer}
-              className="w-full text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-white border border-emerald-200 text-emerald-700 hover:bg-emerald-50 transition mt-1">
-              Done
-            </button>
           </div>
         ) : !confirmingPassword ? (
-          <form onSubmit={submit} className="space-y-4">
-            <label className="block">
-              <span className={labelCls}>Label (optional)</span>
-              <input className={inputCls} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Claude Desktop" maxLength={100} />
-            </label>
+          <form id="token-form" onSubmit={submit} className="space-y-4">
+            <Field label="Label (optional)" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Claude Desktop" maxLength={100} />
 
             <div>
-              <span className={labelCls}>Permission level</span>
-              <div className="space-y-1.5">
-                {TIERS.map((t) => (
-                  <label key={t.value} className={`flex items-start gap-2.5 rounded-xl border px-3 py-2.5 cursor-pointer transition ${tier === t.value ? 'border-[#6C63FF] bg-[#6C63FF]/5' : 'border-slate-200/80 hover:border-slate-300'}`}>
-                    <input type="radio" name="tier" value={t.value} checked={tier === t.value} onChange={() => setTier(t.value)} className="mt-0.5 accent-[#6C63FF]" />
-                    <span>
-                      <span className="block text-xs font-bold text-slate-800">{t.label}</span>
-                      <span className="block text-[10.5px] font-medium text-slate-500 leading-snug mt-0.5">{t.hint}</span>
-                    </span>
-                  </label>
-                ))}
-              </div>
+              <span className="block text-xs font-medium text-fg mb-1.5">Permission level</span>
+              <RichSelect block align="left" label="Permission level" value={tier} onChange={setTier}
+                options={TIERS.map((t) => ({ value: t.value, label: t.label, description: t.hint }))} />
+              <p className="text-xs text-faint mt-1.5">{TIERS.find((t) => t.value === tier)?.hint}</p>
             </div>
 
-            <button type="submit" disabled={creating}
-              className="w-full text-[10px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60 shadow-md shadow-indigo-500/10 hover:shadow-indigo-500/20"
-              style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
-              {creating ? 'Creating…' : 'Create Token'}
-            </button>
-          </form>
-        ) : (
-          <form onSubmit={confirmPasswordAndCreate} className="space-y-3 bg-amber-50 border border-amber-100 rounded-xl p-4">
-            <p className="text-xs font-bold text-amber-900">
-              Confirm your password to create a {TIERS.find((t) => t.value === tier)?.label} token
-            </p>
-            <label className="block">
-              <span className={labelCls}>Current password</span>
-              <div className="relative">
-                <Lock size={13} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-                <input type="password" className={`${inputCls} pl-9`} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Current password" required autoFocus />
-              </div>
-            </label>
-            <div className="flex gap-2">
-              <button type="submit" disabled={verifying || creating}
-                className="text-[10px] font-black uppercase tracking-wider px-5 py-2.5 rounded-xl text-white transition disabled:opacity-60"
-                style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
-                {verifying || creating ? 'Confirming…' : 'Confirm & Create'}
-              </button>
-              <button type="button" onClick={() => { setConfirmingPassword(false); setPassword(''); setError(null); }}
-                className="text-[10px] font-black uppercase tracking-wider px-5 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 transition">
-                Cancel
-              </button>
+            <div className="flex items-start gap-2.5 rounded-control bg-muted px-3.5 py-3 text-[13px] leading-5 text-text">
+              <Info size={15} className="shrink-0 text-faint mt-0.5" />
+              <span>
+                Even a Read Only token sends your analytics data to whichever AI client
+                or provider you connect it to — that's inherent to how MCP works, not
+                something this app can prevent. Only issue tokens to AI tools you trust
+                with this data.
+              </span>
             </div>
           </form>
+        ) : (
+          <form id="confirm-form" onSubmit={confirmPasswordAndCreate} className="rounded-card px-4 py-4 space-y-3" style={{ background: '#fdf3e1', boxShadow: '0 0 0 1px #f3ddb0' }}>
+            <p className="text-sm font-medium text-[#8a5300]">
+              Confirm your password to create a {TIERS.find((t) => t.value === tier)?.label} token
+            </p>
+            <Field label="Current password" type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+              placeholder="Current password" required autoFocus autoComplete="current-password" />
+          </form>
         )}
-      </Drawer>
-    </div>
+      </Modal>
+    </SettingsCard>
   );
 }

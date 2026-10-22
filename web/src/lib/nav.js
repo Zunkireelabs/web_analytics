@@ -72,12 +72,47 @@ export function currentSiteOf(sites, siteId) {
   return sites?.find((s) => s.id === siteId) || sites?.[0] || null;
 }
 
-export function breadcrumbFor(pathname, ctx = {}) {
-  if (pathname === SETTINGS_ITEM.to) return ['Settings'];
+// In-app /settings holds two levels (the person's Account is its own page at
+// /account): Workspace and Project, each with tabs. The open level and tab live
+// in the query string (?scope=workspace|project&tab=<key>).
+export const SETTINGS_TABS = {
+  workspace: [{ key: 'general', label: 'General' }, { key: 'projects', label: 'Projects' }, { key: 'team', label: 'Team' }],
+  project: [{ key: 'details', label: 'Details' }, { key: 'tokens', label: 'API tokens' }],
+};
+
+// → { scope, tab }; a missing/invalid scope falls back to workspace and a
+// missing/invalid tab to the scope's first tab.
+export function settingsLocation(search = '') {
+  const params = new URLSearchParams(search);
+  const scope = params.get('scope') === 'project' ? 'project' : 'workspace';
+  const tabs = SETTINGS_TABS[scope];
+  const tab = tabs.some((t) => t.key === params.get('tab')) ? params.get('tab') : tabs[0].key;
+  return { scope, tab };
+}
+
+export function breadcrumbFor(pathname, ctx = {}, search = '') {
+  if (pathname === SETTINGS_ITEM.to) {
+    const { scope, tab } = settingsLocation(search);
+    return ['Settings', scope === 'project' ? 'Project' : 'Workspace', SETTINGS_TABS[scope].find((t) => t.key === tab).label];
+  }
   if (/^\/clients\/[^/]+\/design-review\/?$/.test(pathname)) return ['Admin', 'Clients', 'Design review'];
   for (const g of visibleGroups(ctx)) {
     const item = g.items.find((i) => i.to === pathname);
     if (item) return [g.label, item.label];
   }
   return [];
+}
+
+// Domain line under the site name: the explicit domain, else the GSC
+// property with its sc-domain:/https:// prefix and trailing slash removed.
+export function siteDomain(site) {
+  if (!site) return '';
+  if (site.website_domain) return site.website_domain;
+  return (site.gsc_property || '').replace(/^sc-domain:/, '').replace(/^https?:\/\//, '').replace(/\/$/, '');
+}
+
+export function siteInitials(name) {
+  const parts = (name || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return (parts[0] || '?').slice(0, 2).toUpperCase();
 }

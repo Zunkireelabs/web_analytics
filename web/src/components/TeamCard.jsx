@@ -1,16 +1,26 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, timeAgo } from '../api.js';
-import { Users, UserPlus, Mail, Ban, MoreHorizontal } from 'lucide-react';
+import { Users, Ban, MoreHorizontal, UserPlus, Info } from 'lucide-react';
 import Avatar from './Avatar.jsx';
-
-const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
-const labelCls = 'block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5';
+import Badge from './Badge.jsx';
+import Button from './Button.jsx';
+import Field from './Field.jsx';
+import Modal from './Modal.jsx';
+import RichSelect from './RichSelect.jsx';
+import { ROLE_LABELS } from './RoleBadge.jsx';
+import SettingsCard from './settings/SettingsCard.jsx';
+import { STATUS } from '../lib/palette.js';
+import { siteInitials } from '../lib/nav.js';
 
 // Mirrors login.js's TENANT_ROLE_RANK — a Tenant Admin can only ever grant a
 // tenant-tier role to their own tenant's users (PLATFORM-ADMIN-DESIGN.md §E);
 // platform tiers are only reachable from admin/Users.jsx.
 const TENANT_ROLES = ['tenant_admin', 'tenant_member'];
-const ROLE_LABELS = { tenant_admin: 'Tenant Admin', tenant_member: 'Tenant Member' };
+
+const ROLE_OPTIONS = [
+  { value: 'tenant_admin', label: 'Admin', description: 'Can invite teammates, change roles and remove members.' },
+  { value: 'tenant_member', label: 'Member', description: "Can use the dashboard; can't manage the team." },
+];
 
 function RowMenu({ user, roleSaving, disabling, onChangeRole, onDisable }) {
   const [open, setOpen] = useState(false);
@@ -18,30 +28,34 @@ function RowMenu({ user, roleSaving, disabling, onChangeRole, onDisable }) {
 
   useEffect(() => {
     if (!open) return;
-    const onDocClick = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const onDocClick = (e) => {
+      // A RichSelect menu is portalled outside this popover — clicking it must not close the popover.
+      if (e.target.closest?.('[role="listbox"]')) return;
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
     document.addEventListener('mousedown', onDocClick);
-    return () => document.removeEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDocClick); document.removeEventListener('keydown', onKey); };
   }, [open]);
 
   return (
     <div className="relative shrink-0" ref={ref}>
-      <button type="button" onClick={() => setOpen((o) => !o)}
-        className="text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition p-1.5 rounded-lg" title="More actions">
-        <MoreHorizontal size={15} />
-      </button>
+      <Button variant="ghost" size="sm" icon title="More actions" aria-label="More actions" onClick={() => setOpen((o) => !o)}>
+        <MoreHorizontal size={14} />
+      </Button>
       {open && (
-        <div className="absolute right-0 top-full mt-1 w-52 bg-white border border-slate-200 rounded-xl shadow-lg p-2 z-20 space-y-2">
-          <label className="block px-1">
-            <span className={labelCls}>Role</span>
-            <select value={user.role} disabled={!!roleSaving[user.id]} onChange={(e) => onChangeRole(user, e.target.value)}
-              className="w-full text-[11px] font-bold text-slate-700 border border-slate-200/80 rounded-lg px-2 py-1.5 bg-white disabled:opacity-60">
-              {TENANT_ROLES.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
-            </select>
-          </label>
+        <div className="absolute right-0 top-full mt-1 w-56 bg-white rounded-card p-2 z-20 space-y-1"
+          style={{ boxShadow: '0 0 0 1px rgba(0,0,0,.06), 0 20px 40px -12px rgba(0,0,0,.18)' }}>
+          <div className="px-0.5">
+            <span className="block text-xs font-medium text-fg mb-1">Role</span>
+            <RichSelect block align="left" label="Role" value={user.role} disabled={!!roleSaving[user.id]}
+              onChange={(r) => onChangeRole(user, r)} options={ROLE_OPTIONS} />
+          </div>
           {user.status !== 'disabled' && (
             <button type="button" onClick={() => { setOpen(false); onDisable(user); }} disabled={!!disabling[user.id]}
-              className="w-full flex items-center gap-2 text-[11px] font-bold text-rose-600 hover:bg-rose-50 rounded-lg px-2 py-1.5 transition disabled:opacity-60">
-              <Ban size={12} /> Remove from team
+              className="w-full flex items-center gap-2 h-8 px-2 rounded-control text-[13px] text-[#b42318] hover:bg-[#fdecec] disabled:opacity-60">
+              <Ban size={13} /> Remove from team
             </button>
           )}
         </div>
@@ -54,12 +68,12 @@ function RowMenu({ user, roleSaving, disabling, onChangeRole, onDisable }) {
 // invite/role-change/disable controls only render for a Tenant Admin — the
 // same boundary the server enforces independently via requireTenantRole
 // (server/routes/users.js), this is UX, not the real access-control layer.
-export default function TeamCard({ role }) {
+export default function TeamCard({ role, workspaceName, projects, currentProjectId }) {
   const isAdmin = role === 'tenant_admin';
   const [users, setUsers] = useState(null); // null = loading
   const [error, setError] = useState(null);
 
-  const [showInvite, setShowInvite] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('tenant_member');
   const [inviteState, setInviteState] = useState('idle');
@@ -80,13 +94,21 @@ export default function TeamCard({ role }) {
       await api.team.invite({ email: inviteEmail.trim(), role: inviteRole });
       setInviteEmail('');
       setInviteRole('tenant_member');
-      setShowInvite(false);
       setInviteState('idle');
+      setInviteOpen(false);
       await load();
     } catch (err) {
       setInviteError(err.message || 'Could not send invitation.');
       setInviteState('error');
     }
+  };
+
+  const closeInvite = () => {
+    setInviteOpen(false);
+    setInviteEmail('');
+    setInviteRole('tenant_member');
+    setInviteError(null);
+    setInviteState('idle');
   };
 
   const changeRole = async (user, newRole) => {
@@ -116,74 +138,38 @@ export default function TeamCard({ role }) {
   };
 
   return (
-    <div className="bg-white/70 border border-slate-200/50 backdrop-blur-md shadow-sm rounded-2xl p-6">
-      <div className="flex items-center justify-between gap-3 flex-wrap mb-1">
-        <h2 className="text-sm font-black text-slate-900 flex items-center gap-2">
-          <Users size={15} className="text-[#6C63FF]" /> Team
-        </h2>
-        {isAdmin && (
-          <button type="button" onClick={() => setShowInvite((s) => !s)}
-            className="text-[10px] font-black uppercase tracking-wider px-3.5 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-650 transition flex items-center gap-1.5">
-            {showInvite ? 'Cancel' : (<><UserPlus size={11} /><span>Invite</span></>)}
-          </button>
-        )}
-      </div>
-      <p className="text-xs text-slate-450 font-semibold mb-4">
-        {isAdmin ? 'Invite teammates and manage their access.' : 'Everyone with access to this account.'}
-      </p>
-
+    <SettingsCard icon={Users} title="Members"
+      description={isAdmin ? `Invite teammates to ${workspaceName || 'this workspace'} and manage their access` : 'Everyone with access to this workspace'}
+      action={isAdmin && (
+        <Button variant="light" onClick={() => setInviteOpen(true)}><UserPlus size={14} />Invite</Button>
+      )}>
       {error && (
-        <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mb-4">{error}</div>
-      )}
-
-      {isAdmin && showInvite && (
-        <form onSubmit={submitInvite} className="mb-5 space-y-3 bg-slate-50/60 border border-slate-100 rounded-xl p-4">
-          <label className="block">
-            <span className={labelCls}>Email</span>
-            <div className="relative">
-              <Mail size={13} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input type="email" className={`${inputCls} pl-9`} value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="name@example.com" required />
-            </div>
-          </label>
-          <label className="block">
-            <span className={labelCls}>Role</span>
-            <select className={inputCls} value={inviteRole} onChange={(e) => setInviteRole(e.target.value)}>
-              {TENANT_ROLES.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
-            </select>
-          </label>
-          {inviteState === 'error' && inviteError && (
-            <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{inviteError}</div>
-          )}
-          <button type="submit" disabled={inviteState === 'sending'}
-            className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition disabled:opacity-60"
-            style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
-            {inviteState === 'sending' ? 'Sending…' : 'Send Invitation'}
-          </button>
-        </form>
+        <div className="mx-5 my-3 rounded-control bg-[#fdecec] text-[#b42318] text-[13px] px-3 py-2">{error}</div>
       )}
 
       {!users ? (
-        <p className="text-xs text-slate-400 font-semibold">Loading…</p>
+        <div>
+          {[0, 1].map((i) => (
+            <div key={i} className="px-5 py-3 border-b border-border last:border-0"><div className="h-5 bg-muted rounded-control animate-pulse" /></div>
+          ))}
+        </div>
       ) : users.length === 0 ? (
-        <p className="text-xs text-slate-400 font-semibold">No teammates yet.</p>
+        <div className="px-5 py-8 text-center text-[13px] text-faint">No teammates yet.</div>
       ) : (
-        <div className="space-y-1.5">
+        <div>
           {users.map((u) => (
-            <div key={u.id} className="flex items-center gap-3 border border-transparent hover:border-slate-100 hover:bg-slate-50/60 hover:shadow-sm rounded-xl px-2.5 py-2 transition">
-              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${u.status === 'disabled' ? 'bg-rose-400' : 'bg-emerald-400'}`} title={u.status === 'disabled' ? 'Disabled' : 'Active'} />
+            <div key={u.id} className="flex items-center gap-3 px-5 py-3 border-b border-border last:border-0">
+              <span className="w-1.5 h-1.5 rounded-full shrink-0" title={u.status === 'disabled' ? 'Disabled' : 'Active'}
+                style={{ background: u.status === 'disabled' ? STATUS.critical.color : STATUS.good.color }} />
               <Avatar email={u.email} size="sm" />
               <div className="min-w-0 flex-1">
-                <p className="text-xs font-bold text-slate-800 truncate">{u.email}</p>
-                <p className="text-[10px] font-semibold text-slate-400 mt-0.5">
+                <p className="text-[13px] font-medium text-fg truncate">{u.email}</p>
+                <p className="text-xs text-faint">
                   {u.last_login_at ? `Last active ${timeAgo(u.last_login_at)}` : 'Never logged in'}
                 </p>
               </div>
-              {u.status === 'disabled' && (
-                <span className="shrink-0 text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-rose-50 text-rose-600">Disabled</span>
-              )}
-              <span className="shrink-0 text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-500">
-                {ROLE_LABELS[u.role] || u.role}
-              </span>
+              {u.status === 'disabled' && <Badge tone="red" className="shrink-0">Disabled</Badge>}
+              <Badge tone="grey" className="shrink-0">{ROLE_LABELS[u.role] || u.role}</Badge>
               {isAdmin && (
                 <RowMenu user={u} roleSaving={roleSaving} disabling={disabling} onChangeRole={changeRole} onDisable={disable} />
               )}
@@ -191,6 +177,62 @@ export default function TeamCard({ role }) {
           ))}
         </div>
       )}
-    </div>
+      {isAdmin && (
+        <Modal isOpen={inviteOpen} onClose={closeInvite} icon={Users} title="Invite team member"
+          subtitle={<>Invite to <span className="text-fg font-medium">{workspaceName}</span></>} maxWidth="max-w-[520px]"
+          footer={(
+            <>
+              <Button variant="light" onClick={closeInvite}>Cancel</Button>
+              <Button type="submit" form="invite-form" variant="primary" disabled={inviteState === 'sending'}>
+                {inviteState === 'sending' ? 'Sending…' : 'Send invitation'}
+              </Button>
+            </>
+          )}>
+          <form id="invite-form" onSubmit={submitInvite} className="space-y-4">
+            <Field label="Email" type="email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="colleague@company.com" required />
+
+            <div>
+              <div className="text-[13px] font-medium text-fg">Access per project</div>
+              <div className="text-xs text-faint">What they can do in each project of this workspace</div>
+              <div className="mt-1">
+                {(projects?.length ? projects : [{ id: currentProjectId ?? 'current', name: workspaceName }]).map((p) => {
+                  const isCurrent = projects?.length ? p.id === currentProjectId : true;
+                  return (
+                    <div key={p.id} className="flex items-center gap-2.5 py-2.5 border-b border-border last:border-0">
+                      {p.logo ? (
+                        <img src={p.logo} alt="" className="w-6 h-6 rounded-[7px] object-contain shrink-0" />
+                      ) : (
+                        <span className="w-6 h-6 rounded-[7px] bg-primary text-white text-[10px] font-medium grid place-items-center shrink-0">{siteInitials(p.name)}</span>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[13px] font-medium text-fg truncate">{p.name}</div>
+                        {p.domain && <div className="text-xs text-faint truncate">{p.domain}</div>}
+                      </div>
+                      {isCurrent ? (
+                        <RichSelect label={`Access to ${p.name}`} value={inviteRole} onChange={setInviteRole} options={ROLE_OPTIONS} />
+                      ) : (
+                        <span title="Invite from that project's settings">
+                          <RichSelect label={`Access to ${p.name}`} value="none" onChange={() => {}} disabled
+                            options={[{ value: 'none', label: 'No access' }]} />
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {inviteState === 'error' && inviteError && (
+              <div className="rounded-control bg-[#fdecec] text-[#b42318] text-[13px] px-3 py-2">{inviteError}</div>
+            )}
+
+            <div className="flex items-start gap-2.5 rounded-control bg-muted px-3 py-2.5 text-[13px] leading-5 text-text">
+              <Info size={15} className="text-faint shrink-0 mt-0.5" />
+              <span>We'll email them a link to join. They get access once they accept.</span>
+            </div>
+          </form>
+        </Modal>
+      )}
+    </SettingsCard>
   );
 }

@@ -1,35 +1,23 @@
 import { User } from 'lucide-react';
-import Avatar from './Avatar.jsx';
 import RoleBadge from './RoleBadge.jsx';
+import SettingsCard, { SettingsRows } from './settings/SettingsCard.jsx';
 
 // Read-only profile summary. There's no separate profile-edit capability
 // anywhere in this app (no name field, no editable-profile endpoint) — this
-// card only ever reflects what /me and /sites already return.
-export default function AccountCard({ email, role, workspace, loading }) {
+// card only ever reflects what /me already returns. `workspace` is still
+// accepted (Settings.jsx passes it) but no longer shown: the workspace lives
+// in the in-app Settings now.
+export default function AccountCard({ email, role, loading }) {
   return (
-    <div className="bg-white/70 border border-slate-200/50 backdrop-blur-md shadow-sm rounded-2xl p-6">
-      <h2 className="text-sm font-black text-slate-900 mb-4 flex items-center gap-2">
-        <User size={15} className="text-[#6C63FF]" /> Account
-      </h2>
-
+    <SettingsCard icon={User} title="Profile" description="Who you are signed in as">
       {loading ? (
-        <p className="text-xs text-slate-400 font-semibold">Loading…</p>
-      ) : (
-        <div className="flex items-center gap-3.5">
-          <Avatar email={email} size="lg" />
-          <div className="min-w-0 space-y-1.5">
-            <p className="text-sm font-bold text-slate-800 truncate">{email || '—'}</p>
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <RoleBadge role={role} tone="brand" />
-              {workspace && (
-                <span className="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-500">
-                  {workspace}
-                </span>
-              )}
-            </div>
-          </div>
+        <div className="px-5 py-4 space-y-2">
+          <div className="h-4 bg-muted rounded-control animate-pulse w-1/2" />
+          <div className="h-4 bg-muted rounded-control animate-pulse w-1/3" />
         </div>
+      ) : (
+        <SettingsRows rows={[['Email', email || '—'], ['Role', <RoleBadge key="role" role={role} tone="brand" />]]} />
       )}
-    </div>
+    </SettingsCard>
   );
 }

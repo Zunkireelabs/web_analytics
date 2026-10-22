@@ -25,6 +25,7 @@ const DesignReview = lazy(() => import('./pages/DesignReview.jsx'));
 const Analyst = lazy(() => import('./pages/Analyst.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
 const OAuthAuthorize = lazy(() => import('./pages/OAuthAuthorize.jsx'));
+const Account = lazy(() => import('./pages/Account.jsx'));
 const UsersAndTokens = lazy(() => import('./pages/admin/UsersAndTokens.jsx'));
 const Monitoring = lazy(() => import('./pages/admin/Monitoring.jsx'));
 
@@ -98,6 +99,17 @@ export default function App() {
   if (authed === null) return <div className="p-8 text-gray-400">Loading…</div>;
   if (!authed) return <Login onAuthed={checkSession} />;
 
+  // Standalone account page (Humblytics-style): no sidebar, top bar, toolbar or
+  // agent panel — the person's own settings. The in-app /settings holds the
+  // workspace and project levels.
+  if (location.pathname === '/account') {
+    return (
+      <Suspense fallback={<div className="p-8 text-faint">Loading…</div>}>
+        <Account email={email} role={role} sites={sites} siteId={siteId} onLogout={logout} />
+      </Suspense>
+    );
+  }
+
   // Platform Administration nav/routes (PLATFORM-ADMIN-DESIGN.md §H, §K
   // Phase 7) — gated on the role dimension directly, not isInternal, since
   // requirePlatformRole('platform_admin') on the server is what actually
@@ -154,7 +166,7 @@ export default function App() {
                   when the session's own site has property_type 'product'. */}
               <Route path="/demand" element={<Demand siteId={siteId} />} />
               {/* Every account, not internal-only — same session's own password either way. */}
-              <Route path="/settings" element={<Settings />} />
+              <Route path="/settings" element={<Settings sites={sites} siteId={siteId} role={role} onSite={setSiteId} />} />
               {/* Staff-only — operates across every client's site, not just this
                   session's own. Gated on isPlatformAdmin, NOT isInternal:
                   both routes' entire API surface is requirePlatformRole

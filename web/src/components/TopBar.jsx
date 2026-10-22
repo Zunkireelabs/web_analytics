@@ -6,8 +6,8 @@ import NotificationBell from './NotificationBell.jsx';
 import { breadcrumbFor } from '../lib/nav.js';
 
 export default function TopBar({ isInternal, isPlatformAdmin, isProduct, agentOpen, onAgent, agentAvailable, onOpenMenu }) {
-  const { pathname } = useLocation();
-  const crumbs = breadcrumbFor(pathname, { isPlatformAdmin, isProduct });
+  const { pathname, search } = useLocation();
+  const crumbs = breadcrumbFor(pathname, { isPlatformAdmin, isProduct }, search);
 
   return (
     <header className="sticky top-0 z-30 h-12 flex items-center gap-3 px-4 md:px-6 bg-canvas border-b border-border-canvas">

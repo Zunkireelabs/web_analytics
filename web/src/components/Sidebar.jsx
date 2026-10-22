@@ -1,12 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ChevronDown, ChevronsUpDown, LogOut } from 'lucide-react';
+import { ChevronDown, ChevronsUpDown, LogOut, Settings as SettingsIcon } from 'lucide-react';
 import Logo from './Logo.jsx';
 import Avatar from './Avatar.jsx';
 import Button from './Button.jsx';
 import SegmentedTabs from './SegmentedTabs.jsx';
 import { ROLE_LABELS } from './RoleBadge.jsx';
-import { visibleGroups, SETTINGS_ITEM, currentSiteOf } from '../lib/nav.js';
+import { visibleGroups, SETTINGS_ITEM, currentSiteOf, siteDomain, siteInitials } from '../lib/nav.js';
 
 const COLLAPSE_STORAGE_KEY = 'sidebar-collapsed-sections';
 
@@ -24,18 +24,13 @@ function loadCollapsedSections() {
   return DEFAULT_COLLAPSED;
 }
 
-// Domain line under the site name: the explicit domain, else the GSC
-// property with its sc-domain:/https:// prefix and trailing slash removed.
-function siteDomain(site) {
-  if (!site) return '';
-  if (site.website_domain) return site.website_domain;
-  return (site.gsc_property || '').replace(/^sc-domain:/, '').replace(/^https?:\/\//, '').replace(/\/$/, '');
-}
-
-function siteInitials(name) {
-  const parts = (name || '').trim().split(/\s+/).filter(Boolean);
+// Initials from an email, same rule as Avatar.jsx (this app has no display name).
+function emailInitials(email) {
+  if (!email) return '?';
+  const local = email.split('@')[0] || '';
+  const parts = local.split(/[.\-_+]/).filter(Boolean);
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return (parts[0] || '?').slice(0, 2).toUpperCase();
+  return local.slice(0, 2).toUpperCase() || '?';
 }
 
 export default function Sidebar({
@@ -45,6 +40,8 @@ export default function Sidebar({
   const loc = useLocation();
   const isActive = (to) => loc.pathname === to;
   const [collapsed, setCollapsed] = useState(loadCollapsedSections);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
 
   const currentSite = currentSiteOf(sites, siteId);
   const groups = visibleGroups({ isPlatformAdmin, isProduct: currentSite?.property_type === 'product' });
@@ -57,7 +54,17 @@ export default function Sidebar({
     });
   };
 
-  useEffect(() => { onCloseMobile?.(); }, [loc.pathname]);
+  useEffect(() => { onCloseMobile?.(); setMenuOpen(false); }, [loc.pathname]);
+
+  // User menu: closes on outside mousedown and Escape.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e) => { if (!menuRef.current?.contains(e.target)) setMenuOpen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setMenuOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [menuOpen]);
 
   // Auto-expand the group containing the current route so a deep link never
   // lands on a page whose own sidebar entry is hidden behind a collapsed group.
@@ -135,7 +142,7 @@ export default function Sidebar({
             {currentSite?.logo_data_url ? (
               <img src={currentSite.logo_data_url} alt="" className="w-6 h-6 rounded-[7px] object-contain shrink-0" />
             ) : (
-              <span className="w-6 h-6 rounded-[7px] bg-primary text-white text-[10px] font-semibold grid place-items-center shrink-0">
+              <span className="w-6 h-6 rounded-[7px] bg-primary text-white text-[10px] font-medium grid place-items-center shrink-0">
                 {siteInitials(currentSite?.name)}
               </span>
             )}
@@ -174,15 +181,42 @@ export default function Sidebar({
 
           <div className="border-t border-border-canvas px-3 pt-2 pb-3">
             <SidebarLink {...SETTINGS_ITEM} active={isActive(SETTINGS_ITEM.to)} />
-            <div className="flex items-center gap-2.5 px-2.5 py-1.5">
-              <Avatar email={email} size="sm" />
-              <div className="min-w-0 flex-1">
-                <div className="text-sm font-medium text-fg truncate">{email || 'Signed in'}</div>
-                <div className="text-xs text-faint truncate">{ROLE_LABELS[role] || role || ''}</div>
-              </div>
-              <Button variant="ghost" size="sm" icon aria-label="Log out" onClick={onLogout}>
-                <LogOut size={14} />
-              </Button>
+            <div className="relative" ref={menuRef}>
+              {menuOpen && (
+                <div role="menu" className="absolute left-0 right-0 bottom-full mb-1.5 z-50 bg-white rounded-card overflow-hidden text-sm"
+                  style={{ boxShadow: '0 0 0 1px rgba(0,0,0,.06), 0 20px 40px -12px rgba(0,0,0,.18)' }}>
+                  <div className="flex items-center gap-2.5 px-3 py-3">
+                    <span className="w-8 h-8 rounded-control bg-primary text-white text-xs font-medium grid place-items-center shrink-0">
+                      {emailInitials(email)}
+                    </span>
+                    <div className="min-w-0">
+                      <div className="font-medium truncate">{email || 'Signed in'}</div>
+                      <div className="text-xs text-faint truncate">{ROLE_LABELS[role] || role || ''}</div>
+                    </div>
+                  </div>
+                  <div className="border-t border-border p-1">
+                    <Link to="/account" role="menuitem" onClick={() => { setMenuOpen(false); onCloseMobile?.(); }}
+                      className="flex items-center gap-2.5 h-[34px] px-2.5 rounded-control hover:bg-muted">
+                      <SettingsIcon size={15} className="text-[#7a7a7a]" /> Account settings
+                    </Link>
+                  </div>
+                  <div className="border-t border-border p-1">
+                    <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); onLogout(); }}
+                      className="w-full flex items-center gap-2.5 h-[34px] px-2.5 rounded-control hover:bg-muted text-[#b42318] text-left">
+                      <LogOut size={15} /> Sign out
+                    </button>
+                  </div>
+                </div>
+              )}
+              <button type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((o) => !o)}
+                className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-control hover:bg-black/[.03] text-left">
+                <Avatar email={email} size="sm" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-fg truncate">{email || 'Signed in'}</div>
+                  <div className="text-xs text-faint truncate">{ROLE_LABELS[role] || role || ''}</div>
+                </div>
+                <ChevronsUpDown size={14} className="text-faint shrink-0" aria-hidden />
+              </button>
             </div>
           </div>
         </div>
