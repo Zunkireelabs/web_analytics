@@ -27,19 +27,19 @@ export default function KpiStrip({ items = [], loading = false, bare = false, co
   const grid = (
       <div className={`grid grid-cols-2 ${LG_GRID[cols] || LG_GRID[4]}`}>
         {cells.map((it, i) => (
-          <div key={loading ? i : it.label} className={`px-5 py-4 min-w-0 ${cellBorders(i, cols)}`}>
+          <div key={loading ? i : it.label} className={`px-4 py-3.5 min-w-0 ${cellBorders(i, cols)}`}>
             {loading ? (
               <>
                 <div className="h-3 w-20 bg-muted rounded-control animate-pulse" />
-                <div className="h-6 w-16 bg-muted rounded-control animate-pulse mt-2.5" />
+                <div className="h-5 w-16 bg-muted rounded-control animate-pulse mt-2.5" />
               </>
             ) : (
               <>
                 <div className="text-[13px] text-text truncate">{it.label}</div>
-                <div className="mt-1.5 flex items-baseline gap-2">
-                  <span className="text-[22px] font-medium tracking-[-0.02em] text-fg tnum truncate">{it.value}</span>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="text-[20px] font-medium tracking-[-0.02em] text-fg tnum truncate">{it.value}</span>
                   {it.delta && (
-                    <span className={`text-[13px] font-medium shrink-0${DELTA_COLOR[it.delta.tone] ? '' : ' text-faint'}`}
+                    <span className={`text-xs font-medium shrink-0${DELTA_COLOR[it.delta.tone] ? '' : ' text-faint'}`}
                       style={DELTA_COLOR[it.delta.tone] ? { color: DELTA_COLOR[it.delta.tone] } : undefined}>
                       {it.delta.text}
                     </span>
@@ -47,7 +47,7 @@ export default function KpiStrip({ items = [], loading = false, bare = false, co
                 </div>
                 {it.sub && <div className="mt-0.5 text-xs leading-4 text-faint">{it.sub}</div>}
                 {it.spark && it.spark.length >= 2 && (
-                  <div className="mt-2 h-7"><Sparkline data={it.spark} stretch dot={false} /></div>
+                  <div className="mt-1.5 h-6"><Sparkline data={it.spark} stretch dot={false} /></div>
                 )}
               </>
             )}

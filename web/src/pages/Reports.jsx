@@ -100,7 +100,7 @@ export default function Reports({ siteId }) {
   ];
 
   return (
-    <div className="max-w-[1360px] mx-auto px-4 md:px-8 pt-8 pb-16 fade-up">
+    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12 fade-up">
       <PageToolbar>
         <div className="no-print max-w-full overflow-x-auto no-scrollbar">
           <SegmentedTabs options={PERIODS.map((p) => ({ value: p.key, label: p.label }))} value={period} onChange={setPeriod} />
@@ -130,7 +130,7 @@ export default function Reports({ siteId }) {
             <KpiStrip items={kpis} loading={loading} cols={5} />
           </div>
 
-          <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr] mt-10 items-start">
+          <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr] mt-8 items-start">
             <div className="min-w-0">
               <PerformanceTrendCard series={data?.series} loading={loading} />
             </div>
@@ -140,19 +140,19 @@ export default function Reports({ siteId }) {
           </div>
 
           {!loading && data?.movers && (data.movers.gainers.length > 0 || data.movers.droppers.length > 0) && (
-            <div className="mt-10">
+            <div className="mt-8">
               <MoversList gainers={data.movers.gainers} droppers={data.movers.droppers} comparisonLabel={MOVER_COMPARISON_LABEL[period]} />
             </div>
           )}
 
           {findings.length > 0 && (
-            <Section className="mt-10" title="Agent findings" subtitle={`${findings.length} agents reported`}>
+            <Section className="mt-8" title="Agent findings" subtitle={`${findings.length} agents reported`}>
               <AgentFindingsHub findings={findings} />
             </Section>
           )}
 
           {recommendations.length > 0 && (
-            <div id="recommendations-section" className="scroll-mt-6 mt-10">
+            <div id="recommendations-section" className="scroll-mt-6 mt-8">
               <Section title="Priority recommendations" subtitle="What to do next, by expected impact"
                 action={<Link to="/action-center" className="btn btn--light no-print">Open Action Center</Link>}>
                 <div className="card overflow-hidden">

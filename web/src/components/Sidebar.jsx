@@ -117,25 +117,25 @@ export default function Sidebar({
           since a translated element's hit-testing moves with its paint
           position, that's correctly only wherever the drawer currently is
           on screen. */}
-      <aside className="fixed md:sticky top-0 left-0 w-64 shrink-0 h-screen z-40 pointer-events-none">
+      <aside className="fixed md:sticky top-0 left-0 w-60 shrink-0 h-screen z-40 pointer-events-none">
         <div
           className={`h-full w-full flex flex-col bg-canvas border-r border-border-canvas pointer-events-auto
                       transition-transform duration-200 md:translate-x-0
                       ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}
         >
-          <div className="flex items-center justify-between gap-2 px-[18px] pt-[18px] pb-2.5">
-            <Logo wordmark />
+          <div className="flex items-center justify-between gap-2 px-4 pt-4 pb-2">
+            <Logo wordmark size={20} className="text-[17px]" />
             <Button variant="ghost" size="sm" icon aria-label="Close menu" className="md:hidden" onClick={onCloseMobile}>
               <span aria-hidden className="text-base leading-none">×</span>
             </Button>
           </div>
 
-          <div className="relative mx-3 mb-2.5 rounded-[10px] bg-white px-2.5 py-2 flex items-center gap-2.5"
+          <div className="relative mx-3 mb-2 rounded-[10px] bg-white px-2 py-1.5 flex items-center gap-2.5"
             style={{ boxShadow: 'var(--ring)' }}>
             {currentSite?.logo_data_url ? (
-              <img src={currentSite.logo_data_url} alt="" className="w-7 h-7 rounded-[7px] object-contain shrink-0" />
+              <img src={currentSite.logo_data_url} alt="" className="w-6 h-6 rounded-[7px] object-contain shrink-0" />
             ) : (
-              <span className="w-7 h-7 rounded-[7px] bg-primary text-white text-[11px] font-semibold grid place-items-center shrink-0">
+              <span className="w-6 h-6 rounded-[7px] bg-primary text-white text-[10px] font-semibold grid place-items-center shrink-0">
                 {siteInitials(currentSite?.name)}
               </span>
             )}
@@ -172,9 +172,9 @@ export default function Sidebar({
             ))}
           </nav>
 
-          <div className="border-t border-border-canvas px-3 pt-2.5 pb-3.5">
+          <div className="border-t border-border-canvas px-3 pt-2 pb-3">
             <SidebarLink {...SETTINGS_ITEM} active={isActive(SETTINGS_ITEM.to)} />
-            <div className="flex items-center gap-2.5 px-2.5 py-2">
+            <div className="flex items-center gap-2.5 px-2.5 py-1.5">
               <Avatar email={email} size="sm" />
               <div className="min-w-0 flex-1">
                 <div className="text-sm font-medium text-fg truncate">{email || 'Signed in'}</div>
@@ -198,7 +198,7 @@ function SidebarGroup({ group, first, isActive, open, onToggle }) {
         type="button"
         onClick={() => onToggle(group.id)}
         aria-expanded={open}
-        className={`w-full flex items-center gap-1.5 px-2.5 ${first ? 'pt-2' : 'pt-[18px]'} pb-1.5 text-[11px] font-medium tracking-[.08em] uppercase text-faint cursor-pointer`}
+        className={`w-full flex items-center gap-1.5 px-2.5 ${first ? 'pt-2' : 'pt-3.5'} pb-1 text-[11px] font-medium tracking-[.08em] uppercase text-faint cursor-pointer`}
       >
         <span>{group.label}</span>
         <ChevronDown size={10} className={`transition-transform duration-200 ${open ? '' : '-rotate-90'}`} />
@@ -211,12 +211,12 @@ function SidebarGroup({ group, first, isActive, open, onToggle }) {
 function SidebarLink({ to, label, icon: Icon, active }) {
   return (
     <Link to={to} aria-current={active ? 'page' : undefined}
-      className={`flex items-center gap-2.5 h-[34px] px-2.5 rounded-control text-[15px] ${
+      className={`flex items-center gap-2 h-[30px] px-2.5 rounded-control text-sm ${
         active ? 'bg-white text-fg font-medium' : 'text-[#3d3d3d] hover:bg-black/[.03]'
       }`}
       style={active ? { boxShadow: 'var(--ring)' } : undefined}
     >
-      <Icon size={16} strokeWidth={1.75} className={active ? 'text-primary' : 'text-[#7a7a7a]'} />
+      <Icon size={15} strokeWidth={1.75} className={active ? 'text-primary' : 'text-[#7a7a7a]'} />
       {label}
     </Link>
   );

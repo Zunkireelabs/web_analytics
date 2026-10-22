@@ -9,7 +9,7 @@ export default function ExecutiveSummaryPanel({ text, source, generatedAt }) {
   return (
     <Section label="Today" source="Executive report" title="Today's summary" subtitle="Prepared by your AI assistant"
       action={generatedAt ? <span className="text-[13px] text-faint">Updated {timeAgo(generatedAt)}</span> : null}>
-      <div className="card px-5 py-4 text-[15px] leading-6 text-text">
+      <div className="card px-4 py-3 text-sm leading-6 text-text">
         {lines.length > 1 ? (
           <ul className="space-y-2">
             {lines.map((line, i) => (

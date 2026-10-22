@@ -18,9 +18,9 @@ export default function Drawer({ isOpen, onClose, title, subtitle, icon: Icon, c
   // Portal to <body> so a transformed/filtered ancestor (fade-up, backdrop-blur) can't become the fixed overlay's containing block.
   return createPortal(
     <div className="fixed inset-0 z-50 flex justify-end bg-neutral-900/30 animate-fade-in" onClick={onClose}>
-      <div className={`w-full ${maxWidth} h-full bg-white border-l border-border-2 text-fg flex flex-col overflow-y-auto custom-scrollbar`}
+      <div className={`w-full ${maxWidth} h-full bg-white border-l border-border-2 text-sm text-fg flex flex-col overflow-y-auto custom-scrollbar`}
         style={{ boxShadow: '0 0 0 1px rgba(0,0,0,.06), 0 30px 60px -20px rgba(0,0,0,.12)' }} onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between gap-3 border-b border-border px-6 py-5 sticky top-0 bg-white z-10">
+        <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-4 sticky top-0 bg-white z-10">
           <div className="flex items-center gap-2.5 min-w-0">
             {Icon && (
               <div className="w-8 h-8 rounded-control bg-primary-tint text-primary flex items-center justify-center shrink-0"

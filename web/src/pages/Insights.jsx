@@ -84,7 +84,7 @@ export default function Insights({ siteId }) {
   ].map(({ label, key }) => ({ label, value: fmtInt(total(key)), spark: sv(key) }));
 
   return (
-    <div className="max-w-[1360px] mx-auto px-4 md:px-8 pt-8 pb-16 fade-up">
+    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12 fade-up">
       <PageToolbar>
         <div className="flex items-center gap-2 w-full md:w-auto">
           <input type="date" value={start} min={range?.earliest} max={range?.latest_visitor} aria-label="Start date"
@@ -109,7 +109,7 @@ export default function Insights({ siteId }) {
 
       <KpiStrip items={kpis} loading={loading} />
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_1.5fr] mt-10 items-start">
+      <div className="grid gap-6 lg:grid-cols-[1fr_1.5fr] mt-8 items-start">
         <Section className="min-w-0" label="Audience" source="Google Analytics" title="Devices" subtitle="Sessions by device type">
           <DonutChart title="Visitors by Device" data={deviceData} />
         </Section>
@@ -119,13 +119,13 @@ export default function Insights({ siteId }) {
       </div>
 
       {/* Top countries by clicks — interactive world map + leaderboard */}
-      <Section className="mt-10" label="Search" source="Google Search Console" title="Search clicks by country" subtitle="Where your search clicks come from">
+      <Section className="mt-8" label="Search" source="Google Search Console" title="Search clicks by country" subtitle="Where your search clicks come from">
         <CountriesWidget rows={country.search} />
       </Section>
 
       {/* Detailed query movements and highlights at the bottom for analysis —
           MoversList renders its own Sections. */}
-      <div className="mt-10">
+      <div className="mt-8">
         <MoversList gainers={movers.gainers} droppers={movers.droppers} comparisonLabel={moverPeriodLabel(start, end)} />
       </div>
     </div>

@@ -18,9 +18,9 @@ export default function Modal({ isOpen, onClose, title, subtitle, icon: Icon, ch
   // Portal to <body> so a transformed/filtered ancestor (fade-up, backdrop-blur) can't become the fixed overlay's containing block.
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-900/40 animate-fade-in" onClick={onClose}>
-      <div className={`w-full ${maxWidth} rounded-card bg-white p-6 text-fg space-y-5`}
+      <div className={`w-full ${maxWidth} rounded-card bg-white p-5 text-sm text-fg space-y-4`}
         style={{ boxShadow: '0 0 0 1px rgba(0,0,0,.06), 0 30px 60px -20px rgba(0,0,0,.12)' }} onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-border pb-4">
+        <div className="flex items-center justify-between border-b border-border pb-3">
           <div className="flex items-center gap-2.5">
             {Icon && (
               <div className="w-8 h-8 rounded-control bg-primary-tint text-primary flex items-center justify-center shrink-0"

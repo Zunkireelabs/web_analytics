@@ -116,7 +116,7 @@ export default function App() {
   const isProduct = currentSiteOf(sites, siteId)?.property_type === 'product';
 
   return (
-    <div className="min-h-screen flex">
+    <div className="min-h-screen flex text-sm">
       <Sidebar sites={sites} siteId={siteId} isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} onSite={setSiteId} onLogout={logout}
         mobileOpen={mobileNavOpen} onCloseMobile={() => setMobileNavOpen(false)}
         email={email} role={role} agentOpen={agentOpen} onAgent={setAssistantOpen} agentAvailable={agentAvailable} />
@@ -125,7 +125,7 @@ export default function App() {
           agentOpen={agentOpen} onAgent={setAssistantOpen} agentAvailable={agentAvailable}
           onOpenMenu={() => setMobileNavOpen(true)} />
         <ShellContext.Provider value={toolbarEl}>
-          <div ref={setToolbarEl} className="page-toolbar flex flex-wrap items-center gap-2 px-4 md:px-6 py-3 border-b border-border-canvas" />
+          <div ref={setToolbarEl} className="page-toolbar flex flex-wrap items-center gap-2 px-4 md:px-6 py-2 border-b border-border-canvas" />
           <main className="flex-1 min-w-0">
         {siteId ? (
           <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>

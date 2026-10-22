@@ -321,7 +321,7 @@ export default function AiGrowth({ isInternal }) {
   };
 
   return (
-    <div className="max-w-[1360px] mx-auto px-4 md:px-8 pt-8 pb-16">
+    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12">
       <PageToolbar>
         <SegmentedTabs
           options={[{ value: 'console', label: 'Interactive' }, { value: 'diagram', label: 'Systems map' }]}
@@ -357,7 +357,7 @@ export default function AiGrowth({ isInternal }) {
       </div>
 
       {/* Executive summary — same pattern as Reports.jsx. */}
-      <div className="mt-10">
+      <div className="mt-8">
         <ExecutiveSummaryPanel
           text={ccData?.executiveSummary?.narrative}
           source={ccData?.executiveSummary?.narrative ? 'executive-report' : null}
@@ -367,8 +367,8 @@ export default function AiGrowth({ isInternal }) {
 
       {/* Pipeline strip — the fixed pipeline shape, always visible so the page
           reads as "a pipeline" on both tabs, even at rest. */}
-      <Section className="mt-10" title="Agent pipeline" subtitle="How a run moves from data to your reports">
-        <div className="card flex items-center px-5 py-4 overflow-x-auto">
+      <Section className="mt-8" title="Agent pipeline" subtitle="How a run moves from data to your reports">
+        <div className="card flex items-center px-4 py-3 overflow-x-auto">
           {SIGNAL_STAGES.map((stage, i) => {
             const caption = stage.label === 'Agents'
               ? (agents?.length ? `${agents.length} specialists` : 'Specialist agents')
@@ -391,7 +391,7 @@ export default function AiGrowth({ isInternal }) {
         </div>
       </Section>
 
-      <div className="mt-10">
+      <div className="mt-8">
         {viewMode === 'console' ? (
           /* ================= INTERACTIVE RUNNING CONSOLE ================= */
           <div className="grid gap-6 lg:grid-cols-[1fr_1.5fr] items-start">
@@ -523,7 +523,7 @@ export default function AiGrowth({ isInternal }) {
                 </div>
               </div>
             </Section>
-            <Section className="mt-10" title="Live activity" subtitle="Latest agent events">
+            <Section className="mt-8" title="Live activity" subtitle="Latest agent events">
               <LiveActivityRail items={activity} />
             </Section>
           </div>
@@ -533,7 +533,7 @@ export default function AiGrowth({ isInternal }) {
       {/* ============= COMPETITOR OVERVIEW ============= */}
       {/* Real competitor standings, driven by the same ccData already powering
           the score row above. */}
-      <Section className="mt-10" title="Competitors" subtitle="How you compare online · click a competitor to see why">
+      <Section className="mt-8" title="Competitors" subtitle="How you compare online · click a competitor to see why">
         {ccData?.competitors && ccData.competitors.length > 0 ? (
           <CompetitorLeaderboard profiles={ccData.competitors} />
         ) : (
@@ -544,7 +544,7 @@ export default function AiGrowth({ isInternal }) {
       {/* ============= DETAILED AGENT INSIGHTS ============= */}
       {/* Per-category detail cards, shown together here rather than behind
           tabs. Card insides are restyled in part 2. */}
-      <Section className="mt-10" label="Authority" source="Backlinks & rankings" title="Detailed agent insights"
+      <Section className="mt-8" label="Authority" source="Backlinks & rankings" title="Detailed agent insights"
         subtitle="What each specialist agent found this cycle">
         <div className="grid gap-6 md:grid-cols-2">
           <AuthorityScoreCard authority={ccData?.authority} meta={ccData?.authorityMeta} loading={ccData === null} />
@@ -565,16 +565,16 @@ export default function AiGrowth({ isInternal }) {
         </div>
       </Section>
 
-      <Section className="mt-10" label="AI search" source="ChatGPT buyer-intent prompts" title="AI search visibility">
+      <Section className="mt-8" label="AI search" source="ChatGPT buyer-intent prompts" title="AI search visibility">
         <AiRecommendationCard aiRecommendation={ccData?.aiRecommendation} meta={ccData?.aiRecommendationMeta} loading={ccData === null} />
       </Section>
 
-      <Section className="mt-10" label="Audience" source="Google Analytics" title="Geographic audience" subtitle="Where your sessions come from">
+      <Section className="mt-8" label="Audience" source="Google Analytics" title="Geographic audience" subtitle="Where your sessions come from">
         <GeoIntelligenceCard geoIntelligence={ccData?.geoIntelligence} meta={ccData?.geoIntelligenceMeta} loading={ccData === null} />
       </Section>
 
       {/* ============= OPERATIONS HISTORY ============= */}
-      <section className="mt-10">
+      <section className="mt-8">
         <button type="button" onClick={() => setShowOpsHistory(!showOpsHistory)} aria-expanded={showOpsHistory}
           className="card w-full flex items-center justify-between px-4 py-3.5 text-sm font-medium text-fg">
           <span>Operations history</span>
@@ -600,7 +600,7 @@ export default function AiGrowth({ isInternal }) {
       {/* Agent Taskforce, Execution Timeline, Model Status, migrated from
           admin/AiOperationsCenter.jsx. */}
       {isInternal && ops && (
-        <div className="mt-10 space-y-10">
+        <div className="mt-8 space-y-8">
           <Section label="Platform operations" source="Staff only · across every tenant" title="Agent taskforce"
             subtitle="Every registered agent's most recent run">
             <div className="card overflow-hidden">

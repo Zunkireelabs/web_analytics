@@ -119,7 +119,7 @@ export default function ClientAssistantPanel({ open, onClose }) {
     <>
       <div className="fixed inset-0 z-40 bg-neutral-900/30 xl:hidden animate-fade-in" onClick={onClose} />
 
-      <div className="fixed inset-y-0 right-0 z-50 w-full sm:w-[400px] bg-white border-l border-border-canvas flex flex-col overflow-hidden animate-slide-left xl:animate-none xl:sticky xl:top-0 xl:h-screen xl:z-auto xl:shrink-0"
+      <div className="fixed inset-y-0 right-0 z-50 w-full sm:w-[360px] bg-white border-l border-border-canvas flex flex-col overflow-hidden animate-slide-left xl:animate-none xl:sticky xl:top-0 xl:h-screen xl:z-auto xl:shrink-0"
         role="dialog" aria-label="Growth Assistant">
 
         <div className="h-14 px-4 border-b border-border-canvas shrink-0 flex items-center gap-2.5">
@@ -136,11 +136,11 @@ export default function ClientAssistantPanel({ open, onClose }) {
           </Button>
         </div>
 
-        <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-5 space-y-4 scrollbar-thin">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4 scrollbar-thin">
           {messages.length === 0 && (
             <div className="space-y-4 pt-2">
               <div>
-                <p className="text-xl font-medium tracking-[-0.02em] text-fg">{siteName ? `Hi, ${siteName}` : 'Hi there'}</p>
+                <p className="text-lg font-medium tracking-[-0.02em] text-fg">{siteName ? `Hi, ${siteName}` : 'Hi there'}</p>
                 <p className="text-sm text-text mt-1">Ask anything about your site's search performance.</p>
               </div>
               <div className="space-y-2">
@@ -191,7 +191,7 @@ export default function ClientAssistantPanel({ open, onClose }) {
             <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Ask about your site…" disabled={asking}
               className="flex-1 min-w-0 bg-transparent border-0 outline-none text-sm text-fg placeholder:text-faint disabled:opacity-60" />
             <button type="submit" disabled={asking || !input.trim()}
-              className="w-[30px] h-[30px] rounded-control bg-primary text-white grid place-items-center disabled:opacity-40 shrink-0" aria-label="Send message">
+              className="w-7 h-7 rounded-control bg-primary text-white grid place-items-center disabled:opacity-40 shrink-0" aria-label="Send message">
               <ArrowUp size={14} />
             </button>
           </div>

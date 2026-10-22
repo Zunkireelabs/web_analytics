@@ -10,11 +10,11 @@ export default function TopBar({ isInternal, isPlatformAdmin, isProduct, agentOp
   const crumbs = breadcrumbFor(pathname, { isPlatformAdmin, isProduct });
 
   return (
-    <header className="sticky top-0 z-30 h-14 flex items-center gap-3 px-4 md:px-6 bg-canvas border-b border-border-canvas">
+    <header className="sticky top-0 z-30 h-12 flex items-center gap-3 px-4 md:px-6 bg-canvas border-b border-border-canvas">
       {/* Sidebar becomes an overlay drawer below md — this is its trigger, not
           reachable any other way on a narrow viewport. */}
       <Button variant="light" className="md:hidden" onClick={onOpenMenu} aria-label="Open menu">
-        <Menu size={15} />
+        <Menu size={14} />
         Menu
       </Button>
 
@@ -41,7 +41,7 @@ export default function TopBar({ isInternal, isPlatformAdmin, isProduct, agentOp
         {isInternal && <NotificationBell />}
         {agentAvailable && (
           <Button variant={agentOpen ? 'light' : 'ghost'} onClick={() => onAgent(!agentOpen)} aria-pressed={agentOpen}>
-            <MessageSquare size={15} />
+            <MessageSquare size={14} />
             Agent
           </Button>
         )}

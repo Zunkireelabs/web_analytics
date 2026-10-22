@@ -192,7 +192,7 @@ export default function Overview({ siteId }) {
   const dateInput = 'h-8 px-2.5 rounded-control bg-white text-[13px] font-medium text-fg min-w-0 flex-1 md:flex-none';
 
   return (
-    <div className="max-w-[1360px] mx-auto px-4 md:px-8 pt-8 pb-16 fade-up">
+    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12 fade-up">
       <PageToolbar>
         <div className="toggle w-full md:w-auto [&>button]:flex-1 md:[&>button]:flex-none">
           {[3, 7, 14, 30].map((d) => (
@@ -224,16 +224,16 @@ export default function Overview({ siteId }) {
 
       <KpiStrip items={kpis} loading={loading} />
 
-      <div className="mt-10">
+      <div className="mt-8">
         <PerformanceTrendCard series={series} loading={loading} />
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr] mt-10">
+      <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr] mt-8">
         <TopPagesCard pages={rangePages} loading={loading} />
         <AiInsightsPanel channels={channels} queries={rangeQueries} pages={rangePages} loading={loading} />
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr] mt-10">
+      <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr] mt-8">
         <TopQueriesCard queries={rangeQueries} loading={loading} />
         <TrafficDistributionCard channels={channels} loading={loading} />
       </div>

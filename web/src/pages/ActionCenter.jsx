@@ -716,7 +716,7 @@ export default function ActionCenter() {
   const draftTarget = (d) => d.input?.page || d.input?.filePath || d.input?.topic || d.input?.market || d.input?.city || '';
 
   const Fact = ({ label, children }) => (
-    <div className="grid grid-cols-1 md:grid-cols-[130px_1fr] gap-0.5 md:gap-3 px-5 py-3 border-b border-border text-sm">
+    <div className="grid grid-cols-1 md:grid-cols-[130px_1fr] gap-0.5 md:gap-3 px-4 py-3 border-b border-border text-sm">
       <dt className="text-faint">{label}</dt>
       <dd className="text-fg min-w-0 [overflow-wrap:anywhere]">{children}</dd>
     </div>
@@ -730,7 +730,7 @@ export default function ActionCenter() {
   const alignment = sel ? GOAL_ALIGNMENT_META[sel.goalAlignment?.level] : null;
 
   return (
-    <div className="max-w-[1360px] mx-auto px-4 md:px-8 pt-8 pb-16">
+    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12">
       <PageToolbar>
         <SegmentedTabs options={tabOptions} value={tab} onChange={setTab} />
         {tab === 'recommendations' && recs && (
@@ -868,7 +868,7 @@ export default function ActionCenter() {
 
       <KpiStrip items={kpis} loading={recs === null} />
 
-      <div className="grid gap-6 lg:grid-cols-[1.3fr_1fr] items-start mt-10">
+      <div className="grid gap-6 lg:grid-cols-[1.3fr_1fr] items-start mt-8">
         {/* ============ LEFT: lists ============ */}
         {tab === 'recommendations' && (
           <Section className="min-w-0" title="Recommendations" subtitle="Grouped by category · open a group to see its fixes">
@@ -1020,8 +1020,8 @@ export default function ActionCenter() {
               <div className="card overflow-hidden">
                 {sel ? (
                   <>
-                    <div className="px-5 py-4 border-b border-border">
-                      <h3 className="text-[17px] font-medium tracking-[-0.01em] text-fg break-words">{titleFor(sel)}</h3>
+                    <div className="px-4 py-3 border-b border-border">
+                      <h3 className="text-[15px] font-medium tracking-[-0.01em] text-fg break-words">{titleFor(sel)}</h3>
                       <div className="flex flex-wrap gap-1.5 mt-2.5">
                         {stateBadge(sel, true)}
                         {BUCKET_META[sel.bucket] && <Badge tone="outline">{BUCKET_META[sel.bucket].label}</Badge>}
@@ -1122,7 +1122,7 @@ export default function ActionCenter() {
                       );
                     })()}
 
-                    <div className="flex flex-wrap items-center justify-end gap-2 px-5 py-3.5">
+                    <div className="flex flex-wrap items-center justify-end gap-2 px-4 py-3.5">
                       {(sel.params?.page || sel.params?.href) && (
                         <Button variant="light" onClick={() => recheckNow(sel)} disabled={recheckingId === sel.id}
                           title="Re-examine this page/link right now instead of waiting for its next scheduled scan">
@@ -1173,8 +1173,8 @@ export default function ActionCenter() {
               <div className="card overflow-hidden">
                 {selectedDraftItem ? (
                   <>
-                    <div className="px-5 py-4 border-b border-border">
-                      <h3 className="text-[17px] font-medium tracking-[-0.01em] text-fg break-words">
+                    <div className="px-4 py-3 border-b border-border">
+                      <h3 className="text-[15px] font-medium tracking-[-0.01em] text-fg break-words">
                         {GENERATOR_META[selectedDraftItem.action_type]?.label || selectedDraftItem.action_type}
                       </h3>
                       <div className="flex flex-wrap gap-1.5 mt-2.5">
@@ -1196,12 +1196,12 @@ export default function ActionCenter() {
                       )}
                     </dl>
 
-                    <div className="px-5 py-4 border-b border-border">
+                    <div className="px-4 py-3 border-b border-border">
                       <div className="text-[13px] text-faint mb-2">Progress to staging</div>
                       <DraftStepper status={selectedDraftItem.status} />
                     </div>
 
-                    <div className="flex flex-wrap justify-end gap-2 px-5 py-3.5">
+                    <div className="flex flex-wrap justify-end gap-2 px-4 py-3.5">
                       <Button variant={selectedDraftItem.status === 'implemented' ? 'light' : 'primary'} onClick={() => setActiveDraft(selectedDraftItem)}>
                         {selectedDraftItem.status === 'implemented' ? 'View draft' : 'Configure & deploy draft'}
                       </Button>

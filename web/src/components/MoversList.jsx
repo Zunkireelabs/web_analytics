@@ -55,7 +55,7 @@ export default function MoversList({ gainers = [], droppers = [], comparisonLabe
       <Highlights gainers={gainers} droppers={droppers} comparisonLabel={comparisonLabel} />
 
       {/* 3 ─ Two-column gainers / drops */}
-      <div id="movers-section" className="grid gap-6 lg:grid-cols-2 mt-10 items-start">
+      <div id="movers-section" className="grid gap-6 lg:grid-cols-2 mt-8 items-start">
         <MoverCard kind="gain" rows={gainers} total={gainers.length} />
         <MoverCard kind="drop" rows={droppers} total={droppers.length} />
       </div>
@@ -123,7 +123,7 @@ function Highlights({ gainers, droppers, comparisonLabel }) {
   if (blocks.length === 0) return null;
 
   return (
-    <Section className="mt-10" title="Spotlight" subtitle="The movements worth a look">
+    <Section className="mt-8" title="Spotlight" subtitle="The movements worth a look">
       <div className="card">
         {blocks.map((b, i) => (
           <div key={i} className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 px-4 py-3 border-b border-border last:border-0 items-center">

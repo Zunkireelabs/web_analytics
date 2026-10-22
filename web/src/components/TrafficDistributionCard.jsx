@@ -30,7 +30,7 @@ export default function TrafficDistributionCard({ channels, loading }) {
 
   return (
     <Section label="Traffic" source="Google Analytics" title="Traffic distribution" subtitle="Sessions by acquisition channel">
-      <div className="card p-5 flex flex-wrap items-center gap-6">
+      <div className="card p-4 flex flex-wrap items-center gap-6">
         {loading ? (
           <div className="w-full py-9 text-center text-sm text-faint">Loading distribution…</div>
         ) : total === 0 ? (
@@ -47,7 +47,7 @@ export default function TrafficDistributionCard({ channels, loading }) {
                 </PieChart>
               </ResponsiveContainer>
               <div className="absolute inset-0 flex flex-col items-center justify-center text-center pointer-events-none">
-                <div className="text-[22px] font-medium tnum text-fg leading-none">{total.toLocaleString()}</div>
+                <div className="text-[20px] font-medium tnum text-fg leading-none">{total.toLocaleString()}</div>
                 <div className="text-xs text-faint mt-1">sessions</div>
               </div>
             </div>

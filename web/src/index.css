@@ -92,7 +92,7 @@
   .btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
     height: 32px; padding: 0 12px; border-radius: var(--radius);
-    font-size: 14px; font-weight: 500; line-height: 20px; white-space: nowrap;
+    font-size: 13px; font-weight: 500; line-height: 20px; white-space: nowrap;
     transition: background-color .15s, box-shadow .15s, color .15s;
   }
   .btn--lg { height: 44px; padding: 0 18px; font-size: 15px; }
@@ -107,15 +107,15 @@
   .btn--primary:hover { background: var(--primary-strong); }
   .btn--ghost { color: var(--text); padding: 0 10px; }
   .btn--ghost:hover { color: var(--fg); }
-  .btn--sm { height: 26px; padding: 0 10px; font-size: 13px; border-radius: 6px; }
+  .btn--sm { height: 24px; padding: 0 10px; font-size: 12px; border-radius: 6px; }
   .btn:disabled, .btn[aria-disabled="true"] { opacity: .5; cursor: not-allowed; pointer-events: none; }
   .btn--icon { width: 32px; padding: 0; }
-  .btn--icon.btn--sm { width: 26px; }
+  .btn--icon.btn--sm { width: 24px; }
 
   /* ---- styles.css: badges ---- */
   .badge {
-    display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px;
-    border-radius: 6px; font-size: 13px; font-weight: 500; white-space: nowrap;
+    display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px;
+    border-radius: 6px; font-size: 12px; font-weight: 500; white-space: nowrap;
   }
   .badge--primary { background: var(--primary-tint); color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary-ring); }
   .badge--green { background: var(--green-tint); color: var(--green); border-radius: 999px; font-size: 12px; }
@@ -131,16 +131,16 @@
   .logo__icon { width: 22px; height: 22px; object-fit: contain; margin-top: -2px; }
 
   /* ---- Data tables (Overview mockup) ---- */
-  .tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
-  .tbl th { font-weight: 500; font-size: 13px; color: var(--faint); text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--border); background: #fcfcfb; white-space: nowrap; }
-  .tbl td { padding: 11px 16px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; color: var(--fg); }
+  .tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .tbl th { font-weight: 500; font-size: 12px; color: var(--faint); text-align: left; padding: 8px 14px; border-bottom: 1px solid var(--border); background: #fcfcfb; white-space: nowrap; }
+  .tbl td { padding: 9px 14px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; color: var(--fg); }
   .tbl tr:last-child td { border-bottom: 0; }
   .tbl .num { text-align: right; }
   .tbl .rank { width: 28px; color: var(--faint-2); }
   .tbl .bar { position: relative; }
-  .tbl .bar > i { position: absolute; inset: 6px auto 6px 8px; border-radius: 6px; background: var(--muted); }
+  .tbl .bar > i { position: absolute; inset: 5px auto 5px 6px; border-radius: 6px; background: var(--muted); }
   .tbl .bar > span { position: relative; }
-  .tbl-foot { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px 8px 16px; border-top: 1px solid var(--border); font-size: 13px; color: var(--faint); }
+  .tbl-foot { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px 6px 14px; border-top: 1px solid var(--border); font-size: 12px; color: var(--faint); }
 
   /* ---- Humblytics section label ---- */
   .label-dot { display: flex; align-items: center; gap: 8px; font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--fg); }
@@ -154,7 +154,7 @@
 
   /* ---- styles.css: toggle ---- */
   .toggle { display: inline-flex; padding: 3px; border-radius: 10px; background: var(--muted); box-shadow: inset 0 0 0 1px var(--border-2); }
-  .toggle button { height: 30px; padding: 0 16px; border-radius: 7px; font-size: 14px; font-weight: 500; color: var(--text); }
+  .toggle button { height: 26px; padding: 0 12px; border-radius: 7px; font-size: 13px; font-weight: 500; color: var(--text); }
   .toggle button { flex-shrink: 0; white-space: nowrap; }
   .toggle button.is-on { background: #fff; color: var(--fg); box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 0 0 1px rgba(0, 0, 0, .04); }
 
@@ -187,10 +187,10 @@
   .tip:hover .tip__box, .tip:focus .tip__box { opacity: 1; visibility: visible; transform: none; }
 
   /* ---- superrank-web login.css: fields + OTP (final cascaded values) ---- */
-  .fld { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .fld { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
   .fld > .fld__label { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 16px; font-weight: 500; }
   .fld input, .fld select, .fld textarea {
-    width: 100%; height: 40px; padding: 0 10px; border: 0; border-radius: var(--radius); background: #fff; font-size: 13px; color: var(--fg);
+    width: 100%; height: 34px; padding: 0 10px; border: 0; border-radius: var(--radius); background: #fff; font-size: 13px; color: var(--fg);
     box-shadow: 0 0 0 1px var(--input), 0 1px 2px rgba(0, 0, 0, .03); outline: none; transition: box-shadow .15s;
   }
   .fld textarea { height: auto; min-height: 80px; padding: 8px 10px; line-height: 20px; resize: vertical; }

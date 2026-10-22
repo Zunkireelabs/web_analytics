@@ -43,20 +43,20 @@ export default function AgentFindingsHub({ findings = [] }) {
 
       {/* Right Content: Expanded details */}
       <div className="card overflow-hidden min-w-0">
-        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-b border-border">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-border">
           <div>
-            <div className="text-[15px] font-medium text-fg">{current.name}</div>
+            <div className="text-sm font-medium text-fg">{current.name}</div>
             <div className="text-[13px] text-faint">Agent audit report</div>
           </div>
           <Badge tone="green">Active analysis</Badge>
         </div>
 
-        <div className="px-5 py-4 border-b border-border">
+        <div className="px-4 py-3 border-b border-border">
           <div className="text-[13px] text-faint">Steepest trend finding</div>
-          <blockquote className="text-[15px] text-fg mt-1 break-words">“{current.headline}”</blockquote>
+          <blockquote className="text-sm text-fg mt-1 break-words">“{current.headline}”</blockquote>
         </div>
 
-        <div className="px-5 py-4">
+        <div className="px-4 py-3">
           <div className="text-[13px] text-faint">Diagnostic breakdown</div>
           {current.narrative ? (
             <ul className="list-disc pl-5 mt-2 space-y-2 text-sm text-text break-words">

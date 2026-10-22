@@ -154,7 +154,7 @@ function ValidationStatusBanner({ draft }) {
   const allPassing = checks.every((k) => v[k].ok === true);
 
   return (
-    <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-border text-[13px]">
+    <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-border text-[13px]">
       {checks.map((k) => <ValidationBadge key={k} checkKey={k} check={v[k]} />)}
       {failing && (
         <div className="w-full flex items-start gap-2" style={{ color: '#b42318' }}>
@@ -495,13 +495,13 @@ export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted 
         onClick={(e) => e.stopPropagation()}
       >
         {/* Modal Header */}
-        <div className="flex items-center gap-2.5 px-5 py-4 border-b border-border">
+        <div className="flex items-center gap-2.5 px-4 py-3 border-b border-border">
           <span className="w-8 h-8 rounded-control bg-primary-tint text-primary grid place-items-center shrink-0"
             style={{ boxShadow: 'inset 0 0 0 1px var(--primary-ring)' }}>
             <Sparkles size={15} />
           </span>
           <div className="min-w-0 flex-1">
-            <div className="text-[15px] font-medium text-fg">
+            <div className="text-sm font-medium text-fg">
               {ACTION_LABELS[draft.action_type] || draft.action_type}
             </div>
             <Badge tone={status.tone} className="mt-1">{status.label}</Badge>
@@ -611,7 +611,7 @@ export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted 
             </div>
           )}
 
-          <div className="px-5 py-4 space-y-5">
+          <div className="px-4 py-3 space-y-5">
             {editing ? (
               <div className="space-y-2">
                 <div className="text-xs flex items-center justify-between gap-3 flex-wrap">
@@ -735,7 +735,7 @@ export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted 
         </div>
 
         {/* Modal Footer Controls */}
-        <div className="flex flex-wrap items-center gap-2 px-5 py-3.5 border-t border-border bg-white">
+        <div className="flex flex-wrap items-center gap-2 px-4 py-3.5 border-t border-border bg-white">
           {draftGone ? (
             <Button variant="primary" className="ml-auto" onClick={() => onDeleted(draft.id)}>Close &amp; refresh</Button>
           ) : (
