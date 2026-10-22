@@ -1,70 +1,62 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, daysAgo, timeAgo } from '../api.js';
-import PageHeader from '../components/PageHeader.jsx';
 import DraftModal from '../components/DraftModal.jsx';
-import { PRIORITY } from '../components/WatchlistCard.jsx';
-import { 
-  Sparkles, 
-  Bot, 
-  Clock, 
-  AlertTriangle, 
-  Cpu, 
-  TrendingUp, 
-  CheckCircle2, 
-  ChevronDown, 
-  ChevronUp, 
+import PageToolbar from '../components/PageToolbar.jsx';
+import PageIntro from '../components/layout/PageIntro.jsx';
+import KpiStrip from '../components/layout/KpiStrip.jsx';
+import Section from '../components/layout/Section.jsx';
+import SegmentedTabs from '../components/SegmentedTabs.jsx';
+import Button from '../components/Button.jsx';
+import Badge from '../components/Badge.jsx';
+import {
+  AlertTriangle,
+  Clock,
+  CheckCircle2,
+  ChevronRight,
   ArrowRight,
-  Activity,
   History,
-  FileText,
-  Settings,
-  Calendar,
   Layers,
-  SlidersHorizontal,
-  FolderSync,
   Zap,
   GitPullRequest,
-  ShieldCheck,
-  ShieldAlert,
   XCircle,
   RefreshCw,
   Lock,
-  Target
+  Check,
 } from 'lucide-react';
-import { STATUS, SERIES } from '../lib/palette.js';
+import { STATUS } from '../lib/palette.js';
 
 const GENERATOR_META = {
-  'meta-title': { label: 'Meta Titles', icon: '🏷️', color: '#6C63FF' },
-  faq: { label: 'FAQ Blocks', icon: '❓', color: '#0ea5e9' },
-  schema: { label: 'Schema Markup', icon: '🧩', color: '#8b5cf6' },
-  'internal-links': { label: 'Internal Links', icon: '🔗', color: '#14b8a6' },
-  'blog-outline': { label: 'Blog Posts', icon: '📝', color: '#ec4899' },
-  'landing-page': { label: 'Landing Pages', icon: '🚀', color: '#c2410c' },
-  translation: { label: 'Translations', icon: '🌐', color: '#06b6d4' },
-  'llms-txt': { label: 'llms.txt Files', icon: '🤖', color: '#10b981' },
-  'security-headers': { label: 'Security Headers', icon: '🛡️', color: '#ef4444' },
-  'html-lang': { label: 'Page Language', icon: '🌍', color: '#0891b2' },
-  viewport: { label: 'Viewport Meta Tag', icon: '📱', color: '#0d9488' },
-  canonical: { label: 'Canonical Tags', icon: '🔗', color: '#7c3aed' },
-  'robots-fix': { label: 'Robots.txt Fixes', icon: '🤖', color: '#059669' },
-  'open-graph': { label: 'Open Graph Tags', icon: '📣', color: '#db2777' },
-  'broken-link-fix': { label: 'Broken Link Removal', icon: '⛔', color: '#dc2626' },
-  'redirect-fix': { label: 'Redirect Fixes', icon: '↪️', color: '#d97706' },
-  'expand-content': { label: 'Content Expansion', icon: '📄', color: '#4f46e5' },
-  sitemap: { label: 'Sitemap Updates', icon: '🗺️', color: '#65a30d' },
+  'meta-title': { label: 'Meta Titles' },
+  faq: { label: 'FAQ Blocks' },
+  schema: { label: 'Schema Markup' },
+  'internal-links': { label: 'Internal Links' },
+  'blog-outline': { label: 'Blog Posts' },
+  'landing-page': { label: 'Landing Pages' },
+  translation: { label: 'Translations' },
+  'llms-txt': { label: 'llms.txt Files' },
+  'security-headers': { label: 'Security Headers' },
+  'html-lang': { label: 'Page Language' },
+  viewport: { label: 'Viewport Meta Tag' },
+  canonical: { label: 'Canonical Tags' },
+  'robots-fix': { label: 'Robots.txt Fixes' },
+  'open-graph': { label: 'Open Graph Tags' },
+  'broken-link-fix': { label: 'Broken Link Removal' },
+  'redirect-fix': { label: 'Redirect Fixes' },
+  'expand-content': { label: 'Content Expansion' },
+  sitemap: { label: 'Sitemap Updates' },
 
-  'geo-audit': { label: 'GEO Audit Reports', icon: '🌐', color: '#0ea5e9' },
-  'direct-answer': { label: 'Direct Answers', icon: '💬', color: '#0ea5e9' },
+  'geo-audit': { label: 'GEO Audit Reports' },
+  'direct-answer': { label: 'Direct Answers' },
 
-  'cookie-policy': { label: 'Cookie Policy', icon: '🍪', color: '#f59e0b' },
-  'privacy-policy': { label: 'Privacy Policy', icon: '🔒', color: '#d97706' },
-  'terms-of-service': { label: 'Terms of Service', icon: '📜', color: '#b45309' },
+  'cookie-policy': { label: 'Cookie Policy' },
+  'privacy-policy': { label: 'Privacy Policy' },
+  'terms-of-service': { label: 'Terms of Service' },
 
-  'duplicate-id-fix': { label: 'Duplicate ID Fix Plans', icon: '🆔', color: '#f97316' },
-  breadcrumbs: { label: 'Breadcrumbs Schema', icon: '🍞', color: '#84cc16' },
-  'schema-repair': { label: 'Structured Data Repairs', icon: '🔧', color: '#a855f7' },
-  'alt-text': { label: 'Image Alt Text', icon: '🖼️', color: '#f472b6' },
+  'duplicate-id-fix': { label: 'Duplicate ID Fix Plans' },
+  breadcrumbs: { label: 'Breadcrumbs Schema' },
+  'schema-repair': { label: 'Structured Data Repairs' },
+  'alt-text': { label: 'Image Alt Text' },
 };
 
 // Source filter (decision: redesign the existing Action Center into a
@@ -80,32 +72,10 @@ const SOURCE_FILTERS = [
   { value: 'geo', label: 'GEO' },
 ];
 const BUCKET_META = {
-  seo: { label: 'SEO', color: '#2563eb' },
-  aeo: { label: 'AEO', color: '#10b981' },
-  geo: { label: 'GEO', color: '#7c3aed' },
+  seo: { label: 'SEO' },
+  aeo: { label: 'AEO' },
+  geo: { label: 'GEO' },
 };
-// Icon per category name — purely cosmetic, falls back to a generic dot for
-// any category not listed (e.g. a future agent's own category).
-const CATEGORY_META = {
-  'Meta Titles': { icon: '🏷️' },
-  'Content Expansion': { icon: '📄' },
-  'Landing Pages': { icon: '🚀' },
-  'Broken Links': { icon: '⛔' },
-  'Technical Fixes': { icon: '🛠️' },
-  'FAQ Opportunities': { icon: '❓' },
-  'Blog Opportunities': { icon: '📝' },
-  'Entity Pages': { icon: '🧩' },
-  'Topic Coverage': { icon: '🌐' },
-  'AI Mentions': { icon: '🤖' },
-  'Citation Opportunities': { icon: '🔗' },
-  'CTR Opportunities': { icon: '📈' },
-  'Traffic Anomalies': { icon: '⚠️' },
-  'Growth Opportunities': { icon: '🌱' },
-  'Conversion Issues': { icon: '🎯' },
-  'GEO Signals': { icon: '📡' },
-  'AI Crawler Access': { icon: '🕷️' },
-};
-
 function pagePathFor(url) {
   try { const u = new URL(url); return u.pathname === '/' ? u.hostname : u.pathname; } catch { return null; }
 }
@@ -169,9 +139,9 @@ function blockedMetaFor(item) {
 // "not tied to a goal" here — the distinction between them is a detector
 // detail, not something the user acts on differently.
 const GOAL_ALIGNMENT_META = {
-  strong: { className: 'bg-emerald-50/70 border-emerald-150 text-emerald-700', textClassName: 'text-emerald-900/85' },
-  partial: { className: 'bg-sky-50/70 border-sky-150 text-sky-700', textClassName: 'text-sky-900/85' },
-  weak: { className: 'bg-slate-50/70 border-slate-150 text-slate-600', textClassName: 'text-slate-700/85' },
+  strong: { label: 'Strong fit' },
+  partial: { label: 'Partial fit' },
+  weak: { label: 'Weak fit' },
 };
 
 // Where a recommendation is in its life (server: recommendation-coordinator.js's
@@ -185,8 +155,8 @@ const GOAL_ALIGNMENT_META = {
 // state (in progress, retrying) harder to pick out. 'fixed' never reaches the
 // UI — the server filters it off the active board.
 const LIFECYCLE_META = {
-  in_progress: { icon: GitPullRequest, label: 'In progress', className: 'bg-violet-50 border-violet-100 text-violet-600' },
-  retry: { icon: RefreshCw, label: 'Retry', className: 'bg-orange-50 border-orange-100 text-orange-600' },
+  in_progress: { label: 'In progress', tone: 'grey' },
+  retry: { label: 'Retry', tone: 'amber' },
 };
 
 // What the last failure means for what happens next, in the user's terms.
@@ -210,11 +180,6 @@ const DRAFT_STATUS_LABEL = {
 };
 
 const STATUS_ORDER = ['draft', 'edited', 'submitted_for_approval', 'approved', 'branch_pushed', 'merged_to_stage', 'pr_opened', 'implemented'];
-const STAGE_COLOR = {
-  draft: STATUS.neutral.color, edited: STATUS.warning.color, submitted_for_approval: STATUS.warning.color,
-  approved: STATUS.good.color, branch_pushed: SERIES[1], merged_to_stage: SERIES[1],
-  pr_opened: SERIES[1], implemented: STATUS.good.color, abandoned: STATUS.neutral.color,
-};
 
 // No 'implemented' entry — implemented drafts live only on the dedicated
 // Implemented tab (see implementedDrafts below), never inside the Drafts
@@ -227,25 +192,49 @@ const STATUS_FILTERS = [
   { value: 'pr_opened', label: 'PR Opened' },
 ];
 
+// Sentence-case draft status for Badges (DRAFT_STATUS_LABEL is lower-case, for prose).
+const draftStatusText = (st) => { const l = DRAFT_STATUS_LABEL[st] || st; return l.charAt(0).toUpperCase() + l.slice(1); };
+
 const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 
+// Human labels for the stepper (DRAFT_STATUS_LABEL is lower-case, for prose).
+const STEP_LABEL = {
+  draft: 'Draft', edited: 'Edited', submitted_for_approval: 'Submitted for approval', approved: 'Approved',
+  branch_pushed: 'Branch pushed', merged_to_stage: 'Merged to stage', pr_opened: 'PR opened', implemented: 'Implemented',
+};
+
+// Draft status → Badge tone (list rows and detail header).
+const DRAFT_TONE = {
+  draft: 'grey', edited: 'grey', abandoned: 'grey',
+  submitted_for_approval: 'amber',
+  approved: 'green', implemented: 'green',
+  branch_pushed: 'outline', merged_to_stage: 'outline', pr_opened: 'outline',
+};
+
+// Vertical checklist of the draft's path to staging. `implemented` reads as
+// all-done (no "current" step).
 function DraftStepper({ status }) {
   const idx = Math.max(0, STATUS_ORDER.indexOf(status));
+  const allDone = status === 'implemented';
   return (
-    <div className="flex items-center gap-1" aria-label={`Status: ${DRAFT_STATUS_LABEL[status] || status}`}>
-      {STATUS_ORDER.map((s, i) => (
-        <span key={s} className="flex items-center">
-          <span className="w-1.5 h-1.5 rounded-full shrink-0 transition-all duration-300"
-            style={{ 
-              background: i <= idx ? STAGE_COLOR[status] : '#e2e8f0',
-              boxShadow: i === idx ? `0 0 6px ${STAGE_COLOR[status]}` : 'none',
-              transform: i === idx ? 'scale(1.25)' : 'scale(1)'
-            }} />
-          {i < STATUS_ORDER.length - 1 && (
-            <span className="w-3 h-px shrink-0" style={{ background: i < idx ? STAGE_COLOR[status] : '#e2e8f0' }} />
-          )}
-        </span>
-      ))}
+    <div aria-label={`Status: ${DRAFT_STATUS_LABEL[status] || status}`}>
+      {STATUS_ORDER.map((s, i) => {
+        const done = allDone || i < idx;
+        const current = !allDone && i === idx;
+        return (
+          <div key={s} className="flex items-center gap-2.5 py-1.5 text-sm">
+            {done ? (
+              <span className="w-4 h-4 rounded-full bg-fg grid place-items-center shrink-0"><Check size={10} className="text-white" strokeWidth={3} /></span>
+            ) : current ? (
+              <span className="w-4 h-4 rounded-full bg-[#fdf3e1] shrink-0" style={{ boxShadow: `inset 0 0 0 4px ${STATUS.warning.color}` }} />
+            ) : (
+              <span className="w-4 h-4 rounded-full shrink-0" style={{ boxShadow: 'inset 0 0 0 1.5px #d4d4d4' }} />
+            )}
+            <span className={done ? 'text-text' : current ? 'font-medium text-fg' : 'text-faint'}>{STEP_LABEL[s]}</span>
+            {current && <Badge tone="amber" className="ml-auto">Current</Badge>}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -636,10 +625,7 @@ export default function ActionCenter() {
   // Selected category items mapping
   const activeItems = activeCategory ? (grouped[activeCategory] || []) : [];
   const sortedItems = [...activeItems].sort((a, b) => (PRIORITY_RANK[a.priority] ?? 1) - (PRIORITY_RANK[b.priority] ?? 1));
-  const activeBucket = activeItems[0]?.bucket;
-  const activeMeta = activeCategory
-    ? { icon: CATEGORY_META[activeCategory]?.icon || '•', color: BUCKET_META[activeBucket]?.color || '#64748b', label: activeCategory }
-    : null;
+  const activeMeta = activeCategory ? { label: activeCategory } : null;
 
   // Default active selection helper
   useEffect(() => {
@@ -654,36 +640,166 @@ export default function ActionCenter() {
     }
   }, [visibleDrafts]);
 
+  // Below lg the details panel sits under the list, so selecting a row scrolls
+  // it into view (above lg it is a sticky right column and already visible).
+  const detailsRef = useRef(null);
+  const reveal = () => {
+    if (window.matchMedia('(max-width: 1023px)').matches) {
+      detailsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+  const pickRecommendation = (item) => { setSelectedRecommendation(item); reveal(); };
+  const pickDraft = (d) => { setSelectedDraftItem(d); reveal(); };
+
+  const tabCount = (n) => (n !== undefined ? <span className="text-faint ml-1">{n}</span> : null);
+  const tabOptions = [
+    { value: 'recommendations', label: <>Recommendations{tabCount(recs?.items.length)}</> },
+    // From the accurate server-side counts (drafts/counts), not the
+    // board list's own length — that list is capped server-side
+    // (listDraftsForBoard) so history can't grow the page unbounded
+    // again the way it did before; the badges must still be right.
+    { value: 'drafts', label: <>Drafts{tabCount(draftCounts?.nonImplemented ?? nonImplementedDrafts?.length)}</> },
+    { value: 'implemented', label: <>Done{tabCount(draftCounts?.implemented ?? implementedDrafts.length)}</> },
+  ];
+
+  const plural = (n, one, many) => (n === 1 ? one : many);
+  const introTitle = tab === 'recommendations'
+    ? (recs === null ? 'Loading recommendations…'
+      : highPriorityCount > 0 ? `${highPriorityCount} high-priority fixes are waiting` : 'No high-priority fixes right now')
+    : tab === 'drafts'
+      ? (pendingApprovalCount > 0
+        ? `${pendingApprovalCount} draft${pendingApprovalCount === 1 ? '' : 's'} ${plural(pendingApprovalCount, 'is', 'are')} waiting for approval`
+        : 'No drafts waiting for approval')
+      : `${implementedThisWeekCount} change${implementedThisWeekCount === 1 ? '' : 's'} shipped this week`;
+  const introSubtitle = tab === 'recommendations'
+    ? `${recs?.items.length ?? 0} recommendations from your agents. ${safeEligibleCount} are safe to ship automatically; review the rest before they go to staging.`
+    : tab === 'drafts'
+      ? 'Review each draft, then approve it to push a branch and open a pull request.'
+      : 'Changes your agents shipped to your site, newest first.';
+
+  const kpis = [
+    { label: 'Recommendations', value: recs?.items.length ?? 0, sub: `across ${Object.keys(grouped).length} categories` },
+    { label: 'High priority', value: highPriorityCount, sub: 'fix these first' },
+    { label: 'Needs review', value: pendingApprovalCount, sub: 'drafts waiting on a person' },
+    { label: 'Auto-eligible', value: safeEligibleCount, sub: 'safe to ship automatically' },
+  ];
+
+  const dateInput = 'h-8 px-2.5 rounded-control bg-white text-[13px] font-medium text-fg min-w-0 flex-1 md:flex-none';
+
+  // One badge per recommendation describing its state. Lifecycle first: a card
+  // with work actually in flight, or one that has come back after a failed
+  // attempt, is describing its own state more usefully than the risk tier can.
+  // Blocked still wins over both — it's the one state where nothing is going to
+  // happen without someone acting. Most blocked_kinds mean the server really
+  // does refuse the draft, so a blocked item must never wear the "Safe" badge.
+  const stateBadge = (item, detailed) => {
+    if (LIFECYCLE_META[item.lifecycle] && !item.blockedReason) {
+      const meta = LIFECYCLE_META[item.lifecycle];
+      return (
+        <Badge tone={meta.tone} className="shrink-0">
+          {meta.label}{item.lifecycle === 'retry' && item.attemptCount > 1 ? ` ${item.attemptCount}×` : ''}
+        </Badge>
+      );
+    }
+    if (item.blockedReason) {
+      const meta = blockedMetaFor(item);
+      const blue = meta.className === 'blue';
+      return <Badge tone={blue ? 'outline' : 'amber'} className="shrink-0">{detailed ? meta.badge : blue ? 'In progress' : 'Blocked'}</Badge>;
+    }
+    if (item.riskTier === 'safe') return <Badge tone="green" className="shrink-0">{detailed ? 'Safe · auto-eligible' : 'Safe'}</Badge>;
+    return detailed ? <Badge tone="amber" className="shrink-0">Manual review required</Badge> : null;
+  };
+
+  const priorityTone = { high: 'red', medium: 'amber', low: 'grey' };
+  const rowCls = (selected) => `w-full flex items-center gap-3 border-b border-border text-left hover:bg-[#fafafa] ${selected ? 'bg-primary-tint' : ''}`;
+  const rowRing = (selected) => (selected ? { boxShadow: 'inset 2px 0 0 var(--primary)' } : undefined);
+  const draftTarget = (d) => d.input?.page || d.input?.filePath || d.input?.topic || d.input?.market || d.input?.city || '';
+
+  const Fact = ({ label, children }) => (
+    <div className="grid grid-cols-1 md:grid-cols-[130px_1fr] gap-0.5 md:gap-3 px-5 py-3 border-b border-border text-sm">
+      <dt className="text-faint">{label}</dt>
+      <dd className="text-fg min-w-0 [overflow-wrap:anywhere]">{children}</dd>
+    </div>
+  );
+  const callout = 'mx-5 my-3 rounded-control px-3.5 py-3 text-[13px]';
+  const link = 'text-primary font-medium underline-offset-2 hover:underline';
+
+  const sel = selectedRecommendation;
+  const selMeta = sel?.blockedReason ? blockedMetaFor(sel) : null;
+  const selBlue = selMeta?.className === 'blue';
+  const alignment = sel ? GOAL_ALIGNMENT_META[sel.goalAlignment?.level] : null;
+
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-      
-      <PageHeader
-        title="Action Center"
-        subtitle="Review, customize, and approve AI recommendations before staging deployment"
-        icon="⚡"
-      />
+    <div className="max-w-[1360px] mx-auto px-4 md:px-8 pt-8 pb-16">
+      <PageToolbar>
+        <SegmentedTabs options={tabOptions} value={tab} onChange={setTab} />
+        {tab === 'recommendations' && recs && (
+          // Source filter — purely a display filter over the same
+          // recommendations feed; Generate Draft/Drafts/Approval/PR logic
+          // below is untouched.
+          <SegmentedTabs options={SOURCE_FILTERS} value={sourceFilter} onChange={setSourceFilter} />
+        )}
+        <div className="flex items-center gap-2 w-full md:w-auto">
+          <input type="date" value={range.start} onChange={(e) => setRange((r) => ({ ...r, start: e.target.value }))}
+            className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="Start date" />
+          <span className="text-faint shrink-0">→</span>
+          <input type="date" value={range.end} onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))}
+            className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="End date" />
+        </div>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {/* Live "today" counters — distinct from the Run button's live
+              eligible-count: that's "how many could ship right now," this is
+              "how many actually did today," pulled from
+              execution_job_recommendations (server/store/execution-jobs.js). */}
+          {tab === 'recommendations' && recs && todayStats && (todayStats.shipped > 0 || todayStats.failed > 0) && (
+            <span className="text-[13px] text-faint" title="Shipped / failed today, across all Execute Safe Fixes and Approve & Ship runs">
+              {todayStats.shipped} shipped today
+              {todayStats.failed > 0 && <span style={{ color: STATUS.critical.text }}> · {todayStats.failed} failed</span>}
+            </span>
+          )}
+          <Button variant="light" onClick={refresh} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</Button>
+          {tab === 'recommendations' && recs && (
+            <Button variant="primary" onClick={executeSafeFixes} disabled={executingSafeFixes || safeEligibleCount === 0}
+              title={safeEligibleCount === 0
+                ? 'No safe-tier recommendations open right now'
+                : `Ship up to ${safeFixBatchLimit ?? safeEligibleCount} of ${safeEligibleCount} safe recommendations — one branch, one PR, no per-item clicks`}>
+              <Zap size={14} />
+              {executingSafeFixes ? 'Running…' : `Run ${Math.min(safeFixBatchLimit ?? safeEligibleCount, safeEligibleCount)} safe fixes`}
+            </Button>
+          )}
+          {tab === 'drafts' && pendingApprovalCount > 0 && (
+            <Button variant="primary" onClick={bulkApproveAllPending} disabled={executingBulkApprove}
+              title={`Approve all ${pendingApprovalCount} pending draft(s) as one batch push/PR instead of one at a time`}>
+              <Zap size={14} />
+              {executingBulkApprove ? '…' : `Approve all pending (${pendingApprovalCount})`}
+            </Button>
+          )}
+        </div>
+      </PageToolbar>
+
+      <PageIntro title={introTitle} subtitle={(tab === 'recommendations' ? recs !== null : drafts !== null) ? introSubtitle : null} />
 
       {error && (
-        <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-2xl px-4 py-3 leading-relaxed flex items-center gap-2">
-          <AlertTriangle size={14} className="text-rose-500 shrink-0" />
+        <div className="rounded-card bg-[#fdecec] text-[#b42318] text-sm px-4 py-3 mb-6 flex items-start gap-2">
+          <AlertTriangle size={14} className="shrink-0 mt-0.5" />
           <span>{error}</span>
         </div>
       )}
 
       {recoveringExecution && (
-        <div className="text-xs font-semibold text-slate-600 bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 leading-relaxed flex items-center gap-2">
-          <Zap size={14} className="text-slate-400 shrink-0 animate-pulse" />
+        <div className="rounded-card bg-muted text-text text-sm px-4 py-3 mb-6 flex items-start gap-2">
+          <Zap size={14} className="shrink-0 mt-0.5" />
           <span>This batch is taking longer than the browser will wait — the run is still going on the server. Fetching its result…</span>
         </div>
       )}
 
       {executionResult && (
-        <div className={`text-xs font-semibold rounded-2xl px-4 py-3 leading-relaxed border ${isRunningExecution ? 'text-slate-600 bg-slate-50 border-slate-200' : 'text-emerald-700 bg-emerald-50 border-emerald-100'}`}>
-          <div className="flex items-center justify-between gap-2">
+        <div className={`rounded-card text-sm px-4 py-3 mb-6 ${isRunningExecution ? 'bg-muted text-text' : 'bg-[#e8f7ee] text-[#1a7f4b]'}`}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="flex items-center gap-2">
               {isRunningExecution
-                ? <Zap size={14} className="text-slate-400 shrink-0 animate-pulse" />
-                : <CheckCircle2 size={14} className="text-emerald-550 shrink-0" />}
+                ? <Zap size={14} className="shrink-0" />
+                : <CheckCircle2 size={14} className="shrink-0" />}
               <span>
                 {isRunningExecution
                   ? `Shipping… ${executionResult.shipped + executionResult.failed} of ${executionResult.job?.items?.length ?? '?'} processed so far (${executionResult.shipped} shipped${executionResult.failed > 0 ? `, ${executionResult.failed} failed` : ''}).`
@@ -692,23 +808,16 @@ export default function ActionCenter() {
             </span>
             <span className="flex items-center gap-2 shrink-0">
               {executionResult.failed > 0 && executionResult.job?.id && (
-                <button
-                  onClick={toggleExecutionFailures}
-                  disabled={loadingExecutionJobDetail}
-                  className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-white border border-rose-200 text-rose-600 hover:border-rose-350 transition disabled:opacity-60 cursor-pointer"
-                >
-                  {loadingExecutionJobDetail ? 'Loading…' : (
-                    <>{executionJobDetail ? <ChevronUp size={10} strokeWidth={2.5} /> : <ChevronDown size={10} strokeWidth={2.5} />} {executionResult.failed} failed</>
-                  )}
-                </button>
+                <Button variant="light" size="sm" onClick={toggleExecutionFailures} disabled={loadingExecutionJobDetail}>
+                  {loadingExecutionJobDetail ? 'Loading…' : <>{executionResult.failed} failed</>}
+                </Button>
               )}
               {executionResult.job?.pr_url && (
-                <a href={executionResult.job.pr_url} target="_blank" rel="noreferrer"
-                  className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-white border border-emerald-200 text-emerald-700 hover:border-emerald-350 transition">
-                  <GitPullRequest size={11} /> View PR
+                <a href={executionResult.job.pr_url} target="_blank" rel="noreferrer" className="btn btn--light btn--sm">
+                  <GitPullRequest size={12} /> View PR
                 </a>
               )}
-              <button onClick={() => { setExecutionResult(null); setExecutionJobDetail(null); }} className="text-emerald-400 hover:text-emerald-600 text-sm leading-none cursor-pointer">×</button>
+              <Button variant="ghost" size="sm" icon aria-label="Dismiss" onClick={() => { setExecutionResult(null); setExecutionJobDetail(null); }}>×</Button>
             </span>
           </div>
 
@@ -717,7 +826,7 @@ export default function ActionCenter() {
               Every failure stays reachable, the banner just stops pushing the
               rest of the page down. */}
           {executionJobDetail && (
-            <div className="mt-3 pt-3 border-t border-emerald-100 space-y-1.5 max-h-80 overflow-y-auto">
+            <div className="mt-3 space-y-1.5 max-h-80 overflow-y-auto">
               {executionJobDetail.items.filter((it) => it.status === 'failed').map((it) => {
                 const Row = it.draft_id ? 'button' : 'div';
                 return (
@@ -725,15 +834,15 @@ export default function ActionCenter() {
                     key={it.id}
                     type={it.draft_id ? 'button' : undefined}
                     onClick={it.draft_id ? () => openFailedDraft(it.draft_id) : undefined}
-                    className={`w-full flex items-start gap-2 text-[11px] font-medium text-rose-700 bg-white/60 rounded-lg px-3 py-2 text-left ${it.draft_id ? 'hover:bg-white hover:border-rose-200 border border-transparent transition cursor-pointer' : ''}`}
+                    className={`w-full flex items-start gap-2 bg-white rounded-control px-3 py-2 text-[13px] text-left ${it.draft_id ? 'cursor-pointer' : ''}`}
                   >
-                    <XCircle size={12} className="text-rose-500 shrink-0 mt-0.5" />
+                    <XCircle size={13} className="shrink-0 mt-0.5" style={{ color: STATUS.critical.color }} />
                     <span>
-                      <span className="font-black">{it.recommendation_type}</span>
-                      {it.page ? <span className="text-rose-500"> — {it.page}</span> : null}
-                      <span className="block text-rose-500 font-normal mt-0.5">{it.error || 'No error message recorded'}</span>
+                      <span className="font-medium text-fg">{it.recommendation_type}</span>
+                      {it.page ? <span className="text-text"> — {it.page}</span> : null}
+                      <span className="block text-text mt-0.5">{it.error || 'No error message recorded'}</span>
                       {it.draft_id && (
-                        <span className="block text-[9px] font-black uppercase tracking-wider text-rose-400 mt-1">Click to open draft →</span>
+                        <span className="block text-primary font-medium mt-1">Open draft</span>
                       )}
                     </span>
                   </Row>
@@ -744,752 +853,367 @@ export default function ActionCenter() {
         </div>
       )}
 
-      {/* QUICK COMMAND METRIC HEADER PANEL */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-
-        {/* Tab switch panel (Left, 5-cols — matches the 5-col left column below so edges line up) */}
-        <div className="lg:col-span-5 bg-slate-100/90 p-1.5 rounded-2xl border border-slate-200/80 flex shadow-sm items-center justify-between">
-          {[
-            { key: 'recommendations', label: 'Recs', count: recs?.items.length },
-            // From the accurate server-side counts (drafts/counts), not the
-            // board list's own length — that list is capped server-side
-            // (listDraftsForBoard) so history can't grow the page unbounded
-            // again the way it did before; the badges must still be right.
-            { key: 'drafts', label: 'Drafts', count: draftCounts?.nonImplemented ?? nonImplementedDrafts?.length },
-            { key: 'implemented', label: 'Done', count: draftCounts?.implemented ?? implementedDrafts.length }
-          ].map((t) => (
-            <button 
-              key={t.key} 
-              onClick={() => setTab(t.key)}
-              className={`text-xs py-2.5 px-3.5 font-black rounded-xl flex-1 transition-all duration-200 cursor-pointer ${
-                tab === t.key
-                  ? 'bg-white text-indigo-650 shadow border border-slate-200/60'
-                  : 'text-slate-500 hover:text-slate-800'
-              }`}
-            >
-              {t.label} {t.count !== undefined && <span className="font-mono text-[9px] opacity-70">({t.count})</span>}
-            </button>
-          ))}
+      {tab === 'drafts' && bulkApproveResult && (
+        <div className="rounded-card bg-[#e8f7ee] text-[#1a7f4b] text-sm px-4 py-3 mb-6 flex flex-wrap items-center justify-between gap-2">
+          <span>
+            Shipped {bulkApproveResult.shipped}{bulkApproveResult.failed > 0 ? `, ${bulkApproveResult.failed} failed` : ''} — committed to one branch{bulkApproveResult.job?.pr_url ? ', one PR opened' : ''}.
+          </span>
+          {bulkApproveResult.job?.pr_url && (
+            <a href={bulkApproveResult.job.pr_url} target="_blank" rel="noreferrer" className="btn btn--light btn--sm shrink-0">
+              <GitPullRequest size={12} /> View PR
+            </a>
+          )}
         </div>
+      )}
 
-        {/* Date controllers & refresh pipeline (Right, 7-cols — matches the 7-col right column below so edges line up) */}
-        <div className="lg:col-span-7 bg-white border border-slate-205 rounded-2xl p-2.5 flex flex-wrap items-center justify-between gap-4 shadow-sm">
-          
-          {/* Quick stats indicators with distinct colored chips */}
-          <div className="flex items-center gap-2.5 text-[10.5px] font-black uppercase tracking-wider shrink-0">
-            <span className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-100 text-indigo-700 px-3 py-1.5 rounded-xl shadow-sm"><Sparkles size={11} className="text-indigo-550 animate-pulse" /> Recs: <strong className="ml-0.5">{recs?.items.length ?? 0}</strong></span>
-            <span className="flex items-center gap-1.5 bg-rose-50 border border-rose-100 text-rose-700 px-3 py-1.5 rounded-xl shadow-sm"><AlertTriangle size={11} className="text-rose-550" /> High: <strong className="ml-0.5">{highPriorityCount}</strong></span>
-            <span className="flex items-center gap-1.5 bg-amber-50 border border-amber-100 text-amber-700 px-3 py-1.5 rounded-xl shadow-sm"><Clock size={11} className="text-amber-550" /> Review: <strong className="ml-0.5">{pendingApprovalCount}</strong></span>
-            <span className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-100 text-emerald-700 px-3 py-1.5 rounded-xl shadow-sm"><ShieldCheck size={11} className="text-emerald-550" /> Auto-eligible: <strong className="ml-0.5">{safeEligibleCount}</strong></span>
-          </div>
+      <KpiStrip items={kpis} loading={recs === null} />
 
-          <div className="flex items-center flex-wrap gap-2 gap-y-2 ml-auto">
-            <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-[10px]">
-              <span className="font-black text-slate-400">Start:</span>
-              <input type="date" value={range.start} onChange={(e) => setRange((r) => ({ ...r, start: e.target.value }))}
-                className="bg-transparent border-none outline-none font-bold text-slate-700 w-[90px] sm:w-[105px]" />
-            </div>
-            <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-[10px]">
-              <span className="font-black text-slate-400">End:</span>
-              <input type="date" value={range.end} onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))}
-                className="bg-transparent border-none outline-none font-bold text-slate-700 w-[90px] sm:w-[105px]" />
-            </div>
-            <button
-              onClick={refresh}
-              disabled={refreshing}
-              className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/10 disabled:opacity-60 cursor-pointer"
-              style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-            >
-              {refreshing ? 'Refreshing…' : 'Refresh'}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* DUAL COLUMN SPLIT VIEWPORT WITH COLOR CONTRAST */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-        
-        {/* Left Column (5-cols) - Pipeline selection lists (SLATE BACKGROUND FOR CONTRAST) */}
-        <div className="lg:col-span-5 bg-slate-50 border border-slate-200 rounded-3xl p-4.5 space-y-4 shadow-sm flex flex-col justify-start">
-          
-          {/* Source filter (Recommendations tab) — SEO / GEO / Analytics,
-              purely a display filter over the same recommendations feed;
-              Generate Draft/Drafts/Approval/PR logic below is untouched. */}
-          {tab === 'recommendations' && recs && (
-            <div className="flex items-center gap-1.5">
-              <div className="flex items-center gap-1 bg-slate-100/90 p-1 rounded-xl border border-slate-200/80">
-                {SOURCE_FILTERS.map((f) => {
-                  const active = sourceFilter === f.value;
-                  const meta = BUCKET_META[f.value];
+      <div className="grid gap-6 lg:grid-cols-[1.3fr_1fr] items-start mt-10">
+        {/* ============ LEFT: lists ============ */}
+        {tab === 'recommendations' && (
+          <Section className="min-w-0" title="Recommendations" subtitle="Grouped by category · open a group to see its fixes">
+            <div className="card overflow-hidden">
+              {recs === null ? (
+                Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="px-4 py-3 border-b border-border last:border-0"><div className="h-4 bg-muted rounded-control animate-pulse" /></div>
+                ))
+              ) : Object.keys(grouped).length === 0 ? (
+                <div className="text-sm text-faint text-center py-12">No recommendations in this range.</div>
+              ) : (
+                Object.entries(grouped).map(([category, items]) => {
+                  const open = activeCategory === category;
                   return (
-                    <button
-                      key={f.value}
-                      onClick={() => setSourceFilter(f.value)}
-                      className={`text-[10px] py-1.5 px-2.5 font-black rounded-lg transition-all duration-150 cursor-pointer ${
-                        active ? 'bg-white shadow border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
-                      }`}
-                      style={active && meta ? { color: meta.color } : undefined}
-                    >
-                      {f.label}
-                    </button>
-                  );
-                })}
-              </div>
-              <button
-                onClick={executeSafeFixes}
-                disabled={executingSafeFixes || safeEligibleCount === 0}
-                title={safeEligibleCount === 0
-                  ? 'No safe-tier recommendations open right now'
-                  : `Ship up to ${safeFixBatchLimit ?? safeEligibleCount} of ${safeEligibleCount} safe recommendations — one branch, one PR, no per-item clicks`}
-                className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-xl text-white transition hover:scale-[1.02] active:scale-[0.98] shadow-sm disabled:opacity-50 disabled:hover:scale-100 cursor-pointer ml-auto shrink-0"
-                style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}
-              >
-                <Zap size={11} className={executingSafeFixes ? 'animate-pulse' : ''} />
-                {executingSafeFixes ? '…' : Math.min(safeFixBatchLimit ?? safeEligibleCount, safeEligibleCount)}
-              </button>
-
-              {/* Live "today" counters — distinct from the Zap button's live
-                  eligible-count above it: that's "how many could ship right
-                  now," this is "how many actually did today," pulled from
-                  execution_job_recommendations (server/store/execution-jobs.js). */}
-              {todayStats && (todayStats.shipped > 0 || todayStats.failed > 0) && (
-                <div className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider shrink-0" title="Shipped / failed today, across all Execute Safe Fixes and Approve & Ship runs">
-                  {todayStats.shipped > 0 && (
-                    <span className="flex items-center gap-1 bg-emerald-50 border border-emerald-100 text-emerald-700 px-2 py-1.5 rounded-xl shadow-sm">
-                      <CheckCircle2 size={10} className="text-emerald-550" /> {todayStats.shipped} today
-                    </span>
-                  )}
-                  {todayStats.failed > 0 && (
-                    <span className="flex items-center gap-1 bg-rose-50 border border-rose-100 text-rose-700 px-2 py-1.5 rounded-xl shadow-sm">
-                      <XCircle size={10} className="text-rose-550" /> {todayStats.failed} today
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Categories select checklist (Recommendations tab) — dynamic per
-              selected source, only categories actually present are shown. */}
-          {tab === 'recommendations' && recs && Object.keys(grouped).length > 0 && (
-            <div className="space-y-1.5">
-              <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 px-1 flex items-center gap-1 mb-1">
-                <Layers size={11} className="text-indigo-550" />
-                <span>Categories ({Object.keys(grouped).length})</span>
-              </div>
-              <div className="grid grid-cols-2 gap-1.5">
-                {Object.entries(grouped).map(([category, items]) => {
-                  const bucketColor = BUCKET_META[items[0]?.bucket]?.color || '#64748b';
-                  const meta = { label: category, icon: CATEGORY_META[category]?.icon || '•', color: bucketColor };
-                  const active = activeCategory === category;
-                  return (
-                    <button
-                      key={category}
-                      onClick={() => setActiveCategory(category)}
-                      className={`flex items-center justify-between px-3 py-2 rounded-xl text-[11px] font-bold transition-all border text-left cursor-pointer ${
-                        active
-                          ? 'bg-white border-slate-300 text-indigo-700 shadow-sm font-black'
-                          : 'bg-slate-100/50 border-slate-200 text-slate-600 hover:text-slate-800'
-                      }`}
-                      style={{
-                        color: active ? meta.color : '',
-                        borderColor: active ? `${meta.color}5a` : ''
-                      }}
-                    >
-                      <span className="flex items-center gap-1.5 truncate">
-                        <span>{meta.icon}</span>
-                        <span className="truncate">{meta.label}</span>
-                      </span>
-                      <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-500">
-                        {items.length}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Pipelines status list (Drafts tab) */}
-          {tab === 'drafts' && nonImplementedDrafts && nonImplementedDrafts.length > 0 && (
-            <div className="space-y-1">
-              <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 px-1 flex items-center gap-1 mb-1">
-                <SlidersHorizontal size={11} className="text-indigo-550" />
-                <span>Pipelines Filter</span>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {STATUS_FILTERS.map((f) => {
-                  const active = statusFilter === f.value;
-                  const count = f.value
-                    ? nonImplementedDrafts.filter((d) => d.status === f.value).length
-                    : nonImplementedDrafts.length;
-                  return (
-                    <button 
-                      key={f.value} 
-                      onClick={() => setStatusFilter(f.value)}
-                      className={`flex items-center justify-between gap-1.5 px-3 py-1.5 rounded-xl text-[10.5px] font-black transition-all border cursor-pointer ${
-                        active 
-                          ? 'bg-white border-slate-350 text-indigo-700 shadow-sm' 
-                          : 'bg-slate-100/60 border-slate-200 text-slate-550 hover:text-slate-800'
-                      }`}
-                    >
-                      <span>{f.label}</span>
-                      <span className="font-mono text-[9px] opacity-75">({count})</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Main list view block */}
-          {tab === 'recommendations' && (
-            <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden flex flex-col justify-between flex-1 min-h-[300px]">
-              <div>
-                <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
-                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Findings List</span>
-                  <span className="text-[10px] font-bold text-slate-400 font-mono">{activeItems.length} entries</span>
-                </div>
-
-                {recs === null ? (
-                  <div className="p-8 text-center text-xs text-slate-450 animate-pulse">Running audits…</div>
-                ) : activeItems.length === 0 ? (
-                  <div className="p-8 text-center text-xs text-slate-450 italic">No recommendations.</div>
-                ) : (
-                  // Unlike the Drafts/Implemented lists below (which already
-                  // cap at max-h-[360px] overflow-y-auto), this one had no
-                  // scroll bound — "View All" expanding to a dozen-plus
-                  // entries just grew the whole card (and page) instead of
-                  // scrolling internally, burying the right column's
-                  // Generate Draft panel far below the fold on mobile.
-                  <div className="divide-y divide-slate-100 overflow-y-auto max-h-[360px]">
-                    {(showAllRecommendations ? sortedItems : sortedItems.slice(0, 4)).map((item) => {
-                      const pr = PRIORITY[item.priority] || PRIORITY.low;
-                      const selected = selectedRecommendation?.id === item.id;
-                      return (
-                        <button
-                          key={item.id}
-                          onClick={() => setSelectedRecommendation(item)}
-                          className={`w-full flex items-start gap-3 px-4 py-3.5 text-left border-b border-slate-50 hover:bg-slate-50/40 transition cursor-pointer ${
-                            selected ? 'bg-indigo-50/45 border-r-2 border-r-indigo-500' : ''
-                          }`}
-                        >
-                          <span className="w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 animate-pulse" style={{ background: pr.color }} />
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="text-xs font-black text-slate-800 leading-snug truncate">{titleFor(item)}</span>
-                              {/* Most blocked_kinds mean the server really does refuse the draft,
-                                  so this must not wear the "Safe — auto-eligible" badge that
-                                  promises the opposite ('design-degraded' is the one exception —
-                                  see blockedMetaFor/the action-button logic below — but even it
-                                  still isn't risk-tier 'safe', so this exclusion is harmless for
-                                  it too). The reason itself is stated in the detail panel. */}
-                              {/* Lifecycle first: a card with work actually in flight, or one
-                                  that has come back after a failed attempt, is describing its
-                                  own state more usefully than the risk tier can. Blocked still
-                                  wins over both — it's the one state where nothing is going to
-                                  happen without someone acting. */}
-                              {LIFECYCLE_META[item.lifecycle] && !item.blockedReason ? (() => {
-                                const meta = LIFECYCLE_META[item.lifecycle];
-                                const LifecycleIcon = meta.icon;
-                                return (
-                                  <span className={`shrink-0 flex items-center gap-0.5 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full border ${meta.className}`}>
-                                    <LifecycleIcon size={8} /> {meta.label}
-                                    {item.lifecycle === 'retry' && item.attemptCount > 1 ? ` ${item.attemptCount}×` : ''}
+                    <div key={category}>
+                      <button type="button" aria-expanded={open} onClick={() => setActiveCategory(category)}
+                        className="w-full flex items-center gap-2.5 px-4 py-3 border-b border-border text-sm text-left">
+                        <ChevronRight size={12} className={`text-faint shrink-0 transition-transform ${open ? 'rotate-90' : ''}`} />
+                        <span className={open ? 'font-medium text-fg' : 'text-text'}>{category}</span>
+                        <span className="text-xs text-text px-[7px] py-px rounded-full" style={{ boxShadow: 'inset 0 0 0 1px var(--border-2)' }}>{items.length}</span>
+                        {open && <span className="ml-auto text-xs text-faint">Priority</span>}
+                      </button>
+                      {open && (
+                        <>
+                          {/* Unlike the Drafts/Done lists below (which already cap at
+                              max-h-[360px] overflow-y-auto), this one had no scroll
+                              bound — "Show all" expanding to a dozen-plus entries just
+                              grew the whole card (and page) instead of scrolling
+                              internally, burying the details panel far below the fold
+                              on mobile. */}
+                          <div className="overflow-y-auto max-h-[360px]">
+                            {(showAllRecommendations ? sortedItems : sortedItems.slice(0, 4)).map((item) => {
+                              const selected = selectedRecommendation?.id === item.id;
+                              const level = item.priority === 'high' ? 3 : item.priority === 'medium' ? 2 : 1;
+                              const itemUrl = item.url || item.params?.page;
+                              const path = itemUrl ? pagePathFor(itemUrl) : null;
+                              return (
+                                <button key={item.id} type="button" onClick={() => pickRecommendation(item)}
+                                  aria-current={selected ? 'true' : undefined}
+                                  className={`${rowCls(selected)} pl-10 pr-4 py-2.5`} style={rowRing(selected)}>
+                                  <span className="flex items-end gap-[2px] shrink-0" aria-label={`${item.priority || 'low'} priority`} role="img">
+                                    {[5, 8, 12].map((h, k) => (
+                                      <i key={k} className="block w-[3px] rounded-[1px]" style={{ height: h, background: k < level ? 'var(--fg)' : '#d4d4d4' }} />
+                                    ))}
                                   </span>
-                                );
-                              })() : item.blockedReason ? (() => {
-                                const meta = blockedMetaFor(item);
-                                const BlockedIcon = meta.icon;
-                                return (
-                                  <span className={`shrink-0 flex items-center gap-0.5 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full ${
-                                    meta.className === 'blue' ? 'bg-sky-50 border border-sky-100 text-sky-600' : 'bg-amber-50 border border-amber-100 text-amber-600'
-                                  }`}>
-                                    <BlockedIcon size={8} /> {meta.className === 'blue' ? 'In progress' : 'Blocked'}
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block text-sm font-medium text-fg truncate">{titleFor(item)}</span>
+                                    <span className="block text-xs text-faint truncate mt-px">{item.reason}</span>
                                   </span>
-                                );
-                              })() : item.riskTier === 'safe' && (
-                                <span className="shrink-0 flex items-center gap-0.5 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
-                                  <ShieldCheck size={8} /> Safe
-                                </span>
-                              )}
-                              {BUCKET_META[item.bucket] && (
-                                <span
-                                  className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full shrink-0"
-                                  style={{ color: BUCKET_META[item.bucket].color, background: `${BUCKET_META[item.bucket].color}14` }}
-                                >
-                                  {BUCKET_META[item.bucket].label}
-                                </span>
-                              )}
+                                  {stateBadge(item, false)}
+                                  {BUCKET_META[item.bucket] && <Badge tone="outline" className="shrink-0">{BUCKET_META[item.bucket].label}</Badge>}
+                                  {path && (
+                                    <span className="hidden md:inline text-xs text-text px-2 py-0.5 rounded-[6px] max-w-[180px] truncate"
+                                      style={{ boxShadow: 'inset 0 0 0 1px var(--border-2)' }}>{path}</span>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {sortedItems.length > 4 && (
+                            <div className="pl-10 py-1.5 border-b border-border">
+                              <Button variant="ghost" size="sm" onClick={() => setShowAllRecommendations(!showAllRecommendations)}>
+                                {showAllRecommendations ? 'Show fewer' : `Show all ${sortedItems.length}`}
+                              </Button>
                             </div>
-                            <p className="text-[10px] font-bold text-slate-450 mt-1 truncate">{item.reason}</p>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-              
-              {sortedItems.length > 4 && (
-                <div className="p-2.5 border-t border-slate-100 bg-slate-50/30 flex justify-end">
-                  <button 
-                    type="button"
-                    onClick={() => setShowAllRecommendations(!showAllRecommendations)}
-                    className="text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-500 hover:text-indigo-650 hover:border-slate-350 transition flex items-center gap-1 shadow-sm focus:outline-none cursor-pointer"
-                  >
-                    <span>{showAllRecommendations ? 'Less' : `All (${sortedItems.length})`}</span>
-                    {showAllRecommendations ? <ChevronUp size={10} strokeWidth={2.5} /> : <ChevronDown size={10} strokeWidth={2.5} />}
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {tab === 'drafts' && (
-            <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden flex-1 flex flex-col min-h-[300px]">
-              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
-                <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Drafts List</span>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-bold text-slate-400 font-mono">{visibleDrafts?.length || 0} visible</span>
-                  {pendingApprovalCount > 0 && (
-                    <button
-                      onClick={bulkApproveAllPending}
-                      disabled={executingBulkApprove}
-                      title={`Approve all ${pendingApprovalCount} pending draft(s) as one batch push/PR instead of one at a time`}
-                      className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-xl text-white transition hover:scale-[1.02] active:scale-[0.98] shadow-sm disabled:opacity-50 disabled:hover:scale-100 cursor-pointer shrink-0"
-                      style={{ background: 'linear-gradient(135deg,#6366f1,#4f46e5)' }}
-                    >
-                      <Zap size={11} className={executingBulkApprove ? 'animate-pulse' : ''} />
-                      {executingBulkApprove ? '…' : `Approve All (${pendingApprovalCount})`}
-                    </button>
-                  )}
-                </div>
-              </div>
-              {bulkApproveResult && (
-                <div className="px-4 py-2.5 border-b border-slate-100 bg-indigo-50/50 flex items-center justify-between gap-2 text-[10px] font-bold text-indigo-700">
-                  <span>
-                    Shipped {bulkApproveResult.shipped}{bulkApproveResult.failed > 0 ? `, ${bulkApproveResult.failed} failed` : ''} — committed to one branch{bulkApproveResult.job?.pr_url ? ', one PR opened' : ''}.
-                  </span>
-                  {bulkApproveResult.job?.pr_url && (
-                    <a href={bulkApproveResult.job.pr_url} target="_blank" rel="noreferrer" className="underline shrink-0">View PR</a>
-                  )}
-                </div>
-              )}
-
-              {drafts === null ? (
-                <div className="p-8 text-center text-xs text-slate-450 animate-pulse">Loading list…</div>
-              ) : visibleDrafts.length === 0 ? (
-                <div className="p-8 text-center text-xs text-slate-405 italic">No drafts matching status.</div>
-              ) : (
-                <div className="divide-y divide-slate-100 overflow-y-auto flex-1 max-h-[360px]">
-                  {visibleDrafts.map((d) => {
-                    const meta = GENERATOR_META[d.action_type] || { label: d.action_type, icon: '•', color: '#64748b' };
-                    const selected = selectedDraftItem?.id === d.id;
-                    return (
-                      <button 
-                        key={d.id} 
-                        onClick={() => setSelectedDraftItem(d)}
-                        className={`w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-slate-50/40 transition cursor-pointer ${
-                          selected ? 'bg-indigo-50/45 border-r-2 border-r-indigo-500' : ''
-                        }`}
-                      >
-                        <span className="w-6 h-6 rounded-lg grid place-items-center text-xs shrink-0 border border-slate-150 bg-white" style={{ color: meta.color }}>
-                          {meta.icon}
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <div className="text-xs font-black text-slate-800 leading-snug">{meta.label}</div>
-                          <div className="text-[9.5px] font-mono text-slate-400 truncate mt-0.5">
-                            {d.input?.page || d.input?.filePath || d.input?.topic || d.input?.market || d.input?.city || ''}
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {tab === 'implemented' && (
-            <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden flex-1 flex flex-col min-h-[300px]">
-              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
-                <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Implemented History</span>
-                <span className="text-[10px] font-bold text-slate-405 font-mono">{draftCounts?.implemented ?? implementedDrafts.length} total</span>
-              </div>
-
-              {drafts === null ? (
-                <div className="p-8 text-center text-xs text-slate-405 animate-pulse">Loading history…</div>
-              ) : implementedDrafts.length === 0 ? (
-                <div className="p-8 text-center text-xs text-slate-405 italic">No logs generated.</div>
-              ) : (
-                <div className="divide-y divide-slate-100 overflow-y-auto flex-1 max-h-[360px]">
-                  {implementedDrafts.map((d) => {
-                    const meta = GENERATOR_META[d.action_type] || { label: d.action_type, icon: '•', color: '#64748b' };
-                    const selected = selectedDraftItem?.id === d.id;
-                    return (
-                      <button 
-                        key={d.id} 
-                        onClick={() => setSelectedDraftItem(d)}
-                        className={`w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-slate-50/40 transition cursor-pointer ${
-                          selected ? 'bg-indigo-50/45 border-r-2 border-r-indigo-500' : ''
-                        }`}
-                      >
-                        <span className="w-6 h-6 rounded-lg grid place-items-center text-xs shrink-0 border border-slate-150 bg-white" style={{ color: meta.color }}>
-                          {meta.icon}
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <div className="text-xs font-black text-slate-800 leading-snug">{meta.label}</div>
-                          <div className="text-[9.5px] font-mono text-slate-400 truncate mt-0.5">
-                            {d.input?.page || d.input?.filePath || d.input?.topic || d.input?.market || d.input?.city || ''}
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Right Column (7-cols) - Split screen Live Workspace Preview (FLOATING WHITE CARD FOR ELEVATION CONTRAST) */}
-        <div className="lg:col-span-7">
-          
-          {tab === 'recommendations' && (
-            <div className="rounded-3xl border border-slate-205 bg-white shadow-md overflow-hidden h-full flex flex-col justify-between min-h-[350px]">
-              {selectedRecommendation ? (
-                <div className="flex-1 flex flex-col justify-between">
-                  <div>
-                    <div className="h-1.5 shrink-0 animate-pulse" style={{ background: activeMeta ? `linear-gradient(to right, ${activeMeta.color}, ${activeMeta.color}3a)` : '#e2e8f0' }} />
-                    <div className="px-6 py-5 border-b border-slate-100 flex items-center gap-3 bg-slate-50/40">
-                      {activeMeta && (
-                        <span className="w-9 h-9 rounded-xl grid place-items-center text-sm shadow border border-slate-200 bg-white animate-fade-in" style={{ color: activeMeta.color }}>
-                          {activeMeta.icon}
-                        </span>
+                          )}
+                        </>
                       )}
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <h3 className="text-sm font-black text-slate-900 leading-tight">{titleFor(selectedRecommendation)}</h3>
-                          {selectedRecommendation.blockedReason ? (() => {
-                            const meta = blockedMetaFor(selectedRecommendation);
-                            const BlockedIcon = meta.icon;
-                            return (
-                              <span className={`flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${
-                                meta.className === 'blue' ? 'bg-sky-50 border border-sky-100 text-sky-600' : 'bg-amber-50 border border-amber-100 text-amber-600'
-                              }`}>
-                                <BlockedIcon size={9} /> {meta.badge}
-                              </span>
-                            );
-                          })() : selectedRecommendation.riskTier === 'safe' ? (
-                            <span className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
-                              <ShieldCheck size={9} /> Safe — auto-eligible
-                            </span>
-                          ) : (
-                            <span className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-50 border border-amber-100 text-amber-600">
-                              <ShieldAlert size={9} /> Manual review required
-                            </span>
-                          )}
-                          {BUCKET_META[selectedRecommendation.bucket] && (
-                            <span
-                              className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full shrink-0"
-                              style={{ color: BUCKET_META[selectedRecommendation.bucket].color, background: `${BUCKET_META[selectedRecommendation.bucket].color}14` }}
-                            >
-                              {BUCKET_META[selectedRecommendation.bucket].label}
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[10px] text-slate-400 font-black uppercase tracking-wider mt-1.5">Found by: {activeMeta?.label || 'Website Check'}</p>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </Section>
+        )}
+
+        {tab === 'drafts' && (
+          <Section className="min-w-0" title="Drafts" subtitle="Generated fixes moving towards your site">
+            {nonImplementedDrafts && nonImplementedDrafts.length > 0 && (
+              <div className="mb-3 max-w-full overflow-x-auto no-scrollbar">
+                <SegmentedTabs value={statusFilter} onChange={setStatusFilter}
+                  options={STATUS_FILTERS.map((f) => ({
+                    value: f.value,
+                    label: <>{f.label}<span className="text-faint ml-1">{f.value ? nonImplementedDrafts.filter((d) => d.status === f.value).length : nonImplementedDrafts.length}</span></>,
+                  }))} />
+              </div>
+            )}
+            <div className="card overflow-hidden">
+              {drafts === null ? (
+                <div className="py-10 text-center text-sm text-faint">Loading list…</div>
+              ) : visibleDrafts.length === 0 ? (
+                <div className="py-10 text-center text-sm text-faint">No drafts matching status.</div>
+              ) : (
+                <div className="overflow-y-auto max-h-[360px]">
+                  {visibleDrafts.map((d) => {
+                    const meta = GENERATOR_META[d.action_type] || { label: d.action_type };
+                    const selected = selectedDraftItem?.id === d.id;
+                    return (
+                      <button key={d.id} type="button" onClick={() => pickDraft(d)} aria-current={selected ? 'true' : undefined}
+                        className={`${rowCls(selected)} px-4 py-3`} style={rowRing(selected)}>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-medium text-fg">{meta.label}</span>
+                          <span className="block font-mono text-xs text-faint truncate">{draftTarget(d)}</span>
+                        </span>
+                        <Badge tone={DRAFT_TONE[d.status] || 'grey'} className="shrink-0">{draftStatusText(d.status)}</Badge>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </Section>
+        )}
+
+        {tab === 'implemented' && (
+          <Section className="min-w-0" title="Shipped" subtitle="Newest first">
+            <div className="card overflow-hidden">
+              {drafts === null ? (
+                <div className="py-10 text-center text-sm text-faint">Loading history…</div>
+              ) : implementedDrafts.length === 0 ? (
+                <div className="py-10 text-center text-sm text-faint">Nothing shipped in this range yet.</div>
+              ) : (
+                <div className="overflow-y-auto max-h-[360px]">
+                  {implementedDrafts.map((d) => {
+                    const meta = GENERATOR_META[d.action_type] || { label: d.action_type };
+                    const selected = selectedDraftItem?.id === d.id;
+                    return (
+                      <button key={d.id} type="button" onClick={() => pickDraft(d)} aria-current={selected ? 'true' : undefined}
+                        className={`${rowCls(selected)} px-4 py-3`} style={rowRing(selected)}>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-medium text-fg">{meta.label}</span>
+                          <span className="block font-mono text-xs text-faint truncate">{draftTarget(d)}</span>
+                        </span>
+                        <Badge tone="green" className="shrink-0">Implemented</Badge>
+                        {d.implemented_at && <span className="text-xs text-faint shrink-0">{timeAgo(d.implemented_at)}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </Section>
+        )}
+
+        {/* ============ RIGHT: details ============ */}
+        <div ref={detailsRef} className="min-w-0 lg:sticky lg:top-[72px] scroll-mt-20">
+          {tab === 'recommendations' && (
+            <Section title="Details" subtitle="The selected recommendation">
+              <div className="card overflow-hidden">
+                {sel ? (
+                  <>
+                    <div className="px-5 py-4 border-b border-border">
+                      <h3 className="text-[17px] font-medium tracking-[-0.01em] text-fg break-words">{titleFor(sel)}</h3>
+                      <div className="flex flex-wrap gap-1.5 mt-2.5">
+                        {stateBadge(sel, true)}
+                        {BUCKET_META[sel.bucket] && <Badge tone="outline">{BUCKET_META[sel.bucket].label}</Badge>}
+                        {activeMeta && <Badge tone="outline">{activeMeta.label}</Badge>}
                       </div>
                     </div>
 
-                    <div className="p-6 space-y-4">
-                      {/* Work in flight. Names the PR so "in progress" is a claim the
-                          user can click on and verify, rather than one they have to
-                          trust — this card used to disappear entirely at this point,
-                          which is how a draft stalled at 'branch_pushed' for three days
-                          stayed invisible. */}
-                      {selectedRecommendation.draft && selectedRecommendation.lifecycle === 'in_progress' && (
-                        <div className="rounded-2xl border border-violet-100 bg-violet-50/50 px-4 py-3">
-                          <p className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider text-violet-700">
-                            <GitPullRequest size={11} />
-                            {selectedRecommendation.draft.awaitingReview ? 'Waiting on your review' : 'Being worked on now'}
-                          </p>
-                          <p className="text-xs font-medium text-violet-900/85 mt-1.5 leading-relaxed">
-                            A fix for this is at{' '}
-                            <span className="font-bold">{DRAFT_STATUS_LABEL[selectedRecommendation.draft.status] || selectedRecommendation.draft.status}</span>.
-                            {selectedRecommendation.draft.awaitingReview
-                              ? ' It needs someone to approve it before it can ship.'
-                              : ' Nothing to do — it will finish on its own.'}
-                          </p>
-                          {selectedRecommendation.draft.prUrl && (
-                            <a
-                              href={selectedRecommendation.draft.prUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center gap-1 text-[11px] font-bold text-violet-700 hover:text-violet-900 underline mt-2"
-                            >
-                              View pull request #{selectedRecommendation.draft.prNumber} <ArrowRight size={10} />
-                            </a>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Why this is back. A recommendation that has been attempted
-                          before and returned is a different thing from a brand-new one,
-                          and the user is owed the difference — including whether the
-                          system intends to try again by itself. */}
-                      {selectedRecommendation.attemptCount > 0 && selectedRecommendation.lifecycle !== 'in_progress' && (
-                        <div className="rounded-2xl border border-orange-100 bg-orange-50/40 px-4 py-3">
-                          <p className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider text-orange-700">
-                            <History size={11} />
-                            Tried {selectedRecommendation.attemptCount}{selectedRecommendation.attemptCount === 1 ? ' time' : ' times'} before
-                            {selectedRecommendation.lastAttemptAt ? ` · last ${timeAgo(selectedRecommendation.lastAttemptAt)}` : ''}
-                          </p>
-                          {RETRY_POLICY_COPY[selectedRecommendation.lastFailurePolicy] && (
-                            <p className="text-xs font-medium text-orange-900/85 mt-1.5 leading-relaxed">
-                              {RETRY_POLICY_COPY[selectedRecommendation.lastFailurePolicy]}
-                            </p>
-                          )}
-                          {/* The raw reason is already customer-safe by the time it is
-                              stored (every writer passes it through lib/errors.js or an
-                              author-written constant), and it is the one detail that
-                              makes a repeat failure diagnosable rather than mysterious. */}
-                          {selectedRecommendation.lastFailureReason && (
-                            <p className="text-[11px] font-medium text-orange-900/70 mt-1.5 leading-relaxed break-words">
-                              Last outcome: {selectedRecommendation.lastFailureReason}
-                            </p>
-                          )}
-                        </div>
-                      )}
-
-                      {/* The server already refuses to draft this (422 in
-                          routes/action-center.js) — this states WHY, and what to do
-                          about it, instead of leaving the user to discover it by
-                          clicking a button that always fails. */}
-                      {selectedRecommendation.blockedReason && (() => {
-                        const meta = blockedMetaFor(selectedRecommendation);
-                        const BlockedIcon = meta.icon;
-                        const blue = meta.className === 'blue';
-                        return (
-                          <div className={`flex items-start gap-2.5 rounded-2xl p-4 border ${blue ? 'bg-sky-50/70 border-sky-150' : 'bg-amber-50/70 border-amber-150'}`}>
-                            <BlockedIcon size={13} className={`shrink-0 mt-0.5 ${blue ? 'text-sky-600' : 'text-amber-600'}`} />
-                            <div className="min-w-0">
-                              <div className={`text-[10px] font-black uppercase tracking-widest mb-1 ${blue ? 'text-sky-700' : 'text-amber-700'}`}>{meta.heading}</div>
-                              <p className={`text-xs font-medium leading-relaxed ${blue ? 'text-sky-900/85' : 'text-amber-900/85'}`}>{selectedRecommendation.blockedReason}</p>
-                            </div>
-                          </div>
-                        );
-                      })()}
-
-                      {/* Never hides the card or its Generate/Fix button either way —
-                          this only ever adds context, it doesn't gate the action. */}
-                      {(() => {
-                        const level = selectedRecommendation.goalAlignment?.level;
-                        const meta = GOAL_ALIGNMENT_META[level];
-                        if (!meta) {
-                          return (
-                            <div className="flex items-start gap-2.5 rounded-2xl p-4 border bg-slate-50/50 border-slate-150">
-                              <Target size={13} className="shrink-0 mt-0.5 text-slate-400" />
-                              <p className="text-xs font-medium text-slate-500">Not tied to an active business goal</p>
-                            </div>
-                          );
-                        }
-                        return (
-                          <div className={`flex items-start gap-2.5 rounded-2xl p-4 border ${meta.className}`}>
-                            <Target size={13} className="shrink-0 mt-0.5" />
-                            <div className="min-w-0">
-                              <div className="text-[10px] font-black uppercase tracking-widest mb-1">Why this matters to your goal</div>
-                              <p className={`text-xs font-medium leading-relaxed ${meta.textClassName}`}>{selectedRecommendation.goalAlignment.rationale}</p>
-                            </div>
-                          </div>
-                        );
-                      })()}
-
-                      <div>
-                        <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Found By</div>
-                        <p className="text-xs font-bold text-slate-700">{selectedRecommendation.agentName || activeMeta?.label}</p>
-                      </div>
-
-                      <div>
-                        <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Reason</div>
-                        <p className="text-xs font-medium text-slate-650 leading-relaxed bg-slate-50 p-4.5 rounded-2xl border border-slate-150 shadow-inner">
-                          {selectedRecommendation.reason}
-                        </p>
-                      </div>
-
-                      {selectedRecommendation.params.page && (
-                        <div>
-                          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Affected Page URL</div>
-                          <div className="bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 font-mono text-[10.5px] text-indigo-650 truncate max-w-full">
-                            {selectedRecommendation.params.page}
-                          </div>
-                        </div>
-                      )}
-
+                    <dl>
+                      <Fact label="Goal">
+                        {alignment ? (
+                          <>
+                            <span className="font-medium">{alignment.label}</span>
+                            <span className="block text-text mt-0.5">{sel.goalAlignment.rationale}</span>
+                          </>
+                        ) : (
+                          <span className="text-faint">Not tied to an active business goal</span>
+                        )}
+                      </Fact>
+                      <Fact label="Found by">{sel.agentName || activeMeta?.label || 'Website Check'}</Fact>
+                      <Fact label="Reason">{sel.reason}</Fact>
+                      {sel.params.page && <Fact label="Page"><span className="font-mono text-[13px] break-all">{sel.params.page}</span></Fact>}
                       {/* blog-image (agents/blog-image.js) keys on the post's real repo
                           path, not a page URL — a distinct label so a raw path is never
                           shown as though it were a live URL. */}
-                      {selectedRecommendation.params.filePath && (
-                        <div>
-                          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Affected File</div>
-                          <div className="bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 font-mono text-[10.5px] text-indigo-650 truncate max-w-full">
-                            {selectedRecommendation.params.filePath}
-                          </div>
-                        </div>
+                      {sel.params.filePath && <Fact label="File"><span className="font-mono text-[13px] break-all">{sel.params.filePath}</span></Fact>}
+                      <Fact label="Priority">
+                        <Badge tone={priorityTone[sel.priority] || 'grey'}>{sel.priority === 'high' ? 'High' : sel.priority === 'medium' ? 'Medium' : 'Low'}</Badge>
+                      </Fact>
+                      {sel.expectedImpact?.label && (
+                        <Fact label="Expected impact"><Badge tone="green">{sel.expectedImpact.label} impact</Badge></Fact>
                       )}
+                    </dl>
 
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Priority</div>
-                          <span className={`inline-flex items-center gap-1 text-[9.5px] font-black uppercase tracking-wider px-3 py-1 rounded-full border ${
-                            selectedRecommendation.priority === 'high' ? 'bg-rose-50 border-rose-100 text-rose-600' : 'bg-slate-50 border-slate-200 text-slate-600'
-                          }`}>
-                            {selectedRecommendation.priority === 'high' ? '⚠️ High' : '• Normal'}
-                          </span>
-                        </div>
-                        {selectedRecommendation.expectedImpact?.label && (
-                          <div>
-                            <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Expected Impact</div>
-                            <span className="inline-flex items-center gap-1 text-[9.5px] font-black uppercase tracking-wider px-3 py-1 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
-                              🚀 {selectedRecommendation.expectedImpact.label} Impact
-                            </span>
-                          </div>
+                    {/* Work in flight. Names the PR so "in progress" is a claim the
+                        user can click on and verify, rather than one they have to
+                        trust — this card used to disappear entirely at this point,
+                        which is how a draft stalled at 'branch_pushed' for three days
+                        stayed invisible. */}
+                    {sel.draft && sel.lifecycle === 'in_progress' && (
+                      <div className={`${callout} bg-muted text-text`}>
+                        <p className="flex items-center gap-1.5 font-medium text-fg">
+                          <GitPullRequest size={14} />
+                          {sel.draft.awaitingReview ? 'Waiting on your review' : 'Being worked on now'}
+                        </p>
+                        <p className="mt-1.5">
+                          A fix for this is at{' '}
+                          <span className="font-medium text-fg">{DRAFT_STATUS_LABEL[sel.draft.status] || sel.draft.status}</span>.
+                          {sel.draft.awaitingReview
+                            ? ' It needs someone to approve it before it can ship.'
+                            : ' Nothing to do — it will finish on its own.'}
+                        </p>
+                        {sel.draft.prUrl && (
+                          <a href={sel.draft.prUrl} target="_blank" rel="noreferrer" className={`inline-flex items-center gap-1 mt-2 ${link}`}>
+                            View pull request #{sel.draft.prNumber} <ArrowRight size={12} />
+                          </a>
                         )}
                       </div>
-                    </div>
-                  </div>
+                    )}
 
-                  <div className="p-6 border-t border-slate-100 bg-slate-50/30 flex items-center justify-end gap-2.5">
-                    {(selectedRecommendation.params?.page || selectedRecommendation.params?.href) && (
-                      <button
-                        onClick={() => recheckNow(selectedRecommendation)}
-                        disabled={recheckingId === selectedRecommendation.id}
-                        title="Re-examine this page/link right now instead of waiting for its next scheduled scan"
-                        className="flex items-center gap-1.5 text-[10.5px] font-black uppercase tracking-wider px-4 py-3 rounded-xl text-slate-600 bg-white border border-slate-200 transition hover:border-slate-350 disabled:opacity-60 cursor-pointer"
-                      >
-                        <RefreshCw size={12} className={recheckingId === selectedRecommendation.id ? 'animate-spin' : ''} />
-                        {recheckingId === selectedRecommendation.id ? 'Re-checking…' : 'Re-check Now'}
-                      </button>
-                    )}
-                    {recheckResult?.id === selectedRecommendation.id && !recheckResult.changed && (
-                      <span className="text-[10px] font-bold text-slate-450 italic">Still detected — not fixed yet.</span>
-                    )}
-                    {selectedRecommendation.riskTier === 'safe' && (
-                      <button
-                        onClick={() => generate(selectedRecommendation)}
-                        disabled={generatingId === selectedRecommendation.id || shippingId === selectedRecommendation.id}
-                        className="text-[10.5px] font-black uppercase tracking-wider px-4 py-3 rounded-xl text-slate-600 bg-white border border-slate-200 transition hover:border-slate-350 disabled:opacity-60 cursor-pointer"
-                      >
-                        {generatingId === selectedRecommendation.id ? 'Drafting…' : 'Preview Draft Only'}
-                      </button>
-                    )}
-                    {/* 'design-degraded' is deliberately excluded here: unlike
-                        every other blocked_kind, it's a failed Design Context
-                        run, which never stops drafting (action-center.js's
-                        generateDraft falls back to the generator's zero-config
-                        template) — swapping out the real button for a
-                        disabled pill would contradict the banner above, which
-                        already says "not blocked." */}
-                    {selectedRecommendation.blockedReason && selectedRecommendation.blockedKind !== 'design-degraded' ? (() => {
-                      const meta = blockedMetaFor(selectedRecommendation);
-                      const BlockedIcon = meta.icon;
-                      const blue = meta.className === 'blue';
-                      return (
-                        <span className={`flex items-center gap-1.5 text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl border ${
-                          blue ? 'text-sky-700 bg-sky-50 border-sky-150' : 'text-amber-700 bg-amber-50 border-amber-150'
-                        }`}>
-                          <BlockedIcon size={12} /> {blue ? 'In progress — nothing to do' : 'Blocked — resolve the setup above'}
-                        </span>
-                      );
-                    })() : (
-                      <button
-                        onClick={() => selectedRecommendation.riskTier === 'safe' ? approveAndShip(selectedRecommendation) : generate(selectedRecommendation)}
-                        disabled={generatingId === selectedRecommendation.id || shippingId === selectedRecommendation.id}
-                        className="flex items-center gap-1.5 text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md disabled:opacity-60 cursor-pointer"
-                        style={selectedRecommendation.riskTier === 'safe'
-                          ? { background: 'linear-gradient(135deg,#10b981,#059669)' }
-                          : { background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-                      >
-                        {selectedRecommendation.riskTier === 'safe' ? (
-                          <><Zap size={12} /> {shippingId === selectedRecommendation.id ? 'Shipping…' : 'Approve & Ship'}</>
-                        ) : (
-                          generatingId === selectedRecommendation.id ? 'Drafting Fix…' : 'Generate Solution Draft'
+                    {/* Why this is back. A recommendation that has been attempted
+                        before and returned is a different thing from a brand-new one,
+                        and the user is owed the difference — including whether the
+                        system intends to try again by itself. */}
+                    {sel.attemptCount > 0 && sel.lifecycle !== 'in_progress' && (
+                      <div className={`${callout} bg-[#fdf3e1] text-[#8a5300]`}>
+                        <p className="flex items-center gap-1.5 font-medium">
+                          <History size={14} />
+                          Tried {sel.attemptCount}{sel.attemptCount === 1 ? ' time' : ' times'} before
+                          {sel.lastAttemptAt ? ` · last ${timeAgo(sel.lastAttemptAt)}` : ''}
+                        </p>
+                        {RETRY_POLICY_COPY[sel.lastFailurePolicy] && (
+                          <p className="mt-1.5">{RETRY_POLICY_COPY[sel.lastFailurePolicy]}</p>
                         )}
-                      </button>
+                        {/* The raw reason is already customer-safe by the time it is
+                            stored (every writer passes it through lib/errors.js or an
+                            author-written constant), and it is the one detail that
+                            makes a repeat failure diagnosable rather than mysterious. */}
+                        {sel.lastFailureReason && (
+                          <p className="mt-1.5 break-words">Last outcome: {sel.lastFailureReason}</p>
+                        )}
+                      </div>
                     )}
-                  </div>
-                </div>
-              ) : (
-                <div className="p-8 text-center text-xs text-slate-400 italic flex-1 flex flex-col justify-center items-center">
-                  Select a finding row on the left to review detail actions
-                </div>
-              )}
-            </div>
+
+                    {/* The server already refuses to draft this (422 in
+                        routes/action-center.js) — this states WHY, and what to do
+                        about it, instead of leaving the user to discover it by
+                        clicking a button that always fails. */}
+                    {sel.blockedReason && (() => {
+                      const BlockedIcon = selMeta.icon;
+                      return (
+                        <div className={`${callout} flex items-start gap-2.5 ${selBlue ? 'bg-muted text-text' : 'bg-[#fdf3e1] text-[#8a5300]'}`}>
+                          <BlockedIcon size={14} className="shrink-0 mt-0.5" />
+                          <div className="min-w-0">
+                            <div className={`font-medium mb-1 ${selBlue ? 'text-fg' : ''}`}>{selMeta.heading}</div>
+                            <p>{sel.blockedReason}</p>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    <div className="flex flex-wrap items-center justify-end gap-2 px-5 py-3.5">
+                      {(sel.params?.page || sel.params?.href) && (
+                        <Button variant="light" onClick={() => recheckNow(sel)} disabled={recheckingId === sel.id}
+                          title="Re-examine this page/link right now instead of waiting for its next scheduled scan">
+                          <RefreshCw size={14} className={recheckingId === sel.id ? 'animate-spin' : ''} />
+                          {recheckingId === sel.id ? 'Re-checking…' : 'Re-check now'}
+                        </Button>
+                      )}
+                      {recheckResult?.id === sel.id && !recheckResult.changed && (
+                        <span className="text-[13px] text-faint">Still detected — not fixed yet.</span>
+                      )}
+                      {sel.riskTier === 'safe' && (
+                        <Button variant="light" onClick={() => generate(sel)} disabled={generatingId === sel.id || shippingId === sel.id}>
+                          {generatingId === sel.id ? 'Drafting…' : 'Preview draft only'}
+                        </Button>
+                      )}
+                      {/* 'design-degraded' is deliberately excluded here: unlike
+                          every other blocked_kind, it's a failed Design Context
+                          run, which never stops drafting (action-center.js's
+                          generateDraft falls back to the generator's zero-config
+                          template) — swapping out the real button for a
+                          disabled pill would contradict the note above, which
+                          already says "not blocked." */}
+                      {sel.blockedReason && sel.blockedKind !== 'design-degraded' ? (
+                        <Badge tone={selBlue ? 'outline' : 'amber'}>
+                          {selBlue ? 'In progress — nothing to do' : 'Blocked — resolve the setup above'}
+                        </Badge>
+                      ) : (
+                        <Button variant="primary" onClick={() => sel.riskTier === 'safe' ? approveAndShip(sel) : generate(sel)}
+                          disabled={generatingId === sel.id || shippingId === sel.id}>
+                          {sel.riskTier === 'safe' ? (
+                            <><Zap size={14} /> {shippingId === sel.id ? 'Shipping…' : 'Approve & ship'}</>
+                          ) : (
+                            generatingId === sel.id ? 'Drafting fix…' : 'Generate solution draft'
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-sm text-faint text-center py-16">Select a recommendation to see its details.</div>
+                )}
+              </div>
+            </Section>
           )}
 
           {(tab === 'drafts' || tab === 'implemented') && (
-            <div className="rounded-3xl border border-slate-205 bg-white shadow-md overflow-hidden h-full flex flex-col justify-between min-h-[350px]">
-              {selectedDraftItem ? (
-                <div className="flex-1 flex flex-col justify-between">
-                  <div>
-                    <div className="h-1.5 shrink-0" style={{ background: STAGE_COLOR[selectedDraftItem.status] || '#e2e8f0' }} />
-                    <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/40">
-                      <div className="flex items-center gap-3">
-                        <span className="w-9 h-9 rounded-xl grid place-items-center text-xs shrink-0 border border-slate-200 bg-white">
-                          {GENERATOR_META[selectedDraftItem.action_type]?.icon || '•'}
-                        </span>
-                        <div>
-                          <h3 className="text-sm font-black text-slate-900 leading-none">{GENERATOR_META[selectedDraftItem.action_type]?.label || selectedDraftItem.action_type}</h3>
-                          <p className="text-[10px] text-slate-450 font-black uppercase tracking-wider mt-1.5">Action Pipeline Target</p>
-                        </div>
+            <Section title="Details" subtitle="The selected draft">
+              <div className="card overflow-hidden">
+                {selectedDraftItem ? (
+                  <>
+                    <div className="px-5 py-4 border-b border-border">
+                      <h3 className="text-[17px] font-medium tracking-[-0.01em] text-fg break-words">
+                        {GENERATOR_META[selectedDraftItem.action_type]?.label || selectedDraftItem.action_type}
+                      </h3>
+                      <div className="flex flex-wrap gap-1.5 mt-2.5">
+                        <Badge tone={DRAFT_TONE[selectedDraftItem.status] || 'grey'}>
+                          {draftStatusText(selectedDraftItem.status)}
+                        </Badge>
+                        <Badge tone="outline">Action pipeline target</Badge>
                       </div>
-                      <span className="text-[9px] font-black uppercase tracking-wider px-2.5 py-1 rounded bg-slate-100 text-slate-500 border border-slate-200">
-                        {DRAFT_STATUS_LABEL[selectedDraftItem.status] || selectedDraftItem.status}
-                      </span>
                     </div>
 
-                    <div className="p-6 space-y-4">
-                      <div>
-                        <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Target Element</div>
-                        <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3.5 text-xs text-slate-700 leading-relaxed font-mono truncate max-w-full">
+                    <dl>
+                      <Fact label="Target">
+                        <span className="font-mono text-[13px] break-all">
                           {selectedDraftItem.input?.page || selectedDraftItem.input?.filePath || selectedDraftItem.input?.topic || selectedDraftItem.input?.market || selectedDraftItem.input?.city || 'Root Context'}
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-between gap-4 py-2.5 border-b border-slate-100">
-                        <span className="text-[10.5px] text-slate-505 font-bold">Staging Stepper Status</span>
-                        <DraftStepper status={selectedDraftItem.status} />
-                      </div>
-
+                        </span>
+                      </Fact>
                       {selectedDraftItem.implemented_at && (
-                        <div className="text-[10px] font-bold text-slate-500 bg-slate-50 p-2.5 rounded-xl border border-slate-150 flex justify-between">
-                          <span>Merge Timeline:</span>
-                          <span className="text-slate-700 font-bold">{new Date(selectedDraftItem.implemented_at).toLocaleString()}</span>
-                        </div>
+                        <Fact label="Merge timeline">{new Date(selectedDraftItem.implemented_at).toLocaleString()}</Fact>
                       )}
-                    </div>
-                  </div>
+                    </dl>
 
-                  <div className="p-6 border-t border-slate-100 bg-slate-50/30 flex justify-end">
-                    <button
-                      onClick={() => setActiveDraft(selectedDraftItem)}
-                      className="text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-indigo-500/10 cursor-pointer"
-                      style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-                    >
-                      {selectedDraftItem.status === 'implemented' ? 'View Draft' : 'Configure & Deploy Draft'}
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="p-8 text-center text-xs text-slate-400 italic flex-1 flex flex-col justify-center items-center">
-                  Select a draft row on the left to configure staging
-                </div>
-              )}
-            </div>
+                    <div className="px-5 py-4 border-b border-border">
+                      <div className="text-[13px] text-faint mb-2">Progress to staging</div>
+                      <DraftStepper status={selectedDraftItem.status} />
+                    </div>
+
+                    <div className="flex flex-wrap justify-end gap-2 px-5 py-3.5">
+                      <Button variant={selectedDraftItem.status === 'implemented' ? 'light' : 'primary'} onClick={() => setActiveDraft(selectedDraftItem)}>
+                        {selectedDraftItem.status === 'implemented' ? 'View draft' : 'Configure & deploy draft'}
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-sm text-faint text-center py-16">Select a draft to see its details.</div>
+                )}
+              </div>
+            </Section>
           )}
         </div>
-        
       </div>
 
       {activeDraft && (

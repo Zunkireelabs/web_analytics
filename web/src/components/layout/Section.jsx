@@ -1,7 +1,7 @@
 export default function Section({ label, source, title, subtitle, action, className = '', children }) {
   return (
     <section className={className}>
-      <div className="flex items-end justify-between gap-4 mb-3">
+      <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2 mb-3">
         <div className="min-w-0">
           {label && (
             <div className="label-dot">
