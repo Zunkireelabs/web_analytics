@@ -139,12 +139,10 @@ export default function ClientAssistantPanel({ open, onClose }) {
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-5 space-y-4 scrollbar-thin">
           {messages.length === 0 && (
             <div className="space-y-4 pt-2">
-              {siteName && (
-                <div>
-                  <p className="text-xl font-medium tracking-[-0.02em] text-fg">Hi, {siteName}</p>
-                  <p className="text-sm text-text mt-1">Ask anything about your site's search performance.</p>
-                </div>
-              )}
+              <div>
+                <p className="text-xl font-medium tracking-[-0.02em] text-fg">{siteName ? `Hi, ${siteName}` : 'Hi there'}</p>
+                <p className="text-sm text-text mt-1">Ask anything about your site's search performance.</p>
+              </div>
               <div className="space-y-2">
                 {STARTER_PROMPTS.map((q) => (
                   <button key={q.text} onClick={() => ask(q.text)}

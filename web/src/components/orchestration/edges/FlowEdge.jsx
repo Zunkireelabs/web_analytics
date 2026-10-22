@@ -1,4 +1,5 @@
 import { BaseEdge, getBezierPath } from '@xyflow/react';
+import { CHART } from '../../../lib/palette.js';
 
 // One edge component for every connection in the graph — centralizes the
 // same color/width/opacity/animation semantics the old hand-rolled SVG
@@ -9,21 +10,21 @@ import { BaseEdge, getBezierPath } from '@xyflow/react';
 // runningAgents Map): the agent feeding this edge is actually running right
 // now — brighter, faster, thicker. `data.loopBack`: the dashed pink
 // Executive Report → Command Center synthesis edge. Everything else is a
-// plain idle brand-purple connector.
+// plain idle grey connector (static; only live edges animate, in the accent).
 export default function FlowEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, markerEnd }) {
   const [path] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
   const isLive = !!data?.live;
   const isLoopBack = !!data?.loopBack;
 
-  const stroke = isLive ? '#a78bfa' : data?.color || '#6C63FF';
-  const strokeWidth = isLive ? 2.5 : isLoopBack ? 1.5 : 1.75;
-  const opacity = isLive ? 0.9 : isLoopBack ? 0.55 : 0.45;
-  const strokeDasharray = isLoopBack ? '3 5' : '5 7';
+  // data.color is no longer used: idle edges are neutral grey.
+  const stroke = isLive ? CHART.highlight : '#d4d4d4';
+  const strokeWidth = isLive ? 2 : 1.25;
+  const strokeDasharray = isLive ? '5 7' : isLoopBack ? '3 5' : undefined;
   const className = isLive ? 'orbit-edge-live' : 'orbit-edge';
 
   return (
     <BaseEdge id={id} path={path} markerEnd={markerEnd}
-      style={{ stroke, strokeWidth, opacity, strokeDasharray, strokeLinecap: 'round' }}
+      style={{ stroke, strokeWidth, opacity: 1, strokeDasharray, strokeLinecap: 'round' }}
       className={className} />
   );
 }

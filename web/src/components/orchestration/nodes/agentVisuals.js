@@ -1,23 +1,9 @@
 import { useEffect, useState } from 'react';
 import { ORCH_CATEGORY as CATEGORY } from '../palette.js';
 import { timeAgo } from '../../../api.js';
+import { CHART, STATUS } from '../../../lib/palette.js';
 
-// Distinct per-agent icons (cosmetic only, no data claim) so the 5 SEO-
-// category agents don't all render the same 🎯 category glyph — makes 10
-// nodes actually scannable as 10 different things instead of 10 identical
-// blobs of the same 4 category icons.
-export const AGENT_ICON = {
-  'query-intelligence': '🔎',
-  opportunity: '🎯',
-  'country-intelligence': '🌍',
-  'device-intelligence': '📱',
-  'ai-visibility': '👁️',
-  'content-gap': '📝',
-  'competitor-intelligence': '⚔️',
-  'technical-seo': '🛠️',
-  authority: '🔗',
-  'ai-recommendation': '💬',
-};
+// Nodes use the category dot instead of per-agent emoji icons.
 
 // Real elapsed seconds since a run actually started, ticking every second —
 // used only while `active` is true (backed by a real in-flight fetch, never
@@ -51,12 +37,13 @@ export function recencyTier(lastRunAt) {
 // instead of a reinvented parallel version that could drift out of sync.
 export function getAgentStatus(agent, { isRunning, elapsed = 0 } = {}) {
   const cat = CATEGORY[agent.category] || CATEGORY.seo;
-  const icon = AGENT_ICON[agent.id] || cat.icon;
+  const icon = cat.icon;
   const hasRun = !!agent.lastRunAt;
   const isError = hasRun && agent.lastRunStatus !== 'ok';
   const tier = isRunning ? 'running' : recencyTier(agent.lastRunAt);
 
-  const glow = { running: 0.85, fresh: 0.55, recent: 0.3, stale: 0.14, none: 0 }[tier];
+  // No glows in this design — kept in the return shape for compatibility.
+  const glow = 0;
   const borderOpacity = { running: 'ff', fresh: 'b3', recent: '80', stale: '40', none: '26' }[tier];
   const cardOpacity = tier === 'none' ? 0.6 : 1;
 
@@ -67,11 +54,11 @@ export function getAgentStatus(agent, { isRunning, elapsed = 0 } = {}) {
       : hasRun
         ? `ran ${timeAgo(agent.lastRunAt)}`
         : 'idle · not yet run';
-  const statusColor = isRunning ? '#a78bfa' : isError ? '#f59e0b' : hasRun ? '#34d399' : '#64748b';
+  const statusColor = isRunning ? CHART.highlight : isError ? STATUS.warning.color : hasRun ? STATUS.good.color : STATUS.neutral.color;
   const statusDot = isRunning ? '●' : isError ? '⚠' : hasRun ? '✓' : '·';
   // Darker variant of statusColor for body text on a light fill — statusColor
   // itself stays as the dot glyph/glow color (works on either background).
-  const statusTextColor = isRunning ? '#7c3aed' : isError ? '#b45309' : hasRun ? '#059669' : '#64748b';
+  const statusTextColor = isRunning ? '#bd3d00' : isError ? STATUS.warning.text : hasRun ? STATUS.good.text : STATUS.neutral.text;
 
   return { cat, icon, hasRun, isError, tier, glow, borderOpacity, cardOpacity, statusText, statusColor, statusDot, statusTextColor };
 }
