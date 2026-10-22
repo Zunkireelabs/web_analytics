@@ -60,13 +60,13 @@ export default function Settings({ sites = [], siteId, role, onSite }) {
       <p className="mt-1 text-sm text-text">Your workspaces and the project you are working in.</p>
 
       <ScopeCards current={scope} items={[
-        { key: 'workspace', label: 'Workspace', description: `${workspaceName} · team and projects`, icon: Building2, onSelect: () => go('workspace') },
-        { key: 'project', label: 'Project', description: `${siteDomain(current) || current?.name || '—'} · details and API`, icon: Globe, onSelect: () => go('project') },
+        { key: 'workspace', label: 'Workspace', description: 'Team and projects', icon: Building2, onSelect: () => go('workspace') },
+        { key: 'project', label: 'Project', description: 'Details and API tokens', icon: Globe, onSelect: () => go('project') },
       ]} />
 
       <UnderlineTabs tabs={SETTINGS_TABS[scope].map((t) => ({ ...t, icon: TAB_ICONS[t.key] }))} value={tab} onChange={(t) => go(scope, t)} />
 
-      <div className="space-y-5 mt-5">
+      <div className="space-y-3 mt-5">
         {scope === 'workspace' && tab === 'general' && (
           <>
             <SettingsCard icon={Building2} title="Your workspaces" description="Every workspace you belong to">

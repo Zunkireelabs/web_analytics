@@ -5,7 +5,7 @@ import Sparkline from './Sparkline.jsx';
 import Badge from './Badge.jsx';
 import Button from './Button.jsx';
 import KpiStrip from './layout/KpiStrip.jsx';
-import Section from './layout/Section.jsx';
+import { Tray, TrayCard } from './layout/Tray.jsx';
 import { STATUS } from '../lib/palette.js';
 
 const sum = (arr, k) => (arr || []).reduce((a, r) => a + (Number(r[k]) || 0), 0);
@@ -43,21 +43,22 @@ export default function MoversList({ gainers = [], droppers = [], comparisonLabe
 
   return (
     <>
-      {/* 1 ─ Summary strip */}
-      <Section label="Search" source={`vs ${comparisonLabel}`} title="Query movements"
-        subtitle={<span className="tip">Which searches gained or lost clicks<span className="tip__box">Queries that changed the most in clicks</span></span>}>
-        <div className="card overflow-hidden">
-          <KpiStrip items={kpis} bare />
-        </div>
-      </Section>
+      {/* 1 + 2 ─ Summary strip and highlights, stacked in one tray. */}
+      <Tray>
+        <TrayCard title="Query movements" subtitle={<span className="tip tip--down">Which searches gained or lost clicks<span className="tip__box">Queries that changed the most in clicks</span></span>} source={`vs ${comparisonLabel}`}>
+          <div className="border-t border-border">
+            <KpiStrip items={kpis} bare />
+          </div>
+        </TrayCard>
+        <Highlights gainers={gainers} droppers={droppers} comparisonLabel={comparisonLabel} />
+      </Tray>
 
-      {/* 2 ─ Highlights band */}
-      <Highlights gainers={gainers} droppers={droppers} comparisonLabel={comparisonLabel} />
-
-      {/* 3 ─ Two-column gainers / drops */}
-      <div id="movers-section" className="grid gap-6 lg:grid-cols-2 mt-8 items-start">
-        <MoverCard kind="gain" rows={gainers} total={gainers.length} />
-        <MoverCard kind="drop" rows={droppers} total={droppers.length} />
+      {/* 3 ─ Two-column gainers / drops. The wrapper carries the scroll-target id. */}
+      <div id="movers-section" className="mt-3">
+        <Tray cols={2}>
+          <MoverCard kind="gain" rows={gainers} total={gainers.length} />
+          <MoverCard kind="drop" rows={droppers} total={droppers.length} />
+        </Tray>
       </div>
     </>
   );
@@ -123,8 +124,8 @@ function Highlights({ gainers, droppers, comparisonLabel }) {
   if (blocks.length === 0) return null;
 
   return (
-    <Section className="mt-8" title="Spotlight" subtitle="The movements worth a look">
-      <div className="card">
+    <TrayCard title="Spotlight" subtitle="The movements worth a look">
+      <div className="border-t border-border">
         {blocks.map((b, i) => (
           <div key={i} className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 px-4 py-3 border-b border-border last:border-0 items-center">
             <Badge tone={TAG_TONE[b.tag]}>{b.tag}</Badge>
@@ -133,7 +134,7 @@ function Highlights({ gainers, droppers, comparisonLabel }) {
           </div>
         ))}
       </div>
-    </Section>
+    </TrayCard>
   );
 }
 
@@ -147,9 +148,9 @@ function MoverCard({ kind, rows, total }) {
   const hasMore = (rows || []).length > 7;
 
   return (
-    <Section className="min-w-0" title={gain ? 'Top gainers' : 'Top drops'}
+    <TrayCard title={gain ? 'Top gainers' : 'Top drops'}
       subtitle={`${total} queries ${gain ? 'gained' : 'lost'} clicks`}>
-      <div className="card overflow-hidden">
+      <div>
         {displayRows.length === 0 ? (
           <div className="text-sm text-faint text-center py-10">No queries moved in this period.</div>
         ) : (
@@ -213,7 +214,7 @@ function MoverCard({ kind, rows, total }) {
           </>
         )}
       </div>
-    </Section>
+    </TrayCard>
   );
 }
 

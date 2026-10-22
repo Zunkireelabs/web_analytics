@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { ComposedChart, Area, ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import Badge from './Badge.jsx';
 import Button from './Button.jsx';
+import { TrayCard } from './layout/Tray.jsx';
 import { fmtDay } from '../lib/format.js';
 import { CHART, AXIS_TICK } from '../lib/palette.js';
 
@@ -54,23 +55,17 @@ export default function GrowthTrendCard({ id, title, subtitle, unit = '', data, 
   })).filter((r) => r.value != null);
 
   return (
-    <div className="card overflow-hidden flex flex-col h-full">
-      <div className="flex items-start justify-between gap-3 px-4 py-3 border-b border-border">
-        <div>
-          <h3 className="text-sm font-medium text-fg">{title}</h3>
-          {subtitle && <p className="text-xs text-faint mt-0.5">{subtitle}</p>}
-        </div>
-        {rows.length >= 2 && data.delta != null && (
-          <Badge tone={data.delta >= 0 ? 'green' : 'red'} className="shrink-0">
-            {data.delta >= 0 ? '+' : '\u2212'}{Math.abs(data.delta)}{unit}
-          </Badge>
-        )}
-      </div>
+    <TrayCard className="flex flex-col h-full" title={title} subtitle={subtitle}
+      action={rows.length >= 2 && data.delta != null ? (
+        <Badge tone={data.delta >= 0 ? 'green' : 'red'} className="shrink-0">
+          {data.delta >= 0 ? '+' : '\u2212'}{Math.abs(data.delta)}{unit}
+        </Badge>
+      ) : null}>
 
       {loading ? (
-        <div className="px-4 py-10 text-center text-[13px] text-faint flex-1 flex items-center justify-center">Loading…</div>
+        <div className="border-t border-border px-4 py-10 text-center text-[13px] text-faint flex-1 flex items-center justify-center">Loading…</div>
       ) : rows.length === 0 ? (
-        <div className="flex-1 px-4 py-10 text-center text-[13px] text-faint flex flex-col items-center justify-center gap-3">
+        <div className="border-t border-border flex-1 px-4 py-10 text-center text-[13px] text-faint flex flex-col items-center justify-center gap-3">
           <p>{emptyMessage || 'No real data yet.'}</p>
           {action && (
             <>
@@ -82,12 +77,12 @@ export default function GrowthTrendCard({ id, title, subtitle, unit = '', data, 
           )}
         </div>
       ) : rows.length === 1 ? (
-        <div className="flex-1 px-4 py-8 text-center flex flex-col justify-center">
+        <div className="border-t border-border flex-1 px-4 py-8 text-center flex flex-col justify-center">
           <p className="text-[20px] font-medium text-fg tnum">{rows[0].value}{unit}</p>
           <p className="text-[13px] text-faint mt-1">Only one real data point so far — a trend needs at least two.</p>
         </div>
       ) : (
-        <div className="flex-1 flex flex-col justify-end px-2 pt-3 pb-2">
+        <div className="border-t border-border flex-1 flex flex-col justify-end px-2 pt-3 pb-2">
           <ResponsiveContainer width="100%" height={160}>
             <ComposedChart data={rows} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} vertical={false} />
@@ -100,6 +95,6 @@ export default function GrowthTrendCard({ id, title, subtitle, unit = '', data, 
           </ResponsiveContainer>
         </div>
       )}
-    </div>
+    </TrayCard>
   );
 }

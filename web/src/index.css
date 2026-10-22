@@ -13,6 +13,7 @@
   --color-primary: var(--primary);  --color-primary-strong: var(--primary-strong);
   --color-primary-tint: var(--primary-tint);  --color-primary-ring: var(--primary-ring);
   --color-canvas: var(--canvas);  --color-border-canvas: var(--border-canvas);
+  --color-tray: var(--tray);
   --color-green: var(--green);  --color-green-tint: var(--green-tint);
   --radius-control: var(--radius);  --radius-card: var(--radius-card);
   --radius-chip: var(--radius-chip);  --radius-panel: var(--radius-panel);
@@ -42,6 +43,9 @@
   --green-tint: #e8f7ee;
   --canvas: #f7f6f4;          /* warm off-white page */
   --border-canvas: #e9e7e4;   /* warm hairline */
+  --tray: #f5f5f4;            /* grey tray the white cards sit in */
+  --tray-ring: #ebeae8;
+  --panel-ring: #e9e7e4;      /* ring around the white main panel */
 
   --radius-chip: 5px;
   --radius: 8px;
@@ -142,6 +146,10 @@
   .tbl .bar > span { position: relative; }
   .tbl-foot { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px 6px 14px; border-top: 1px solid var(--border); font-size: 12px; color: var(--faint); }
 
+  /* ---- Tray layout: white cards sitting in a grey tray ---- */
+  .tray { display: grid; gap: 6px; padding: 6px; background: var(--tray); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--tray-ring); }
+  .tray-card { background: #fff; border-radius: 12px; box-shadow: 0 0 0 1px rgba(0,0,0,.05), 0 1px 2px rgba(0,0,0,.03); overflow: hidden; min-width: 0; }
+
   /* ---- Humblytics section label ---- */
   .label-dot { display: flex; align-items: center; gap: 8px; font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--fg); }
   .label-dot::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--primary); }
@@ -185,6 +193,7 @@
     opacity: 0; visibility: hidden; transform: translateY(4px); transition: opacity .12s, transform .12s, visibility .12s; pointer-events: none;
   }
   .tip:hover .tip__box, .tip:focus .tip__box { opacity: 1; visibility: visible; transform: none; }
+  .tip--down .tip__box { top: calc(100% + 8px); bottom: auto; }
 
   /* ---- superrank-web login.css: fields + OTP (final cascaded values) ---- */
   .fld { display: flex; flex-direction: column; gap: 6px; min-width: 0; }

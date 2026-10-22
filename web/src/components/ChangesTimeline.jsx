@@ -61,11 +61,11 @@ function parseTextStructure(text) {
 
 export default function ChangesTimeline({ items }) {
   if (!items?.length) {
-    return <div className="card py-10 text-center text-sm text-faint">No changes logged since the last analysis.</div>;
+    return <div className="border-t border-border py-10 text-center text-sm text-faint">No changes logged since the last analysis.</div>;
   }
 
   return (
-    <div className="card">
+    <div className="border-t border-border">
       {items.map((c, i) => {
         const isHealth = c.type === 'health';
         const m = isHealth ? MARKER.health[c.positive ? 'up' : 'down'] : MARKER[c.type] || MARKER.fallback;

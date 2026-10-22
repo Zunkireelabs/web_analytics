@@ -5,6 +5,7 @@ import OrchestrationDiagram from '../components/orchestration/OrchestrationDiagr
 import AgentDetailPanel from '../components/orchestration/AgentDetailPanel.jsx';
 import LiveActivityRail from '../components/orchestration/LiveActivityRail.jsx';
 import GrowthScores from '../components/GrowthScores.jsx';
+import { Tray, TrayCard } from '../components/layout/Tray.jsx';
 import ExecutiveSummaryPanel from '../components/ExecutiveSummaryPanel.jsx';
 import CompetitorLeaderboard from '../components/CompetitorLeaderboard.jsx';
 import AuthorityScoreCard from '../components/AuthorityScoreCard.jsx';
@@ -357,18 +358,20 @@ export default function AiGrowth({ isInternal }) {
       </div>
 
       {/* Executive summary — same pattern as Reports.jsx. */}
-      <div className="mt-8">
-        <ExecutiveSummaryPanel
-          text={ccData?.executiveSummary?.narrative}
-          source={ccData?.executiveSummary?.narrative ? 'executive-report' : null}
-          generatedAt={ccData?.executiveSummary?.generatedAt}
-        />
+      <div className="mt-3">
+        <Tray>
+          <ExecutiveSummaryPanel
+            text={ccData?.executiveSummary?.narrative}
+            source={ccData?.executiveSummary?.narrative ? 'executive-report' : null}
+            generatedAt={ccData?.executiveSummary?.generatedAt}
+          />
+        </Tray>
       </div>
 
       {/* Pipeline strip — the fixed pipeline shape, always visible so the page
           reads as "a pipeline" on both tabs, even at rest. */}
-      <Section className="mt-8" title="Agent pipeline" subtitle="How a run moves from data to your reports">
-        <div className="card flex items-center px-4 py-3 overflow-x-auto">
+      <Section tray className="mt-3" title="Agent pipeline" subtitle="How a run moves from data to your reports">
+        <div className="flex items-center px-4 py-3 overflow-x-auto border-t border-border">
           {SIGNAL_STAGES.map((stage, i) => {
             const caption = stage.label === 'Agents'
               ? (agents?.length ? `${agents.length} specialists` : 'Specialist agents')
@@ -391,139 +394,133 @@ export default function AiGrowth({ isInternal }) {
         </div>
       </Section>
 
-      <div className="mt-8">
+      <div className="mt-3">
         {viewMode === 'console' ? (
           /* ================= INTERACTIVE RUNNING CONSOLE ================= */
-          <div className="grid gap-6 lg:grid-cols-[1fr_1.5fr] items-start">
-            <Section title="Agent status" subtitle="Live output from the current run">
-              <div className="card overflow-hidden">
-                <div className="flex items-center gap-2.5 px-4 py-3.5 border-b border-border">
-                  <span className={`w-2 h-2 rounded-full shrink-0 ${active ? 'bg-primary' : 'bg-faint-2'}`}
-                    style={{ boxShadow: '0 0 0 3px var(--muted)' }} />
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium text-fg">{active ? 'Agents running' : 'Cluster idle'}</div>
-                    <div className="text-[13px] text-faint">
-                      {runningAgents.size > 0
-                        ? `${runningAgents.size} agents currently auditing site streams`
-                        : 'Standby for diagnostic commands'}
-                    </div>
+          <Tray className="lg:grid-cols-[1fr_1.5fr] items-start">
+            <TrayCard title="Agent status" subtitle="Live output from the current run">
+              <div className="flex items-center gap-2.5 px-4 py-3.5 border-y border-border">
+                <span className={`w-2 h-2 rounded-full shrink-0 ${active ? 'bg-primary' : 'bg-faint-2'}`}
+                  style={{ boxShadow: '0 0 0 3px var(--muted)' }} />
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-fg">{active ? 'Agents running' : 'Cluster idle'}</div>
+                  <div className="text-[13px] text-faint">
+                    {runningAgents.size > 0
+                      ? `${runningAgents.size} agents currently auditing site streams`
+                      : 'Standby for diagnostic commands'}
                   </div>
                 </div>
-                <div className="bg-[#fcfcfb] px-4 py-3 min-h-[150px] max-h-[300px] overflow-y-auto font-mono text-xs leading-5 text-text custom-scrollbar">
-                  {consoleLogs.map((log, idx) => (
-                    <div key={idx} className="flex items-start gap-2.5">
-                      <span className="text-faint shrink-0 select-none">[{log.time}]</span>
-                      <span className={log.type === 'system' || log.type === 'error' ? 'text-fg font-medium' : undefined}>{log.text}</span>
-                    </div>
-                  ))}
-                  <div ref={terminalEndRef} />
-                </div>
               </div>
-            </Section>
+              <div className="bg-[#fcfcfb] px-4 py-3 min-h-[150px] max-h-[300px] overflow-y-auto font-mono text-xs leading-5 text-text custom-scrollbar">
+                {consoleLogs.map((log, idx) => (
+                  <div key={idx} className="flex items-start gap-2.5">
+                    <span className="text-faint shrink-0 select-none">[{log.time}]</span>
+                    <span className={log.type === 'system' || log.type === 'error' ? 'text-fg font-medium' : undefined}>{log.text}</span>
+                  </div>
+                ))}
+                <div ref={terminalEndRef} />
+              </div>
+            </TrayCard>
 
-            <Section title="Live findings" subtitle={`${revealedFindings.length} findings from the latest runs`}
+            <TrayCard title="Live findings" subtitle={`${revealedFindings.length} findings from the latest runs`}
               action={revealedFindings.length > 0 && !isThinking ? (
                 <span className="inline-flex items-center gap-1.5 text-[13px] text-[#1a7f4b]">
                   <CheckCircle size={13} /> Processing cycle complete
                 </span>
               ) : null}>
-              <div className="card overflow-hidden">
-                {revealedFindings.length === 0 ? (
-                  <div className="px-4 py-10 text-sm text-faint text-center">
-                    Awaiting analysis stream — diagnostic findings will fill these in one-by-one as agents complete auditing.
-                  </div>
-                ) : (
-                  <div className="max-h-[460px] overflow-y-auto custom-scrollbar">
-                    {revealedFindings.map((f, i) => {
-                      const itemCat = CATEGORY[f.category] || CATEGORY.seo;
-                      const hasDetails = f.narrative && f.narrative !== f.headline;
-                      return (
-                        <div
-                          key={f.agentId || i}
-                          data-finding-agent={f.agentId}
-                          className={`grid grid-cols-1 sm:grid-cols-[auto_1fr_auto] gap-x-3 gap-y-1 px-4 py-3.5 border-b border-border last:border-0 ${highlightClass(Boolean(highlightedAgentId) && f.agentId === highlightedAgentId)}`}
-                        >
-                          <span className="inline-flex items-center gap-1.5 h-[22px] px-2 rounded-[6px] text-xs font-medium text-text bg-white self-start w-fit"
-                            style={{ boxShadow: 'inset 0 0 0 1px var(--border-2)' }}>
-                            <span className="w-1.5 h-1.5 rounded-full" style={{ background: itemCat.color }} />
-                            {itemCat.label}
-                          </span>
-                          <div className="min-w-0">
-                            <div className="text-sm font-medium text-fg">{f.headline}</div>
-                            <div className="text-xs text-faint mt-1">
-                              {f.name}{f.generatedAt ? ` · ${timeAgo(f.generatedAt)}` : ''}{f.stat ? ` · ${f.stat}` : ''}
-                            </div>
+              {revealedFindings.length === 0 ? (
+                <div className="px-4 py-10 text-sm text-faint text-center border-t border-border">
+                  Awaiting analysis stream — diagnostic findings will fill these in one-by-one as agents complete auditing.
+                </div>
+              ) : (
+                <div className="max-h-[460px] overflow-y-auto custom-scrollbar border-t border-border">
+                  {revealedFindings.map((f, i) => {
+                    const itemCat = CATEGORY[f.category] || CATEGORY.seo;
+                    const hasDetails = f.narrative && f.narrative !== f.headline;
+                    return (
+                      <div
+                        key={f.agentId || i}
+                        data-finding-agent={f.agentId}
+                        className={`grid grid-cols-1 sm:grid-cols-[auto_1fr_auto] gap-x-3 gap-y-1 px-4 py-3.5 border-b border-border last:border-0 ${highlightClass(Boolean(highlightedAgentId) && f.agentId === highlightedAgentId)}`}
+                      >
+                        <span className="inline-flex items-center gap-1.5 h-[22px] px-2 rounded-[6px] text-xs font-medium text-text bg-white self-start w-fit"
+                          style={{ boxShadow: 'inset 0 0 0 1px var(--border-2)' }}>
+                          <span className="w-1.5 h-1.5 rounded-full" style={{ background: itemCat.color }} />
+                          {itemCat.label}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-fg">{f.headline}</div>
+                          <div className="text-xs text-faint mt-1">
+                            {f.name}{f.generatedAt ? ` · ${timeAgo(f.generatedAt)}` : ''}{f.stat ? ` · ${f.stat}` : ''}
                           </div>
-                          {hasDetails ? (
-                            <button type="button" onClick={() => toggleExpand(i)} aria-expanded={expandedIndices.has(i)}
-                              className="text-[13px] font-medium text-primary hover:underline whitespace-nowrap self-start text-left">
-                              {expandedIndices.has(i) ? 'Hide details' : 'View details'}
-                            </button>
-                          ) : <span />}
-                          {hasDetails && expandedIndices.has(i) && (
-                            <p className="sm:col-span-3 text-[13px] text-text break-words">{f.narrative}</p>
-                          )}
                         </div>
-                      );
-                    })}
-                    {isThinking && (
-                      <div className="px-4 py-3.5"><div className="h-4 w-2/3 bg-muted rounded-control animate-pulse" /></div>
-                    )}
-                  </div>
-                )}
-                {revealedFindings.length > 0 && !isThinking && (
-                  <div className="tbl-foot">
-                    <span>{revealedFindings.length} findings</span>
-                    <a href="/reports" className="btn btn--ghost btn--sm">View executive report summary</a>
-                  </div>
-                )}
-              </div>
-            </Section>
-          </div>
+                        {hasDetails ? (
+                          <button type="button" onClick={() => toggleExpand(i)} aria-expanded={expandedIndices.has(i)}
+                            className="text-[13px] font-medium text-primary hover:underline whitespace-nowrap self-start text-left">
+                            {expandedIndices.has(i) ? 'Hide details' : 'View details'}
+                          </button>
+                        ) : <span />}
+                        {hasDetails && expandedIndices.has(i) && (
+                          <p className="sm:col-span-3 text-[13px] text-text break-words">{f.narrative}</p>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {isThinking && (
+                    <div className="px-4 py-3.5"><div className="h-4 w-2/3 bg-muted rounded-control animate-pulse" /></div>
+                  )}
+                </div>
+              )}
+              {revealedFindings.length > 0 && !isThinking && (
+                <div className="tbl-foot">
+                  <span>{revealedFindings.length} findings</span>
+                  <a href="/reports" className="btn btn--ghost btn--sm">View executive report summary</a>
+                </div>
+              )}
+            </TrayCard>
+          </Tray>
         ) : (
           /* ================= ARCHITECTURE SYSTEM DIAGRAM ================= */
           <div>
-            <Section title="Systems map" subtitle="The parallel path each run takes. Node status updates live.">
-              <div className="card overflow-hidden">
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 border-b border-border text-[13px] text-text">
-                  {[
-                    ['Running', CHART.highlight],
-                    ['Ran recently', STATUS.good.color],
-                    ['Failed last run', STATUS.warning.color],
-                    ['Idle / not yet run', STATUS.neutral.color],
-                  ].map(([label, color]) => (
-                    <span key={label} className="flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full" style={{ background: color }} /> {label}
-                    </span>
-                  ))}
-                </div>
-                <div className="px-4 pt-3 pb-3 text-[13px] text-faint space-y-2">
-                  <p>This view illustrates the parallel execution path. The status of each agent reacts live to system runner calls.</p>
-                  {agenticStats?.byMode?.length > 0 && (
-                    <p>
-                      Agentic mode also ran {agenticStats.byMode.reduce((s, m) => s + m.sessions, 0)} time(s) in the last 30 days
-                      {(() => {
-                        const agentic = agenticStats.byMode.find((m) => m.mode !== 'question');
-                        return agentic ? ` (avg ${agentic.avg_rounds} rounds, ${agentic.avg_tool_calls} tool calls)` : '';
-                      })()} — the diagram below reflects the fixed parallel path only.
-                    </p>
-                  )}
-                </div>
+            <Section tray title="Systems map" subtitle="The parallel path each run takes. Node status updates live.">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 border-y border-border text-[13px] text-text">
+                {[
+                  ['Running', CHART.highlight],
+                  ['Ran recently', STATUS.good.color],
+                  ['Failed last run', STATUS.warning.color],
+                  ['Idle / not yet run', STATUS.neutral.color],
+                ].map(([label, color]) => (
+                  <span key={label} className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full" style={{ background: color }} /> {label}
+                  </span>
+                ))}
+              </div>
+              <div className="px-4 pt-3 pb-3 text-[13px] text-faint space-y-2">
+                <p>This view illustrates the parallel execution path. The status of each agent reacts live to system runner calls.</p>
+                {agenticStats?.byMode?.length > 0 && (
+                  <p>
+                    Agentic mode also ran {agenticStats.byMode.reduce((s, m) => s + m.sessions, 0)} time(s) in the last 30 days
+                    {(() => {
+                      const agentic = agenticStats.byMode.find((m) => m.mode !== 'question');
+                      return agentic ? ` (avg ${agentic.avg_rounds} rounds, ${agentic.avg_tool_calls} tool calls)` : '';
+                    })()} — the diagram below reflects the fixed parallel path only.
+                  </p>
+                )}
+              </div>
 
-                <div className="border-t border-border">
-                  {agents !== null && agents.length === 0 ? (
-                    <div className="py-12 text-center text-sm text-faint">No agents available yet.</div>
-                  ) : agents === null ? (
-                    // Matches OrchestrationDiagram's real responsive canvas height
-                    // exactly, so there's no layout jump when the graph replaces it.
-                    <div className="h-[300px] md:h-[680px] bg-muted animate-pulse" />
-                  ) : (
-                    <OrchestrationDiagram agents={agents} onSelectAgent={setSelected} runningAgents={runningAgents} />
-                  )}
-                </div>
+              <div className="border-t border-border">
+                {agents !== null && agents.length === 0 ? (
+                  <div className="py-12 text-center text-sm text-faint">No agents available yet.</div>
+                ) : agents === null ? (
+                  // Matches OrchestrationDiagram's real responsive canvas height
+                  // exactly, so there's no layout jump when the graph replaces it.
+                  <div className="h-[300px] md:h-[680px] bg-muted animate-pulse" />
+                ) : (
+                  <OrchestrationDiagram agents={agents} onSelectAgent={setSelected} runningAgents={runningAgents} />
+                )}
               </div>
             </Section>
-            <Section className="mt-8" title="Live activity" subtitle="Latest agent events">
+            <Section tray className="mt-3" title="Live activity" subtitle="Latest agent events">
               <LiveActivityRail items={activity} />
             </Section>
           </div>
@@ -533,66 +530,65 @@ export default function AiGrowth({ isInternal }) {
       {/* ============= COMPETITOR OVERVIEW ============= */}
       {/* Real competitor standings, driven by the same ccData already powering
           the score row above. */}
-      <Section className="mt-8" title="Competitors" subtitle="How you compare online · click a competitor to see why">
+      <Section tray className="mt-3" title="Competitors" subtitle="How you compare online · click a competitor to see why">
         {ccData?.competitors && ccData.competitors.length > 0 ? (
           <CompetitorLeaderboard profiles={ccData.competitors} />
         ) : (
-          <div className="card text-sm text-faint text-center py-10">No competitors logged yet.</div>
+          <div className="text-sm text-faint text-center py-10 border-t border-border">No competitors logged yet.</div>
         )}
       </Section>
 
       {/* ============= DETAILED AGENT INSIGHTS ============= */}
       {/* Per-category detail cards, shown together here rather than behind
           tabs. Card insides are restyled in part 2. */}
-      <Section className="mt-8" label="Authority" source="Backlinks & rankings" title="Detailed agent insights"
-        subtitle="What each specialist agent found this cycle">
-        <div className="grid gap-6 md:grid-cols-2">
-          <AuthorityScoreCard authority={ccData?.authority} meta={ccData?.authorityMeta} loading={ccData === null} />
-          <ReferringDomainsCard
-            summary={ccDomainUnresolved ? null : ccBacklinks}
-            loading={!ccDomainUnresolved && ccBacklinks === null}
-          />
-          <CompetitorBacklinkCard
-            backlinkComparison={ccData?.backlinkComparison}
-            meta={ccData?.backlinkComparisonMeta}
-            loading={ccData === null}
-          />
-          <CompetitorRankingCard
-            rankingComparison={ccData?.rankingComparison}
-            meta={ccData?.rankingComparisonMeta}
-            loading={ccData === null}
-          />
-        </div>
-      </Section>
+      <Tray className="mt-3 md:grid-cols-2" title="Detailed agent insights" subtitle="What each specialist agent found this cycle" source="Backlinks & rankings">
+        <AuthorityScoreCard authority={ccData?.authority} meta={ccData?.authorityMeta} loading={ccData === null} />
+        <ReferringDomainsCard
+          summary={ccDomainUnresolved ? null : ccBacklinks}
+          loading={!ccDomainUnresolved && ccBacklinks === null}
+        />
+        <CompetitorBacklinkCard
+          backlinkComparison={ccData?.backlinkComparison}
+          meta={ccData?.backlinkComparisonMeta}
+          loading={ccData === null}
+        />
+        <CompetitorRankingCard
+          rankingComparison={ccData?.rankingComparison}
+          meta={ccData?.rankingComparisonMeta}
+          loading={ccData === null}
+        />
+      </Tray>
 
-      <Section className="mt-8" label="AI search" source="ChatGPT buyer-intent prompts" title="AI search visibility">
+      <Tray className="mt-3" title="AI search visibility" source="ChatGPT buyer-intent prompts">
         <AiRecommendationCard aiRecommendation={ccData?.aiRecommendation} meta={ccData?.aiRecommendationMeta} loading={ccData === null} />
-      </Section>
+      </Tray>
 
-      <Section className="mt-8" label="Audience" source="Google Analytics" title="Geographic audience" subtitle="Where your sessions come from">
+      <Tray className="mt-3" title="Geographic audience" subtitle="Where your sessions come from" source="Google Analytics">
         <GeoIntelligenceCard geoIntelligence={ccData?.geoIntelligence} meta={ccData?.geoIntelligenceMeta} loading={ccData === null} />
-      </Section>
+      </Tray>
 
       {/* ============= OPERATIONS HISTORY ============= */}
-      <section className="mt-8">
+      <section>
+        <div className="tray mt-3">
         <button type="button" onClick={() => setShowOpsHistory(!showOpsHistory)} aria-expanded={showOpsHistory}
-          className="card w-full flex items-center justify-between px-4 py-3.5 text-sm font-medium text-fg">
+          className="tray-card w-full flex items-center justify-between px-4 py-3.5 text-sm font-medium text-fg">
           <span>Operations history</span>
           <span className="flex items-center gap-2 text-[13px] text-faint font-normal">
             Agent activity and recent site changes
             <ChevronDown size={14} className={`transition-transform duration-200 ${showOpsHistory ? 'rotate-180' : ''}`} />
           </span>
         </button>
+        </div>
 
         {showOpsHistory && (
-          <div className="grid gap-6 lg:grid-cols-2 mt-6 items-start">
-            <Section title="Agent activity">
+          <Tray className="mt-3 lg:grid-cols-2 items-start">
+            <TrayCard title="Agent activity">
               <ActivityFeed items={ccData?.activity || []} />
-            </Section>
-            <Section title="Recent site changes">
+            </TrayCard>
+            <TrayCard title="Recent site changes">
               <ChangesTimeline items={ccData?.recentChanges || []} />
-            </Section>
-          </div>
+            </TrayCard>
+          </Tray>
         )}
       </section>
 
@@ -600,89 +596,85 @@ export default function AiGrowth({ isInternal }) {
       {/* Agent Taskforce, Execution Timeline, Model Status, migrated from
           admin/AiOperationsCenter.jsx. */}
       {isInternal && ops && (
-        <div className="mt-8 space-y-8">
-          <Section label="Platform operations" source="Staff only · across every tenant" title="Agent taskforce"
+        <div className="mt-3 space-y-3">
+          <Section tray source="Staff only · across every tenant" title="Agent taskforce"
             subtitle="Every registered agent's most recent run">
-            <div className="card overflow-hidden">
-              <table className="tbl">
-                <thead>
-                  <tr>
-                    <th>Agent</th>
-                    <th className="hidden sm:table-cell">Category</th>
-                    <th>Status</th>
-                    <th className="num hidden sm:table-cell">Last run</th>
-                    <th className="num">Duration</th>
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Agent</th>
+                  <th className="hidden sm:table-cell">Category</th>
+                  <th>Status</th>
+                  <th className="num hidden sm:table-cell">Last run</th>
+                  <th className="num">Duration</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shownOpsAgents.map((a) => (
+                  <tr key={a.id}>
+                    <td className="font-medium">{a.name}</td>
+                    <td className="hidden sm:table-cell text-text">{CATEGORY[a.category]?.label ?? a.category}</td>
+                    <td>{statusBadge(a.lastRunStatus)}</td>
+                    <td className="num hidden sm:table-cell">{a.lastRunAt ? timeAgo(a.lastRunAt) : 'Never run'}</td>
+                    <td className="num">{fmtDuration(a.tookMs)}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {shownOpsAgents.map((a) => (
-                    <tr key={a.id}>
-                      <td className="font-medium">{a.name}</td>
-                      <td className="hidden sm:table-cell text-text">{CATEGORY[a.category]?.label ?? a.category}</td>
-                      <td>{statusBadge(a.lastRunStatus)}</td>
-                      <td className="num hidden sm:table-cell">{a.lastRunAt ? timeAgo(a.lastRunAt) : 'Never run'}</td>
-                      <td className="num">{fmtDuration(a.tookMs)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <div className="tbl-foot">
-                <span>Showing {shownOpsAgents.length} of {opsAgents.length} agents</span>
-                {opsAgents.length > 10 && (
-                  <Button variant="ghost" size="sm" onClick={() => setShowAllAgents((v) => !v)}>
-                    {showAllAgents ? 'Show fewer' : 'Show all agents'}
-                  </Button>
-                )}
-              </div>
+                ))}
+              </tbody>
+            </table>
+            <div className="tbl-foot">
+              <span>Showing {shownOpsAgents.length} of {opsAgents.length} agents</span>
+              {opsAgents.length > 10 && (
+                <Button variant="ghost" size="sm" onClick={() => setShowAllAgents((v) => !v)}>
+                  {showAllAgents ? 'Show fewer' : 'Show all agents'}
+                </Button>
+              )}
             </div>
           </Section>
 
-          <div className="grid gap-6 lg:grid-cols-[1.5fr_1fr] items-start">
-            <Section title="Execution timeline" subtitle="Most recent agent runs across every tenant">
+          <Tray className="lg:grid-cols-[1.5fr_1fr] items-start">
+            <TrayCard title="Execution timeline" subtitle="Most recent agent runs across every tenant">
               {ops.executionLog.length === 0 ? (
-                <div className="card text-sm text-faint text-center py-10">No agent runs recorded yet.</div>
+                <div className="text-sm text-faint text-center py-10 border-t border-border">No agent runs recorded yet.</div>
               ) : (
-                <div className="card overflow-hidden">
-                  <div className="max-h-96 overflow-y-auto">
-                    <table className="tbl">
-                      <thead>
-                        <tr>
-                          <th>Time</th>
-                          <th>Agent</th>
-                          <th className="hidden sm:table-cell">Client</th>
-                          <th className="num">Status</th>
+                <>
+                <div className="max-h-96 overflow-y-auto">
+                  <table className="tbl">
+                    <thead>
+                      <tr>
+                        <th>Time</th>
+                        <th>Agent</th>
+                        <th className="hidden sm:table-cell">Client</th>
+                        <th className="num">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ops.executionLog.map((r, i) => (
+                        <tr key={i}>
+                          <td className="text-text whitespace-nowrap">{new Date(r.createdAt).toLocaleTimeString()}</td>
+                          <td className="font-mono text-[13px] font-medium">{r.agentId}</td>
+                          <td className="hidden sm:table-cell">{r.siteName}</td>
+                          <td className="num">{statusBadge(r.status)}</td>
                         </tr>
-                      </thead>
-                      <tbody>
-                        {ops.executionLog.map((r, i) => (
-                          <tr key={i}>
-                            <td className="text-text whitespace-nowrap">{new Date(r.createdAt).toLocaleTimeString()}</td>
-                            <td className="font-mono text-[13px] font-medium">{r.agentId}</td>
-                            <td className="hidden sm:table-cell">{r.siteName}</td>
-                            <td className="num">{statusBadge(r.status)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <div className="tbl-foot"><span>Latest {ops.executionLog.length} runs</span></div>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
+                <div className="tbl-foot"><span>Latest {ops.executionLog.length} runs</span></div>
+                </>
               )}
-            </Section>
+            </TrayCard>
 
-            <Section title="Model status" subtitle="Models behind each tier">
-              <div className="card overflow-hidden">
-                <table className="tbl">
-                  <tbody>
-                    <tr><td className="text-text">Active provider</td><td className="num capitalize">{ops.modelStatus.provider}</td></tr>
-                    <tr><td className="text-text">Daily-tier model</td><td className="num font-mono text-[13px]">{ops.modelStatus.dailyModel}</td></tr>
-                    <tr><td className="text-text">Monthly-tier model</td><td className="num font-mono text-[13px]">{ops.modelStatus.monthlyModel}</td></tr>
-                    <tr><td className="text-text">Forecast engine model</td><td className="num font-mono text-[13px]">{ops.modelStatus.forecastModel}</td></tr>
-                  </tbody>
-                </table>
-              </div>
-            </Section>
-          </div>
+            <TrayCard title="Model status" subtitle="Models behind each tier">
+              <table className="tbl">
+                <tbody>
+                  <tr><td className="text-text">Active provider</td><td className="num capitalize">{ops.modelStatus.provider}</td></tr>
+                  <tr><td className="text-text">Daily-tier model</td><td className="num font-mono text-[13px]">{ops.modelStatus.dailyModel}</td></tr>
+                  <tr><td className="text-text">Monthly-tier model</td><td className="num font-mono text-[13px]">{ops.modelStatus.monthlyModel}</td></tr>
+                  <tr><td className="text-text">Forecast engine model</td><td className="num font-mono text-[13px]">{ops.modelStatus.forecastModel}</td></tr>
+                </tbody>
+              </table>
+            </TrayCard>
+          </Tray>
         </div>
       )}
 

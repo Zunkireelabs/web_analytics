@@ -13,7 +13,7 @@ const TITLE = 'Who outranks you on Google';
 
 function EmptyState({ message, value = '—', color }) {
   return (
-    <div className="card p-5">
+    <div className="tray-card p-5">
       <div className="flex items-center justify-between gap-2 text-[13px] text-text">
         <span>{TITLE}</span>
         <Badge tone="outline">Google Search</Badge>
@@ -27,7 +27,7 @@ function EmptyState({ message, value = '—', color }) {
 export default function CompetitorRankingCard({ rankingComparison, meta, loading }) {
   if (loading) {
     return (
-      <div className="card p-5 space-y-3">
+      <div className="tray-card p-5 space-y-3">
         <div className="h-3 w-40 bg-muted rounded-control animate-pulse" />
         <div className="h-6 w-32 bg-muted rounded-control animate-pulse" />
       </div>
@@ -50,7 +50,7 @@ export default function CompetitorRankingCard({ rankingComparison, meta, loading
 
   if (!rankingComparison.rows?.length) {
     return (
-      <div className="card p-5">
+      <div className="tray-card p-5">
         <div className="text-[13px] text-text">{TITLE}</div>
         <div className="mt-1.5 text-[22px] font-medium tracking-[-0.02em] text-fg tnum">0</div>
         <p className="mt-2 text-[13px] text-text">
@@ -61,7 +61,7 @@ export default function CompetitorRankingCard({ rankingComparison, meta, loading
   }
 
   return (
-    <div className="card p-5">
+    <div className="tray-card p-5">
       <div className="flex items-center justify-between gap-2 text-[13px] text-text">
         <span>{TITLE}</span>
         <Badge tone="outline">{sourceLabel}</Badge>

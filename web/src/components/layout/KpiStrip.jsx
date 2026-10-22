@@ -55,5 +55,5 @@ export default function KpiStrip({ items = [], loading = false, bare = false, co
         ))}
       </div>
   );
-  return bare ? grid : <div className="card overflow-hidden">{grid}</div>;
+  return bare ? grid : <div className="tray"><div className="tray-card">{grid}</div></div>;
 }

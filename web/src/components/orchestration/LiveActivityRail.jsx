@@ -7,7 +7,7 @@ import { ORCH_CATEGORY as CATEGORY } from './palette.js';
 // snapshot. Renders only its box; the section title comes from the parent.
 export default function LiveActivityRail({ items }) {
   return (
-    <div className="card overflow-hidden flex flex-col" style={{ maxHeight: 320 }}>
+    <div className="border-t border-border flex flex-col" style={{ maxHeight: 320 }}>
       <div className="overflow-y-auto flex-1 custom-scrollbar">
         {items === null ? (
           <div className="p-4 space-y-2.5">

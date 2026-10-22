@@ -12,11 +12,11 @@ const CATEGORY_META = {
 
 export default function ActivityFeed({ items }) {
   if (!items?.length) {
-    return <div className="card py-10 text-center text-sm text-faint">No activity logged yet.</div>;
+    return <div className="border-t border-border py-10 text-center text-sm text-faint">No activity logged yet.</div>;
   }
 
   return (
-    <div className="card">
+    <div className="border-t border-border">
       {items.map((a, i) => {
         const attempted = a.status !== 'ok';
         const cat = CATEGORY_META[a.category || 'seo'] || { label: 'Audit', icon: Activity, color: STATUS.neutral.color };

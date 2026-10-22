@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import Section from './layout/Section.jsx';
+import { TrayCard } from './layout/Tray.jsx';
 import Button from './Button.jsx';
 
 const num = (v) => Number(v || 0);
@@ -25,60 +25,58 @@ export default function TopPagesCard({ pages, loading }) {
   const labelOf = labelForRows(rows);
 
   return (
-    <Section title="Top pages" subtitle="Landing pages by organic impressions">
-      <div className="card overflow-hidden">
-        {loading ? (
+    <TrayCard title="Top pages" subtitle="Landing pages by organic impressions">
+      {loading ? (
+        <table className="tbl">
+          <tbody>
+            {Array.from({ length: 5 }).map((_, i) => (
+              <tr key={i}>
+                <td colSpan={4}><div className="h-4 bg-muted rounded-control animate-pulse" /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : rows.length === 0 ? (
+        <div className="text-sm text-faint text-center py-10">No page data for this range.</div>
+      ) : (
+        <>
           <table className="tbl">
+            <thead>
+              <tr>
+                <th className="rank">#</th>
+                <th>Page</th>
+                <th className="num">Impr.</th>
+                <th className="num">Clicks</th>
+              </tr>
+            </thead>
             <tbody>
-              {Array.from({ length: 5 }).map((_, i) => (
-                <tr key={i}>
-                  <td colSpan={4}><div className="h-4 bg-muted rounded-control animate-pulse" /></td>
-                </tr>
-              ))}
+              {displayRows.map((r, i) => {
+                const impr = num(r.impressions);
+                const share = Math.max((impr / max) * 100, 4);
+                return (
+                  <tr key={i}>
+                    <td className="rank">{i + 1}</td>
+                    <td className="bar max-w-0 w-full">
+                      <i style={{ width: `${share}%` }} />
+                      <span className="block truncate" title={r.dim_value}>{labelOf(r.dim_value)}</span>
+                    </td>
+                    <td className="num">{fmt(impr)}</td>
+                    <td className="num">{fmt(r.clicks)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
-        ) : rows.length === 0 ? (
-          <div className="text-sm text-faint text-center py-10">No page data for this range.</div>
-        ) : (
-          <>
-            <table className="tbl">
-              <thead>
-                <tr>
-                  <th className="rank">#</th>
-                  <th>Page</th>
-                  <th className="num">Impr.</th>
-                  <th className="num">Clicks</th>
-                </tr>
-              </thead>
-              <tbody>
-                {displayRows.map((r, i) => {
-                  const impr = num(r.impressions);
-                  const share = Math.max((impr / max) * 100, 4);
-                  return (
-                    <tr key={i}>
-                      <td className="rank">{i + 1}</td>
-                      <td className="bar max-w-0 w-full">
-                        <i style={{ width: `${share}%` }} />
-                        <span className="block truncate" title={r.dim_value}>{labelOf(r.dim_value)}</span>
-                      </td>
-                      <td className="num">{fmt(impr)}</td>
-                      <td className="num">{fmt(r.clicks)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            <div className="tbl-foot">
-              <span>Showing {displayRows.length} of {rows.length}</span>
-              {hasMore && (
-                <Button variant="ghost" size="sm" onClick={() => setShowAll((s) => !s)}>
-                  {showAll ? 'Show less' : 'View all pages'}
-                </Button>
-              )}
-            </div>
-          </>
-        )}
-      </div>
-    </Section>
+          <div className="tbl-foot">
+            <span>Showing {displayRows.length} of {rows.length}</span>
+            {hasMore && (
+              <Button variant="ghost" size="sm" onClick={() => setShowAll((s) => !s)}>
+                {showAll ? 'Show less' : 'View all pages'}
+              </Button>
+            )}
+          </div>
+        </>
+      )}
+    </TrayCard>
   );
 }

@@ -4,7 +4,7 @@ import PageToolbar from '../components/PageToolbar.jsx';
 import SegmentedTabs from '../components/SegmentedTabs.jsx';
 import Badge from '../components/Badge.jsx';
 import PageIntro from '../components/layout/PageIntro.jsx';
-import Section from '../components/layout/Section.jsx';
+import { Tray, TrayCard } from '../components/layout/Tray.jsx';
 import KpiStrip from '../components/layout/KpiStrip.jsx';
 import Sparkline from '../components/Sparkline.jsx';
 import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, Radar, Legend, Tooltip } from 'recharts';
@@ -181,9 +181,9 @@ export default function Compare({ siteId }) {
       <KpiStrip cols={6} loading={!data} items={kpis} />
 
       {/* Biggest changes + radar */}
-      <div className="grid gap-6 lg:grid-cols-[1.25fr_1fr] mt-8 items-start">
-        <Section className="min-w-0" title="Biggest changes" subtitle={`${fmtLabel(labelA)} vs ${fmtLabel(labelB)}, largest declines first`}>
-          <div className="card overflow-hidden">
+      <Tray className="mt-3 lg:grid-cols-[1.25fr_1fr]">
+        <TrayCard title="Biggest changes" subtitle={`${fmtLabel(labelA)} vs ${fmtLabel(labelB)}, largest declines first`}>
+          <div>
             <table className="tbl">
               <thead>
                 <tr>
@@ -227,10 +227,10 @@ export default function Compare({ siteId }) {
               </tbody>
             </table>
           </div>
-        </Section>
+        </TrayCard>
 
-        <Section className="min-w-0" title="Profile shape" subtitle="Each metric scaled to the larger of the two periods">
-          <div className="card pt-2">
+        <TrayCard className="flex flex-col" title="Profile shape" subtitle="Each metric scaled to the larger of the two periods">
+          <div className="pt-1 flex-1 flex flex-col justify-center">
             <ResponsiveContainer width="100%" height={262}>
               <RadarChart data={radar} outerRadius={66} margin={{ top: 14, right: 10, bottom: 14, left: 10 }}>
                 <PolarGrid stroke={CHART.grid} />
@@ -242,8 +242,8 @@ export default function Compare({ siteId }) {
               </RadarChart>
             </ResponsiveContainer>
           </div>
-        </Section>
-      </div>
+        </TrayCard>
+      </Tray>
     </div>
   );
 }

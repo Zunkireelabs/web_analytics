@@ -98,7 +98,7 @@ export default function CountriesWidget({ rows }) {
 
   if (sorted.length === 0) {
     return (
-      <div className="card text-sm text-faint py-10 text-center">No country data for this range yet.</div>
+      <div className="text-sm text-faint py-10 text-center">No country data for this range yet.</div>
     );
   }
 
@@ -111,7 +111,7 @@ export default function CountriesWidget({ rows }) {
   const ring = { boxShadow: 'inset 0 0 0 1px var(--border-2)' };
 
   return (
-    <div className="card overflow-hidden">
+    <div className="border-t border-border">
       {/* This card is real GSC data + plain threshold checks, not an LLM call — no "AI" badge. */}
       <KpiStrip items={kpis} bare />
 

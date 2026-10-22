@@ -10,7 +10,7 @@ export default function DonutChart({ title, data }) {
   const total = rows.reduce((s, d) => s + Number(d.value), 0);
 
   return (
-    <div className="card p-4 flex flex-wrap items-center gap-6">
+    <div className="px-4 pb-4 pt-1 flex flex-wrap items-center gap-6">
       {rows.length === 0 ? (
         <div className="w-full py-9 text-center text-sm text-faint">No data yet.</div>
       ) : (

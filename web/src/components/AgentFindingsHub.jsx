@@ -11,9 +11,9 @@ export default function AgentFindingsHub({ findings = [] }) {
   const cat = CATEGORY[current.category] || CATEGORY.seo;
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[1fr_1.6fr] items-start">
+    <div className="grid lg:grid-cols-[1fr_1.6fr] border-t border-border">
       {/* Left Navigation: List of findings/agents */}
-      <div className="card overflow-hidden max-h-[480px] overflow-y-auto custom-scrollbar min-w-0">
+      <div className="max-h-[480px] overflow-y-auto custom-scrollbar min-w-0 border-b lg:border-b-0 lg:border-r border-border">
         {findings.map((f, i) => {
           const itemCat = CATEGORY[f.category] || CATEGORY.seo;
           const isSelected = i === selectedIdx;
@@ -42,7 +42,7 @@ export default function AgentFindingsHub({ findings = [] }) {
       </div>
 
       {/* Right Content: Expanded details */}
-      <div className="card overflow-hidden min-w-0">
+      <div className="min-w-0">
         <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-border">
           <div>
             <div className="text-sm font-medium text-fg">{current.name}</div>

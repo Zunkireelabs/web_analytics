@@ -126,7 +126,7 @@ export default function Sidebar({
           on screen. */}
       <aside className="fixed md:sticky top-0 left-0 w-60 shrink-0 h-screen z-40 pointer-events-none">
         <div
-          className={`h-full w-full flex flex-col bg-canvas border-r border-border-canvas pointer-events-auto
+          className={`h-full w-full flex flex-col bg-canvas border-r border-border-canvas md:border-r-0 pointer-events-auto
                       transition-transform duration-200 md:translate-x-0
                       ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}
         >
@@ -246,11 +246,11 @@ function SidebarLink({ to, label, icon: Icon, active }) {
   return (
     <Link to={to} aria-current={active ? 'page' : undefined}
       className={`flex items-center gap-2 h-[30px] px-2.5 rounded-control text-sm ${
-        active ? 'bg-white text-fg font-medium' : 'text-[#3d3d3d] hover:bg-black/[.03]'
+        active ? 'bg-white text-fg font-medium' : 'text-[#262626] font-medium hover:bg-black/[.03]'
       }`}
       style={active ? { boxShadow: 'var(--ring)' } : undefined}
     >
-      <Icon size={15} strokeWidth={1.75} className={active ? 'text-primary' : 'text-[#7a7a7a]'} />
+      <Icon size={15} strokeWidth={1.75} className={active ? 'text-primary' : 'text-[#5c5c5c]'} />
       {label}
     </Link>
   );

@@ -6,7 +6,6 @@ import AccountCard from '../components/AccountCard.jsx';
 import SecurityCard from '../components/SecurityCard.jsx';
 import ScopeCards from '../components/settings/ScopeCards.jsx';
 import SettingsCard from '../components/settings/SettingsCard.jsx';
-import { currentSiteOf, siteDomain } from '../lib/nav.js';
 import { STATUS } from '../lib/palette.js';
 
 // PLACEHOLDER until billing exists: the plan name and status come from this one
@@ -35,14 +34,14 @@ export default function Account({ email, role, sites, siteId, onLogout }) {
         <p className="mt-1 text-sm text-text">Your profile and sign-in, shared across every workspace and project.</p>
 
         <ScopeCards current="account" items={[
-          { key: 'account', label: 'Account', description: 'Profile and sign-in', icon: User, onSelect: () => {} },
-          { key: 'workspace', label: 'Workspace', description: `${sites?.[0]?.name || 'Your workspace'} · team and projects`, icon: Building2,
+          { key: 'account', label: 'Account', description: 'Profile, plan and billing', icon: User, onSelect: () => {} },
+          { key: 'workspace', label: 'Workspace', description: 'Team and projects', icon: Building2,
             onSelect: () => navigate('/settings?scope=workspace') },
-          { key: 'project', label: 'Project', description: `${siteDomain(currentSiteOf(sites, siteId)) || 'Current project'} · details and API`, icon: Globe,
+          { key: 'project', label: 'Project', description: 'Details and API tokens', icon: Globe,
             onSelect: () => navigate('/settings?scope=project') },
         ]} />
 
-        <div className="space-y-5 mt-5">
+        <div className="space-y-3 mt-5">
           <AccountCard email={email} role={role} />
           <SecurityCard />
           <SettingsCard icon={CreditCard} title="Plan & billing" description="Your subscription applies to your whole account — every workspace and project.">
@@ -58,14 +57,14 @@ export default function Account({ email, role, sites, siteId, onLogout }) {
             </div>
           </SettingsCard>
 
-          <div className="grid gap-5 sm:grid-cols-2">
-            <SettingsCard className="h-full" icon={Users} title="Team & workspaces" description="Invites and roles live on each workspace, not on your account.">
+          <div className="tray sm:grid-cols-2">
+            <SettingsCard bare className="h-full" icon={Users} title="Team & workspaces" description="Invites and roles live on each workspace, not on your account.">
               <div className="px-5 py-4">
                 <Button variant="light" onClick={() => navigate('/settings?scope=workspace&tab=team')}>Open workspace settings <ChevronRight size={14} /></Button>
                 <p className="text-xs text-faint mt-2.5">Settings → Workspace → Team.</p>
               </div>
             </SettingsCard>
-            <SettingsCard className="h-full" icon={KeyRound} title="API keys & MCP" description="API tokens belong to each project.">
+            <SettingsCard bare className="h-full" icon={KeyRound} title="API keys & MCP" description="API tokens belong to each project.">
               <div className="px-5 py-4">
                 <Button variant="light" onClick={() => navigate('/settings?scope=project&tab=tokens')}>Open project settings <ChevronRight size={14} /></Button>
                 <p className="text-xs text-faint mt-2.5">Settings → Project → API tokens.</p>

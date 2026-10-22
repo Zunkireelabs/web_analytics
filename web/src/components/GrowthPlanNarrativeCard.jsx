@@ -1,4 +1,5 @@
 import Badge from './Badge.jsx';
+import { TrayCard } from './layout/Tray.jsx';
 import { timeAgo } from '../api.js';
 
 const STEPS = [
@@ -10,7 +11,7 @@ const STEPS = [
 export default function GrowthPlanNarrativeCard({ growthPlan, loading }) {
   if (loading) {
     return (
-      <div className="card px-4 py-4 space-y-2">
+      <div className="tray-card px-4 py-4 space-y-2">
         <div className="h-4 bg-muted rounded-control animate-pulse w-1/4" />
         <div className="h-16 bg-muted rounded-control animate-pulse" />
       </div>
@@ -22,25 +23,16 @@ export default function GrowthPlanNarrativeCard({ growthPlan, loading }) {
   }
 
   return (
-    <div className="card overflow-hidden fade-up">
-      {/* Header with AI Active Badge */}
-      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-border">
-        <div>
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-medium text-fg">Your growth roadmap</h3>
-            <Badge tone="primary">AI agent active</Badge>
-          </div>
-          <p className="text-[13px] text-faint mt-0.5">
-            Grounded in your real onboarding baseline and site audit findings
-          </p>
+    <TrayCard className="fade-up" title="Your growth roadmap"
+      subtitle="Grounded in your real onboarding baseline and site audit findings"
+      action={(
+        <div className="flex items-center gap-2">
+          <Badge tone="primary">AI agent active</Badge>
+          {growthPlan.generatedAt && <Badge tone="grey" className="shrink-0">Updated {timeAgo(growthPlan.generatedAt)}</Badge>}
         </div>
-        {growthPlan.generatedAt && (
-          <Badge tone="grey" className="shrink-0">Updated {timeAgo(growthPlan.generatedAt)}</Badge>
-        )}
-      </div>
-
+      )}>
       {/* 3 step roadmap */}
-      <div className="grid md:grid-cols-3 gap-px bg-border">
+      <div className="grid md:grid-cols-3 gap-px bg-border border-t border-border">
         {STEPS.map(({ key, number, label, badge }) => (
           <div key={key} className="bg-white px-4 py-3.5">
             <div className="text-xs text-faint tnum">{number} · {badge}</div>
@@ -49,6 +41,6 @@ export default function GrowthPlanNarrativeCard({ growthPlan, loading }) {
           </div>
         ))}
       </div>
-    </div>
+    </TrayCard>
   );
 }

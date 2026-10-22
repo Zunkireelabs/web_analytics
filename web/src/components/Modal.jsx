@@ -39,7 +39,7 @@ export default function Modal({ isOpen, onClose, title, subtitle, icon: Icon, ch
           <div className="flex items-start gap-3 px-5 py-4 border-b border-border">
             {iconTile}
             <div className="min-w-0">
-              <h3 className="text-[15px] font-medium text-fg">{title}</h3>
+              <h3 className="text-[15px] font-semibold text-fg">{title}</h3>
               {subtitle && <p className="text-[13px] text-text mt-px">{subtitle}</p>}
             </div>
             {closeBtn('ml-auto')}
@@ -54,7 +54,7 @@ export default function Modal({ isOpen, onClose, title, subtitle, icon: Icon, ch
             <div className="flex items-center gap-2.5">
               {iconTile}
               <div>
-                <h3 className="text-[15px] font-medium text-fg">{title}</h3>
+                <h3 className="text-[15px] font-semibold text-fg">{title}</h3>
                 {subtitle && <p className="text-[13px] text-faint">{subtitle}</p>}
               </div>
             </div>

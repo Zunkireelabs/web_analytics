@@ -7,6 +7,7 @@ import PageToolbar from '../components/PageToolbar.jsx';
 import PageIntro from '../components/layout/PageIntro.jsx';
 import KpiStrip from '../components/layout/KpiStrip.jsx';
 import Section from '../components/layout/Section.jsx';
+import { Tray, TrayCard } from '../components/layout/Tray.jsx';
 import Button from '../components/Button.jsx';
 import { fmtRange } from '../lib/format.js';
 
@@ -109,23 +110,23 @@ export default function Insights({ siteId }) {
 
       <KpiStrip items={kpis} loading={loading} />
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_1.5fr] mt-8 items-start">
-        <Section className="min-w-0" label="Audience" source="Google Analytics" title="Devices" subtitle="Sessions by device type">
+      <Tray className="mt-3 lg:grid-cols-[1fr_1.5fr]">
+        <TrayCard title="Devices" subtitle="Sessions by device type" source="Google Analytics">
           <DonutChart title="Visitors by Device" data={deviceData} />
-        </Section>
-        <Section className="min-w-0" label="Audience" source="Google Analytics" title="Visitors by country" subtitle="Top 10 locations by sessions">
+        </TrayCard>
+        <TrayCard title="Visitors by country" subtitle="Top 10 locations by sessions" source="Google Analytics">
           <CountryCard rows={country.visitors} barKey="sessions" />
-        </Section>
-      </div>
+        </TrayCard>
+      </Tray>
 
       {/* Top countries by clicks — interactive world map + leaderboard */}
-      <Section className="mt-8" label="Search" source="Google Search Console" title="Search clicks by country" subtitle="Where your search clicks come from">
+      <Section tray className="mt-3" title="Search clicks by country" subtitle="Where your search clicks come from" source="Google Search Console">
         <CountriesWidget rows={country.search} />
       </Section>
 
       {/* Detailed query movements and highlights at the bottom for analysis —
-          MoversList renders its own Sections. */}
-      <div className="mt-8">
+          MoversList renders its own trays. */}
+      <div className="mt-3">
         <MoversList gainers={movers.gainers} droppers={movers.droppers} comparisonLabel={moverPeriodLabel(start, end)} />
       </div>
     </div>
@@ -150,7 +151,7 @@ function CountryCard({ rows, barKey }) {
   const max = Math.max(1, ...list.map((r) => Number(r[barKey]) || 0));
   const shown = showAll ? list : list.slice(0, 5);
   return (
-    <div className="card overflow-hidden">
+    <div>
       {list.length === 0 ? (
         <div className="text-sm text-faint text-center py-10">No data.</div>
       ) : (

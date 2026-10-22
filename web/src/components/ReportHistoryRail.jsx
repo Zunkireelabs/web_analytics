@@ -36,7 +36,7 @@ export default function ReportHistoryRail({ history = [] }) {
   const max = Math.max(1, ...history.map((h) => Number(h.clicks) || 0));
 
   return (
-    <div className="card overflow-hidden">
+    <div>
       {history.length === 0 ? (
         <div className="text-sm text-faint py-10 text-center">No report history yet.</div>
       ) : (

@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import PageToolbar from '../components/PageToolbar.jsx';
 import PageIntro from '../components/layout/PageIntro.jsx';
 import KpiStrip from '../components/layout/KpiStrip.jsx';
+import { Tray, TrayCard } from '../components/layout/Tray.jsx';
 import Section from '../components/layout/Section.jsx';
 import SegmentedTabs from '../components/SegmentedTabs.jsx';
 import Button from '../components/Button.jsx';
@@ -124,38 +125,36 @@ export default function Reports({ siteId }) {
               never actually returns either (only Command Center's route
               does), so passing them here would always be null/false and
               imply a freshness timestamp this page doesn't really have. */}
-          <ExecutiveSummaryPanel text={data?.narrative} />
+          <Tray><ExecutiveSummaryPanel text={data?.narrative} /></Tray>
 
-          <div className="mt-6">
+          <div className="mt-3">
             <KpiStrip items={kpis} loading={loading} cols={5} />
           </div>
 
-          <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr] mt-8 items-start">
-            <div className="min-w-0">
-              <PerformanceTrendCard series={data?.series} loading={loading} />
-            </div>
-            <Section className="min-w-0" title="Report history" subtitle="Clicks per period, newest first">
+          <Tray className="mt-3 lg:grid-cols-[1.6fr_1fr]">
+            <PerformanceTrendCard series={data?.series} loading={loading} />
+            <TrayCard title="Report history" subtitle="Clicks per period, newest first">
               <ReportHistoryRail history={data?.history} />
-            </Section>
-          </div>
+            </TrayCard>
+          </Tray>
 
           {!loading && data?.movers && (data.movers.gainers.length > 0 || data.movers.droppers.length > 0) && (
-            <div className="mt-8">
+            <div className="mt-3">
               <MoversList gainers={data.movers.gainers} droppers={data.movers.droppers} comparisonLabel={MOVER_COMPARISON_LABEL[period]} />
             </div>
           )}
 
           {findings.length > 0 && (
-            <Section className="mt-8" title="Agent findings" subtitle={`${findings.length} agents reported`}>
+            <Section tray className="mt-3" title="Agent findings" subtitle={`${findings.length} agents reported`}>
               <AgentFindingsHub findings={findings} />
             </Section>
           )}
 
           {recommendations.length > 0 && (
-            <div id="recommendations-section" className="scroll-mt-6 mt-8">
-              <Section title="Priority recommendations" subtitle="What to do next, by expected impact"
+            <div id="recommendations-section" className="scroll-mt-6 mt-3">
+              <Section tray title="Priority recommendations" subtitle="What to do next, by expected impact"
                 action={<Link to="/action-center" className="btn btn--light no-print">Open Action Center</Link>}>
-                <div className="card overflow-hidden">
+                <div className="border-t border-border">
                   {recommendations.map((r) => (
                     <RecommendationCard key={r.id} title={r.title} reason={r.reason}
                       impact={r.impact} effort={r.effort} category={r.category} />

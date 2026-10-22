@@ -22,7 +22,7 @@ export default function AuthorityScoreCard({ authority, meta, loading }) {
 
   if (loading) {
     return (
-      <div className="card p-5 space-y-3">
+      <div className="tray-card p-5 space-y-3">
         <div className="h-3 w-28 bg-muted rounded-control animate-pulse" />
         <div className="h-6 w-20 bg-muted rounded-control animate-pulse" />
       </div>
@@ -31,7 +31,7 @@ export default function AuthorityScoreCard({ authority, meta, loading }) {
 
   if (!authority) {
     return (
-      <div className="card p-5">
+      <div className="tray-card p-5">
         <div className="flex items-center justify-between gap-2 text-[13px] text-text">
           <span>SEO domain authority</span>
           <Badge tone="outline">Not yet available</Badge>
@@ -48,7 +48,7 @@ export default function AuthorityScoreCard({ authority, meta, loading }) {
   const row = 'flex justify-between gap-3 py-2 border-b border-border last:border-0 text-[13px]';
 
   return (
-    <div className="card p-5">
+    <div className="tray-card p-5">
       <div className="flex items-start justify-between gap-6">
         <div className="min-w-0">
           <div className="text-[13px] text-text">SEO domain authority</div>

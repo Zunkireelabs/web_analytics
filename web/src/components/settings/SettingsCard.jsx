@@ -1,12 +1,14 @@
 // The shared settings card: header (icon + title + description, optional action),
 // body as given, optional footer. Callers add their own body padding; rows use
 // `px-5 py-3 border-b border-border last:border-0`.
-export default function SettingsCard({ icon: Icon, title, description, action, footer, children, className = '', style }) {
-  return (
-    <div className={`card overflow-hidden ${className}`.trim()} style={style}>
+// Wraps itself in a grey tray; `bare` skips the tray (just the white card) for callers
+// that put several cards in one tray of their own (Account's two-up).
+export default function SettingsCard({ icon: Icon, title, description, action, footer, children, className = '', style, bare = false }) {
+  const card = (
+    <div className={`tray-card ${className}`.trim()} style={style}>
       <div className="flex items-start justify-between gap-3 px-4 sm:px-5 py-3.5 border-b border-border">
         <div className="min-w-0">
-          <h2 className="flex items-center gap-2 text-[15px] font-medium text-fg">
+          <h2 className="flex items-center gap-2 text-[15px] font-semibold text-fg">
             {Icon && <Icon size={15} className="text-faint" />}
             {title}
           </h2>
@@ -18,6 +20,7 @@ export default function SettingsCard({ icon: Icon, title, description, action, f
       {footer && <div className="flex justify-end gap-2 px-5 py-3 border-t border-border">{footer}</div>}
     </div>
   );
+  return bare ? card : <div className="tray">{card}</div>;
 }
 
 // Definition list for read-only facts: rows = [[label, value], …]; rows with a

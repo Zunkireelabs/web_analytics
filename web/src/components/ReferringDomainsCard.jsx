@@ -16,7 +16,7 @@ export default function ReferringDomainsCard({ summary, loading }) {
 
   if (loading) {
     return (
-      <div className="card p-5 space-y-3">
+      <div className="tray-card p-5 space-y-3">
         <div className="h-3 w-32 bg-muted rounded-control animate-pulse" />
         <div className="h-6 w-16 bg-muted rounded-control animate-pulse" />
       </div>
@@ -25,7 +25,7 @@ export default function ReferringDomainsCard({ summary, loading }) {
 
   if (!summary || summary.status !== 'ok') {
     return (
-      <div className="card p-5">
+      <div className="tray-card p-5">
         <div className="text-[13px] text-text">Referring domains</div>
         <div className="mt-1.5 text-[22px] font-medium tracking-[-0.02em] text-fg tnum">—</div>
         <p className="mt-2 text-[13px] text-text">{emptyMessage(summary)}</p>
@@ -34,7 +34,7 @@ export default function ReferringDomainsCard({ summary, loading }) {
   }
 
   return (
-    <div className="card p-5">
+    <div className="tray-card p-5">
       <div className="text-[13px] text-text">Referring domains</div>
       <div className="mt-1.5 flex items-baseline gap-2">
         <span className="text-[22px] font-medium tracking-[-0.02em] text-fg tnum">{animatedCount}</span>

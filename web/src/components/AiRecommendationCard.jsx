@@ -28,7 +28,7 @@ export default function AiRecommendationCard({ aiRecommendation, meta, loading }
 
   if (loading) {
     return (
-      <div className="card p-4 space-y-3">
+      <div className="tray-card p-4 space-y-3">
         <div className="h-3 w-28 bg-muted rounded-control animate-pulse" />
         <div className="h-6 w-20 bg-muted rounded-control animate-pulse" />
       </div>
@@ -37,7 +37,7 @@ export default function AiRecommendationCard({ aiRecommendation, meta, loading }
 
   if (!aiRecommendation) {
     return (
-      <div className="card p-4">
+      <div className="tray-card p-4">
         <div className="flex items-center justify-between gap-2 text-[13px] text-text">
           <span>AI search visibility</span>
           <Badge tone="outline">Not yet available</Badge>
@@ -54,7 +54,7 @@ export default function AiRecommendationCard({ aiRecommendation, meta, loading }
   const gap = aiRecommendation.competitorCitationGapPct;
 
   return (
-    <div className="card overflow-hidden">
+    <div className="tray-card overflow-hidden">
       <div className="px-4 pt-4 pb-3 text-sm text-text">
         Mentioned in {aiRecommendation.mentionedCount} of {aiRecommendation.promptsChecked} {aiRecommendation.providerCount > 1 ? 'AI' : 'ChatGPT'} buyer-intent prompts
         {coverageCaveat && (

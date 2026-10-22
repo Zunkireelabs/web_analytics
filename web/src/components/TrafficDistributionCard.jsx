@@ -1,5 +1,5 @@
 import { ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
-import Section from './layout/Section.jsx';
+import { TrayCard } from './layout/Tray.jsx';
 import { SERIES, CHART } from '../lib/palette.js';
 
 const num = (v) => Number(v || 0);
@@ -29,8 +29,8 @@ export default function TrafficDistributionCard({ channels, loading }) {
   const pieRows = rows.filter((r) => r.value > 0);
 
   return (
-    <Section label="Traffic" source="Google Analytics" title="Traffic distribution" subtitle="Sessions by acquisition channel">
-      <div className="card p-4 flex flex-wrap items-center gap-6">
+    <TrayCard title="Traffic distribution" subtitle="Sessions by acquisition channel" source="Google Analytics">
+      <div className="p-4 pt-1 flex flex-wrap items-center gap-6">
         {loading ? (
           <div className="w-full py-9 text-center text-sm text-faint">Loading distribution…</div>
         ) : total === 0 ? (
@@ -68,6 +68,6 @@ export default function TrafficDistributionCard({ channels, loading }) {
           </>
         )}
       </div>
-    </Section>
+    </TrayCard>
   );
 }

@@ -46,10 +46,14 @@ const COMPONENTS = {
   hr: () => <hr className="border-border my-3" />,
 };
 
-export default function MarkdownReport({ content }) {
+// `bare` drops the card chrome for use as the body of a TrayCard/Section (the
+// Milestones baseline report); the default keeps the card for DraftPreview.
+export default function MarkdownReport({ content, bare = false }) {
   if (!content) return null;
   return (
-    <div className="card px-5 py-4 md:px-6 md:py-5 text-[13px] leading-5 text-text">
+    <div className={bare
+      ? 'px-5 py-4 md:px-6 md:py-5 text-[13px] leading-5 text-text border-t border-border'
+      : 'card px-5 py-4 md:px-6 md:py-5 text-[13px] leading-5 text-text'}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={COMPONENTS}>
         {content}
       </ReactMarkdown>

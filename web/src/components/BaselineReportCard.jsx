@@ -20,16 +20,16 @@ export default function BaselineReportCard({ report, siteId, isInternal, onGener
   const downloadUrl = api.baselineReportDownloadUrl(isInternal ? siteId : undefined);
 
   return (
-    <Section label="Baseline" title="Your baseline report" subtitle="Where the site stood at onboarding"
+    <Section tray title="Your baseline report" subtitle="Where the site stood at onboarding"
       action={report.available && (
         <a href={downloadUrl} className="btn btn--light">
           <FileDown size={14} /> Download PDF
         </a>
       )}>
       {report.available ? (
-        <MarkdownReport content={report.narrativeMd} />
+        <MarkdownReport bare content={report.narrativeMd} />
       ) : (
-        <div className="card px-4 py-8 text-center space-y-3">
+        <div className="px-4 py-8 text-center space-y-3 border-t border-border">
           <p className="text-sm text-text">{report.message}</p>
           {isInternal && siteId && (
             <Button variant="light" size="sm" onClick={() => api.generateBaselineReport(siteId).then(onGenerated).catch(() => {})}>

@@ -5,6 +5,7 @@ import TrafficDistributionCard from '../components/TrafficDistributionCard.jsx';
 import AiInsightsPanel from '../components/AiInsightsPanel.jsx';
 import TopPagesCard from '../components/TopPagesCard.jsx';
 import PerformanceTrendCard from '../components/PerformanceTrendCard.jsx';
+import { Tray } from '../components/layout/Tray.jsx';
 import PageToolbar from '../components/PageToolbar.jsx';
 import PageIntro from '../components/layout/PageIntro.jsx';
 import KpiStrip from '../components/layout/KpiStrip.jsx';
@@ -224,19 +225,19 @@ export default function Overview({ siteId }) {
 
       <KpiStrip items={kpis} loading={loading} />
 
-      <div className="mt-8">
+      <Tray className="mt-3">
         <PerformanceTrendCard series={series} loading={loading} />
-      </div>
+      </Tray>
 
-      <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr] mt-8">
+      <Tray className="mt-3 lg:grid-cols-[1.4fr_1fr]">
         <TopPagesCard pages={rangePages} loading={loading} />
         <AiInsightsPanel channels={channels} queries={rangeQueries} pages={rangePages} loading={loading} />
-      </div>
+      </Tray>
 
-      <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr] mt-8">
+      <Tray className="mt-3 lg:grid-cols-[1.6fr_1fr]">
         <TopQueriesCard queries={rangeQueries} loading={loading} />
         <TrafficDistributionCard channels={channels} loading={loading} />
-      </div>
+      </Tray>
     </div>
   );
 }

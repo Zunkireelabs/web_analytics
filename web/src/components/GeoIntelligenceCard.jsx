@@ -28,7 +28,7 @@ export default function GeoIntelligenceCard({ geoIntelligence, meta, loading }) 
 
   if (loading) {
     return (
-      <div className="card p-5 space-y-3">
+      <div className="tray-card p-5 space-y-3">
         <div className="h-3 w-28 bg-muted rounded-control animate-pulse" />
         <div className="h-6 w-20 bg-muted rounded-control animate-pulse" />
       </div>
@@ -37,7 +37,7 @@ export default function GeoIntelligenceCard({ geoIntelligence, meta, loading }) 
 
   if (!geoIntelligence) {
     return (
-      <div className="card p-5">
+      <div className="tray-card p-5">
         <div className="flex items-center justify-between gap-2 text-[13px] text-text">
           <span>Geographic audience share</span>
           <Badge tone="outline">Not yet available</Badge>
@@ -56,7 +56,7 @@ export default function GeoIntelligenceCard({ geoIntelligence, meta, loading }) 
   const topGrowing = growing[0] || null;
 
   return (
-    <div className="card overflow-hidden">
+    <div className="tray-card overflow-hidden">
       <div className="grid grid-cols-1 sm:grid-cols-3">
         <div className={CELL}>
           <div className="text-[13px] text-text">Primary market</div>

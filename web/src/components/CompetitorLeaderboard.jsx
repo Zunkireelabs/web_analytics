@@ -37,11 +37,11 @@ export default function CompetitorLeaderboard({ profiles }) {
   ].filter(Boolean).sort((a, b) => b.score - a.score);
 
   if (!rows.length) {
-    return <div className="card text-sm text-faint text-center py-10">No competitors logged yet.</div>;
+    return <div className="border-t border-border text-sm text-faint text-center py-10">No competitors logged yet.</div>;
   }
 
   return (
-    <div className="card overflow-hidden">
+    <div className="border-t border-border">
       <table className="tbl">
         <thead>
           <tr>

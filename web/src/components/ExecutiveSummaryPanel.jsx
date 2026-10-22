@@ -1,4 +1,4 @@
-import Section from './layout/Section.jsx';
+import { TrayCard } from './layout/Tray.jsx';
 import { timeAgo } from '../api.js';
 
 // Today's summary — plain-English narrative for non-technical readers.
@@ -7,9 +7,9 @@ export default function ExecutiveSummaryPanel({ text, source, generatedAt }) {
   const lines = (text || '').split('\n').map((l) => l.trim()).filter(Boolean);
 
   return (
-    <Section label="Today" source="Executive report" title="Today's summary" subtitle="Prepared by your AI assistant"
+    <TrayCard title="Today's summary" subtitle="Prepared by your AI assistant" source="Executive report"
       action={generatedAt ? <span className="text-[13px] text-faint">Updated {timeAgo(generatedAt)}</span> : null}>
-      <div className="card px-4 py-3 text-sm leading-6 text-text">
+      <div className="border-t border-border px-4 py-3 text-sm leading-6 text-text">
         {lines.length > 1 ? (
           <ul className="space-y-2">
             {lines.map((line, i) => (
@@ -23,6 +23,6 @@ export default function ExecutiveSummaryPanel({ text, source, generatedAt }) {
           <p className="whitespace-pre-line">{lines[0] || 'Report generating — check back after today\'s update.'}</p>
         )}
       </div>
-    </Section>
+    </TrayCard>
   );
 }

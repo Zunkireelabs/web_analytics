@@ -868,11 +868,11 @@ export default function ActionCenter() {
 
       <KpiStrip items={kpis} loading={recs === null} />
 
-      <div className="grid gap-6 lg:grid-cols-[1.3fr_1fr] items-start mt-8">
+      <div className="grid gap-3 lg:grid-cols-[1.3fr_1fr] items-start mt-3">
         {/* ============ LEFT: lists ============ */}
         {tab === 'recommendations' && (
-          <Section className="min-w-0" title="Recommendations" subtitle="Grouped by category · open a group to see its fixes">
-            <div className="card overflow-hidden">
+          <Section tray className="min-w-0" title="Recommendations" subtitle="Grouped by category · open a group to see its fixes">
+            <div className="border-t border-border">
               {recs === null ? (
                 Array.from({ length: 6 }).map((_, i) => (
                   <div key={i} className="px-4 py-3 border-b border-border last:border-0"><div className="h-4 bg-muted rounded-control animate-pulse" /></div>
@@ -946,17 +946,17 @@ export default function ActionCenter() {
         )}
 
         {tab === 'drafts' && (
-          <Section className="min-w-0" title="Drafts" subtitle="Generated fixes moving towards your site">
-            {nonImplementedDrafts && nonImplementedDrafts.length > 0 && (
-              <div className="mb-3 max-w-full overflow-x-auto no-scrollbar">
-                <SegmentedTabs value={statusFilter} onChange={setStatusFilter}
-                  options={STATUS_FILTERS.map((f) => ({
-                    value: f.value,
-                    label: <>{f.label}<span className="text-faint ml-1">{f.value ? nonImplementedDrafts.filter((d) => d.status === f.value).length : nonImplementedDrafts.length}</span></>,
-                  }))} />
-              </div>
-            )}
-            <div className="card overflow-hidden">
+          <Section tray className="min-w-0" title="Drafts" subtitle="Generated fixes moving towards your site">
+            <div className="border-t border-border">
+              {nonImplementedDrafts && nonImplementedDrafts.length > 0 && (
+                <div className="px-4 py-2.5 border-b border-border overflow-x-auto no-scrollbar">
+                  <SegmentedTabs value={statusFilter} onChange={setStatusFilter}
+                    options={STATUS_FILTERS.map((f) => ({
+                      value: f.value,
+                      label: <>{f.label}<span className="text-faint ml-1">{f.value ? nonImplementedDrafts.filter((d) => d.status === f.value).length : nonImplementedDrafts.length}</span></>,
+                    }))} />
+                </div>
+              )}
               {drafts === null ? (
                 <div className="py-10 text-center text-sm text-faint">Loading list…</div>
               ) : visibleDrafts.length === 0 ? (
@@ -984,8 +984,8 @@ export default function ActionCenter() {
         )}
 
         {tab === 'implemented' && (
-          <Section className="min-w-0" title="Shipped" subtitle="Newest first">
-            <div className="card overflow-hidden">
+          <Section tray className="min-w-0" title="Shipped" subtitle="Newest first">
+            <div className="border-t border-border">
               {drafts === null ? (
                 <div className="py-10 text-center text-sm text-faint">Loading history…</div>
               ) : implementedDrafts.length === 0 ? (
@@ -1016,8 +1016,8 @@ export default function ActionCenter() {
         {/* ============ RIGHT: details ============ */}
         <div ref={detailsRef} className="min-w-0 lg:sticky lg:top-[72px] scroll-mt-20">
           {tab === 'recommendations' && (
-            <Section title="Details" subtitle="The selected recommendation">
-              <div className="card overflow-hidden">
+            <Section tray title="Details" subtitle="The selected recommendation">
+              <div className="border-t border-border">
                 {sel ? (
                   <>
                     <div className="px-4 py-3 border-b border-border">
@@ -1169,8 +1169,8 @@ export default function ActionCenter() {
           )}
 
           {(tab === 'drafts' || tab === 'implemented') && (
-            <Section title="Details" subtitle="The selected draft">
-              <div className="card overflow-hidden">
+            <Section tray title="Details" subtitle="The selected draft">
+              <div className="border-t border-border">
                 {selectedDraftItem ? (
                   <>
                     <div className="px-4 py-3 border-b border-border">

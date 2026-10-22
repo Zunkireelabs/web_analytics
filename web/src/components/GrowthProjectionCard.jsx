@@ -31,7 +31,7 @@ export default function GrowthProjectionCard({ title, unit = '', projection, loa
 
   if (loading) {
     return (
-      <div className={compact ? 'bg-white px-4 py-3.5' : 'card px-4 py-4'}>
+      <div className={compact ? 'bg-white px-4 py-3.5' : 'tray-card px-4 py-4'}>
         <div className="text-[13px] text-text truncate">{title}</div>
         <div className="h-10 bg-muted rounded-control animate-pulse mt-2" />
       </div>
@@ -116,7 +116,7 @@ export default function GrowthProjectionCard({ title, unit = '', projection, loa
   );
 
   return (
-    <div className={compact ? 'bg-white px-4 py-3.5 min-w-0 flex flex-col h-full' : 'card px-4 py-4 flex flex-col h-full'}>
+    <div className={compact ? 'bg-white px-4 py-3.5 min-w-0 flex flex-col h-full' : 'tray-card px-4 py-4 flex flex-col h-full'}>
       {body}
     </div>
   );

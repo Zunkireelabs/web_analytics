@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import { TrendingUp, Search, FileText, Lightbulb } from 'lucide-react';
-import Section from './layout/Section.jsx';
+import { TrayCard } from './layout/Tray.jsx';
 import Badge from './Badge.jsx';
 
 const num = (v) => Number(v || 0);
@@ -70,8 +70,8 @@ export default function AiInsightsPanel({ channels, queries, pages, loading }) {
   const insights = buildInsights({ channels, queries, pages });
 
   return (
-    <Section title="Quick insights" subtitle="What changed and what to do next" action={<Badge tone="outline">Rule-based</Badge>}>
-      <div className="card">
+    <TrayCard title="Quick insights" subtitle="What changed and what to do next" action={<Badge tone="outline">Rule-based</Badge>}>
+      <div className="border-t border-border">
         {loading ? (
           <div className="py-14 text-center text-sm text-faint">Analyzing…</div>
         ) : insights.length === 0 ? (
@@ -98,6 +98,6 @@ export default function AiInsightsPanel({ channels, queries, pages, loading }) {
           })
         )}
       </div>
-    </Section>
+    </TrayCard>
   );
 }

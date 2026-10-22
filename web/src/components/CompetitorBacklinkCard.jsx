@@ -14,7 +14,7 @@ function emptyMessage(meta) {
 export default function CompetitorBacklinkCard({ backlinkComparison, meta, loading }) {
   if (loading) {
     return (
-      <div className="card p-5 space-y-3">
+      <div className="tray-card p-5 space-y-3">
         <div className="h-3 w-40 bg-muted rounded-control animate-pulse" />
         <div className="h-6 w-32 bg-muted rounded-control animate-pulse" />
       </div>
@@ -23,7 +23,7 @@ export default function CompetitorBacklinkCard({ backlinkComparison, meta, loadi
 
   if (!backlinkComparison) {
     return (
-      <div className="card p-5">
+      <div className="tray-card p-5">
         <div className="text-[13px] text-text">Competitor backlink comparison</div>
         <div className="mt-1.5 text-[22px] font-medium tracking-[-0.02em] text-fg tnum">—</div>
         <p className="mt-2 text-[13px] text-text">{emptyMessage(meta)}</p>
@@ -36,7 +36,7 @@ export default function CompetitorBacklinkCard({ backlinkComparison, meta, loadi
   const row = 'flex justify-between gap-3 py-2 border-b border-border last:border-0 text-[13px]';
 
   return (
-    <div className="card p-5">
+    <div className="tray-card p-5">
       <div className="text-[13px] text-text">Competitor backlink comparison</div>
 
       <div className="mt-1.5 flex items-baseline gap-2">

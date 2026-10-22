@@ -66,7 +66,7 @@ export default function SiteAuditSummaryCard({ siteAudit, loading }) {
 
   if (loading) {
     return (
-      <div className="card px-4 py-8 text-center">
+      <div className="border-t border-border px-4 py-8 text-center">
         <Loader2 size={20} className="animate-spin text-faint mx-auto" />
         <p className="text-sm text-text mt-2">Analyzing site audit baseline…</p>
       </div>
@@ -75,7 +75,7 @@ export default function SiteAuditSummaryCard({ siteAudit, loading }) {
 
   if (!run) {
     return (
-      <div className="card px-4 py-10 text-center">
+      <div className="border-t border-border px-4 py-10 text-center">
         <Radar size={20} className="text-faint mx-auto" />
         <h3 className="text-sm font-medium text-fg mt-2">First site audit pending</h3>
         <p className="text-[13px] text-text">
@@ -87,7 +87,7 @@ export default function SiteAuditSummaryCard({ siteAudit, loading }) {
 
   if (run.status === 'failed') {
     return (
-      <div className="card px-4 py-3 flex gap-3">
+      <div className="border-t border-border px-4 py-3 flex gap-3">
         <XCircle size={16} className="shrink-0 mt-0.5" style={{ color: STATUS.critical.text }} />
         <div>
           <h4 className="text-sm font-medium text-fg">Site audit interrupted</h4>
@@ -102,7 +102,7 @@ export default function SiteAuditSummaryCard({ siteAudit, loading }) {
   const stat = 'px-4 first:pl-0 border-l border-border first:border-0';
 
   return (
-    <div className="card overflow-hidden fade-up">
+    <div className="border-t border-border fade-up">
       {/* Row 1: title + high-level stats */}
       <div className="flex flex-wrap items-center justify-between gap-4 px-4 py-3 border-b border-border">
         <div>

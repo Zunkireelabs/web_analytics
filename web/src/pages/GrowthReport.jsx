@@ -7,6 +7,7 @@ import Section from '../components/layout/Section.jsx';
 import Badge from '../components/Badge.jsx';
 import { fmtDay } from '../lib/format.js';
 import { STATUS } from '../lib/palette.js';
+import { Tray } from '../components/layout/Tray.jsx';
 import PerformanceTrendCard from '../components/PerformanceTrendCard.jsx';
 import GrowthTrendCard from '../components/GrowthTrendCard.jsx';
 import GrowthProjectionCard from '../components/GrowthProjectionCard.jsx';
@@ -135,70 +136,69 @@ export default function GrowthReport({ isInternal = false }) {
       ) : data === null ? (
         <KpiStrip cols={3} loading items={[{}, {}, {}]} />
       ) : !data.available ? (
-        <div className="card px-4 py-10 text-center text-sm text-text">{data.message}</div>
+        <div className="tray"><div className="tray-card px-4 py-10 text-center text-sm text-text">{data.message}</div></div>
       ) : (
         <>
           <KpiStrip cols={3} items={kpis} />
 
-          <div className="mt-8">
+          <div className="mt-3">
             <BaselineReportCard report={baselineReport} siteId={isInternal ? selectedSiteId : undefined}
               isInternal={isInternal} onGenerated={loadBaselineReport} />
           </div>
 
-          <Section className="mt-8" label="Site audit" title="Where you stand today" subtitle="The latest full crawl of your site">
+          <Section tray className="mt-3" title="Where you stand today" subtitle="The latest full crawl of your site">
             <SiteAuditSummaryCard siteAudit={data.siteAudit} loading={false} />
           </Section>
 
-          {/* Growth Plan & Performance — combined narrative, AI projections,
-              and historical trends in one compact section (previously two
-              separate stacked sections). */}
-          <Section className="mt-8" label="Growth" title="Growth plan and trends" subtitle="Three-month projections, then the real history behind them">
-            <div className="space-y-6">
+          {/* Growth plan & performance — consecutive trays: the roadmap narrative,
+              the AI projections strip, then the real history behind them. */}
+          {data.growthPlan?.available && (
+            <Tray className="mt-3">
               <GrowthPlanNarrativeCard growthPlan={data.growthPlan} loading={false} />
+            </Tray>
+          )}
 
-              {/* Compact AI projections — 6 metrics in one hairline strip (gap-px on
-                  the inner grid draws the lines; .card is unlayered, so the bg-border
-                  can't go on the card itself). */}
-              <div className="card overflow-hidden">
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-border">
-                  <GrowthProjectionCard title="Health Score" compact
-                    projection={data.healthScore.projection} />
-                  <GrowthProjectionCard title="Weekly Clicks" unit="/week" compact
-                    projection={data.performance.clicksProjection} />
-                  <GrowthProjectionCard title="Weekly Impressions" unit="/week" compact
-                    projection={data.performance.impressionsProjection} />
-                  <GrowthProjectionCard title="Competitor Readiness" compact
-                    projection={data.competitorTrend?.projection} />
-                  <GrowthProjectionCard title="Authority Score" compact
-                    projection={data.authorityTrend?.projection} />
-                  <GrowthProjectionCard title="AI Recommendation Rate" unit="%" compact
-                    projection={data.aiRecommendationTrend?.projection} />
-                </div>
-              </div>
-
-              {/* Historical trend charts, side-by-side where reasonable. */}
-              <div className="grid lg:grid-cols-2 gap-6">
-                <PerformanceTrendCard series={data.performance.series} targets={data.performance.targets} loading={false} onTargetSaved={load} showClicksProjectionNote />
-                <GrowthTrendCard id="health" title="Website Health Score"
-                  data={data.healthScore} emptyMessage="Not enough health-score history yet." onTargetSaved={load} />
-              </div>
-
-              <div className="grid lg:grid-cols-3 gap-6">
-                <GrowthTrendCard id="competitor" title="Competitor Readiness"
-                  subtitle={data.competitorTrend?.domain ? `vs. ${data.competitorTrend.domain}` : undefined}
-                  data={data.competitorTrend}
-                  emptyMessage="No tracked competitor has enough history yet." onTargetSaved={load} />
-                <GrowthTrendCard id="authority" title="Authority Score"
-                  subtitle={data.authorityTrend?.dataSource === 'commoncrawl' ? 'Coarser estimate (free Common Crawl data — referring domains only)' : undefined}
-                  data={data.authorityTrend} emptyMessage="Needs real DataForSEO backlink data (or free Common Crawl data) — neither connected yet." onTargetSaved={load} />
-                <GrowthTrendCard id="ai-rec" title="AI Recommendation Rate" unit="%"
-                  data={data.aiRecommendationTrend} emptyMessage="No AI recommendation checks have run yet." onTargetSaved={load}
-                  action={data.aiRecommendationTrend?.configured && !data.aiRecommendationTrend?.available
-                    ? { label: 'Run First AI Recommendation Check', run: () => api.runAiRecommendation() }
-                    : undefined} />
-              </div>
+          {/* Compact AI projections — 6 metrics in one hairline strip (gap-px on
+              the inner grid draws the lines; the bg-border sits on the grid, not
+              on the card). */}
+          <Section tray className="mt-3" title="Growth plan and trends" subtitle="Three-month projections, then the real history behind them">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-border border-t border-border">
+              <GrowthProjectionCard title="Health Score" compact
+                projection={data.healthScore.projection} />
+              <GrowthProjectionCard title="Weekly Clicks" unit="/week" compact
+                projection={data.performance.clicksProjection} />
+              <GrowthProjectionCard title="Weekly Impressions" unit="/week" compact
+                projection={data.performance.impressionsProjection} />
+              <GrowthProjectionCard title="Competitor Readiness" compact
+                projection={data.competitorTrend?.projection} />
+              <GrowthProjectionCard title="Authority Score" compact
+                projection={data.authorityTrend?.projection} />
+              <GrowthProjectionCard title="AI Recommendation Rate" unit="%" compact
+                projection={data.aiRecommendationTrend?.projection} />
             </div>
           </Section>
+
+          {/* Historical trend charts, side-by-side where reasonable. */}
+          <Tray className="mt-3 lg:grid-cols-2">
+            <PerformanceTrendCard series={data.performance.series} targets={data.performance.targets} loading={false} onTargetSaved={load} showClicksProjectionNote />
+            <GrowthTrendCard id="health" title="Website Health Score"
+              data={data.healthScore} emptyMessage="Not enough health-score history yet." onTargetSaved={load} />
+          </Tray>
+
+          <Tray className="mt-3 lg:grid-cols-3">
+            <GrowthTrendCard id="competitor" title="Competitor Readiness"
+              subtitle={data.competitorTrend?.domain ? `vs. ${data.competitorTrend.domain}` : undefined}
+              data={data.competitorTrend}
+              emptyMessage="No tracked competitor has enough history yet." onTargetSaved={load} />
+            <GrowthTrendCard id="authority" title="Authority Score"
+              subtitle={data.authorityTrend?.dataSource === 'commoncrawl' ? 'Coarser estimate (free Common Crawl data — referring domains only)' : undefined}
+              data={data.authorityTrend} emptyMessage="Needs real DataForSEO backlink data (or free Common Crawl data) — neither connected yet." onTargetSaved={load} />
+            <GrowthTrendCard id="ai-rec" title="AI Recommendation Rate" unit="%"
+              data={data.aiRecommendationTrend} emptyMessage="No AI recommendation checks have run yet." onTargetSaved={load}
+              action={data.aiRecommendationTrend?.configured && !data.aiRecommendationTrend?.available
+                ? { label: 'Run First AI Recommendation Check', run: () => api.runAiRecommendation() }
+                : undefined} />
+          </Tray>
         </>
       )}
     </div>

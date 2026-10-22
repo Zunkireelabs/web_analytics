@@ -4,7 +4,7 @@ import { ComposedChart, Area, Line, ReferenceLine, ResponsiveContainer, XAxis, Y
 import { Target } from 'lucide-react';
 import { CHART, AXIS_TICK } from '../lib/palette.js';
 import { fmtDay } from '../lib/format.js';
-import Section from './layout/Section.jsx';
+import { TrayCard } from './layout/Tray.jsx';
 import SegmentedTabs from './SegmentedTabs.jsx';
 import Button from './Button.jsx';
 import GrowthTargetForm, { buildChartRows } from './GrowthTargetForm.jsx';
@@ -44,60 +44,58 @@ export default function PerformanceTrendCard({ series, targets, loading, onTarge
   const chartRows = buildChartRows(rows, target);
 
   return (
-    <Section
+    <TrayCard
       title="Performance trend"
       subtitle="Daily search performance over the selected range"
       action={<Link to="/insights" className="btn btn--light shrink-0">View performance report</Link>}
     >
-      <div className="card overflow-hidden">
-        <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border">
-          <div className="min-w-0 overflow-x-auto no-scrollbar">
-            <SegmentedTabs options={METRICS.map((m) => ({ value: m.key, label: m.label }))} value={metricKey}
-              onChange={(k) => { setMetricKey(k); setEditing(false); }} />
-          </div>
-          {metricKey === 'clicks' && showClicksProjectionNote ? (
-            <span className="ml-auto text-xs text-primary whitespace-nowrap">AI-projected above</span>
-          ) : metricKey !== 'clicks' && !editing && (
-            <Button variant="ghost" size="sm" icon className="ml-auto" onClick={() => setEditing(true)}
-              title={`Edit ${metric.label} growth target`} aria-label={`Edit ${metric.label} growth target`}>
-              <Target size={14} />
-            </Button>
-          )}
+      <div className="flex items-center gap-2 px-3 py-2.5 border-y border-border">
+        <div className="min-w-0 overflow-x-auto no-scrollbar">
+          <SegmentedTabs options={METRICS.map((m) => ({ value: m.key, label: m.label }))} value={metricKey}
+            onChange={(k) => { setMetricKey(k); setEditing(false); }} />
         </div>
-
-        <div className="p-4">
-          {editing && metricKey !== 'clicks' && (
-            <GrowthTargetForm metric={metricKey} unit={metric.key === 'ctr' ? ' (0-1)' : ''} initial={target}
-              onCancel={() => setEditing(false)}
-              onSaved={() => { setEditing(false); onTargetSaved?.(); }} />
-          )}
-
-          {loading ? (
-            <div className="py-20 text-center text-sm text-faint">Loading trend…</div>
-          ) : rows.length === 0 && !target ? (
-            <div className="py-20 text-center text-sm text-faint">No data for this range.</div>
-          ) : (
-            <ResponsiveContainer width="100%" height={230}>
-            <ComposedChart data={chartRows} margin={{ top: 5, right: 8, left: -14, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} vertical={false} />
-              <XAxis dataKey="date" tick={AXIS_TICK} tickFormatter={(d) => fmtDay(d)} axisLine={false} tickLine={false} />
-              <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} width={52}
-                tickFormatter={(v) => metric.key === 'ctr' ? `${Math.round(v * 100)}%` : Number(v).toLocaleString()} />
-              <Tooltip content={<CustomTooltip metric={metric} />} cursor={{ stroke: CHART.cursor, strokeWidth: 1 }} />
-              {target?.baselineValue == null && target != null && (
-                <ReferenceLine y={target.value} stroke={CHART.highlight} strokeDasharray="5 5" strokeWidth={1.5}
-                  label={{ value: `Goal: ${metric.format(target.value)} by ${String(target.date).slice(5, 10)}`, position: 'insideTopLeft', fontSize: 10, fill: CHART.highlight, fontWeight: 700 }} />
-              )}
-              <Area type="monotone" dataKey="value" stroke={CHART.highlight} strokeWidth={2.5}
-                fill={CHART.highlight} fillOpacity={0.08} dot={false} activeDot={{ r: 5, strokeWidth: 0, fill: CHART.highlight }} connectNulls={false} />
-              {target?.baselineValue != null && (
-                <Line type="linear" dataKey="plan" stroke={CHART.muted} strokeWidth={2} strokeDasharray="5 5" dot={{ r: 3 }} connectNulls name="Planned" />
-              )}
-            </ComposedChart>
-          </ResponsiveContainer>
-          )}
-        </div>
+        {metricKey === 'clicks' && showClicksProjectionNote ? (
+          <span className="ml-auto text-xs text-primary whitespace-nowrap">AI-projected above</span>
+        ) : metricKey !== 'clicks' && !editing && (
+          <Button variant="ghost" size="sm" icon className="ml-auto" onClick={() => setEditing(true)}
+            title={`Edit ${metric.label} growth target`} aria-label={`Edit ${metric.label} growth target`}>
+            <Target size={14} />
+          </Button>
+        )}
       </div>
-    </Section>
+
+      <div className="p-4">
+        {editing && metricKey !== 'clicks' && (
+          <GrowthTargetForm metric={metricKey} unit={metric.key === 'ctr' ? ' (0-1)' : ''} initial={target}
+            onCancel={() => setEditing(false)}
+            onSaved={() => { setEditing(false); onTargetSaved?.(); }} />
+        )}
+
+        {loading ? (
+          <div className="py-20 text-center text-sm text-faint">Loading trend…</div>
+        ) : rows.length === 0 && !target ? (
+          <div className="py-20 text-center text-sm text-faint">No data for this range.</div>
+        ) : (
+          <ResponsiveContainer width="100%" height={230}>
+          <ComposedChart data={chartRows} margin={{ top: 5, right: 8, left: -14, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} vertical={false} />
+            <XAxis dataKey="date" tick={AXIS_TICK} tickFormatter={(d) => fmtDay(d)} axisLine={false} tickLine={false} />
+            <YAxis tick={AXIS_TICK} axisLine={false} tickLine={false} width={52}
+              tickFormatter={(v) => metric.key === 'ctr' ? `${Math.round(v * 100)}%` : Number(v).toLocaleString()} />
+            <Tooltip content={<CustomTooltip metric={metric} />} cursor={{ stroke: CHART.cursor, strokeWidth: 1 }} />
+            {target?.baselineValue == null && target != null && (
+              <ReferenceLine y={target.value} stroke={CHART.highlight} strokeDasharray="5 5" strokeWidth={1.5}
+                label={{ value: `Goal: ${metric.format(target.value)} by ${String(target.date).slice(5, 10)}`, position: 'insideTopLeft', fontSize: 10, fill: CHART.highlight, fontWeight: 700 }} />
+            )}
+            <Area type="monotone" dataKey="value" stroke={CHART.highlight} strokeWidth={2.5}
+              fill={CHART.highlight} fillOpacity={0.08} dot={false} activeDot={{ r: 5, strokeWidth: 0, fill: CHART.highlight }} connectNulls={false} />
+            {target?.baselineValue != null && (
+              <Line type="linear" dataKey="plan" stroke={CHART.muted} strokeWidth={2} strokeDasharray="5 5" dot={{ r: 3 }} connectNulls name="Planned" />
+            )}
+          </ComposedChart>
+        </ResponsiveContainer>
+        )}
+      </div>
+    </TrayCard>
   );
 }

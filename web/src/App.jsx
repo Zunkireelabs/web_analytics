@@ -132,12 +132,12 @@ export default function App() {
       <Sidebar sites={sites} siteId={siteId} isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} onSite={setSiteId} onLogout={logout}
         mobileOpen={mobileNavOpen} onCloseMobile={() => setMobileNavOpen(false)}
         email={email} role={role} agentOpen={agentOpen} onAgent={setAssistantOpen} agentAvailable={agentAvailable} />
-      <div className="flex-1 min-w-0 flex flex-col">
+      <div className="flex-1 min-w-0 flex flex-col bg-white md:my-2 md:mr-2 md:rounded-[14px] md:shadow-[0_0_0_1px_var(--panel-ring)] md:overflow-clip md:min-h-[calc(100vh-16px)]">
         <TopBar isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} isProduct={isProduct}
           agentOpen={agentOpen} onAgent={setAssistantOpen} agentAvailable={agentAvailable}
           onOpenMenu={() => setMobileNavOpen(true)} />
         <ShellContext.Provider value={toolbarEl}>
-          <div ref={setToolbarEl} className="page-toolbar flex flex-wrap items-center gap-2 px-4 md:px-6 py-2 border-b border-border-canvas" />
+          <div ref={setToolbarEl} className="page-toolbar flex flex-wrap items-center gap-2 px-4 md:px-6 py-2 bg-white border-b border-border-canvas" />
           <main className="flex-1 min-w-0">
         {siteId ? (
           <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>
