@@ -1,4 +1,6 @@
 import Sparkline from './Sparkline.jsx';
+import Badge from './Badge.jsx';
+import { CHART } from '../lib/palette.js';
 import { 
   MousePointer, 
   Eye, 
@@ -26,19 +28,20 @@ const EMOJI_MAP = {
 };
 
 // Premium KPI tile: icon + label, big value, trend pill, and a live mini-sparkline.
+// `color` is kept for caller compatibility; KPI tiles are monochrome.
 export default function StatCard({
-  label, value, prev, data = [], icon, color = '#6C63FF',
+  label, value, prev, data = [], icon, color = CHART.highlight,
   format = (v) => v, hint, lowerIsBetter = false, loading = false,
 }) {
   if (loading) {
     return (
       <div className="card p-5 relative overflow-hidden animate-pulse">
         <div className="flex items-center justify-between">
-          <div className="h-6 w-24 bg-slate-100/80 rounded-md" />
-          <div className="h-5 w-12 bg-slate-100/80 rounded-full" />
+          <div className="h-6 w-24 bg-muted rounded-control" />
+          <div className="h-5 w-12 bg-muted rounded-control" />
         </div>
-        <div className="h-8 w-20 bg-slate-200/60 rounded-xl mt-4" />
-        <div className="h-10 w-full bg-slate-55/80 rounded-lg mt-3" />
+        <div className="h-8 w-20 bg-muted rounded-control mt-4" />
+        <div className="h-10 w-full bg-muted rounded-control mt-3" />
       </div>
     );
   }
@@ -56,35 +59,28 @@ export default function StatCard({
       <div>
         <div className="flex items-center justify-between gap-1">
           <div className="flex items-center gap-2 min-w-0">
-            <span 
-              className="w-8 h-8 rounded-xl grid place-items-center text-sm shrink-0 transition-transform duration-300 group-hover:scale-105 shadow-sm"
-              style={{ background: `${color}12`, color }}
-            >
-              {LucideIcon ? <LucideIcon size={14} strokeWidth={2.25} /> : icon}
+            <span className="w-8 h-8 rounded-control bg-muted text-text grid place-items-center text-sm shrink-0">
+              {LucideIcon ? <LucideIcon size={14} strokeWidth={2} /> : icon}
             </span>
-            <span className="text-xs font-bold text-slate-500 truncate tracking-tight" title={label}>
-              {label}{hint && <span className="text-slate-400 font-medium"> · {hint}</span>}
+            <span className="text-[13px] font-medium text-text truncate" title={label}>
+              {label}{hint && <span className="text-faint font-normal"> · {hint}</span>}
             </span>
           </div>
           {delta != null && (
-            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0 border transition-colors flex items-center gap-0.5 ${
-              good == null ? 'text-slate-400 bg-slate-50 border-slate-200/40'
-                : good ? 'text-emerald-600 bg-emerald-500/5 border-emerald-500/10' 
-                : 'text-rose-500 bg-rose-500/5 border-rose-500/10'}`}
-            >
-              {good != null && (good ? <ArrowUpRight size={10} strokeWidth={3} /> : <ArrowDownRight size={10} strokeWidth={3} />)}
+            <Badge tone={good == null ? 'grey' : good ? 'green' : 'red'} className="shrink-0">
+              {good != null && (good ? <ArrowUpRight size={12} strokeWidth={2} /> : <ArrowDownRight size={12} strokeWidth={2} />)}
               {Math.abs(delta)}%
-            </span>
+            </Badge>
           )}
         </div>
 
-        <div className="text-2xl font-black text-slate-950 mt-4 tracking-tight leading-none font-sans">
+        <div className="text-2xl font-semibold tracking-[-0.02em] text-fg tnum mt-4 leading-none">
           {value == null ? '—' : format(cur)}
         </div>
       </div>
 
       <div className="mt-4 h-9 w-full">
-        <Sparkline data={data} color={color} stretch dot={false} height={32} />
+        <Sparkline data={data} color={CHART.highlight} stretch dot={false} height={32} />
       </div>
     </div>
   );

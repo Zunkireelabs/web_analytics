@@ -1,5 +1,7 @@
 import { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
+import Button from './Button.jsx';
 
 // Generic centered modal shell, factored out of AnalystKeyboardShortcutsModal's
 // pattern so Settings (and future callers) don't each hand-roll the overlay.
@@ -13,28 +15,31 @@ export default function Modal({ isOpen, onClose, title, subtitle, icon: Icon, ch
 
   if (!isOpen) return null;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-md animate-fade-in" onClick={onClose}>
-      <div className={`w-full ${maxWidth} rounded-3xl bg-white border border-slate-200 shadow-2xl p-6 text-slate-900 space-y-5`} onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+  // Portal to <body> so a transformed/filtered ancestor (fade-up, backdrop-blur) can't become the fixed overlay's containing block.
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-900/40 animate-fade-in" onClick={onClose}>
+      <div className={`w-full ${maxWidth} rounded-card bg-white p-6 text-fg space-y-5`}
+        style={{ boxShadow: '0 0 0 1px rgba(0,0,0,.06), 0 30px 60px -20px rgba(0,0,0,.12)' }} onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-border pb-4">
           <div className="flex items-center gap-2.5">
             {Icon && (
-              <div className="w-8 h-8 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-[#6C63FF] shrink-0">
+              <div className="w-8 h-8 rounded-control bg-primary-tint text-primary flex items-center justify-center shrink-0"
+                style={{ boxShadow: 'inset 0 0 0 1px var(--primary-ring)' }}>
                 <Icon size={16} />
               </div>
             )}
             <div>
-              <h3 className="text-sm font-black text-slate-900">{title}</h3>
-              {subtitle && <p className="text-[11px] font-semibold text-slate-400">{subtitle}</p>}
+              <h3 className="text-[15px] font-semibold text-fg">{title}</h3>
+              {subtitle && <p className="text-[13px] text-faint">{subtitle}</p>}
             </div>
           </div>
-          <button type="button" onClick={onClose}
-            className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-400 hover:text-slate-600 transition shrink-0">
+          <Button variant="ghost" size="sm" icon aria-label="Close" onClick={onClose}>
             <X size={14} />
-          </button>
+          </Button>
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

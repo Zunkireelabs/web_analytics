@@ -1,94 +1,231 @@
 @import "tailwindcss";
 
-/* ───────── Zunkiree Labs Analytics — design system ───────── */
-:root {
-  color-scheme: light;
-  --brand:      #6C63FF;   /* primary indigo-purple */
-  --brand-2:    #8b5cf6;
-  --ink:        #0f172a;   /* slate-900 */
-  --ink-soft:   #475569;   /* slate-600 */
-  --muted:      #94a3b8;   /* slate-400 */
-  --bg:         #f7f8fc;   /* app background */
-  --line:       #eef1f6;   /* card borders */
-  --pos:        #059669;
-  --neg:        #e11d48;
+/* Tailwind bridge: exposes the SuperRank tokens as utilities (text-faint,
+   bg-primary-tint, rounded-card ...). Deliberately adds no sm/md/lg/xl radius
+   or shadow keys, so existing Tailwind utilities keep their meaning. */
+@theme inline {
+  --font-sans: var(--font);
+  --color-bg: var(--bg);  --color-page: var(--page);
+  --color-fg: var(--fg);  --color-fg-strong: var(--fg-strong);
+  --color-text: var(--text);  --color-faint: var(--faint);  --color-faint-2: var(--faint-2);
+  --color-border: var(--border);  --color-border-2: var(--border-2);  --color-input: var(--input);
+  --color-muted: var(--muted);
+  --color-primary: var(--primary);  --color-primary-strong: var(--primary-strong);
+  --color-primary-tint: var(--primary-tint);  --color-primary-ring: var(--primary-ring);
+  --color-canvas: var(--canvas);  --color-border-canvas: var(--border-canvas);
+  --color-green: var(--green);  --color-green-tint: var(--green-tint);
+  --radius-control: var(--radius);  --radius-card: var(--radius-card);
+  --radius-chip: var(--radius-chip);  --radius-panel: var(--radius-panel);
 }
 
+/* ───────── SuperRank design tokens (from the marketing site, styles.css) ─────────
+   Radius tokens are renamed (-chip/-card/-panel) because Tailwind v4 already defines
+   its own small/large/xl radius keys; redefining them here would change every rounded-lg/xl. */
+:root {
+  color-scheme: light;
+  --bg: #fff;
+  --page: #f5f5f5;
+  --fg: #171717;
+  --fg-strong: #101112;
+  --text: #525252;
+  --faint: #8a8a8a;
+  --faint-2: #a3a3a3;
+  --border: #f0f0f0;
+  --border-2: #e6e6e6;
+  --input: #e3e3e3;
+  --muted: #f5f5f5;
+  --primary: #d54e00;
+  --primary-strong: #bd3d00;
+  --primary-tint: #fff4ed;
+  --primary-ring: #ffe1cc;
+  --green: #1a7f4b;
+  --green-tint: #e8f7ee;
+  --canvas: #f7f6f4;          /* warm off-white page */
+  --border-canvas: #e9e7e4;   /* warm hairline */
+
+  --radius-chip: 5px;
+  --radius: 8px;
+  --radius-card: 12px;
+  --radius-panel: 16px;
+
+  --ring: 0 0 0 1px rgba(0, 0, 0, .06), 0 1px 2px rgba(0, 0, 0, .04);
+  --card-shadow: 0 0 0 1px rgba(9, 9, 11, .05), 0 10px 15px -3px rgba(0, 0, 0, .05), 0 4px 6px -4px rgba(0, 0, 0, .05);
+  --float-shadow: 0 0 0 1px rgba(9, 9, 11, .06), 0 24px 48px -12px rgba(213, 78, 0, .14), 0 8px 16px -8px rgba(0, 0, 0, .08);
+
+  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+@layer base {
 /* Only body, never html too — html AND body both carrying a non-visible
    overflow at the same time is a documented Chromium/WebKit quirk that
    silently breaks `position: sticky` for every descendant (confirmed via
    Playwright repro: Sidebar.jsx's sticky sidebar scrolled away entirely on
    a tall page instead of staying pinned). body alone still clips the same
    accidental horizontal overflow this was added to prevent. */
-body {
-  overflow-x: hidden;
-  margin: 0;
-  background: radial-gradient(at 0% 0%, rgba(108, 99, 255, 0.05) 0px, transparent 50%),
-              radial-gradient(at 50% 0%, rgba(139, 92, 246, 0.04) 0px, transparent 50%),
-              radial-gradient(at 100% 0%, rgba(56, 189, 248, 0.05) 0px, transparent 50%),
-              #f8fafc;
-  font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  color: var(--ink);
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-  min-height: 100vh;
+  body {
+    overflow-x: hidden;
+    margin: 0;
+    min-height: 100vh;
+    background: var(--canvas);
+    color: var(--fg);
+    font-family: var(--font);
+    font-feature-settings: 'cv11', 'ss01';
+    font-optical-sizing: auto;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }
+  .tnum { font-variant-numeric: tabular-nums; }
 }
 
-/* Premium card surface */
-.card {
-  background: rgba(255, 255, 255, 0.65);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.7);
-  border-radius: 24px;
-  box-shadow: 
-    0 1px 3px rgba(15, 23, 42, 0.03),
-    0 8px 20px -6px rgba(15, 23, 42, 0.04),
-    0 24px 48px -12px rgba(15, 23, 42, 0.05);
-}
-.card-dark {
-  background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%) !important;
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.15) !important;
-  border-radius: 24px;
-  color: #ffffff !important;
-  box-shadow: 
-    0 4px 20px rgba(15, 23, 42, 0.25),
-    0 10px 30px -5px rgba(0, 0, 0, 0.3);
-}
-.card-hover {
-  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.card-hover:hover {
-  background: rgba(255, 255, 255, 0.95);
-  box-shadow: 
-    0 4px 10px rgba(108, 99, 255, 0.04),
-    0 16px 36px -4px rgba(108, 99, 255, 0.1),
-    0 32px 64px -16px rgba(108, 99, 255, 0.08),
-    0 0 0 1px rgba(108, 99, 255, 0.25);
-  transform: translateY(-3px) scale(1.005);
+/* Legacy surfaces. Intentionally UNLAYERED: their precedence over utilities
+   (per-file rounded-2xl / bg-*) is load-bearing across the app. */
+.card { background: #fff; border-radius: var(--radius-card); box-shadow: 0 0 0 1px var(--border-canvas); }
+.card-hover { transition: box-shadow .15s; }
+.card-hover:hover { box-shadow: 0 0 0 1px #dedbd7, 0 1px 2px rgba(0, 0, 0, .04); }
+.card-dark { background: var(--fg) !important; border: 0 !important; border-radius: var(--radius-card); color: #fff !important; box-shadow: none; }
+.glass-panel { background: #fff; box-shadow: 0 0 0 1px var(--border-canvas); }
+.page-toolbar:empty { display: none; }
+
+@layer components {
+  /* ---- from superrank-web styles.css: buttons ---- */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    height: 32px; padding: 0 12px; border-radius: var(--radius);
+    font-size: 14px; font-weight: 500; line-height: 20px; white-space: nowrap;
+    transition: background-color .15s, box-shadow .15s, color .15s;
+  }
+  .btn--lg { height: 44px; padding: 0 18px; font-size: 15px; }
+  .btn--dark { background: var(--fg); color: #fff; }
+  .btn--dark:hover { background: #2a2a2a; }
+  .btn--light { background: #fff; color: var(--fg); box-shadow: var(--ring); }
+  .btn--light:hover { background: #fafafa; }
+  .btn--primary {
+    background: var(--primary); color: #fff;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14), 0 1px 2px rgba(150, 45, 0, .2);
+  }
+  .btn--primary:hover { background: var(--primary-strong); }
+  .btn--ghost { color: var(--text); padding: 0 10px; }
+  .btn--ghost:hover { color: var(--fg); }
+  .btn--sm { height: 26px; padding: 0 10px; font-size: 13px; border-radius: 6px; }
+  .btn:disabled, .btn[aria-disabled="true"] { opacity: .5; cursor: not-allowed; pointer-events: none; }
+  .btn--icon { width: 32px; padding: 0; }
+  .btn--icon.btn--sm { width: 26px; }
+
+  /* ---- styles.css: badges ---- */
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px;
+    border-radius: 6px; font-size: 13px; font-weight: 500; white-space: nowrap;
+  }
+  .badge--primary { background: var(--primary-tint); color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary-ring); }
+  .badge--green { background: var(--green-tint); color: var(--green); border-radius: 999px; font-size: 12px; }
+  .badge--grey { background: var(--muted); color: var(--text); border-radius: 999px; font-size: 12px; }
+  .badge--outline { background: #fff; color: var(--fg); box-shadow: var(--ring); }
+  .badge--red { background: #fdecec; color: #b42318; border-radius: 999px; font-size: 12px; }
+  .badge--amber { background: #fdf3e1; color: #8a5300; border-radius: 999px; font-size: 12px; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+
+  /* ---- styles.css: logo (with flame icon) ---- */
+  .logo { display: inline-flex; align-items: center; gap: 6px; font-size: 19px; font-weight: 600; letter-spacing: -.04em; color: var(--fg); }
+  .logo b { color: var(--primary); font-weight: 600; }
+  .logo__icon { width: 22px; height: 22px; object-fit: contain; margin-top: -2px; }
+
+  /* ---- Data tables (Overview mockup) ---- */
+  .tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .tbl th { font-weight: 500; font-size: 13px; color: var(--faint); text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--border); background: #fcfcfb; white-space: nowrap; }
+  .tbl td { padding: 11px 16px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; color: var(--fg); }
+  .tbl tr:last-child td { border-bottom: 0; }
+  .tbl .num { text-align: right; }
+  .tbl .rank { width: 28px; color: var(--faint-2); }
+  .tbl .bar { position: relative; }
+  .tbl .bar > i { position: absolute; inset: 6px auto 6px 8px; border-radius: 6px; background: var(--muted); }
+  .tbl .bar > span { position: relative; }
+  .tbl-foot { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px 8px 16px; border-top: 1px solid var(--border); font-size: 13px; color: var(--faint); }
+
+  /* ---- Humblytics section label ---- */
+  .label-dot { display: flex; align-items: center; gap: 8px; font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--fg); }
+  .label-dot::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--primary); }
+
+  /* ---- styles.css: segmented control ---- */
+  .seg { display: inline-flex; padding: 2px; border-radius: 9px; background: var(--muted); }
+  .seg span { padding: 2px 10px; font-size: 12px; font-weight: 500; color: rgba(0, 0, 0, .55); border-radius: 7px; }
+  .seg .on { background: #fff; color: var(--fg-strong); box-shadow: 0 1px 3px rgba(0, 0, 0, .04), 0 0 0 1px rgba(28, 40, 64, .12); }
+  .seg .dot { padding: 0; }
+
+  /* ---- styles.css: toggle ---- */
+  .toggle { display: inline-flex; padding: 3px; border-radius: 10px; background: var(--muted); box-shadow: inset 0 0 0 1px var(--border-2); }
+  .toggle button { height: 30px; padding: 0 16px; border-radius: 7px; font-size: 14px; font-weight: 500; color: var(--text); }
+  .toggle button { flex-shrink: 0; white-space: nowrap; }
+  .toggle button.is-on { background: #fff; color: var(--fg); box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 0 0 1px rgba(0, 0, 0, .04); }
+
+  /* ---- styles.css: dropdown shell ---- */
+  .dd { padding: 12px; background: #fff; border-radius: 20px;
+    box-shadow: 0 0 0 1px rgba(0,0,0,.06), 0 30px 60px -20px rgba(0,0,0,.12); }
+  .dd__label { padding: 8px 12px 6px; font-size: 13px; color: var(--faint-2); }
+  .dd__item { display: flex; gap: 14px; padding: 10px 12px; border-radius: 12px; }
+  .dd__item:hover { background: #fafafa; }
+  .dd__icon { width: 20px; height: 20px; flex: none; margin-top: 1px; color: #8a8a8a; }
+  .dd__item b { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 500; line-height: 20px; }
+  .dd__item span { display: block; margin-top: 3px; font-size: 13px; line-height: 19px; color: var(--text); }
+  .dd__item b span { margin: 0; }
+  .dd__bar { display: flex; align-items: center; gap: 16px; margin-top: 8px; padding: 14px 16px; border-radius: 12px; background: #f6f6f6; font-size: 14px; color: var(--faint); }
+  .dd__bar:hover { background: #f1f1f1; }
+  .dd__bar b { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: var(--fg); font-weight: 500; white-space: nowrap; }
+
+  /* Menu open/close. Marketing used the individual translate property; folded into transform so the
+     CSS minifier cannot drop it. */
+  .menu { position: absolute; top: calc(100% + 8px); z-index: 60; opacity: 0; visibility: hidden; transform: translateY(4px); transition: opacity .15s, transform .15s, visibility .15s; }
+  .menu.is-open { opacity: 1; visibility: visible; transform: none; }
+
+  /* ---- superrank-web pricing.css: tooltip ---- */
+  .tip { position: relative; cursor: help; text-decoration: underline dotted #b5b5b5; text-underline-offset: 4px; }
+  .tip__box {
+    position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 10; width: 260px; padding: 10px 12px; border-radius: 8px;
+    background: var(--fg); color: #fff; font-size: 12px; line-height: 18px; text-decoration: none;
+    opacity: 0; visibility: hidden; transform: translateY(4px); transition: opacity .12s, transform .12s, visibility .12s; pointer-events: none;
+  }
+  .tip:hover .tip__box, .tip:focus .tip__box { opacity: 1; visibility: visible; transform: none; }
+
+  /* ---- superrank-web login.css: fields + OTP (final cascaded values) ---- */
+  .fld { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .fld > .fld__label { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 16px; font-weight: 500; }
+  .fld input, .fld select, .fld textarea {
+    width: 100%; height: 40px; padding: 0 10px; border: 0; border-radius: var(--radius); background: #fff; font-size: 13px; color: var(--fg);
+    box-shadow: 0 0 0 1px var(--input), 0 1px 2px rgba(0, 0, 0, .03); outline: none; transition: box-shadow .15s;
+  }
+  .fld textarea { height: auto; min-height: 80px; padding: 8px 10px; line-height: 20px; resize: vertical; }
+  .fld input::placeholder, .fld textarea::placeholder { color: var(--faint); }
+  .fld input:focus, .fld select:focus, .fld textarea:focus { box-shadow: 0 0 0 1px var(--primary), 0 0 0 4px var(--primary-tint); }
+  .fld__hint { font-size: 12px; line-height: 16px; color: var(--faint); }
+  .fld__err { font-size: 12px; line-height: 16px; color: #b42318; }
+  .fld select {
+    appearance: none; padding-right: 32px; cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none' stroke='%238a8a8a' stroke-width='1.6'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center;
+  }
+  .fld .is-bad { box-shadow: 0 0 0 1px #e5484d, 0 0 0 4px #fdecec; }
+
+  .otp { display: flex; align-items: center; justify-content: center; gap: 8px; }
+  .otp input { width: 44px; height: 52px; padding: 0; border: 0; border-radius: var(--radius); background: #fff; text-align: center; font: 500 22px/1 var(--font); font-variant-numeric: tabular-nums; color: var(--fg); box-shadow: 0 0 0 1px var(--input), 0 1px 2px rgba(0, 0, 0, .03); outline: none; caret-color: var(--primary); }
+  .otp input:focus { box-shadow: 0 0 0 1px var(--primary), 0 0 0 4px var(--primary-tint); }
+  .otp.is-bad input { box-shadow: 0 0 0 1px #e5484d, 0 0 0 3px #fdecec; }
+  .otp__dash { width: 10px; height: 2px; border-radius: 1px; background: #cfcfcb; }
+  @media (max-width: 760px) { .otp input { width: 40px; height: 48px; } }
 }
 
-/* Glassmorphism panel */
-.glass-panel {
-  background: rgba(255, 255, 255, 0.45);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.6);
+/* Active pill shadow (the .toggle is-on shadow) */
+.active-pill-shadow {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 0 0 1px rgba(0, 0, 0, .04);
 }
-
-
-/* Section / card heading */
-.card-title { font-size: 0.875rem; font-weight: 600; color: var(--ink-soft); letter-spacing: -0.01em; }
 
 /* Subtle entrance animations */
 @keyframes fadeUp {
   from { opacity: 0; transform: translateY(12px); }
   to { opacity: 1; transform: none; }
 }
+/* backwards, not both: a filled-forwards transform would trap position:fixed descendants. */
 .fade-up {
-  animation: fadeUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: fadeUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) backwards;
 }
 
 @keyframes slideDown {
@@ -96,7 +233,7 @@ body {
   to { opacity: 1; transform: none; }
 }
 .animate-slide-down {
-  animation: slideDown 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: slideDown 0.3s cubic-bezier(0.16, 1, 0.3, 1) backwards;
 }
 
 @keyframes pulseGlow {
@@ -105,11 +242,6 @@ body {
 }
 .pulse-glow {
   animation: pulseGlow 4s ease-in-out infinite;
-}
-
-/* Custom interactive active state indicators */
-.active-pill-shadow {
-  box-shadow: 0 4px 12px rgba(108, 99, 255, 0.25);
 }
 
 /* Hide scrollbar for Chrome, Safari and Opera */
@@ -122,7 +254,7 @@ body {
   scrollbar-width: none;  /* Firefox */
 }
 
-/* Custom premium scrollbars */
+/* Custom scrollbar utility */
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -131,11 +263,15 @@ body {
   background: transparent;
 }
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: #e3e3e3;
   border-radius: 9999px;
 }
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: #cfcfcf;
+}
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #e3e3e3 transparent;
 }
 
 /* Flowing connector line (login hero) */
@@ -172,30 +308,11 @@ body {
     color: #0f172a !important;
   }
   .card {
-    border: 1px solid #e2e8f0 !important;
+    border: 1px solid var(--border-2) !important;
     box-shadow: none !important;
     background: white !important;
     page-break-inside: avoid;
   }
-}
-
-/* Custom scrollbar utility */
-.custom-scrollbar::-webkit-scrollbar {
-  width: 4px;
-}
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: transparent;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(108, 99, 255, 0.15);
-  border-radius: 4px;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgba(108, 99, 255, 0.35);
-}
-.custom-scrollbar {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(108, 99, 255, 0.15) transparent;
 }
 
 /* ───────── AI Data Analyst Command Center — design system ─────────

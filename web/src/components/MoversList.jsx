@@ -2,11 +2,12 @@ import { useState, useEffect } from 'react';
 import { api } from '../api.js';
 import Sparkline from './Sparkline.jsx';
 import { ArrowUpRight, ArrowDownRight, Info } from 'lucide-react';
+import { STATUS, SERIES } from '../lib/palette.js';
 
-const GREEN = '#10b981';
-const RED = '#f43f5e';
-const BLUE = '#3b82f6';
-const PURPLE = '#8b5cf6';
+const GREEN = STATUS.good.color;
+const RED = STATUS.critical.color;
+const BLUE = SERIES[1];
+const PURPLE = SERIES[4];
 
 const sum = (arr, k) => (arr || []).reduce((a, r) => a + (Number(r[k]) || 0), 0);
 const fmtSigned = (n) => `${n >= 0 ? '+' : ''}${n.toLocaleString()}`;
@@ -214,7 +215,7 @@ function MoverCard({ kind, rows, total }) {
   const [showAll, setShowAll] = useState(false);
   const gain = kind === 'gain';
   const color = gain ? GREEN : RED;
-  const soft = gain ? '#ecfdf5' : '#fff1f2';
+  const soft = gain ? STATUS.good.tint : STATUS.critical.tint;
   const softBorder = gain ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.1)';
   const displayRows = showAll ? (rows || []) : (rows || []).slice(0, 7);
   const hasMore = (rows || []).length > 7;

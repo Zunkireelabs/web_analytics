@@ -4,6 +4,9 @@ import { api } from './api.js';
 import Login from './pages/Login.jsx';
 import Overview from './pages/Overview.jsx';
 import Sidebar from './components/Sidebar.jsx';
+import TopBar from './components/TopBar.jsx';
+import { ShellContext } from './components/shellContext.js';
+import { currentSiteOf } from './lib/nav.js';
 import ClientAssistantPanel from './components/ClientAssistantPanel.jsx';
 
 // Lazy-loaded: none of these are needed for first paint. The internal-only
@@ -31,14 +34,16 @@ export default function App() {
   const [authed, setAuthed] = useState(null); // null = still checking
   const [isInternal, setIsInternal] = useState(false);
   const [role, setRole] = useState(null);
+  const [email, setEmail] = useState(null);
   const [sites, setSites] = useState([]);
   const [siteId, setSiteId] = useState(null);
   const [sitesLoaded, setSitesLoaded] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [toolbarEl, setToolbarEl] = useState(null); // PageToolbar portals into this node
 
   const checkSession = () => api.me()
-    .then((r) => { setAuthed(r.authed); setIsInternal(!!r.isInternal); setRole(r.role || null); })
+    .then((r) => { setAuthed(r.authed); setIsInternal(!!r.isInternal); setRole(r.role || null); setEmail(r.email || null); })
     .catch(() => setAuthed(false));
 
   // Check session on load.
@@ -106,34 +111,22 @@ export default function App() {
   // the client-facing Assistant deliberately does not carry the admin
   // Assistant's cross-client analyst capability anyway.
   const hideAssistant = location.pathname === '/analyst';
+  const agentAvailable = !hideAssistant;
+  const agentOpen = assistantOpen && agentAvailable;
+  const isProduct = currentSiteOf(sites, siteId)?.property_type === 'product';
 
   return (
-    <div className="min-h-screen relative flex">
-      {/* soft purple ambiance behind all pages */}
-      <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
-        <div className="absolute -top-32 -right-24 w-[620px] h-[620px] rounded-full blur-3xl"
-          style={{ background: 'radial-gradient(circle, rgba(108,99,255,0.12), transparent 60%)' }} />
-        <div className="absolute top-1/3 -left-40 w-[520px] h-[520px] rounded-full blur-3xl"
-          style={{ background: 'radial-gradient(circle, rgba(139,92,246,0.10), transparent 60%)' }} />
-        <div className="absolute bottom-10 right-1/4 w-[460px] h-[460px] rounded-full blur-3xl"
-          style={{ background: 'radial-gradient(circle, rgba(108,99,255,0.08), transparent 60%)' }} />
-      </div>
+    <div className="min-h-screen flex">
       <Sidebar sites={sites} siteId={siteId} isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} onSite={setSiteId} onLogout={logout}
-        mobileOpen={mobileNavOpen} onCloseMobile={() => setMobileNavOpen(false)} />
-      <main className="flex-1 min-w-0 pt-14 md:pt-0">
-        {/* Sidebar becomes an overlay drawer below md — this is its trigger,
-            not reachable any other way on a narrow viewport. `main`'s extra
-            top padding on mobile keeps page content (which assumes it owns
-            the top-left corner, e.g. PageHeader) from sitting under this
-            fixed button. */}
-        <button type="button" onClick={() => setMobileNavOpen(true)} aria-label="Open menu"
-          className="md:hidden fixed top-4 left-4 z-20 w-10 h-10 rounded-xl bg-white border border-slate-200 shadow-sm
-                     grid place-items-center text-slate-600 hover:text-slate-900
-                     focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF]">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <path d="M3 6h18M3 12h18M3 18h18" />
-          </svg>
-        </button>
+        mobileOpen={mobileNavOpen} onCloseMobile={() => setMobileNavOpen(false)}
+        email={email} role={role} agentOpen={agentOpen} onAgent={setAssistantOpen} agentAvailable={agentAvailable} />
+      <div className="flex-1 min-w-0 flex flex-col">
+        <TopBar isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} isProduct={isProduct}
+          agentOpen={agentOpen} onAgent={setAssistantOpen} agentAvailable={agentAvailable}
+          onOpenMenu={() => setMobileNavOpen(true)} />
+        <ShellContext.Provider value={toolbarEl}>
+          <div ref={setToolbarEl} className="page-toolbar flex flex-wrap items-center gap-2 px-4 md:px-6 py-3 border-b border-border-canvas" />
+          <main className="flex-1 min-w-0">
         {siteId ? (
           <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>
             <Routes>
@@ -206,26 +199,18 @@ export default function App() {
             No site configured yet. Run the migration to seed your site, then ingest some data.
           </div>
         )}
-      </main>
+          </main>
+        </ShellContext.Provider>
+      </div>
 
       {/* The Growth Assistant is the primary way to interact with the
-          platform — reachable from anywhere via this floating trigger, not
-          tucked into one page. Client-facing only: it talks to
-          server/assistant/'s tenant-isolated capability registry (onboarding
-          status, pending decisions, agent activity, safe fixes), not the
-          cross-client analyst capability the staff-only Admin Assistant on
-          /analyst has. */}
-      {!assistantOpen && !hideAssistant && (
-        <button type="button" onClick={() => setAssistantOpen(true)}
-          className="fixed bottom-6 right-6 z-20 w-14 h-14 rounded-full text-white text-xl shadow-lg
-                     hover:scale-105 transition-transform focus-visible:outline focus-visible:outline-2
-                     focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF]"
-          style={{ background: '#6C63FF', boxShadow: '0 8px 24px -4px rgba(108,99,255,0.5)' }}
-          aria-label="Open Growth Assistant">
-          ✦
-        </button>
-      )}
-      <ClientAssistantPanel open={assistantOpen && !hideAssistant} onClose={() => setAssistantOpen(false)} />
+          platform — reachable from anywhere via the sidebar's Browse/Agent
+          toggle and the top bar's Agent button, not tucked into one page.
+          Client-facing only: it talks to server/assistant/'s tenant-isolated
+          capability registry (onboarding status, pending decisions, agent
+          activity, safe fixes), not the cross-client analyst capability the
+          staff-only Admin Assistant on /analyst has. */}
+      <ClientAssistantPanel open={agentOpen} onClose={() => setAssistantOpen(false)} />
     </div>
   );
 }

@@ -3,6 +3,7 @@ import { useCountUp } from '../useCountUp.js';
 import { timeAgo } from '../api.js';
 import Sparkline from './Sparkline.jsx';
 import { AlertTriangle, Globe2, TrendingUp, Compass, ArrowUpRight, ArrowDownRight } from 'lucide-react';
+import { CHART } from '../lib/palette.js';
 
 function emptyMessage(meta) {
   if (!meta?.hasRun) return 'Geographical intelligence not analyzed yet — runs monthly.';
@@ -84,7 +85,7 @@ export default function GeoIntelligenceCard({ geoIntelligence, meta, loading }) 
         </div>
         {sparklineData.length >= 2 && (
           <div className="w-24 h-12 shrink-0 bg-slate-50/50 rounded-xl p-1.5 border border-slate-100">
-            <Sparkline data={sparklineData} color="#0ea5e9" stretch dot={false} />
+            <Sparkline data={sparklineData} color={CHART.highlight} stretch dot={false} />
           </div>
         )}
       </div>

@@ -3,6 +3,7 @@ import { api, timeAgo } from '../../api.js';
 import PageHeader from '../../components/PageHeader.jsx';
 import Tabs from '../../components/Tabs.jsx';
 import { Database, Activity, Clock, AlertTriangle, ScrollText, CheckCircle2, XCircle } from 'lucide-react';
+import { STATUS } from '../../lib/palette.js';
 
 const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
 const labelCls = 'block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5';
@@ -15,9 +16,9 @@ const TABS = [
 ];
 
 const STATUS_COLORS = {
-  ok: { color: '#059669', bg: '#ecfdf5', border: '#a7f3d0' },
-  unknown: { color: '#64748b', bg: '#f1f5f9', border: '#e2e8f0' },
-  error: { color: '#dc2626', bg: '#fef2f2', border: '#fecaca' },
+  ok: { color: STATUS.good.text, bg: STATUS.good.tint, border: STATUS.good.ring },
+  unknown: { color: STATUS.neutral.text, bg: STATUS.neutral.tint, border: STATUS.neutral.ring },
+  error: { color: STATUS.critical.text, bg: STATUS.critical.tint, border: STATUS.critical.ring },
 };
 
 function StatusPill({ status }) {

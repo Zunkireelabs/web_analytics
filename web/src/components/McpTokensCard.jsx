@@ -22,7 +22,7 @@ function connectSnippet(token) {
   // is baked in at build time (Dockerfile ARG/ENV). Falls back to this app's
   // own origin if unset, so local dev (npm run dev:web) is unaffected.
   const origin = import.meta.env.VITE_MCP_ORIGIN || (typeof window !== 'undefined' ? window.location.origin : '');
-  return `claude mcp add --transport http zunkiree-analytics ${origin}/api/mcp \\\n  --header "Authorization: Bearer ${token}"`;
+  return `claude mcp add --transport http superrank ${origin}/api/mcp \\\n  --header "Authorization: Bearer ${token}"`;
 }
 
 function CopyButton({ text }) {

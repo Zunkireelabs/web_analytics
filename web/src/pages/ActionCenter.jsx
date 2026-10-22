@@ -32,6 +32,7 @@ import {
   Lock,
   Target
 } from 'lucide-react';
+import { STATUS, SERIES } from '../lib/palette.js';
 
 const GENERATOR_META = {
   'meta-title': { label: 'Meta Titles', icon: '🏷️', color: '#6C63FF' },
@@ -210,9 +211,9 @@ const DRAFT_STATUS_LABEL = {
 
 const STATUS_ORDER = ['draft', 'edited', 'submitted_for_approval', 'approved', 'branch_pushed', 'merged_to_stage', 'pr_opened', 'implemented'];
 const STAGE_COLOR = {
-  draft: '#94a3b8', edited: '#f59e0b', submitted_for_approval: '#f59e0b',
-  approved: '#10b981', branch_pushed: '#7c3aed', merged_to_stage: '#2563eb',
-  pr_opened: '#2563eb', implemented: '#10b981', abandoned: '#94a3b8',
+  draft: STATUS.neutral.color, edited: STATUS.warning.color, submitted_for_approval: STATUS.warning.color,
+  approved: STATUS.good.color, branch_pushed: SERIES[1], merged_to_stage: SERIES[1],
+  pr_opened: SERIES[1], implemented: STATUS.good.color, abandoned: STATUS.neutral.color,
 };
 
 // No 'implemented' entry — implemented drafts live only on the dedicated

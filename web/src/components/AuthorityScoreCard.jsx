@@ -3,6 +3,7 @@ import { useCountUp } from '../useCountUp.js';
 import { timeAgo } from '../api.js';
 import Sparkline from './Sparkline.jsx';
 import { AlertTriangle, Award, Link2, Info, ArrowUpRight, ArrowDownRight } from 'lucide-react';
+import { STATUS } from '../lib/palette.js';
 
 function emptyMessage(meta) {
   if (!meta?.dataForSeoBacklinksConfigured) return "We haven't calculated this yet — check back soon.";
@@ -12,7 +13,7 @@ function emptyMessage(meta) {
   return `Checked ${timeAgo(meta.lastRunAt)}, but no score was available.`;
 }
 
-const scoreColor = (score) => (score >= 70 ? '#10b981' : score >= 40 ? '#f59e0b' : '#ef4444');
+const scoreColor = (score) => (score >= 70 ? STATUS.good.color : score >= 40 ? STATUS.warning.color : STATUS.critical.color);
 
 export default function AuthorityScoreCard({ authority, meta, loading }) {
   const [showPages, setShowPages] = useState(false);

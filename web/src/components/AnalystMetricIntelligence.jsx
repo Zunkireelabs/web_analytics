@@ -11,6 +11,7 @@ import {
   formatByUnit, finding, supportingLine, groupDeclinesByMetric, lowConfidenceReason,
   SEVERITY_META, TYPE_META,
 } from '../lib/analystFormat.js';
+import { CHART, SERIES, AXIS_TICK } from '../lib/palette.js';
 
 // Compact past-vs-forecast picture for one metric, fetched only when a card is
 // actually expanded — the dashboard payload carries summary numbers, and the
@@ -56,36 +57,30 @@ function MiniTrend({ clientId, metric }) {
     <div>
       <ResponsiveContainer width="100%" height={150}>
         <ComposedChart data={rows.merged} margin={{ top: 4, right: 6, left: 0, bottom: 0 }}>
-          <defs>
-            <linearGradient id={`miniFill-${metric.metric_key}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#8b5cf6" stopOpacity={0.22} />
-              <stop offset="100%" stopColor="#8b5cf6" stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+          <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} vertical={false} />
           <XAxis
-            dataKey="date" tick={{ fontSize: 9, fill: '#94a3b8', fontWeight: 600 }}
+            dataKey="date" tick={{ ...AXIS_TICK, fontSize: 9 }}
             axisLine={false} tickLine={false} minTickGap={44}
             tickFormatter={(d) => new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}
           />
           <YAxis
-            tick={{ fontSize: 9, fill: '#94a3b8', fontWeight: 600 }} axisLine={false} tickLine={false} width={40}
+            tick={{ ...AXIS_TICK, fontSize: 9 }} axisLine={false} tickLine={false} width={40}
             tickFormatter={(v) => (metric.unit === 'ratio' ? `${Math.round(v * 100)}%` : Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(v))}
           />
           <Tooltip
-            contentStyle={{ fontSize: 11, borderRadius: 12, border: '1px solid #e2e8f0' }}
+            contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #e6e6e6' }}
             formatter={(v, name) => [formatByUnit(v, metric.unit), name === 'forecast' ? 'Forecast' : 'Observed']}
             labelFormatter={(d) => new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { dateStyle: 'medium', timeZone: 'UTC' })}
           />
           {rows.lastActual && (
             <ReferenceLine
-              x={rows.lastActual} stroke="#cbd5e1" strokeDasharray="3 3"
-              label={{ value: 'Today', position: 'insideTopRight', fontSize: 8, fill: '#94a3b8', fontWeight: 700 }}
+              x={rows.lastActual} stroke={CHART.cursor} strokeDasharray="3 3"
+              label={{ value: 'Today', position: 'insideTopRight', fontSize: 8, fill: CHART.axis, fontWeight: 700 }}
             />
           )}
-          <Area type="monotone" dataKey="band" stroke="none" fill="#8b5cf6" fillOpacity={0.13} connectNulls={false} />
-          <Area type="monotone" dataKey="value" stroke="#8b5cf6" strokeWidth={2} fill={`url(#miniFill-${metric.metric_key})`} dot={false} connectNulls={false} />
-          <Line type="monotone" dataKey="forecast" stroke="#38bdf8" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
+          <Area type="monotone" dataKey="band" stroke="none" fill={CHART.highlight} fillOpacity={0.13} connectNulls={false} />
+          <Area type="monotone" dataKey="value" stroke={CHART.highlight} strokeWidth={2} fill={CHART.highlight} fillOpacity={0.08} dot={false} connectNulls={false} />
+          <Line type="monotone" dataKey="forecast" stroke={SERIES[1]} strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
         </ComposedChart>
       </ResponsiveContainer>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[9px] font-bold text-slate-400 mt-1.5">

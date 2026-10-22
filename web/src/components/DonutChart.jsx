@@ -1,6 +1,7 @@
 import { ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { SERIES } from '../lib/palette.js';
 
-const COLORS = ['#6C63FF', '#8b5cf6', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899'];
+const COLORS = SERIES;
 
 // Donut chart from [{ name, value }]. `title` optional.
 export default function DonutChart({ title, data }) {

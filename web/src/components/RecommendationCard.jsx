@@ -1,5 +1,6 @@
 import { CATEGORY } from './AgentCard.jsx';
 import { Target, Globe, FileText, Brain } from 'lucide-react';
+import { STATUS } from '../lib/palette.js';
 
 const ICONS = {
   seo: Target,
@@ -9,11 +10,11 @@ const ICONS = {
 };
 
 const IMPACT = {
-  High: { color: '#10b981', bg: '#ecfdf5', border: 'rgba(16,185,129,0.1)' },
-  Medium: { color: '#f59e0b', bg: '#fffbeb', border: 'rgba(245,158,11,0.1)' },
-  Low: { color: '#94a3b8', bg: '#f8fafc', border: 'rgba(148,163,184,0.1)' },
+  High: { color: STATUS.good.color, bg: STATUS.good.tint, border: STATUS.good.ring },
+  Medium: { color: STATUS.warning.color, bg: STATUS.warning.tint, border: STATUS.warning.ring },
+  Low: { color: STATUS.neutral.color, bg: STATUS.neutral.tint, border: STATUS.neutral.ring },
 };
-const EFFORT_COLOR = { Low: '#10b981', Medium: '#f59e0b', High: '#f43f5e' };
+const EFFORT_COLOR = { Low: STATUS.good.color, Medium: STATUS.warning.color, High: STATUS.critical.color };
 
 export default function RecommendationCard({ title, reason, impact, effort, category }) {
   const cat = CATEGORY[category] || CATEGORY.seo;

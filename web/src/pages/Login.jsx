@@ -193,8 +193,8 @@ export default function Login({ onAuthed }) {
                 <Logo size={22} color="#ffffff" />
               </div>
               <div className="text-left hidden sm:block">
-                <div className="text-xs font-black tracking-widest text-slate-900 uppercase leading-none">Search Analytics</div>
-                <div className="text-[9px] text-[#ea580c] font-black tracking-widest uppercase mt-1">Zunkiree Labs</div>
+                <div className="text-xs font-black tracking-widest text-slate-900 uppercase leading-none">SuperRank</div>
+                <div className="text-[9px] text-[#ea580c] font-black tracking-widest uppercase mt-1">AI SEO agent</div>
               </div>
               <span className="ml-1 hidden md:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-slate-900/10 text-slate-800 border border-slate-900/15">
                 <Sparkles size={9} strokeWidth={3} className="text-orange-500" /> AI Agency
@@ -701,7 +701,7 @@ function LoginModal({ initialMode = 'login', onClose, onAuthed }) {
               <Logo size={28} color="#ffffff" />
             </div>
             <div className="mt-3.5">
-              <div className="text-xs font-black text-slate-900 uppercase tracking-widest leading-none">Search Analytics AI</div>
+              <div className="text-xs font-black text-slate-900 uppercase tracking-widest leading-none">SuperRank</div>
               <div className="text-[9.5px] text-[#ea580c] font-black uppercase tracking-widest mt-1">Enterprise Login</div>
             </div>
           </div>
@@ -758,7 +758,7 @@ function LoginModal({ initialMode = 'login', onClose, onAuthed }) {
             {showForgot && (
               <div className="text-[10px] text-slate-650 bg-white border border-slate-200 rounded-xl px-3 py-2 leading-relaxed flex gap-1.5 shadow-sm">
                 <Info size={12} className="text-orange-500 shrink-0 mt-0.5" />
-                <span>Contact your Zunkiree Labs account administrator to request a credential reset.</span>
+                <span>Contact your SuperRank account administrator to request a credential reset.</span>
               </div>
             )}
 
@@ -838,7 +838,7 @@ function RequestAccessForm({ onBack }) {
         </div>
         <h2 className="text-base font-black text-slate-850 uppercase tracking-wider">Request Submitted</h2>
         <p className="text-xs text-slate-500 leading-relaxed font-bold">
-          Your request is in the pending review pipeline. Once approved by Zunkiree staff, you will be able to log in with the credentials you just configured.
+          Your request is in the pending review pipeline. Once approved by the SuperRank team, you will be able to log in with the credentials you just configured.
         </p>
         <button 
           type="button" 

@@ -21,6 +21,7 @@ import {
   ShieldAlert,
   ShieldQuestion
 } from 'lucide-react';
+import { CHART } from '../lib/palette.js';
 
 const ACTION_LABELS = {
   'meta-title': 'Meta Title & Description', faq: 'FAQ', schema: 'Schema Markup',
@@ -35,35 +36,6 @@ const ACTION_LABELS = {
   'cookie-policy': 'Cookie Policy', 'privacy-policy': 'Privacy Policy', 'terms-of-service': 'Terms of Service',
   'duplicate-id-fix': 'Duplicate ID Fix Plan', breadcrumbs: 'Breadcrumbs Schema',
   'schema-repair': 'Structured Data Repair', 'alt-text': 'Image Alt Text',
-};
-
-const GENERATOR_COLORS = {
-  'meta-title': '#6C63FF',
-  faq: '#0ea5e9',
-  schema: '#8b5cf6',
-  'internal-links': '#14b8a6',
-  'blog-outline': '#ec4899',
-  'landing-page': '#c2410c',
-  translation: '#06b6d4',
-  'llms-txt': '#10b981',
-  'security-headers': '#ef4444',
-  'html-lang': '#0891b2',
-  viewport: '#0d9488',
-  canonical: '#7c3aed',
-  'robots-fix': '#059669',
-  'open-graph': '#db2777',
-  'broken-link-fix': '#dc2626',
-  'redirect-fix': '#d97706',
-  'expand-content': '#4f46e5',
-  sitemap: '#65a30d',
-  'geo-audit': '#0ea5e9',
-  'cookie-policy': '#f59e0b',
-  'privacy-policy': '#d97706',
-  'terms-of-service': '#b45309',
-  'duplicate-id-fix': '#f97316',
-  breadcrumbs: '#84cc16',
-  'schema-repair': '#a855f7',
-  'alt-text': '#f472b6',
 };
 
 // Must match server/store/drafts.js's MERGE_MANDATORY_TYPES EXACTLY — every
@@ -331,7 +303,7 @@ export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted 
   // button is disabled (they'd just 404 too) in favor of one clear way out.
   const [draftGone, setDraftGone] = useState(false);
   const status = STATUS_INFO[draft.status] || STATUS_INFO.draft;
-  const brandColor = GENERATOR_COLORS[draft.action_type] || '#6366f1';
+  const brandColor = CHART.highlight;
   const [showDiff, setShowDiff] = useState(true);
 
   const selectTitle = async (title) => {

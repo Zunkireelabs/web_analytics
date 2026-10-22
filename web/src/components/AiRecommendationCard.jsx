@@ -4,6 +4,7 @@ import { timeAgo } from '../api.js';
 import Sparkline from './Sparkline.jsx';
 import { providerCoverageCaveat } from '../lib/provider-coverage.js';
 import { AlertTriangle, Sparkles, HelpCircle, CheckCircle2, ArrowUpRight, ArrowDownRight } from 'lucide-react';
+import { STATUS } from '../lib/palette.js';
 
 function emptyMessage(meta) {
   const anyConfigured = meta?.providers?.some((p) => p.configured);
@@ -14,7 +15,7 @@ function emptyMessage(meta) {
   return `Checked ${timeAgo(meta.lastRunAt)}, but no data was available.`;
 }
 
-const pctColor = (pct) => (pct >= 60 ? '#10b981' : pct >= 25 ? '#f59e0b' : '#ef4444');
+const pctColor = (pct) => (pct >= 60 ? STATUS.good.color : pct >= 25 ? STATUS.warning.color : STATUS.critical.color);
 
 export default function AiRecommendationCard({ aiRecommendation, meta, loading }) {
   const [showPrompts, setShowPrompts] = useState(false);

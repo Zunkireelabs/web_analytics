@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ComposedChart, Area, Line, ReferenceLine, ReferenceDot, ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { api } from '../api.js';
 import { horizonUnit } from '../lib/analystFormat.js';
+import { CHART, SERIES, STATUS, AXIS_TICK } from '../lib/palette.js';
 
 const GRANULARITIES = ['Day', 'Week', 'Month'];
 
@@ -197,36 +198,30 @@ export default function AnalystTrendCard({ clientId, metrics, selectedMetricKey,
         ) : (
           <ResponsiveContainer width="100%" height={260}>
             <ComposedChart data={chartRows.rows} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
-              <defs>
-                <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#8b5cf6" stopOpacity={0.25} />
-                  <stop offset="100%" stopColor="#8b5cf6" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} vertical={false} />
               <XAxis dataKey="date" tickFormatter={(d) => formatLabel(d, granularity)}
-                tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 600 }} axisLine={false} tickLine={false}
+                tick={{ ...AXIS_TICK, fontSize: 10 }} axisLine={false} tickLine={false}
                 minTickGap={40} />
-              <YAxis tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 600 }} axisLine={false} tickLine={false} width={46}
+              <YAxis tick={{ ...AXIS_TICK, fontSize: 10 }} axisLine={false} tickLine={false} width={46}
                 tickFormatter={(v) => metric?.unit === 'ratio' ? `${Math.round(v * 100)}%` : compactNumber(v)} />
-              <Tooltip content={<CustomTooltip unit={metric?.unit} />} cursor={{ stroke: '#cbd5e1', strokeWidth: 1 }}
+              <Tooltip content={<CustomTooltip unit={metric?.unit} />} cursor={{ stroke: CHART.cursor, strokeWidth: 1 }}
                 labelFormatter={(d) => formatLabel(d, granularity)} />
               {chartRows.lastActualDate && (
-                <ReferenceLine x={bucketKey(chartRows.lastActualDate, granularity)} stroke="#cbd5e1" strokeDasharray="3 3"
-                  label={{ value: 'Today', position: 'insideTopRight', fontSize: 9, fill: '#94a3b8', fontWeight: 700 }} />
+                <ReferenceLine x={bucketKey(chartRows.lastActualDate, granularity)} stroke={CHART.cursor} strokeDasharray="3 3"
+                  label={{ value: 'Today', position: 'insideTopRight', fontSize: 9, fill: CHART.axis, fontWeight: 700 }} />
               )}
-              <Area type="monotone" dataKey="band" stroke="none" fill="#8b5cf6" fillOpacity={0.14} connectNulls={false} />
-              <Area type="monotone" dataKey="value" stroke="#8b5cf6" strokeWidth={2.5}
-                fill="url(#trendFill)" dot={false} activeDot={{ r: 5, strokeWidth: 0, fill: '#8b5cf6' }} connectNulls={false} />
-              <Line type="monotone" dataKey="forecast" stroke="#38bdf8" strokeWidth={2} strokeDasharray="5 5"
+              <Area type="monotone" dataKey="band" stroke="none" fill={CHART.highlight} fillOpacity={0.14} connectNulls={false} />
+              <Area type="monotone" dataKey="value" stroke={CHART.highlight} strokeWidth={2.5}
+                fill={CHART.highlight} fillOpacity={0.08} dot={false} activeDot={{ r: 5, strokeWidth: 0, fill: CHART.highlight }} connectNulls={false} />
+              <Line type="monotone" dataKey="forecast" stroke={SERIES[1]} strokeWidth={2} strokeDasharray="5 5"
                 dot={{ r: 2 }} connectNulls={false} />
               {chartRows.anomalyMarkers?.map((m, idx) => (
                 <ReferenceDot key={`a-${idx}`} x={m.date} y={m.value} r={5}
-                  fill={m.direction === 'high' ? '#fb7185' : '#38bdf8'} stroke="#ffffff" strokeWidth={1.5} />
+                  fill={m.direction === 'high' ? STATUS.critical.color : SERIES[1]} stroke="#ffffff" strokeWidth={1.5} />
               ))}
               {chartRows.trendShiftMarkers?.map((m, idx) => (
                 <ReferenceDot key={`t-${idx}`} x={m.date} y={m.value} r={5} shape="diamond"
-                  fill={m.direction === 'up' ? '#34d399' : '#fbbf24'} stroke="#ffffff" strokeWidth={1.5} />
+                  fill={m.direction === 'up' ? STATUS.good.color : STATUS.warning.color} stroke="#ffffff" strokeWidth={1.5} />
               ))}
             </ComposedChart>
           </ResponsiveContainer>

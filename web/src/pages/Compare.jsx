@@ -4,6 +4,7 @@ import PageHeader from '../components/PageHeader.jsx';
 import StatCard from '../components/StatCard.jsx';
 import Sparkline from '../components/Sparkline.jsx';
 import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, Radar, Legend, Tooltip } from 'recharts';
+import { SERIES, STATUS } from '../lib/palette.js';
 
 const fmtInt = (v) => Number(v).toLocaleString();
 
@@ -38,12 +39,12 @@ function weekLabel(start) {
 const pctChange = (a, b) => { a = Number(a) || 0; b = Number(b) || 0; if (a === 0) return b > 0 ? 100 : 0; return Math.round(((b - a) / a) * 100); };
 
 const METRICS = [
-  { key: 'clicks', label: 'Clicks', icon: '🖱', color: '#6C63FF' },
-  { key: 'impressions', label: 'Impressions', icon: '👁', color: '#8b5cf6' },
-  { key: 'users', label: 'Users', icon: '👥', color: '#10b981' },
-  { key: 'new_users', label: 'New users', icon: '✨', color: '#0ea5e9' },
-  { key: 'sessions', label: 'Sessions', icon: '⏱', color: '#14b8a6' },
-  { key: 'conversions', label: 'Conversions', icon: '✅', color: '#d946ef' },
+  { key: 'clicks', label: 'Clicks', icon: '🖱', color: SERIES[0] },
+  { key: 'impressions', label: 'Impressions', icon: '👁', color: SERIES[1] },
+  { key: 'users', label: 'Users', icon: '👥', color: SERIES[2] },
+  { key: 'new_users', label: 'New users', icon: '✨', color: SERIES[3] },
+  { key: 'sessions', label: 'Sessions', icon: '⏱', color: SERIES[4] },
+  { key: 'conversions', label: 'Conversions', icon: '✅', color: SERIES[5] },
 ];
 
 export default function Compare({ siteId }) {
@@ -245,7 +246,7 @@ export default function Compare({ siteId }) {
                         </div>
                       </div>
                       <div className="pr-2 shrink-0">
-                        <Sparkline data={c.spark} color={up ? '#10b981' : '#f43f5e'} width={44} height={18} fill={false} dot={false} />
+                        <Sparkline data={c.spark} color={up ? STATUS.good.color : STATUS.critical.color} width={44} height={18} fill={false} dot={false} />
                       </div>
                       <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border w-16 text-center shrink-0 transition-colors ${
                         up ? 'text-emerald-600 bg-emerald-500/5 border-emerald-500/10' : 'text-rose-500 bg-rose-500/5 border-rose-500/10'
