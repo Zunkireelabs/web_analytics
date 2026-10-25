@@ -2,6 +2,7 @@ import { useEffect, useState, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { api } from './api.js';
 import Login from './pages/Login.jsx';
+import SuperRankLogin from './pages/SuperRankLogin.jsx';
 import Overview from './pages/Overview.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import TopBar from './components/TopBar.jsx';
@@ -77,7 +78,7 @@ export default function App() {
   // lets <Login> (rendered unconditionally, regardless of path) hand off to
   // <Routes> at the same /oauth/authorize-consent URL once authed flips true.
   useEffect(() => {
-    if (authed === false && !window.location.pathname.startsWith('/oauth/')) {
+    if (authed === false && !window.location.pathname.startsWith('/oauth/') && window.location.pathname !== '/login') {
       navigate('/', { replace: true });
     }
   }, [authed, navigate]);
@@ -110,7 +111,11 @@ export default function App() {
   };
 
   if (authed === null) return <div className="p-8 text-gray-400">Loading…</div>;
-  if (!authed) return <Login onAuthed={checkSession} />;
+  if (!authed) {
+    // The superrank.si "Log in" button lands here.
+    if (location.pathname === '/login') return <SuperRankLogin onAuthed={checkSession} />;
+    return <Login onAuthed={checkSession} />;
+  }
 
   // Standalone account page (Humblytics-style): no sidebar, top bar, toolbar or
   // agent panel — the person's own settings. The in-app /settings holds the
@@ -157,6 +162,7 @@ export default function App() {
             <Routes key={siteId}>
               {/* No standalone marketing homepage in the authenticated app — land straight on AI Growth (the agent runner console, AiGrowth.jsx). */}
               <Route path="/" element={<Navigate to="/ai-orchestration" replace />} />
+              <Route path="/login" element={<Navigate to="/" replace />} />
               <Route path="/overview" element={<Overview siteId={siteId} />} />
               <Route path="/insights" element={<Insights siteId={siteId} />} />
               <Route path="/compare" element={<Compare siteId={siteId} />} />
