@@ -8,6 +8,7 @@ import {
 } from './lib/gsc-url-audit.js';
 import { pickRedirectTarget } from './lib/redirect-target.js';
 import { callLLM } from '../llm.js';
+import { safeMessage } from '../lib/errors.js';
 
 export const meta = {
   id: 'gsc-url-audit',
@@ -118,7 +119,8 @@ async function probe(url) {
       html,
     };
   } catch (err) {
-    return { url, status: null, error: String(err?.message || err) };
+    const { message } = safeMessage('gsc-url-audit.fetchUrl', err, 'this page could not be checked right now');
+    return { url, status: null, error: message };
   } finally {
     clearTimeout(timer);
   }

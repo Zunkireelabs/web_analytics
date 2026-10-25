@@ -518,7 +518,8 @@ async function computeRedirectAddMerge(site, draft, beforeRef) {
   if (!from || !to) return { ok: false, reason: 'draft-not-ready', error: 'This draft has no from/to URL.' };
   let tree;
   try { tree = await getRepoTree(site, beforeRef); } catch (err) {
-    return { ok: false, reason: 'repo-tree-unavailable', error: String(err?.message || err) };
+    const { message } = safeMessage('backend.computeRedirectAddMerge', err, 'the repository file list is temporarily unavailable');
+    return { ok: false, reason: 'repo-tree-unavailable', error: message };
   }
   const plan = await planRedirect({
     files: tree.files,
