@@ -81,14 +81,6 @@ jobs:
             REPORT_MODEL_DAILY=${{ vars.REPORT_MODEL_DAILY }}
             REPORT_MODEL_MONTHLY=${{ vars.REPORT_MODEL_MONTHLY }}
 
-            # ── AI Recommendation (opt-in, real buyer-style prompts) ────────
-            # Probes ChatGPT with each client's prompts and records whether
-            # the client is recommended. Its own gate on top of OPENAI_API_KEY
-            # (that key alone must not turn on costed probes) — see
-            # server/agents/lib/model-providers/openai.js. Same flag staging
-            # already sets.
-            AI_RECOMMENDATION_ENABLED=true
-
             # ── GitHub App (multi-client credentials) ───────────────────────
             # Optional. Unset until a GitHub App is registered, at which point
             # every site carrying a github_app_installation_id authenticates
