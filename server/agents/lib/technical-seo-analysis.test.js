@@ -62,6 +62,31 @@ describe('crawlExternalCitations', () => {
   // block an unfamiliar UA string, so a lone 403 is not proof a citation is
   // actually dead. Two of these false positives had already shipped as real
   // PRs deleting live citations before this was caught.
+  test('a 404 answered to HEAD is confirmed with a GET before a link is reported broken', async () => {
+    const original = globalThis.fetch;
+    const methods = [];
+    globalThis.fetch = async (url, opts) => {
+      methods.push(opts.method);
+      return { status: opts.method === 'HEAD' ? 404 : 200, headers: { get: () => null } };
+    };
+    try {
+      const pageResults = [{ page: 'https://mysite.com/blog/post', analysis: { externalCitationLinks: ['https://nvlpubs.example/doc.pdf'] } }];
+      const result = await crawlExternalCitations(pageResults);
+      assert.equal(result.broken.length, 0, 'a link that GET serves must not be reported dead because HEAD said 404');
+      assert.deepEqual(methods, ['HEAD', 'GET']);
+    } finally { globalThis.fetch = original; }
+  });
+
+  test('a 404 that GET also returns is still reported broken', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => ({ status: 404, headers: { get: () => null } });
+    try {
+      const pageResults = [{ page: 'https://mysite.com/blog/post', analysis: { externalCitationLinks: ['https://gone.example/doc.pdf'] } }];
+      const result = await crawlExternalCitations(pageResults);
+      assert.equal(result.broken.length, 1);
+    } finally { globalThis.fetch = original; }
+  });
+
   test('a 403 under the bot UA is retried with a browser UA before being reported broken', async () => {
     const original = globalThis.fetch;
     let calls = 0;
@@ -150,15 +175,17 @@ describe('crawlExternalCitations', () => {
     });
   }
 
-  test('a plain 404 is never retried — only outright failures and 403/429/503 get a second chance', async () => {
+  test('a plain 404 is not retried under a browser UA — only a single GET confirms the HEAD', async () => {
     const original = globalThis.fetch;
     let calls = 0;
-    globalThis.fetch = async () => { calls++; return { status: 404, headers: { get: () => null } }; };
+    const uas = new Set();
+    globalThis.fetch = async (url, opts) => { calls++; uas.add(opts.headers['User-Agent']); return { status: 404, headers: { get: () => null } }; };
     try {
       const pageResults = [{ page: 'https://mysite.com/blog/post', analysis: { externalCitationLinks: ['https://really.example/404'] } }];
       const result = await crawlExternalCitations(pageResults);
       assert.equal(result.broken.length, 1);
-      assert.equal(calls, 1, 'an honest 404 must not spend a second request retrying it');
+      assert.equal(calls, 2, 'HEAD then one GET to confirm — no further retries');
+      assert.equal(uas.size, 1, 'an honest 404 must not be retried under a different identity');
     } finally { globalThis.fetch = original; }
   });
 });

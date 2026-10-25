@@ -10,6 +10,7 @@ import { PROVIDERS, getConfiguredProviders } from './lib/model-providers/index.j
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
 import { effortForGenerator } from './lib/page-content.js';
 import { callLLM } from '../llm.js';
+import { targetMarketNames } from './lib/site-locations.js';
 
 // Distinct from server/agents/ai-visibility.js — that agent measures
 // structural readiness to be cited (schema/FAQ/robots.txt on this site's
@@ -56,14 +57,24 @@ const HIGH_INTENT_SOURCES = new Set(['service', 'top-query']);
 // below) since this step is generation/phrasing, not the actual "does
 // OpenAI recommend us" test — that distinction matters: only the real
 // probe below is locked to OpenAI per the agent's design.
-async function generatePromptCandidates({ companyName, homepageTitle, homepageDescription, topPages, topQueries }) {
+async function generatePromptCandidates({ companyName, homepageTitle, homepageDescription, topPages, topQueries, targetMarkets = [] }) {
   const system = 'You write realistic buyer-style questions a real prospective customer might ask an AI ' +
     'assistant, based ONLY on the real company context given below — never invent a service, industry, or fact ' +
     'not evidenced in the context. For each of: (1) the company\'s real services/offerings as described on its ' +
     'own homepage, (2) its real top landing pages, (3) its real top search queries — write 1-3 natural questions ' +
     'a buyer might genuinely ask (e.g. "what\'s the best tool for X", "who should I use for Y"), phrased the way ' +
     'a real person would type it, never mentioning the company by name (the test is whether it comes up ' +
-    'unprompted). Respond with ONLY a JSON array, each item {"promptText": "...", "source": "service"|"landing-page"|"top-query"}, ' +
+    'unprompted). ' +
+    // The top pages/queries below skew to whichever market the site already
+    // ranks in (zunkireelabs.com: "...in Nepal"), so without this a global
+    // business is only ever tested on its home market. Phrased from the
+    // site's own configured markets, never invented.
+    (targetMarkets.length
+      ? `This company serves these markets: ${targetMarkets.join(', ')}. Do NOT anchor every question to one country or city, ` +
+        'even if the pages/queries below do — make roughly half of the questions location-neutral (how a buyer anywhere would ask), ' +
+        'and spread the rest across the listed markets. '
+      : '') +
+    'Respond with ONLY a JSON array, each item {"promptText": "...", "source": "service"|"landing-page"|"top-query"}, ' +
     `capped at ${MAX_TRACKED_PROMPTS} items total.`;
   const user = `Company: ${companyName}\nHomepage title: ${homepageTitle || 'unknown'}\n` +
     `Homepage description: ${homepageDescription || 'unknown'}\n` +
@@ -238,6 +249,7 @@ export async function run({ siteId, start, end }) {
     homepageTitle: homepage.ok ? homepage.analysis.title : null,
     homepageDescription: homepage.ok ? homepage.analysis.metaDescription : null,
     topPages: topPageUrls, topQueries: topQueryTexts,
+    targetMarkets: targetMarketNames(site),
   });
   await Promise.all(candidates.map((c) => upsertTrackedPrompt(siteId, c.promptText, c.source)
     .catch((err) => console.error('[agents] ai-recommendation: failed to upsert prompt:', err.message))));

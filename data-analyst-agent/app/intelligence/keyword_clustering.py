@@ -316,8 +316,15 @@ async def research_topic_keywords(site_type: str | None, industry: str, topic: s
         "You are a keyword research expert. Given a company's site type, industry, and one topic it "
         "offers, return the real keywords people actually search on Google when looking for this. "
         "Focus on: problem-based searches (e.g. 'how to automate bookings'), solution-based searches "
-        "(e.g. 'AI booking engine software'), comparison searches (e.g. 'best booking software for "
-        "clinics'), and location searches if relevant (e.g. 'booking software nepal'). Return only "
+        "(e.g. 'AI booking engine software'), and comparison searches (e.g. 'best booking software for "
+        "clinics'). Two rules matter more than volume. (1) RELEVANCE: only return searches where this "
+        "company, as a software/service provider in its stated industry, would genuinely be a credible "
+        "answer. If the topic belongs to another industry (e.g. a software company with a healthcare "
+        "topic), keep only searches from buyers of the company's own kind of product (software, AI "
+        "assistants, automation for that sector) and skip searches about the other industry's own "
+        "practice (clinical procedures, medical devices, diagnosis, real-estate transactions). "
+        "(2) REACH: assume a global audience. Do not add a country or city to a keyword unless the "
+        "topic itself is about that place; never default to the company's home country. Return only "
         'JSON, no other text: {"keywords": [{"keyword": "...", "search_intent": '
         '"informational"|"commercial"|"transactional", "estimated_difficulty": "low"|"medium"|"high"}, '
         f'...]}}, exactly {RESEARCH_KEYWORDS_PER_TOPIC} items.'

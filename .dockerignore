@@ -1,7 +1,7 @@
 # Build-context exclusions for every image built from this repo root
-# (Dockerfile, server/design-agent/Dockerfile).
+# (Dockerfile; the Design Agent worker runs from that same image).
 #
-# The load-bearing entry is `.venv` — server/design-agent/Dockerfile creates
+# The load-bearing entry is `.venv` — the retired Design Agent Dockerfile created
 # the Design Agent's Python venv itself (`python3 -m venv
 # server/design-agent/python/.venv`) and then runs `COPY server ./server`
 # AFTERWARDS. Without this file, a developer's local .venv present in the

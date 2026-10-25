@@ -23,24 +23,13 @@ import { configured as dataForSeoKeywordsConfigured, fetchKeywordIdeas, fetchSea
 import { saveKeywordGaps } from '../../store/data-analyst.js';
 import { getLatestKeywordDemandRunDates, saveKeywordDemandRun } from '../../store/keyword-demand.js';
 import { previousWeek, previousMonth, monthBounds } from '../../util/dates.js';
-import { resolveSiteLocations } from './site-locations.js';
+import { resolveSiteLocations, LOCATION_NAMES } from './site-locations.js';
 
 const MAX_SEED_TERMS = 8; // a homepage describes a handful of real offerings, not dozens
 const MAX_GAPS_PER_RUN = 20; // one month's worth of real candidate topics — the weekly ship cycle works through these gradually, same volume as the existing LLM-research step (RESEARCH_KEYWORDS_PER_TOPIC=20)
 const MAX_LLM_GUESS_PER_LOCATION = 5; // a last-resort, per-location top-up — never meant to rival a real DataForSEO batch
 const DIFFICULTY_TO_PRIORITY = { low: 'high', medium: 'medium', high: 'low' }; // mirrors keyword_clustering.py's own mapping: easier to rank = higher priority
 
-// Friendly names for the LLM-guess fallback's prompt only — real requests to
-// DataForSEO always use the numeric locationCode itself (see
-// site-locations.js), never a name. Only needs to cover markets this
-// codebase actually configures a site for (migrations 159/162); an
-// unlisted code degrades to "location code N" in the prompt, still
-// functional.
-const LOCATION_NAMES = {
-  2840: 'the United States', 2826: 'the United Kingdom', 2356: 'India',
-  2036: 'Australia', 2124: 'Canada', 2524: 'Nepal', 2756: 'Switzerland',
-  2528: 'the Netherlands', 2276: 'Germany',
-};
 
 // A hybrid-scope site (real home market + real global reach, e.g. Admizz or
 // Zunkiree Labs itself, see migration 159) queries more than one location —

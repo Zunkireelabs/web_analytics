@@ -99,3 +99,16 @@ describe('getConfiguredProviders — gating', () => {
     assert.deepEqual(getConfiguredProviders().map((p) => p.id), ['openai', 'anthropic', 'perplexity']);
   });
 });
+
+describe('openai probe — web search', () => {
+  test('textFromResponse appends cited source URLs so a citation of the own domain is visible', async () => {
+    const { textFromResponse } = await import('./openai.js');
+    const res = {
+      output_text: 'Top agencies include Acme.',
+      output: [{ content: [{ annotations: [{ type: 'url_citation', url: 'https://zunkireelabs.com/' }, { type: 'url_citation', url: 'https://zunkireelabs.com/' }, { type: 'other' }] }] }],
+    };
+    assert.equal(textFromResponse(res), 'Top agencies include Acme.\n\nSources:\nhttps://zunkireelabs.com/');
+    assert.equal(textFromResponse({ output_text: ' plain ' }), 'plain');
+    assert.equal(textFromResponse(null), '');
+  });
+});

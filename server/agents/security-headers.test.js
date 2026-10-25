@@ -43,6 +43,20 @@ describe('security-headers run()', () => {
     assert.equal(res.facts.findings.some((x) => x.id === 'security-headers:site:missing-security-headers'), false);
   });
 
+  test('a deployed Report-Only CSP is not reported as a missing CSP', async () => {
+    const { 'content-security-policy': _enforcing, ...rest } = FULL;
+    headerResponses = { default: { ...rest, 'content-security-policy-report-only': "default-src 'self'" } };
+    const res = await run({ siteId: 1, start: 'a', end: 'b', params: { pages: ['https://example.com/'] } });
+    assert.equal(res.facts.findings.some((x) => x.id === 'security-headers:content-security-policy'), false);
+  });
+
+  test('no CSP header of either kind is still reported missing', async () => {
+    const { 'content-security-policy': _enforcing, ...rest } = FULL;
+    headerResponses = { default: rest };
+    const res = await run({ siteId: 1, start: 'a', end: 'b', params: { pages: ['https://example.com/'] } });
+    assert.ok(res.facts.findings.some((x) => x.id === 'security-headers:content-security-policy'));
+  });
+
   test('http and https variants of one page count once', async () => {
     headerResponses = { default: {} };
     const res = await run({ siteId: 1, start: 'a', end: 'b', params: { pages: ['http://example.com/a', 'https://example.com/a'] } });

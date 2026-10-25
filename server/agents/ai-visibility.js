@@ -207,7 +207,13 @@ export async function run({ siteId, start, end, pageCache, params }) {
     if (!f.result.ok) return { ...base, score: null, fetchError: f.result.error };
     const categories = scorePageCategories(f.result.analysis);
     const scored = llmsScore != null ? combineScores(categories, llmsScore, geoSignalsScore(f.result.analysis)) : { overall: null, categories };
-    return { ...base, score: scored, recommendations: recommendationsFor(scored.categories), fetchError: null };
+    // A legal, utility (careers/team/contact/…) or listing page has no prose of
+    // its own to turn into an FAQ — the same exemption geo-signals.js and
+    // page-content.js already apply. Other findings still apply.
+    const a = f.result.analysis;
+    const noFaqPage = a.isLegalPage || a.isUtilityPage || a.isListingPage || a.isDeclaredDuplicate;
+    const recs = recommendationsFor(scored.categories).filter((r) => !(noFaqPage && r.generatorId === 'faq'));
+    return { ...base, score: scored, recommendations: recs, fetchError: null };
   });
 
   const scoredPages = pages.filter((p) => p.score?.overall != null);
@@ -231,7 +237,11 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const priorities = priorityByRank(prioritized);
   const findings = prioritized.flatMap((p, i) => {
     if (!p.recommendations?.length) return [];
-    const priority = priorities[i];
+    // Rank alone makes the worst third of pages 'high' on every site, so a
+    // brand-new site with zero traffic got "critical" alerts. With no
+    // impressions there is nothing at stake yet — cap at 'low' so it never
+    // triggers a critical-issues notification.
+    const priority = p.impressions > 0 ? priorities[i] : 'low';
     const expectedImpact = { label: impactFromPriority(priority), basis: 'computed', value: p.impressions };
     return p.recommendations.map((rec) => makeFinding({
       id: `ai-visibility:${rec.key}:${p.page}`,

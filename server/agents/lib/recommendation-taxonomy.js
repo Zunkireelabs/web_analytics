@@ -62,6 +62,7 @@ const BY_GENERATOR = {
   'broken-link-fix': { bucket: 'seo', category: 'Broken Links' },
   'missing-page-create': { bucket: 'seo', category: 'Broken Links' },
   'redirect-fix': { bucket: 'seo', category: 'Broken Links' },
+  'redirect-add': { bucket: 'seo', category: 'Broken Links' },
   faq: { bucket: 'aeo', category: 'FAQ Opportunities' },
   'blog-outline': { bucket: 'aeo', category: 'Blog Opportunities' },
   'direct-answer': { bucket: 'geo', category: 'Blog Opportunities' },

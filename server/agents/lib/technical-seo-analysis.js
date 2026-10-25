@@ -117,6 +117,7 @@ export async function detectDuplicateTitles(siteId, batchResults) {
 // (not just the first request) is checked against isPrivateOrLocalHost —
 // a same-host redirect could in principle point at a private/internal
 // address even when the original href looked like a normal same-site link.
+const HEAD_UNRELIABLE_STATUSES = new Set([404, 405, 410, 501]);
 async function followRedirects(startUrl, maxHops = MAX_REDIRECT_HOPS, headers = UA_HEADER, timeoutMs = REDIRECT_HOP_TIMEOUT_MS) {
   const chain = [];
   let current = startUrl;
@@ -131,7 +132,13 @@ async function followRedirects(startUrl, maxHops = MAX_REDIRECT_HOPS, headers = 
     let res;
     try {
       res = await fetch(current, { method: 'HEAD', redirect: 'manual', signal: controller.signal, headers });
-      if (res.status === 405) { // some servers reject HEAD outright
+      // Some servers reject HEAD outright (405) or answer it differently from
+      // GET — nvlpubs.nist.gov returns 404 to HEAD and 200 to GET for the same
+      // PDF, which reported a working citation as dead (zunkireelabs.com,
+      // 2026-10-13). A "not found" HEAD is therefore confirmed with a GET before
+      // it is trusted. 403/429/503 are left to followRedirectsWithRetry's own
+      // bot-protection retry.
+      if (HEAD_UNRELIABLE_STATUSES.has(res.status)) {
         res = await fetch(current, { method: 'GET', redirect: 'manual', signal: controller.signal, headers });
       }
     } catch (err) {

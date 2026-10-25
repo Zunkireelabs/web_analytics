@@ -7,6 +7,9 @@ services:
   # isolation for this service.
   app:
     container_name: data-analyst-agent-stage
+    # Explicit tag: the staging deploy pulls the CI-built image and tags it
+    # as this, so `up -d` uses it and builds nothing on the VPS.
+    image: data-analyst-agent-app:latest
     build:
       context: .
       dockerfile: Dockerfile
