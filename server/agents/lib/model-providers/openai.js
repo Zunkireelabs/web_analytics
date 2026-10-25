@@ -30,6 +30,35 @@ export function configured() {
 
 const MODEL = process.env.AI_RECOMMENDATION_MODEL || 'gpt-4o-mini';
 
+// Whether probes run with live web search, like the ChatGPT app a real buyer
+// uses. OPT-IN (AI_RECOMMENDATION_WEB_SEARCH=true) because every search call
+// is billed on top of the model tokens, and the daily agent can make many.
+// Left off, the probe only tests what the model remembers from training,
+// which reported 0 mentions out of 30 prompts for zunkireelabs.com
+// (2026-10-13) while the ChatGPT app ranked it #2 for a comparable question —
+// so treat memory-only results as a weak signal and turn this on for a small,
+// deliberate check.
+export function webSearchEnabled() {
+  return process.env.AI_RECOMMENDATION_WEB_SEARCH === 'true';
+}
+
+// Pulls the answer text out of a Responses API result and appends the URLs it
+// cited as sources, so a citation of the company's own domain is visible to
+// the deterministic mention check even when its name is not in the prose.
+// Pure, so it is testable without a network call.
+export function textFromResponse(res) {
+  const text = (res?.output_text || '').trim();
+  const urls = new Set();
+  for (const item of res?.output || []) {
+    for (const part of item?.content || []) {
+      for (const a of part?.annotations || []) {
+        if (a?.type === 'url_citation' && a.url) urls.add(a.url);
+      }
+    }
+  }
+  return urls.size ? `${text}\n\nSources:\n${[...urls].join('\n')}` : text;
+}
+
 // Sends `prompt` exactly as a real user would ask it — no system prompt
 // steering the answer, since the whole point is observing what the model
 // would naturally say unprompted. Returns the raw text verbatim; callers
@@ -38,6 +67,20 @@ const MODEL = process.env.AI_RECOMMENDATION_MODEL || 'gpt-4o-mini';
 export async function ask(prompt) {
   if (!configured()) throw new Error('OPENAI_API_KEY is not set — AI Recommendation probes cannot run.');
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  if (webSearchEnabled()) {
+    try {
+      const res = await client.responses.create({
+        model: MODEL,
+        max_output_tokens: 900,
+        tools: [{ type: 'web_search_preview' }],
+        input: prompt,
+      });
+      const raw = textFromResponse(res);
+      if (raw) return { raw, model: `${MODEL}+web-search` };
+    } catch (err) {
+      console.warn('[ai-recommendation] web-search probe failed, falling back to memory-only:', err.message);
+    }
+  }
   const res = await client.chat.completions.create({
     model: MODEL,
     max_tokens: 600,

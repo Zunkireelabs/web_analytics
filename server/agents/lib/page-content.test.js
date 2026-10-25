@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding, llmsTxtHasValidStructure, titleKeywordConsistency, inferSchemaType, MAX_INLINE_STYLE_COUNT, MIN_GROUNDING_WORDS, hasSufficientGroundingContent, requireGroundedContent, rebuildFaqContainerText, isListingPage } from './page-content.js';
+import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding, llmsTxtHasValidStructure, titleKeywordConsistency, inferSchemaType, MAX_INLINE_STYLE_COUNT, MIN_GROUNDING_WORDS, hasSufficientGroundingContent, requireGroundedContent, rebuildFaqContainerText, isListingPage, isDeclaredDuplicate } from './page-content.js';
 
 // Regression coverage for a real false-positive found in production: a
 // robots.txt that correctly Allow's every real answer-engine crawler while
@@ -898,6 +898,12 @@ describe('contentGapsFor — false-positive gates', () => {
     assert.equal(analyzePage('<html><body></body></html>', 'https://example.com/services/web').isArticlePage, false);
     assert.equal(analyzePage('<html><body></body></html>', 'https://example.com/privacy').isLegalPage, true);
   });
+  test('cookie-preferences is a legal page; careers/team/contact/projects are utility pages, blog posts and services are not', () => {
+    const at = (path) => analyzePage('<html><body></body></html>', `https://example.com${path}`);
+    assert.equal(at('/cookie-preferences/').isLegalPage, true);
+    for (const path of ['/careers/', '/team/', '/contact/', '/projects/', '/apply/']) assert.equal(at(path).isUtilityPage, true, path);
+    for (const path of ['/blog/team-building-tips', '/services/ai-development/', '/products/orca/']) assert.equal(at(path).isUtilityPage, false, path);
+  });
 });
 
 describe('isListingPage', () => {
@@ -924,5 +930,29 @@ describe('inferSchemaType — listing pages', () => {
   });
   test('an existing real type still wins over the listing inference', () => {
     assert.equal(inferSchemaType('https://e.com/blog/', ['Blog'], { isListingPage: true }), 'Blog');
+  });
+});
+
+describe('isDeclaredDuplicate', () => {
+  test('a same-site canonical to a different URL marks the page as a duplicate', () => {
+    assert.equal(isDeclaredDuplicate('https://x.com/get-started/?package=Gold', 'https://x.com/get-started/'), true);
+    assert.equal(isDeclaredDuplicate('https://x.com/get-started/index.html?package=Gold', 'https://x.com/get-started/'), true);
+  });
+
+  test('the page itself, a trailing slash, index.html or www are not duplicates', () => {
+    assert.equal(isDeclaredDuplicate('https://x.com/a/', 'https://x.com/a/'), false);
+    assert.equal(isDeclaredDuplicate('https://x.com/a', 'https://x.com/a/'), false);
+    assert.equal(isDeclaredDuplicate('https://x.com/a/index.html', 'https://x.com/a/'), false);
+    assert.equal(isDeclaredDuplicate('https://www.x.com/a/', 'https://x.com/a/'), false);
+  });
+
+  test('a missing, malformed or cross-host canonical is not judged here', () => {
+    assert.equal(isDeclaredDuplicate('https://x.com/a/', null), false);
+    assert.equal(isDeclaredDuplicate('https://x.com/a/', 'not a url'), false);
+    assert.equal(isDeclaredDuplicate('https://x.com/a/', 'https://other.com/a/'), false);
+  });
+
+  test('a declared duplicate raises no content gaps', () => {
+    assert.deepEqual(contentGapsFor({ isDeclaredDuplicate: true, h1Count: 0, h2Count: 0 }, []), []);
   });
 });

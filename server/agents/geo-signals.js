@@ -74,7 +74,7 @@ const GEO_SIGNAL_RULES = [
     effort: effortForGenerator('schema'),
   },
   {
-    test: (analysis, query) => hasComparisonQueryIntent(query) && !analysis.hasComparisonContent,
+    test: (analysis, query) => hasComparisonQueryIntent(query) && !analysis.hasComparisonContent && !analysis.isLegalPage && !analysis.isUtilityPage && !analysis.isListingPage,
     label: 'Add comparison, alternatives, or "best of" content — generative engines disproportionately cite this shape.',
     generatorId: 'expand-content',
     params: (page, query, schemaTypes) => ({ page, query, focus: 'comparison-content' }),
@@ -124,7 +124,7 @@ const GEO_SIGNAL_RULES = [
     // matches nothing visible. Confirmed on chayceproperties.com, which got
     // qa-content recommendations — and shipped drafts — for its Terms,
     // Privacy and Cookie pages and its /blog/ index.
-    test: (analysis) => analysis.questionHeadingCount === 0 && !analysis.hasVisibleFaqContent && !analysis.isLegalPage && !analysis.isListingPage,
+    test: (analysis) => analysis.questionHeadingCount === 0 && !analysis.hasVisibleFaqContent && !analysis.isLegalPage && !analysis.isUtilityPage && !analysis.isListingPage,
     label: 'Add question-style headings (e.g. "What is...?", "How does...?") with grounded answers — improves featured-snippet and AI-citation eligibility.',
     generatorId: 'qa-content',
     params: (page, query, schemaTypes) => ({ page, query }),
@@ -133,6 +133,7 @@ const GEO_SIGNAL_RULES = [
 ];
 
 export function recommendationsFor(analysis, page, query, schemaTypes) {
+  if (analysis.isDeclaredDuplicate) return [];
   return GEO_SIGNAL_RULES.filter((r) => r.test(analysis, query)).map((r) => ({
     label: r.label,
     generatorId: r.generatorId,

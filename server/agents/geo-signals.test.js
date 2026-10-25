@@ -67,6 +67,23 @@ describe('geo-signals — applicability gates', () => {
     assert.equal(recs.length, 0);
   });
 
+  test('comparison content is never asked for on a legal page or a section index', () => {
+    for (const flag of ['isLegalPage', 'isListingPage', 'isUtilityPage']) {
+      const recs = recommendationsFor(analysisWith({ hasComparisonContent: false, [flag]: true }), '/privacy-policy/', 'best privacy policy', []);
+      assert.equal(recs.some((r) => r.params?.focus === 'comparison-content'), false, flag);
+    }
+  });
+
+  test('a utility page (careers/team) gets no Q&A or comparison recommendation', () => {
+    const recs = recommendationsFor(analysisWith({ isUtilityPage: true, questionHeadingCount: 0, hasVisibleFaqContent: false, hasComparisonContent: false }), '/careers/', 'best jobs', []);
+    assert.equal(recs.some((r) => r.generatorId === 'qa-content' || r.params?.focus === 'comparison-content'), false);
+  });
+
+  test('a declared duplicate page gets no GEO recommendations', () => {
+    const recs = recommendationsFor(analysisWith({ isDeclaredDuplicate: true, questionHeadingCount: 0, hasVisibleFaqContent: false }), '/p', 'q', []);
+    assert.deepEqual(recs, []);
+  });
+
   test('date, citation and review signals are not asked for on a non-article page', () => {
     const recs = recommendationsFor(
       analysisWith({ isArticlePage: false, hasFreshnessSignal: false, hasExternalCitations: false, hasReviewSchema: false }),

@@ -46,3 +46,23 @@ export function resolveSiteLocations(site) {
     default: return [globalLocation]; // 'global' (default), or no target_scope set at all
   }
 }
+
+// Friendly names for prompt text only (the keyword LLM-guess fallback and the
+// AI-mention prompt generator) — real requests to DataForSEO always use the
+// numeric locationCode itself, never a name. Only needs to cover markets this
+// codebase actually configures a site for (migrations 159/162); an unlisted
+// code degrades to "location code N" in the prompt, still functional.
+export const LOCATION_NAMES = {
+  2840: 'the United States', 2826: 'the United Kingdom', 2356: 'India',
+  2036: 'Australia', 2124: 'Canada', 2524: 'Nepal', 2756: 'Switzerland',
+  2528: 'the Netherlands', 2276: 'Germany',
+};
+
+// The markets a site actually sells into, as readable names — empty for a site
+// with no market configuration (nothing to say, so callers add no market text).
+export function targetMarketNames(site) {
+  const hasExplicit = Array.isArray(site?.target_markets) && site.target_markets.length;
+  if (!hasExplicit && site?.target_scope !== 'global' && site?.target_scope !== 'hybrid') return [];
+  const names = resolveSiteLocations(site).map((l) => LOCATION_NAMES[l.locationCode]).filter(Boolean);
+  return [...new Set(names)];
+}

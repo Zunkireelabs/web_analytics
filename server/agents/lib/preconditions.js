@@ -226,7 +226,24 @@ export const tsxContractCheck = {
   },
 };
 
-export const BUILTIN_CHECKS = Object.freeze([structuralFitCheck, fixSuppressedCheck, productKnowledgeCheck, designCompletenessCheck, tsxContractCheck]);
+// A site owner's explicit "never generate this kind of work for me". Kept in
+// the site's own url_file_map.siteRoot.blockedActionTypes (e.g. ['landing-page'])
+// so no migration is needed and other action types for the same site are
+// untouched. Blocking, because attempting a type the owner has refused is
+// certain to be unwanted; a site with no list is unaffected.
+export const siteBlockedActionCheck = {
+  id: 'site-blocked-action',
+  severity: PRECONDITION_SEVERITY.BLOCKING,
+  appliesTo: (ctx) => Boolean(ctx.actionType && ctx.site?.url_file_map?.siteRoot?.blockedActionTypes?.length),
+  async run(ctx) {
+    const blocked = ctx.site.url_file_map.siteRoot.blockedActionTypes;
+    return blocked.includes(ctx.actionType)
+      ? { ok: false, reason: 'action-type-blocked-for-site', detail: `This site has switched off ${ctx.actionType} generation.` }
+      : { ok: true };
+  },
+};
+
+export const BUILTIN_CHECKS = Object.freeze([siteBlockedActionCheck, structuralFitCheck, fixSuppressedCheck, productKnowledgeCheck, designCompletenessCheck, tsxContractCheck]);
 
 // Registered on import, so a caller gets the real set by calling
 // checkPreconditions and needs no setup. Exported individually above so each

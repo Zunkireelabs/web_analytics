@@ -207,7 +207,13 @@ export async function run({ siteId, start, end, pageCache, params }) {
     if (!f.result.ok) return { ...base, score: null, fetchError: f.result.error };
     const categories = scorePageCategories(f.result.analysis);
     const scored = llmsScore != null ? combineScores(categories, llmsScore, geoSignalsScore(f.result.analysis)) : { overall: null, categories };
-    return { ...base, score: scored, recommendations: recommendationsFor(scored.categories), fetchError: null };
+    // A legal, utility (careers/team/contact/…) or listing page has no prose of
+    // its own to turn into an FAQ — the same exemption geo-signals.js and
+    // page-content.js already apply. Other findings still apply.
+    const a = f.result.analysis;
+    const noFaqPage = a.isLegalPage || a.isUtilityPage || a.isListingPage || a.isDeclaredDuplicate;
+    const recs = recommendationsFor(scored.categories).filter((r) => !(noFaqPage && r.generatorId === 'faq'));
+    return { ...base, score: scored, recommendations: recs, fetchError: null };
   });
 
   const scoredPages = pages.filter((p) => p.score?.overall != null);

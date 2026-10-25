@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveSiteLocations } from './site-locations.js';
+import { resolveSiteLocations, targetMarketNames } from './site-locations.js';
 
 describe('resolveSiteLocations', () => {
   test('a site with no target_scope/country_code resolves to the single global default', () => {
@@ -46,5 +46,17 @@ describe('resolveSiteLocations', () => {
   test('an empty target_markets array is ignored, falling back to target_scope', () => {
     const site = { target_scope: 'local', country_code: 2826, language_code: 'en', target_markets: [] };
     assert.deepEqual(resolveSiteLocations(site), [{ locationCode: 2826, languageCode: 'en' }]);
+  });
+});
+
+describe('targetMarketNames', () => {
+  test('lists every configured market by readable name, de-duplicated', () => {
+    const site = { target_markets: [{ locationCode: 2840 }, { locationCode: 2524 }, { locationCode: 2840 }] };
+    assert.deepEqual(targetMarketNames(site), ['the United States', 'Nepal']);
+  });
+
+  test('a local-only site yields no market text, so its prompts stay local', () => {
+    assert.deepEqual(targetMarketNames({ target_scope: 'local', country_code: 2826 }), []);
+    assert.deepEqual(targetMarketNames({}), []);
   });
 });

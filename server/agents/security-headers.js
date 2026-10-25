@@ -33,6 +33,12 @@ const CHECKS = [
     key: 'content-security-policy',
     label: 'Content-Security-Policy',
     detail: 'restricts which scripts/resources a page is allowed to load, a real mitigation against XSS and data-injection attacks',
+    // A deployed Report-Only policy is the deliberate staged state, not a
+    // missing header: generators/security-headers.js drafts CSP as Report-Only
+    // on purpose and leaves promotion to enforcing to a human. Reporting it
+    // "missing" again every run (zunkireelabs.com, 2026-10-13) just re-raised a
+    // finding the owner had already acted on; promotion is the owner's call.
+    satisfiedBy: (headers) => headers.has('content-security-policy-report-only'),
   },
   {
     key: 'x-content-type-options',

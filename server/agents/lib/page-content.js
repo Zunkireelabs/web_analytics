@@ -191,9 +191,20 @@ export function isArticleLikePage({ schemaTypes = [], openGraphType = null, page
 }
 
 // Legal/policy pages never need FAQ/comparison/author gaps; used to gate FAQ.
-const LEGAL_PATH_RE = /\/(privacy|privacy-policy|terms|terms-of-service|terms-and-conditions|terms-of-use|legal|cookies?|cookie-policy|disclaimer|refund-policy|imprint)(\/|$)/i;
+const LEGAL_PATH_RE = /\/(privacy|privacy-policy|terms|terms-of-service|terms-and-conditions|terms-of-use|legal|cookies?|cookie-policy|cookie-preferences|cookie-settings|cookie-consent|disclaimer|refund-policy|imprint)(\/|$)/i;
 export function isLegalPath(pagePath = '') {
   return LEGAL_PATH_RE.test(pagePath || '');
+}
+
+// Utility / directory pages (careers, team, contact, apply, a projects index,
+// login, thank-you): they exist to be navigated or filled in, not to be cited
+// by an answer engine, so comparison / Q&A / FAQ content generated onto them
+// is wrong on its face. Confirmed on zunkireelabs.com (site 1, 2026-10-13):
+// /careers/, /team/, /projects/ and /cookie-preferences/ each carried
+// comparison-content, author-byline and qa-content recommendations.
+const UTILITY_PATH_RE = /\/(careers?|jobs|team|contact(-us)?|apply|projects|log-?in|sign-?(in|up)|thank-?you)(\/|$)/i;
+export function isUtilityPath(pagePath = '') {
+  return UTILITY_PATH_RE.test(pagePath || '');
 }
 
 // A section index (a blog or resources listing): a non-root page whose own
@@ -954,6 +965,7 @@ export function analyzePage(html, pageUrl) {
     pagePath, // this page's own URL path — see isArticleLikePage/isLegalPath gates in contentGapChecks
     isArticlePage: isArticleLikePage({ schemaTypes: [...schemaTypes], openGraphType: ($('meta[property="og:type"]').first().attr('content') || '').trim(), pagePath }), // author/freshness/review/citation signals only apply to article-like pages
     isLegalPage: isLegalPath(pagePath),
+    isUtilityPage: isUtilityPath(pagePath), // careers/team/contact/apply/projects index — see isUtilityPath
     isListingPage: isListingPage(pagePath, internalLinks), // section index (blog/resources listing) — see isListingPage
     // Strict accordion questions OR any looser FAQ-shaped visible content —
     // the signal other agents use to avoid asserting "no FAQ" / "no question headings".
@@ -1504,13 +1516,14 @@ export function inferSchemaType(pageUrl, schemaTypes = [], analysis = null) {
 function contentGapChecks(analysis, queryTexts = []) {
   const queries = Array.isArray(queryTexts) ? queryTexts : [queryTexts];
   const gaps = [];
+  if (analysis.isDeclaredDuplicate) return gaps;
   if (analysis.h1Count === 0) gaps.push({ type: 'Missing H1', detail: 'No H1 heading found.' });
   else if (analysis.h1Count > 1) gaps.push({ type: 'Missing H1', detail: `${analysis.h1Count} H1 tags found — should be exactly one.` });
   if (analysis.h2Count === 0) gaps.push({ type: 'Missing H2', detail: 'No H2 subheadings — thin content structure.' });
 
   // FAQ is a content/service/location-page concern — never a legal/policy
   // page — and is not "missing" when any visible FAQ-shaped content exists.
-  if (!analysis.hasFaq && !analysis.hasVisibleFaqContent && !analysis.isLegalPage) gaps.push({ type: 'Missing FAQ', detail: 'No FAQ schema, heading, or Q&A accordion detected.' });
+  if (!analysis.hasFaq && !analysis.hasVisibleFaqContent && !analysis.isLegalPage && !analysis.isUtilityPage) gaps.push({ type: 'Missing FAQ', detail: 'No FAQ schema, heading, or Q&A accordion detected.' });
   if (!analysis.hasSchema) gaps.push({ type: 'Missing schema', detail: 'No structured data (JSON-LD) found on the page.' });
 
   const titleLen = analysis.title?.length || 0;
@@ -1614,6 +1627,28 @@ function contentGapChecks(analysis, queryTexts = []) {
 // the same result into recommendationsFor() for every query that lands on
 // this page, so shared pages aren't re-fetched.
 const stripWww = (u) => String(u).replace(/^(https?:\/\/)www\./i, '$1');
+// A page whose own canonical tag names a DIFFERENT URL on the same site is a
+// declared duplicate (e.g. /get-started/?package=X canonicalising to
+// /get-started/): the site has already told search engines which page counts,
+// so findings about the duplicate are noise that can never be acted on. Only
+// a same-host canonical with a different path or query counts; a missing,
+// malformed or cross-host canonical is NOT judged here (cross-host is its own
+// real gap), and a trailing slash or /index.html difference is not a
+// different page.
+export function isDeclaredDuplicate(pageUrl, canonicalUrl) {
+  if (!pageUrl || !canonicalUrl) return false;
+  const norm = (u) => {
+    const x = new URL(u);
+    const path = x.pathname.replace(/index\.html$/, '').replace(/\/+$/, '') || '/';
+    return { host: x.host.replace(/^www\./, ''), key: path + x.search };
+  };
+  try {
+    const a = norm(pageUrl);
+    const b = norm(canonicalUrl);
+    return a.host === b.host && a.key !== b.key;
+  } catch { return false; }
+}
+
 export async function analyzePageUrl(url) {
   const fetched = await fetchHtml(url);
   if (!fetched.ok) return { ok: false, error: fetched.error };
@@ -1622,6 +1657,7 @@ export async function analyzePageUrl(url) {
   // the DESTINATION's HTML under the original URL. Flag it so URL-relative
   // checks (canonical host) can skip rather than judge the wrong page.
   analysis.wasRedirected = !!fetched.url && stripWww(fetched.url).replace(/\/$/, '') !== stripWww(url).replace(/\/$/, '');
+  analysis.isDeclaredDuplicate = isDeclaredDuplicate(url, analysis.canonicalUrl);
   return { ok: true, analysis };
 }
 

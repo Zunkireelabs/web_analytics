@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   checkPreconditions, registerPrecondition, clearPreconditions,
   registeredPreconditionIds, isPreconditionsEnforcing, PRECONDITION_SEVERITY,
-  registerBuiltinPreconditions, structuralFitCheck, fixSuppressedCheck, productKnowledgeCheck,
+  registerBuiltinPreconditions, structuralFitCheck, fixSuppressedCheck, productKnowledgeCheck, siteBlockedActionCheck,
 } from './preconditions.js';
 
 // The built-in checks reach for the repo and the database, so the registry
@@ -139,8 +139,8 @@ describe('isPreconditionsEnforcing', () => {
 });
 
 describe('the built-in checks', () => {
-  test('all three are registered by registerBuiltinPreconditions', () => {
-    assert.deepEqual(registerBuiltinPreconditions().sort(), ['design-completeness', 'fix-suppressed', 'product-knowledge', 'structural-fit', 'tsx-component-contract']);
+  test('all built-in checks are registered by registerBuiltinPreconditions', () => {
+    assert.deepEqual(registerBuiltinPreconditions().sort(), ['design-completeness', 'fix-suppressed', 'product-knowledge', 'site-blocked-action', 'structural-fit', 'tsx-component-contract']);
   });
 
   test('structural-fit applies only to prose action types, and only with a real page', () => {
@@ -166,5 +166,23 @@ describe('the built-in checks', () => {
     assert.equal(productKnowledgeCheck.appliesTo({ site: { property_type: 'website' }, actionType: 'landing-page' }), false);
     // A technical fix needs no product facts.
     assert.equal(productKnowledgeCheck.appliesTo({ site: { property_type: 'product' }, actionType: 'canonical' }), false);
+  });
+});
+
+describe('siteBlockedActionCheck', () => {
+  const site = (list) => ({ url_file_map: { siteRoot: { blockedActionTypes: list } } });
+
+  test('refuses only the action types the site has blocked', async () => {
+    const ctx = { site: site(['landing-page']), actionType: 'landing-page' };
+    assert.equal(siteBlockedActionCheck.appliesTo(ctx), true);
+    const r = await siteBlockedActionCheck.run(ctx);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'action-type-blocked-for-site');
+    assert.deepEqual(await siteBlockedActionCheck.run({ site: site(['landing-page']), actionType: 'faq' }), { ok: true });
+  });
+
+  test('does not apply to a site with no blocked list', () => {
+    assert.equal(siteBlockedActionCheck.appliesTo({ site: { url_file_map: {} }, actionType: 'landing-page' }), false);
+    assert.equal(siteBlockedActionCheck.appliesTo({ site: site([]), actionType: 'landing-page' }), false);
   });
 });
