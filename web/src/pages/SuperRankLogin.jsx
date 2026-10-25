@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 import './superrank-login.css';
 
@@ -73,7 +72,7 @@ export default function SuperRankLogin({ onAuthed }) {
           </form>
 
           <div className="sr-auth__switch">
-            New here? <Link to="/" className="sr-auth__link">Request access</Link>
+            New here? <a href="https://superrank.si/get-started" className="sr-auth__link">Request access</a>
           </div>
         </section>
       </main>

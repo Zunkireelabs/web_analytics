@@ -1,7 +1,6 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { api } from './api.js';
-import Login from './pages/Login.jsx';
 import SuperRankLogin from './pages/SuperRankLogin.jsx';
 import Overview from './pages/Overview.jsx';
 import Sidebar from './components/Sidebar.jsx';
@@ -111,11 +110,8 @@ export default function App() {
   };
 
   if (authed === null) return <div className="p-8 text-gray-400">Loading…</div>;
-  if (!authed) {
-    // The superrank.si "Log in" button lands here.
-    if (location.pathname === '/login') return <SuperRankLogin onAuthed={checkSession} />;
-    return <Login onAuthed={checkSession} />;
-  }
+  // Signed-out visitors, at /login or the bare app address, get the SuperRank login.
+  if (!authed) return <SuperRankLogin onAuthed={checkSession} />;
 
   // Standalone account page (Humblytics-style): no sidebar, top bar, toolbar or
   // agent panel — the person's own settings. The in-app /settings holds the
