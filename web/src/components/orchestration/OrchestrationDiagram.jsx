@@ -12,23 +12,6 @@ import { buildGraph } from './layout.js';
 const NODE_TYPES = { agent: AgentFlowNode, hub: HubFlowNode };
 const EDGE_TYPES = { flow: FlowEdge };
 
-// The fit-to-container zoom floor is plain CSS (not a Tailwind class), and
-// still worth easing slightly above `md` so a tablet-width container
-// doesn't shrink node text further than it needs to — there's no CSS-only
-// way to make a JS number responsive, so this tracks the `md` breakpoint in
-// JS instead.
-function useIsDesktop() {
-  const query = '(min-width: 768px)';
-  const [isDesktop, setIsDesktop] = useState(() => typeof window !== 'undefined' ? window.matchMedia(query).matches : true);
-  useEffect(() => {
-    const mq = window.matchMedia(query);
-    const onChange = () => setIsDesktop(mq.matches);
-    mq.addEventListener('change', onChange);
-    return () => mq.removeEventListener('change', onChange);
-  }, []);
-  return isDesktop;
-}
-
 // Measures a DOM element's rendered size, synchronously via
 // getBoundingClientRect() in a layout effect (fast path — correct as soon as
 // CSS has applied, which it has by the time layout effects run) and kept
@@ -68,25 +51,9 @@ function graphBounds(nodes) {
   return { minX, minY, maxX, maxY };
 }
 
-// {x, y, zoom} to fit `bounds` inside a container of the given size.
-function computeFit(bounds, containerWidth, containerHeight, { padding = 0.1, minZoom = 0.05, maxZoom = 1.5 } = {}) {
-  const boundsWidth = Math.max(1, bounds.maxX - bounds.minX);
-  const boundsHeight = Math.max(1, bounds.maxY - bounds.minY);
-  const rawZoom = Math.min(
-    (containerWidth * (1 - padding)) / boundsWidth,
-    (containerHeight * (1 - padding)) / boundsHeight
-  );
-  const zoom = Math.min(maxZoom, Math.max(minZoom, rawZoom));
-  return {
-    zoom,
-    x: containerWidth / 2 - (bounds.minX + boundsWidth / 2) * zoom,
-    y: containerHeight / 2 - (bounds.minY + boundsHeight / 2) * zoom,
-  };
-}
-
 // A read-only node-graph rendering of the real orchestrator (server/agents/
-// orchestrator.js + runner.js) — a dotted graph-paper background, elevated
-// node cards, fitted animated connectors — the same visual language as
+// orchestrator.js + runner.js) — a dotted graph-paper background, quiet white
+// node cards, grey static connectors (orange and animated only while live) — the same visual language as
 // n8n/LangGraph Studio/Temporal's workflow UIs, built on React Flow.
 //
 // Fully static (no pan/zoom/drag, at every breakpoint): React Flow's own
@@ -112,39 +79,54 @@ function computeFit(bounds, containerWidth, containerHeight, { padding = 0.1, mi
 // had no visible effect either. Scaling/positioning the wrapper with CSS
 // instead cannot silently no-op the way those three did.
 export default function OrchestrationDiagram({ agents, onSelectAgent, runningAgents }) {
-  const { nodes, edges } = useMemo(
-    () => buildGraph({ agents, runningAgents, onSelectAgent }),
-    [agents, runningAgents, onSelectAgent]
-  );
-  const isDesktop = useIsDesktop();
+  const { nodes, edges } = useMemo(() => {
+    const g = buildGraph({ agents, runningAgents, onSelectAgent });
+    // layout.js centres the columns on a fixed Y, so a tall graph has nodes at
+    // negative coordinates — outside React Flow's own box, which clips them.
+    // Shift everything so the graph's top-left is (0, 0).
+    const b = graphBounds(g.nodes);
+    return {
+      edges: g.edges,
+      nodes: g.nodes.map((n) => ({ ...n, position: { x: n.position.x - b.minX, y: n.position.y - b.minY } })),
+    };
+  }, [agents, runningAgents, onSelectAgent]);
   const [wrapperRef, size] = useElementSize();
 
   const bounds = useMemo(() => graphBounds(nodes), [nodes]);
-  const fit = useMemo(
-    () => size && computeFit(bounds, size.width, size.height, {
-      padding: 0.1,
-      // Desktop/tablet: floor the shrink at 0.45 so node text doesn't get
-      // smaller than it needs to on a container that's already fairly wide.
-      // Mobile: no meaningful floor (0.05) — always fit the entire graph in
-      // the small box, whatever zoom that takes.
-      minZoom: isDesktop ? 0.45 : 0.05,
-      maxZoom: 1.5,
-    }),
-    [bounds, size, isDesktop]
-  );
+  // Fit by WIDTH, then size the canvas height from the graph's own aspect
+  // ratio. The real graph is far taller than wide (35 agents in two sub-
+  // columns), so fitting it into a fixed-height box shrank the node text to
+  // ~6px and, once the zoom hit its floor, clipped both side columns. Deriving
+  // the height keeps the whole graph inside the box with an even margin at the
+  // largest legible zoom, at every container width (ResizeObserver re-measures
+  // on resize / tab switch).
+  const PAD = 0.06;
+  const layoutFit = useMemo(() => {
+    if (!size) return null;
+    const bw = Math.max(1, bounds.maxX - bounds.minX);
+    const bh = Math.max(1, bounds.maxY - bounds.minY);
+    const zoom = Math.min(1.5, Math.max(0.2, (size.width * (1 - PAD)) / bw));
+    const margin = size.width * (PAD / 2);
+    return {
+      zoom,
+      height: Math.max(300, Math.ceil(bh * zoom + margin * 2)),
+      x: (size.width - bw * zoom) / 2 - bounds.minX * zoom,
+      y: margin - bounds.minY * zoom,
+    };
+  }, [bounds, size]);
+  const fit = layoutFit;
 
   return (
-    <div ref={wrapperRef} className="relative w-full h-[300px] md:h-[680px] rounded-3xl overflow-hidden"
-      style={{ border: '1px solid rgba(15,23,42,0.08)', background: 'rgba(255,255,255,0.35)' }}>
+    <div ref={wrapperRef} className="relative w-full overflow-hidden"
+      style={{ background: '#fcfcfb', height: fit ? fit.height : 680 }}>
       <style>{`
         @keyframes orbitDash { to { stroke-dashoffset: -24; } }
-        .orbit-edge { animation: orbitDash 1.4s linear infinite; }
         .orbit-edge-live { animation: orbitDash 0.6s linear infinite; }
         @keyframes nodePulseRing {
-          0% { box-shadow: 0 0 0 0 rgba(124,58,237,0.45); }
-          100% { box-shadow: 0 0 0 10px rgba(124,58,237,0); }
+          0% { box-shadow: 0 0 0 0 rgba(213,78,0,0.35); }
+          100% { box-shadow: 0 0 0 10px rgba(213,78,0,0); }
         }
-        @media (prefers-reduced-motion: reduce) { .orbit-edge, .orbit-edge-live { animation: none; } }
+        @media (prefers-reduced-motion: reduce) { .orbit-edge-live { animation: none; } }
         .orchestration-flow .react-flow__attribution { display: none; }
       `}</style>
 
@@ -167,7 +149,7 @@ export default function OrchestrationDiagram({ agents, onSelectAgent, runningAge
               panOnDrag={false} zoomOnPinch={false}
               panOnScroll={false} zoomOnScroll={false} zoomOnDoubleClick={false}
               proOptions={{ hideAttribution: true }}>
-              <Background variant="dots" gap={24} size={1} color="rgba(15,23,42,0.12)" />
+              <Background variant="dots" gap={16} size={1} color="#e9e7e4" />
             </ReactFlow>
           </ReactFlowProvider>
         </div>

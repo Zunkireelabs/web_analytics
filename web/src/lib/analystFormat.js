@@ -1,19 +1,20 @@
 import { Clock, AlertTriangle, TrendingDown, Award } from 'lucide-react';
+import { STATUS, SERIES } from './palette.js';
 
 export const SEVERITY_META = {
-  high: { label: 'High', color: '#e11d48', bg: '#e11d480c', border: '#e11d481e' },
-  medium: { label: 'Medium', color: '#ea580c', bg: '#ea580c0c', border: '#ea580c1e' },
-  low: { label: 'Low', color: '#64748b', bg: '#64748b0c', border: '#64748b1e' },
+  high: { label: 'High', color: STATUS.critical.text, bg: STATUS.critical.tint, border: STATUS.critical.ring, tone: 'red' },
+  medium: { label: 'Medium', color: STATUS.warning.text, bg: STATUS.warning.tint, border: STATUS.warning.ring, tone: 'amber' },
+  low: { label: 'Low', color: STATUS.neutral.text, bg: STATUS.neutral.tint, border: STATUS.neutral.ring, tone: 'grey' },
 };
 
 // Recolors/re-icons per insight_type already (forecast_risk vs anomaly vs
 // trend_shift vs milestone) — the backend already tags this, so no backend
 // change is needed for type-based treatment.
 export const TYPE_META = {
-  forecast_risk: { icon: Clock, label: 'Early Warning', color: '#8b5cf6' },
-  anomaly: { icon: AlertTriangle, label: 'Anomaly', color: '#e11d48' },
-  trend_shift: { icon: TrendingDown, label: 'Trend Shift', color: '#ea580c' },
-  milestone: { icon: Award, label: 'Milestone', color: '#0ea5e9' },
+  forecast_risk: { icon: Clock, label: 'Early Warning', color: SERIES[1] },
+  anomaly: { icon: AlertTriangle, label: 'Anomaly', color: STATUS.critical.color },
+  trend_shift: { icon: TrendingDown, label: 'Trend Shift', color: STATUS.warning.color },
+  milestone: { icon: Award, label: 'Milestone', color: STATUS.good.color },
 };
 
 export const METHOD_LABEL = { zscore: 'Z-score', iqr: 'IQR' };
@@ -256,10 +257,10 @@ export function evidenceBullets(insight, metric) {
 export const FORECAST_RISK_PCT = 10;
 
 export const HEALTH_META = {
-  'at-risk': { label: 'Projected decline', color: '#e11d48', bg: '#e11d480f', border: '#e11d4826', chip: 'an-chip-rose' },
-  watch: { label: 'Trending toward trouble', color: '#ea580c', bg: '#ea580c0f', border: '#ea580c26', chip: 'an-chip-amber' },
-  healthy: { label: 'Healthy', color: '#059669', bg: '#0596690f', border: '#05966926', chip: 'an-chip-emerald' },
-  'no-data': { label: 'Insufficient data', color: '#64748b', bg: '#64748b0c', border: '#64748b1e', chip: 'an-chip-slate' },
+  'at-risk': { label: 'Projected decline', color: STATUS.critical.text, bg: STATUS.critical.tint, border: STATUS.critical.ring, tone: 'red' },
+  watch: { label: 'Trending toward trouble', color: STATUS.warning.text, bg: STATUS.warning.tint, border: STATUS.warning.ring, tone: 'amber' },
+  healthy: { label: 'Healthy', color: STATUS.good.text, bg: STATUS.good.tint, border: STATUS.good.ring, tone: 'green' },
+  'no-data': { label: 'Insufficient data', color: STATUS.neutral.text, bg: STATUS.neutral.tint, border: STATUS.neutral.ring, tone: 'grey' },
 };
 
 // The adverse edge of the forecast's own confidence band at the horizon — the

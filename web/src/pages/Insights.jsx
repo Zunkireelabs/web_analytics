@@ -2,9 +2,14 @@ import { useEffect, useState } from 'react';
 import { api, daysAgo } from '../api.js';
 import DonutChart from '../components/DonutChart.jsx';
 import MoversList from '../components/MoversList.jsx';
-import PageHeader from '../components/PageHeader.jsx';
-import StatCard from '../components/StatCard.jsx';
 import CountriesWidget from '../components/CountriesWidget.jsx';
+import PageToolbar from '../components/PageToolbar.jsx';
+import PageIntro from '../components/layout/PageIntro.jsx';
+import KpiStrip from '../components/layout/KpiStrip.jsx';
+import Section from '../components/layout/Section.jsx';
+import { Tray, TrayCard } from '../components/layout/Tray.jsx';
+import Button from '../components/Button.jsx';
+import { fmtRange } from '../lib/format.js';
 
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 const fmtInt = (v) => Number(v).toLocaleString();
@@ -71,64 +76,57 @@ export default function Insights({ siteId }) {
   // instead of an endless loading skeleton.
   const loading = !error && series.length === 0;
 
+  const dateInput = 'h-8 px-2.5 rounded-control bg-white text-[13px] font-medium text-fg min-w-0 flex-1 md:flex-none';
+  const kpis = [
+    { label: 'Clicks', key: 'clicks' },
+    { label: 'Impressions', key: 'impressions' },
+    { label: 'Users', key: 'users' },
+    { label: 'Sessions', key: 'sessions' },
+  ].map(({ label, key }) => ({ label, value: fmtInt(total(key)), spark: sv(key) }));
+
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6 fade-up">
+    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12 fade-up">
+      <PageToolbar>
+        <div className="flex items-center gap-2 w-full md:w-auto">
+          <input type="date" value={start} min={range?.earliest} max={range?.latest_visitor} aria-label="Start date"
+            onChange={(e) => setStart(e.target.value)} className={dateInput} style={{ boxShadow: 'var(--ring)' }} />
+          <span className="text-faint shrink-0">→</span>
+          <input type="date" value={end} min={range?.earliest} max={range?.latest_visitor} aria-label="End date"
+            onChange={(e) => setEnd(e.target.value)} className={dateInput} style={{ boxShadow: 'var(--ring)' }} />
+        </div>
+        <span className="ml-auto hidden md:block text-[13px] text-faint">Compared with {moverPeriodLabel(start, end)}</span>
+      </PageToolbar>
+
       {error && (
-        <div className="card p-4 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 text-center">
+        <div className="rounded-card bg-[#fdecec] text-[#b42318] text-sm px-4 py-3 mb-6">
           Unable to load some real data right now. Try refreshing.
         </div>
       )}
-      <PageHeader
-        title="Insights" 
-        subtitle="Deep dive into search query movements, devices, and user geography" 
-        icon="🔍" 
-        right={
-          <div className="flex items-center gap-3 bg-white/80 border border-slate-200/50 backdrop-blur-md p-3 rounded-2xl shadow-sm z-10">
-            <label className="flex flex-col">
-              <span className="text-[9px] font-extrabold text-slate-400 uppercase tracking-wider mb-1 px-1">From</span>
-              <input type="date" value={start} min={range?.earliest} max={range?.latest_visitor}
-                     onChange={(e) => setStart(e.target.value)}
-                     className="bg-white border border-slate-200/80 rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition shadow-sm" />
-            </label>
-            <label className="flex flex-col">
-              <span className="text-[9px] font-extrabold text-slate-400 uppercase tracking-wider mb-1 px-1">To</span>
-              <input type="date" value={end} min={range?.earliest} max={range?.latest_visitor}
-                     onChange={(e) => setEnd(e.target.value)}
-                     className="bg-white border border-slate-200/80 rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition shadow-sm" />
-            </label>
-          </div>
-        } 
+
+      <PageIntro
+        title={loading ? 'Insights' : `${fmtInt(total('clicks'))} clicks from ${fmtInt(total('impressions'))} impressions`}
+        subtitle={loading ? null : `Search queries, devices and where your visitors come from, ${fmtRange(start, end)}.`}
       />
 
-      {/* Range KPI summary with sparklines — always 2 cols (even below sm) so
-          4 cards stacked one-per-row doesn't turn into a long mobile scroll. */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-5">
-        <StatCard label="Clicks (range)" icon="🖱" color="#6C63FF" data={sv('clicks')} value={total('clicks')} format={fmtInt} loading={loading} />
-        <StatCard label="Impressions (range)" icon="👁" color="#8b5cf6" data={sv('impressions')} value={total('impressions')} format={fmtInt} loading={loading} />
-        <StatCard label="Users (range)" icon="👥" color="#10b981" data={sv('users')} value={total('users')} format={fmtInt} loading={loading} />
-        <StatCard label="Sessions (range)" icon="⏱" color="#14b8a6" data={sv('sessions')} value={total('sessions')} format={fmtInt} loading={loading} />
-      </div>
+      <KpiStrip items={kpis} loading={loading} />
 
-      {/* Demographics & Devices Split Grid - prioritized visuals first */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-        <div className="lg:col-span-5 flex flex-col">
+      <Tray className="mt-3 lg:grid-cols-[1fr_1.5fr]">
+        <TrayCard title="Devices" subtitle="Sessions by device type" source="Google Analytics">
           <DonutChart title="Visitors by Device" data={deviceData} />
-        </div>
-        <div className="lg:col-span-7 flex flex-col">
-          <CountryCard title="Visitors by Country" rows={country.visitors}
-            barKey="sessions" cols={[['sessions', 'Sessions'], ['users', 'Users']]} />
-        </div>
-      </div>
+        </TrayCard>
+        <TrayCard title="Visitors by country" subtitle="Top 10 locations by sessions" source="Google Analytics">
+          <CountryCard rows={country.visitors} barKey="sessions" />
+        </TrayCard>
+      </Tray>
 
       {/* Top countries by clicks — interactive world map + leaderboard */}
-      <CountriesWidget rows={country.search} />
+      <Section tray className="mt-3" title="Search clicks by country" subtitle="Where your search clicks come from" source="Google Search Console">
+        <CountriesWidget rows={country.search} />
+      </Section>
 
-      {/* Detailed query movements and highlights section at the bottom for analysis */}
-      <div className="pt-2">
-        <div className="mb-4">
-          <h2 className="text-lg font-bold text-slate-900 tracking-tight">Query Movement Analysis</h2>
-          <p className="text-xs text-slate-400 font-medium">Track search terms gaining or losing visibility</p>
-        </div>
+      {/* Detailed query movements and highlights at the bottom for analysis —
+          MoversList renders its own trays. */}
+      <div className="mt-3">
         <MoversList gainers={movers.gainers} droppers={movers.droppers} comparisonLabel={moverPeriodLabel(start, end)} />
       </div>
     </div>
@@ -144,62 +142,51 @@ const FLAG = {
   'Switzerland': '🇨🇭', 'Sweden': '🇸🇪', 'Ireland': '🇮🇪', 'New Zealand': '🇳🇿', 'South Africa': '🇿🇦',
   'Turkey': '🇹🇷', 'Mexico': '🇲🇽', 'Poland': '🇵🇱', 'Vietnam': '🇻🇳', 'Hong Kong': '🇭🇰', 'Qatar': '🇶🇦',
 };
-const flag = (c) => FLAG[c] || '🌐';
+const flag = (c) => FLAG[c] || '🏳️';
 
-function RankBadge({ n }) {
-  const top = n <= 3;
-  return (
-    <span className="w-6 h-6 rounded-lg grid place-items-center text-[11px] font-extrabold shrink-0"
-      style={top ? { background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)', color: '#fff', boxShadow: '0 3px 6px -1.5px rgba(108, 99, 255, 0.3)' } : { background: '#f1f5f9', color: '#64748b' }}>
-      {n}
-    </span>
-  );
-}
-
-// Visual ranked country list: rank badge + flag + gradient bar + value chip.
-function CountryCard({ title, rows, barKey, cols }) {
+// Visitors list as a ranked table; 5 rows with a "Show all" toggle.
+function CountryCard({ rows, barKey }) {
+  const [showAll, setShowAll] = useState(false);
   const list = rows || [];
   const max = Math.max(1, ...list.map((r) => Number(r[barKey]) || 0));
-  const [primaryKey, primaryLbl] = cols[0];
-  const [secKey, secLbl] = cols[1];
+  const shown = showAll ? list : list.slice(0, 5);
   return (
-    <div className="card p-6 flex flex-col justify-between flex-1 fade-up">
-      <div>
-        <div className="flex items-center justify-between mb-5">
-          <div>
-            <h3 className="text-base font-bold text-slate-900 tracking-tight">{title}</h3>
-            <p className="text-xs text-slate-400 font-medium mt-0.5">Top visitor locations ranked by session count</p>
+    <div>
+      {list.length === 0 ? (
+        <div className="text-sm text-faint text-center py-10">No data.</div>
+      ) : (
+        <>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th className="rank">#</th>
+                <th>Country</th>
+                <th className="num">Sessions</th>
+                <th className="num hidden sm:table-cell">Users</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((r, i) => (
+                <tr key={i}>
+                  <td className="rank">{i + 1}</td>
+                  <td className="bar max-w-0 w-full">
+                    <i style={{ width: `${Math.max((Number(r[barKey]) / max) * 100, 4)}%` }} />
+                    <span className="block truncate">{flag(r.country)} {r.country}</span>
+                  </td>
+                  <td className="num">{Number(r.sessions).toLocaleString()}</td>
+                  <td className="num hidden sm:table-cell">{Number(r.users).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="tbl-foot">
+            <span>Showing {shown.length} of {list.length}</span>
+            {list.length > 5 && (
+              <Button variant="ghost" size="sm" onClick={() => setShowAll((v) => !v)}>{showAll ? 'Show fewer' : 'Show all'}</Button>
+            )}
           </div>
-          <span className="text-[9px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-full bg-slate-100/80 border border-slate-200/30 text-slate-500">
-            Top {list.length || 0}
-          </span>
-        </div>
-        {list.length === 0 && <div className="text-sm text-slate-400 py-10 text-center font-medium">No data.</div>}
-        <div className="divide-y divide-slate-100/50">
-          {list.map((r, i) => (
-            <div key={i} className="flex items-center gap-3 py-3 hover:bg-slate-50/50 rounded-xl px-1 transition duration-150 group">
-              <RankBadge n={i + 1} />
-              <span className="text-lg shrink-0 select-none">{flag(r.country)}</span>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="text-sm font-semibold text-slate-700 truncate group-hover:text-slate-900 transition-colors">{r.country}</span>
-                  <span className="text-sm font-bold text-slate-900 shrink-0">
-                    {Number(r[primaryKey]).toLocaleString()}
-                    <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide"> {primaryLbl.toLowerCase()}</span>
-                  </span>
-                </div>
-                <div className="h-1.5 rounded-full bg-slate-100/80 mt-2 overflow-hidden w-full">
-                  <div 
-                    className="h-full rounded-full transition-all duration-500 bg-gradient-to-r from-[#6C63FF] to-[#8b5cf6]" 
-                    style={{ width: `${(Number(r[barKey]) / max) * 100}%` }} 
-                  />
-                </div>
-                <div className="text-[10px] text-slate-400 font-semibold mt-2">{secLbl}: <span className="text-slate-600 font-bold">{Number(r[secKey]).toLocaleString()}</span></div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
+        </>
+      )}
     </div>
   );
 }

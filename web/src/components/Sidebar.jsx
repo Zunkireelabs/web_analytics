@@ -1,85 +1,19 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { ChevronDown, ChevronsUpDown, LogOut, Settings as SettingsIcon } from 'lucide-react';
 import Logo from './Logo.jsx';
-import NotificationBell from './NotificationBell.jsx';
-import {
-  BarChart3,
-  Search,
-  TrendingUp,
-  FileText,
-  Sprout,
-  Zap,
-  Network,
-  Building2,
-  Settings as SettingsIcon,
-  Users,
-  HeartPulse,
-  LineChart,
-  ChevronDown,
-  Target,
-} from 'lucide-react';
-
-const PURPLE = '#6C63FF';
-
-const NAV = [
-  { to: '/overview', label: 'Overview', icon: BarChart3 },
-  { to: '/insights', label: 'Insights', icon: Search },
-  { to: '/compare', label: 'Compare', icon: TrendingUp },
-  { to: '/reports', label: 'Reports', icon: FileText },
-  { to: '/milestones', label: 'Milestones', icon: Sprout },
-  { to: '/settings', label: 'Settings', icon: SettingsIcon },
-];
-
-// Client-facing growth tooling — same page for staff and clients alike,
-// each session server-scoped to its own site (req.session.siteId), never a
-// staff-only cross-client view.
-const GROWTH_TOOLS_NAV = [
-  { to: '/action-center', label: 'Action Center', icon: Zap },
-  { to: '/ai-orchestration', label: 'Orchestration', icon: Network },
-];
-
-// Universal Product Growth mode's one new nav entry (see ClientOnboarding.jsx's
-// PROPERTY_TYPES) — shown only when the current site's own property_type is
-// 'product', never for a 'website' site. Generic across any product tenant,
-// not specific to whichever product is first onboarded with it.
-const DEMAND_NAV_ITEM = { to: '/demand', label: 'Demand', icon: Target };
-
-// Staff-only pages — operate across every client's site, not just the
-// session's own. Both routes' entire API surface is requirePlatformRole
-// ('platform_admin')-gated server-side (server/routes/clients.js,
-// dataAnalyst.js, keywords.js), so this section is shown on isPlatformAdmin,
-// not isInternal — an internal-site session that's only tenant_admin/
-// tenant_member has no use for a nav entry whose every real request 404s.
-const INTERNAL_NAV = [
-  { to: '/clients', label: 'Clients', icon: Building2 },
-  { to: '/analyst', label: 'Analyst', icon: LineChart },
-];
-
-// Platform Administration (PLATFORM-ADMIN-DESIGN.md §H, §K Phase 7) —
-// visually separate from Internal Console above, gated on the role
-// dimension (isPlatformAdmin), not isInternal — see App.jsx's own comment
-// on why those two are kept distinct even though they coincide today.
-const PLATFORM_ADMIN_NAV = [
-  { to: '/admin/users', label: 'Users & Tokens', icon: Users },
-  { to: '/admin/system-health', label: 'Monitoring', icon: HeartPulse },
-];
-
-// Which of the three collapsible nav groups (below) each route belongs to
-// — used to auto-expand a group on load/navigation so a deep link never
-// lands on a page whose own sidebar entry is hidden behind a collapsed
-// section.
-const NAV_SECTIONS = [
-  { id: 'growth', links: [...GROWTH_TOOLS_NAV, DEMAND_NAV_ITEM] },
-  { id: 'internal', links: INTERNAL_NAV },
-  { id: 'platform', links: PLATFORM_ADMIN_NAV },
-];
+import WorkspaceSwitcher from './WorkspaceSwitcher.jsx';
+import Avatar from './Avatar.jsx';
+import Button from './Button.jsx';
+import SegmentedTabs from './SegmentedTabs.jsx';
+import { ROLE_LABELS } from './RoleBadge.jsx';
+import { visibleGroups, SETTINGS_ITEM, currentSiteOf } from '../lib/nav.js';
 
 const COLLAPSE_STORAGE_KEY = 'sidebar-collapsed-sections';
 
-// Growth Tools starts open, Internal Console/Platform Administration start
-// collapsed — matches the approved sidebar mockup. Only applies until the
-// user first toggles something; from then on their saved choice wins.
-const DEFAULT_COLLAPSED = { internal: true, platform: true };
+// Every group starts open. Only applies until the user first toggles
+// something; from then on their saved choice wins.
+const DEFAULT_COLLAPSED = {};
 
 function loadCollapsedSections() {
   try {
@@ -91,18 +25,27 @@ function loadCollapsedSections() {
   return DEFAULT_COLLAPSED;
 }
 
-export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, onSite, onLogout, mobileOpen, onCloseMobile }) {
+// Initials from an email, same rule as Avatar.jsx (this app has no display name).
+function emailInitials(email) {
+  if (!email) return '?';
+  const local = email.split('@')[0] || '';
+  const parts = local.split(/[.\-_+]/).filter(Boolean);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return local.slice(0, 2).toUpperCase() || '?';
+}
+
+export default function Sidebar({
+  sites, siteId, isInternal, isPlatformAdmin, onSwitchProject, onLogout, mobileOpen, onCloseMobile,
+  email, role, agentOpen, onAgent, agentAvailable,
+}) {
   const loc = useLocation();
   const isActive = (to) => loc.pathname === to;
   const [collapsed, setCollapsed] = useState(loadCollapsedSections);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
 
-  // property_type is the third nav-filter dimension alongside isPlatformAdmin/
-  // isInternal above (Universal Product Growth mode) — sites is server-scoped
-  // to the session's own site, so this is always that site, not a staff pick.
-  const currentSite = sites?.find((s) => s.id === siteId) || sites?.[0] || null;
-  const growthToolsNav = currentSite?.property_type === 'product'
-    ? [...GROWTH_TOOLS_NAV, DEMAND_NAV_ITEM]
-    : GROWTH_TOOLS_NAV;
+  const currentSite = currentSiteOf(sites, siteId);
+  const groups = visibleGroups({ isPlatformAdmin, isProduct: currentSite?.property_type === 'product' });
 
   const toggleSection = (id) => {
     setCollapsed((prev) => {
@@ -112,10 +55,22 @@ export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, on
     });
   };
 
-  useEffect(() => { onCloseMobile?.(); }, [loc.pathname]);
+  useEffect(() => { onCloseMobile?.(); setMenuOpen(false); }, [loc.pathname]);
 
+  // User menu: closes on outside mousedown and Escape.
   useEffect(() => {
-    const active = NAV_SECTIONS.find((s) => s.links.some((n) => n.to === loc.pathname));
+    if (!menuOpen) return;
+    const onDown = (e) => { if (!menuRef.current?.contains(e.target)) setMenuOpen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setMenuOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [menuOpen]);
+
+  // Auto-expand the group containing the current route so a deep link never
+  // lands on a page whose own sidebar entry is hidden behind a collapsed group.
+  useEffect(() => {
+    const active = groups.find((g) => g.items.some((n) => n.to === loc.pathname));
     if (!active) return;
     setCollapsed((prev) => {
       if (!prev[active.id]) return prev;
@@ -148,7 +103,7 @@ export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, on
   return (
     <>
       {mobileOpen && (
-        <div className="fixed inset-0 bg-slate-900/40 z-40 md:hidden animate-fade-in" onClick={onCloseMobile} aria-hidden="true" />
+        <div className="fixed inset-0 bg-neutral-900/40 z-40 md:hidden animate-fade-in" onClick={onCloseMobile} aria-hidden="true" />
       )}
       {/* `position: fixed` and the slide-in/out `transform` are deliberately
           on two different elements, not one. Combining them on the same
@@ -161,9 +116,9 @@ export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, on
           establishes the fixed/sticky position and never gets a transform;
           the inner one carries the transform and all the visible content.
           The outer element is `pointer-events-none` — its box always spans
-          the full 240px×100vh area even while the inner drawer is slid
+          the full 256px×100vh area even while the inner drawer is slid
           off-screen, and without this it would permanently block clicks to
-          whatever sits behind that area (the mobile hamburger button
+          whatever sits behind that area (the TopBar's Menu button
           included, at every screen this renders on) whether the drawer is
           open or not. The inner element re-enables pointer events for
           itself, which is all that should ever actually catch a click, and
@@ -172,63 +127,76 @@ export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, on
           on screen. */}
       <aside className="fixed md:sticky top-0 left-0 w-60 shrink-0 h-screen z-40 pointer-events-none">
         <div
-          className={`h-full w-full flex flex-col bg-white/70 backdrop-blur-md border-r border-slate-200/50 pointer-events-auto
+          className={`h-full w-full flex flex-col bg-canvas border-r border-border-canvas md:border-r-0 pointer-events-auto
                       transition-transform duration-200 md:translate-x-0
                       ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}
         >
-          <div className="flex items-center gap-2 px-5 py-5 border-b border-slate-100/50">
-            <Logo size={28} />
-            <span className="font-extrabold tracking-tight text-slate-950 text-[13px] leading-tight flex-1 min-w-0 truncate">
-              Search <span style={{ color: PURPLE }}>Analytics AI</span>
-            </span>
-            {isInternal && <NotificationBell />}
-            <button onClick={onCloseMobile} aria-label="Close menu"
-              className="md:hidden w-10 h-10 rounded-lg grid place-items-center text-lg text-slate-400 hover:bg-slate-150 hover:text-slate-700 transition shrink-0">
-              ×
-            </button>
+          <div className="flex items-center justify-between gap-2 px-4 pt-4 pb-2">
+            <Logo wordmark size={20} className="text-[17px]" />
+            <Button variant="ghost" size="sm" icon aria-label="Close menu" className="md:hidden" onClick={onCloseMobile}>
+              <span aria-hidden className="text-base leading-none">×</span>
+            </Button>
           </div>
 
-          <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto custom-scrollbar">
-            {NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
+          <WorkspaceSwitcher currentSite={currentSite} siteId={siteId} onSwitch={onSwitchProject} />
 
-            <SidebarSection id="growth" label="Growth Tools" tint="text-[#6C63FF] hover:text-[#6C63FF]/80"
-              links={growthToolsNav} isActive={isActive} open={!collapsed.growth} onToggle={toggleSection} />
+          {agentAvailable && (
+            <div className="mx-3 mb-1.5">
+              <SegmentedTabs
+                className="w-full [&>button]:flex-1"
+                options={[{ value: 'browse', label: 'Browse' }, { value: 'agent', label: 'Agent' }]}
+                value={agentOpen ? 'agent' : 'browse'}
+                onChange={(v) => onAgent(v === 'agent')}
+              />
+            </div>
+          )}
 
-            {isPlatformAdmin && (
-              <SidebarSection id="internal" label="Internal Console" tint="text-[#6C63FF] hover:text-[#6C63FF]/80"
-                links={INTERNAL_NAV} isActive={isActive} open={!collapsed.internal} onToggle={toggleSection} />
-            )}
-
-            {isPlatformAdmin && (
-              <SidebarSection id="platform" label="Platform Administration" tint="text-[#6C63FF] hover:text-[#6C63FF]/80"
-                links={PLATFORM_ADMIN_NAV} isActive={isActive} open={!collapsed.platform} onToggle={toggleSection} />
-            )}
+          <nav className="flex-1 overflow-y-auto px-3 py-1.5 custom-scrollbar">
+            {groups.map((g, i) => (
+              <SidebarGroup key={g.id} group={g} first={i === 0} isActive={isActive}
+                open={!collapsed[g.id]} onToggle={toggleSection} />
+            ))}
           </nav>
 
-          <div className="px-3 py-4 border-t border-slate-200/50 space-y-3">
-            {sites?.length > 1 && (
-              <select value={siteId || ''} onChange={(e) => onSite(Number(e.target.value))}
-                className="w-full text-xs font-bold bg-white border border-slate-200/80 rounded-xl px-2.5 py-2 text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 shadow-sm transition">
-                {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
-            )}
-
-            <div className="flex items-center gap-2.5 px-2">
-              {sites?.[0]?.logo_data_url ? (
-                <img src={sites[0].logo_data_url} alt={sites[0].name}
-                  style={{ display: 'block', height: 26, width: 'auto', maxWidth: 100 }} className="rounded-lg shadow-sm border border-slate-100" />
-              ) : (
-                <Logo size={26} />
+          <div className="border-t border-border-canvas px-3 pt-2 pb-3">
+            <SidebarLink {...SETTINGS_ITEM} active={isActive(SETTINGS_ITEM.to)} />
+            <div className="relative" ref={menuRef}>
+              {menuOpen && (
+                <div role="menu" className="absolute left-0 right-0 bottom-full mb-1.5 z-50 bg-white rounded-card overflow-hidden text-sm"
+                  style={{ boxShadow: '0 0 0 1px rgba(0,0,0,.06), 0 20px 40px -12px rgba(0,0,0,.18)' }}>
+                  <div className="flex items-center gap-2.5 px-3 py-3">
+                    <span className="w-8 h-8 rounded-control bg-primary text-white text-xs font-medium grid place-items-center shrink-0">
+                      {emailInitials(email)}
+                    </span>
+                    <div className="min-w-0">
+                      <div className="font-medium truncate">{email || 'Signed in'}</div>
+                      <div className="text-xs text-faint truncate">{ROLE_LABELS[role] || role || ''}</div>
+                    </div>
+                  </div>
+                  <div className="border-t border-border p-1">
+                    <Link to="/account" role="menuitem" onClick={() => { setMenuOpen(false); onCloseMobile?.(); }}
+                      className="flex items-center gap-2.5 h-[34px] px-2.5 rounded-control hover:bg-muted">
+                      <SettingsIcon size={15} className="text-[#7a7a7a]" /> Account settings
+                    </Link>
+                  </div>
+                  <div className="border-t border-border p-1">
+                    <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); onLogout(); }}
+                      className="w-full flex items-center gap-2.5 h-[34px] px-2.5 rounded-control hover:bg-muted text-[#b42318] text-left">
+                      <LogOut size={15} /> Sign out
+                    </button>
+                  </div>
+                </div>
               )}
-              {sites?.[0]?.name && (
-                <span className="text-xs font-bold text-slate-600 truncate">{sites[0].name}</span>
-              )}
+              <button type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((o) => !o)}
+                className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-control hover:bg-black/[.03] text-left">
+                <Avatar email={email} size="sm" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-fg truncate">{email || 'Signed in'}</div>
+                  <div className="text-xs text-faint truncate">{ROLE_LABELS[role] || role || ''}</div>
+                </div>
+                <ChevronsUpDown size={14} className="text-faint shrink-0" aria-hidden />
+              </button>
             </div>
-
-            <button onClick={onLogout}
-              className="w-full text-left text-xs font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100/50 px-2.5 py-2 rounded-xl transition">
-              Log out
-            </button>
           </div>
         </div>
       </aside>
@@ -236,33 +204,32 @@ export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, on
   );
 }
 
-function SidebarSection({ id, label, tint, links, isActive, open, onToggle }) {
+function SidebarGroup({ group, first, isActive, open, onToggle }) {
   return (
     <div>
       <button
         type="button"
-        onClick={() => onToggle(id)}
+        onClick={() => onToggle(group.id)}
         aria-expanded={open}
-        className={`w-full flex items-center justify-between gap-2 px-3 pt-6 pb-2 text-[9px] font-black uppercase tracking-widest transition-colors cursor-pointer ${tint}`}
+        className={`w-full flex items-center gap-1.5 px-2.5 ${first ? 'pt-2' : 'pt-3.5'} pb-1 text-[11px] font-medium tracking-[.08em] uppercase text-faint cursor-pointer`}
       >
-        <span>{label}</span>
-        <ChevronDown size={12} strokeWidth={2.5} className={`transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
+        <span>{group.label}</span>
+        <ChevronDown size={10} className={`transition-transform duration-200 ${open ? '' : '-rotate-90'}`} />
       </button>
-      {open && links.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
+      {open && group.items.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
     </div>
   );
 }
 
 function SidebarLink({ to, label, icon: Icon, active }) {
   return (
-    <Link to={to}
-      className={`group flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all duration-200 ${
-        active
-          ? 'text-indigo-600 bg-indigo-500/10 active-pill-shadow'
-          : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100/60'
+    <Link to={to} aria-current={active ? 'page' : undefined}
+      className={`flex items-center gap-2 h-[30px] px-2.5 rounded-control text-sm ${
+        active ? 'bg-white text-fg font-medium' : 'text-[#262626] font-medium hover:bg-black/[.03]'
       }`}
+      style={active ? { boxShadow: 'var(--ring)' } : undefined}
     >
-      <Icon size={15} strokeWidth={active ? 2.5 : 2} className={active ? 'text-indigo-600' : 'text-slate-400 group-hover:text-slate-600 transition-colors'} />
+      <Icon size={15} strokeWidth={1.75} className={active ? 'text-primary' : 'text-[#5c5c5c]'} />
       {label}
     </Link>
   );

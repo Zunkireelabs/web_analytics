@@ -18,8 +18,8 @@ export default function Avatar({ email, size = 'sm' }) {
   const s = SIZES[size] || SIZES.sm;
   return (
     <div
-      className={`${s.box} ${s.text} rounded-full grid place-items-center font-black text-white shrink-0`}
-      style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
+      className={`${s.box} ${s.text} rounded-full grid place-items-center bg-primary-tint text-primary-strong font-semibold shrink-0`}
+      style={{ boxShadow: 'inset 0 0 0 1px var(--primary-ring)' }}
       title={email}
     >
       {initialsFromEmail(email)}

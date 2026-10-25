@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react';
+import { Languages } from 'lucide-react';
 import { api } from '../api.js';
 import Sparkline from './Sparkline.jsx';
-import { ArrowUpRight, ArrowDownRight, Info } from 'lucide-react';
-
-const GREEN = '#10b981';
-const RED = '#f43f5e';
-const BLUE = '#3b82f6';
-const PURPLE = '#8b5cf6';
+import Badge from './Badge.jsx';
+import Button from './Button.jsx';
+import KpiStrip from './layout/KpiStrip.jsx';
+import { Tray, TrayCard } from './layout/Tray.jsx';
+import { STATUS } from '../lib/palette.js';
 
 const sum = (arr, k) => (arr || []).reduce((a, r) => a + (Number(r[k]) || 0), 0);
 const fmtSigned = (n) => `${n >= 0 ? '+' : ''}${n.toLocaleString()}`;
@@ -25,83 +25,48 @@ export default function MoversList({ gainers = [], droppers = [], comparisonLabe
   const pct = priorTotal ? Math.round((netChange / priorTotal) * 100) : null;
   const changed = gainers.length + droppers.length;
 
-  return (
-    <div className="space-y-6">
-      {/* 1 ─ Summary grid */}
-      <div className="card p-6">
-        <div className="flex flex-col lg:flex-row items-stretch justify-between gap-6">
-          <div className="lg:max-w-xs flex flex-col justify-center">
-            <div className="flex items-center gap-2">
-              <h3 className="text-base font-extrabold text-slate-950 tracking-tight">Query Movements</h3>
-              <span className="text-slate-400 cursor-help" title="Queries that changed the most in clicks"><Info size={14} /></span>
-            </div>
-            <p className="text-xs text-slate-400 font-semibold mt-1">Clicks performance compared to {comparisonLabel}</p>
-          </div>
-          
-          {/* Always 2 cols (even below sm) so 4 tiles stacked one-per-row
-              doesn't turn into a long mobile scroll. */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 flex-1">
-            <Metric icon={<TrendUp />} tint={GREEN} value={fmtSigned(netChange)} label="Net click change"
-              badge={pct != null ? `${pct >= 0 ? '+' : ''}${pct}%` : null} badgeUp={netChange >= 0} />
-            <Metric icon={<Activity />} tint={BLUE} value={recentTotal.toLocaleString()} label="This period clicks"
-              sub={`vs ${priorTotal.toLocaleString()}`} />
-            <Metric icon={<Target />} tint={PURPLE} value={changed} label="Queries moved" />
-            <Metric icon={<Swap />} tint={GREEN}
-              value={
-                <span className="flex items-center gap-1">
-                  <span className="text-emerald-500 font-extrabold">{gainers.length}</span>
-                  <span className="text-slate-300 font-medium">/</span>
-                  <span className="text-rose-500 font-extrabold">{droppers.length}</span>
-                </span>
-              }
-              label="Gainers / Drops" />
-          </div>
-        </div>
-      </div>
-
-      {/* 2 ─ AI Insights Highlights band */}
-      <Highlights gainers={gainers} droppers={droppers} comparisonLabel={comparisonLabel} />
-
-      {/* 3 ─ Two-column gainers / drops */}
-      <div id="movers-section" className="grid md:grid-cols-2 gap-6">
-        <MoverCard kind="gain" rows={gainers} total={gainers.length} />
-        <MoverCard kind="drop" rows={droppers} total={droppers.length} />
-      </div>
-    </div>
-  );
-}
-
-/* ───────── Summary metric tile ───────── */
-function Metric({ icon, tint, value, label, badge, badgeUp, sub }) {
-  return (
-    <div className="rounded-2xl border border-slate-200/50 p-4 card-hover bg-white/50 backdrop-blur-md flex flex-col justify-between group">
-      <div className="flex items-center justify-between">
-        <span 
-          className="w-8 h-8 rounded-xl grid place-items-center transition-transform duration-300 group-hover:scale-105" 
-          style={{ background: `${tint}12`, color: tint }}
-        >
-          {icon}
+  const kpis = [
+    { label: 'Net click change', value: fmtSigned(netChange),
+      delta: pct != null ? { text: `${pct >= 0 ? '+' : ''}${pct}%`, tone: netChange >= 0 ? 'good' : 'bad' } : undefined },
+    { label: 'Clicks this period', value: recentTotal.toLocaleString(), sub: `vs ${priorTotal.toLocaleString()}` },
+    { label: 'Queries moved', value: changed },
+    { label: 'Gainers / drops',
+      value: (
+        <span>
+          <span className="text-[#1a7f4b]">{gainers.length}</span>{' '}
+          <span className="text-faint font-normal">/</span>{' '}
+          <span className="text-[#b42318]">{droppers.length}</span>
         </span>
-        {badge && (
-          <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${
-            badgeUp 
-              ? 'bg-emerald-500/5 text-emerald-600 border-emerald-500/10' 
-              : 'bg-rose-500/5 text-rose-500 border-rose-500/10'
-          }`}>
-            {badge}
-          </span>
-        )}
+      ),
+      sub: 'queries' },
+  ];
+
+  return (
+    <>
+      {/* 1 + 2 ─ Summary strip and highlights, stacked in one tray. */}
+      <Tray>
+        <TrayCard title="Query movements" subtitle={<span className="tip tip--down">Which searches gained or lost clicks<span className="tip__box">Queries that changed the most in clicks</span></span>} source={`vs ${comparisonLabel}`}>
+          <div className="border-t border-border">
+            <KpiStrip items={kpis} bare />
+          </div>
+        </TrayCard>
+        <Highlights gainers={gainers} droppers={droppers} comparisonLabel={comparisonLabel} />
+      </Tray>
+
+      {/* 3 ─ Two-column gainers / drops. The wrapper carries the scroll-target id. */}
+      <div id="movers-section" className="mt-3">
+        <Tray cols={2}>
+          <MoverCard kind="gain" rows={gainers} total={gainers.length} />
+          <MoverCard kind="drop" rows={droppers} total={droppers.length} />
+        </Tray>
       </div>
-      <div className="mt-3.5">
-        <div className="text-xl font-black text-slate-950 tracking-tight leading-none">{value}</div>
-        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mt-1.5">{label}</div>
-        {sub && <div className="text-[10px] font-medium text-slate-400 mt-1">{sub}</div>}
-      </div>
-    </div>
+    </>
   );
 }
 
 /* ───────── Highlights band — local heuristics over gainers/droppers, not an LLM call ───────── */
+const TAG_TONE = { Gainer: 'green', New: 'outline', Trending: 'primary', Drop: 'red' };
+
 function Highlights({ gainers, droppers, comparisonLabel }) {
   const used = new Set();
   const take = (q) => { if (q) used.add(q.query); return q; };
@@ -113,7 +78,7 @@ function Highlights({ gainers, droppers, comparisonLabel }) {
 
   const highlighted = [topGain, newQ, vsQ, topDrop].filter(Boolean).map((q) => q.query);
   const [translations, setTranslations] = useState({});
-  
+
   useEffect(() => {
     highlighted.forEach((q) => {
       api.translate(q).then((t) => {
@@ -122,90 +87,54 @@ function Highlights({ gainers, droppers, comparisonLabel }) {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [highlighted.join('|')]);
-  
+
   const withTranslation = (q, text) => translations[q] ? `${text} (“${translations[q]}”)` : text;
 
   const blocks = [];
   if (topGain) {
     const c = changePct(topGain.prior, topGain.delta);
-    blocks.push({ 
-      icon: <TrendUp />, 
-      color: GREEN, 
-      tag: 'Gainer', 
-      head: `“${topGain.query}”`, 
+    blocks.push({
+      tag: 'Gainer',
+      head: `“${topGain.query}”`,
       text: withTranslation(topGain.query, `Highest growth · ${c.isNew ? `+${topGain.recent} clicks` : `${c.text} clicks`}`),
-      border: 'rgba(16,185,129,0.1)',
-      bg: 'rgba(16,185,129,0.03)'
     });
   }
   if (newQ) {
-    blocks.push({ 
-      icon: <Sparkle />, 
-      color: BLUE, 
-      tag: 'New', 
-      head: `“${newQ.query}”`, 
+    blocks.push({
+      tag: 'New',
+      head: `“${newQ.query}”`,
       text: withTranslation(newQ.query, newQ.page ? `+${newQ.recent} new clicks → ${newQ.page}` : `+${newQ.recent} new clicks vs ${comparisonLabel}`),
-      border: 'rgba(59,130,246,0.1)',
-      bg: 'rgba(59,130,246,0.03)'
     });
   }
   if (vsQ) {
-    blocks.push({ 
-      icon: <Activity />, 
-      color: PURPLE, 
-      tag: 'Trending', 
-      head: `“${vsQ.query}”`, 
+    blocks.push({
+      tag: 'Trending',
+      head: `“${vsQ.query}”`,
       text: withTranslation(vsQ.query, 'Comparison searches gaining momentum'),
-      border: 'rgba(139,92,246,0.1)',
-      bg: 'rgba(139,92,246,0.03)'
     });
   }
   if (topDrop) {
-    blocks.push({ 
-      icon: <TrendDown />, 
-      color: RED, 
-      tag: 'Drop', 
-      head: `“${topDrop.query}”`, 
+    blocks.push({
+      tag: 'Drop',
+      head: `“${topDrop.query}”`,
       text: withTranslation(topDrop.query, 'Lost the most visibility — refresh content'),
-      border: 'rgba(244,63,94,0.1)',
-      bg: 'rgba(244,63,94,0.03)'
     });
   }
 
   if (blocks.length === 0) return null;
 
   return (
-    <div className="rounded-3xl border border-indigo-500/10 p-5 bg-gradient-to-br from-indigo-500/[0.02] via-purple-500/[0.01] to-white/70 backdrop-blur-md">
-      <div className="flex items-center gap-2 mb-4">
-        <span className="text-xs font-black uppercase tracking-wider text-indigo-600">Spotlight Insights</span>
-      </div>
-      <div className="flex flex-wrap gap-4">
+    <TrayCard title="Spotlight" subtitle="The movements worth a look">
+      <div className="border-t border-border">
         {blocks.map((b, i) => (
-          <div 
-            key={i} 
-            className="flex items-start gap-3 rounded-2xl border p-4 shadow-sm bg-white/70 hover:translate-y-[-1px] transition-transform duration-200 flex-1 min-w-[240px]"
-            style={{ borderColor: b.border, background: b.bg }}
-          >
-            <span 
-              className="w-8 h-8 rounded-xl grid place-items-center shrink-0 shadow-sm" 
-              style={{ background: '#fff', color: b.color }}
-            >
-              {b.icon}
-            </span>
-            <div className="min-w-0 flex-1">
-              <span 
-                className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded border" 
-                style={{ borderColor: b.border, color: b.color, background: '#fff' }}
-              >
-                {b.tag}
-              </span>
-              <div className="text-sm font-bold text-slate-900 leading-snug mt-2 truncate" title={b.head}>{b.head}</div>
-              <div className="text-[11px] font-medium text-slate-500 leading-snug mt-1">{b.text}</div>
-            </div>
+          <div key={i} className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 px-4 py-3 border-b border-border last:border-0 items-center">
+            <Badge tone={TAG_TONE[b.tag]}>{b.tag}</Badge>
+            <div className="text-sm font-medium text-fg truncate" title={b.head}>{b.head}</div>
+            <div className="col-start-2 text-[13px] text-text">{b.text}</div>
           </div>
         ))}
       </div>
-    </div>
+    </TrayCard>
   );
 }
 
@@ -213,140 +142,110 @@ function Highlights({ gainers, droppers, comparisonLabel }) {
 function MoverCard({ kind, rows, total }) {
   const [showAll, setShowAll] = useState(false);
   const gain = kind === 'gain';
-  const color = gain ? GREEN : RED;
-  const soft = gain ? '#ecfdf5' : '#fff1f2';
-  const softBorder = gain ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.1)';
+  const color = gain ? STATUS.good.color : STATUS.critical.color;
+  const textColor = gain ? STATUS.good.text : STATUS.critical.text;
   const displayRows = showAll ? (rows || []) : (rows || []).slice(0, 7);
   const hasMore = (rows || []).length > 7;
-  
+
   return (
-    <div className="card flex flex-col justify-between">
+    <TrayCard title={gain ? 'Top gainers' : 'Top drops'}
+      subtitle={`${total} queries ${gain ? 'gained' : 'lost'} clicks`}>
       <div>
-        <div className="flex items-center justify-between p-5 pb-3">
-          <div className="flex items-center gap-3">
-            <span 
-              className="w-9 h-9 rounded-xl grid place-items-center text-white shadow-sm" 
-              style={{ 
-                background: color,
-                boxShadow: `0 4px 10px -2px ${color}55`
-              }}
-            >
-              {gain ? <TrendUp /> : <TrendDown />}
-            </span>
-            <h3 className="font-extrabold text-slate-950 tracking-tight">{gain ? 'Top Gainers' : 'Top Drops'}</h3>
-          </div>
-          <span 
-            className="text-[10px] font-bold px-2.5 py-0.5 rounded-full border" 
-            style={{ background: soft, borderColor: softBorder, color }}
-          >
-            {gain ? '▲' : '▼'} {total} queries
-          </span>
-        </div>
-
-        {/* column header */}
-        <div className="grid grid-cols-[20px_1fr_56px_44px] sm:grid-cols-[28px_1fr_64px_64px_64px] items-center gap-2 sm:gap-3 px-5 pt-3 pb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100">
-          <span></span>
-          <span>Query</span>
-          <span className="text-right">Change</span>
-          <span className="text-right">%</span>
-          <span className="text-right hidden sm:block">Trend</span>
-        </div>
-
-        <div className="px-2 divide-y divide-slate-100/50">
-          {displayRows.length === 0 && <div className="text-sm text-slate-400 px-3 py-6 font-medium">No movement.</div>}
-          {displayRows.map((r, i) => {
-            const c = changePct(r.prior, r.delta);
-            return (
-              <div key={i} className="grid grid-cols-[20px_1fr_56px_44px] sm:grid-cols-[28px_1fr_64px_64px_64px] items-center gap-2 sm:gap-3 px-3 py-3 rounded-xl hover:bg-slate-50/50 transition duration-150 group">
-                <span 
-                  className="w-5 h-5 rounded-md grid place-items-center text-[10px] font-black" 
-                  style={{ background: soft, color }}
-                >
-                  {i + 1}
-                </span>
-                <span className="min-w-0 pr-1">
-                  <span className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-sm font-semibold text-slate-700 truncate group-hover:text-slate-900 transition-colors" title={r.query}>
-                      {r.query}
-                    </span>
-                    <TranslateButton query={r.query} />
-                  </span>
-                  {r.page && (
-                    <span className="block text-[10px] text-slate-400 font-medium truncate mt-0.5" title={r.page}>
-                      → {r.page.replace(/https?:\/\/[^\/]+/i, '')}{(r.device || r.country) && ` (${[r.device?.toLowerCase(), r.country].filter(Boolean).join(' · ')})`}
-                    </span>
-                  )}
-                </span>
-                <span className="text-right text-sm font-bold tabular-nums" style={{ color }}>{fmtSigned(r.delta)}</span>
-                <span className="text-right">
-                  <span 
-                    className="text-[10px] font-bold px-1.5 py-0.5 rounded border"
-                    style={c.isNew 
-                      ? { background: '#eff6ff', borderColor: 'rgba(59,130,246,0.1)', color: '#2563eb' } 
-                      : { background: soft, borderColor: softBorder, color }}
-                  >
-                    {c.text}
-                  </span>
-                </span>
-                <span className="justify-end pr-1 hidden sm:flex">
-                  <Sparkline data={sparkSteps(r.prior, r.recent)} color={color} width={50} height={18} fill={false} dot={false} />
-                </span>
-              </div>
-            );
-          })}
-        </div>
+        {displayRows.length === 0 ? (
+          <div className="text-sm text-faint text-center py-10">No queries moved in this period.</div>
+        ) : (
+          <>
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th className="rank">#</th>
+                  <th>Query</th>
+                  <th className="num">Change</th>
+                  <th className="num hidden sm:table-cell">%</th>
+                  <th className="num hidden sm:table-cell">Trend</th>
+                </tr>
+              </thead>
+              <tbody>
+                {displayRows.map((r, i) => {
+                  const c = changePct(r.prior, r.delta);
+                  return (
+                    <tr key={i}>
+                      <td className="rank">{i + 1}</td>
+                      <td className="max-w-0 w-full">
+                        <Translatable query={r.query}>
+                          {({ button, result }) => (
+                            <>
+                              <span className="flex items-center gap-1 min-w-0">
+                                <span className="text-sm text-fg truncate" title={r.query}>{r.query}</span>
+                                {button}
+                              </span>
+                              {result}
+                            </>
+                          )}
+                        </Translatable>
+                        {r.page && (
+                          <span className="block text-xs text-faint truncate" title={r.page}>
+                            → {r.page.replace(/https?:\/\/[^\/]+/i, '')}{(r.device || r.country) && ` (${[r.device?.toLowerCase(), r.country].filter(Boolean).join(' · ')})`}
+                          </span>
+                        )}
+                      </td>
+                      <td className="num font-medium whitespace-nowrap" style={{ color: textColor }}>{fmtSigned(r.delta)}</td>
+                      <td className="num hidden sm:table-cell whitespace-nowrap">
+                        {c.isNew ? <Badge tone="outline">New</Badge> : <span style={{ color: textColor }}>{c.text}</span>}
+                      </td>
+                      <td className="num hidden sm:table-cell">
+                        <span className="inline-flex justify-end">
+                          <Sparkline data={sparkSteps(r.prior, r.recent)} color={color} width={56} height={16} fill={false} dot={false} />
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div className="tbl-foot">
+              <span>Showing {displayRows.length} of {rows.length}</span>
+              {hasMore && (
+                <Button variant="ghost" size="sm" onClick={() => setShowAll((s) => !s)}>
+                  {showAll ? 'Show fewer' : `View all ${gain ? 'gainers' : 'drops'}`}
+                </Button>
+              )}
+            </div>
+          </>
+        )}
       </div>
-
-      {hasMore && (
-        <button 
-          className="w-[calc(100%-16px)] text-xs font-bold py-2.5 mx-2 my-2 rounded-xl transition duration-150 border hover:brightness-95 select-none"
-          style={{ background: soft, borderColor: softBorder, color }}
-          onClick={() => setShowAll((s) => !s)}
-        >
-          {showAll ? `Show less ↑` : `View all ${gain ? 'gainers' : 'drops'} (${total}) →`}
-        </button>
-      )}
-    </div>
+    </TrayCard>
   );
 }
 
-/* ───────── Click-to-reveal translation ───────── */
-function TranslateButton({ query }) {
+/* ───────── Click-to-reveal translation ─────────
+   Render-prop: the button goes beside the query, the result renders under it. */
+function Translatable({ query, children }) {
   const [state, setState] = useState(null); // null | 'loading' | { language, translation }
-  if (state && state !== 'loading' && (state.language === 'English' || !state.translation)) return null;
-  return (
+  const hidden = state && state !== 'loading' && (state.language === 'English' || !state.translation);
+  const button = hidden ? null : (
     <span className="shrink-0">
       {!state && (
-        <button
-          type="button"
-          className="inline-flex items-center justify-center w-8 h-8 -my-2 text-[10px] text-slate-400 hover:text-slate-650 leading-none transition-colors"
-          title="Translate query"
+        <Button variant="ghost" size="sm" icon title="Translate query" aria-label="Translate query"
           onClick={async (e) => {
             e.stopPropagation();
             setState('loading');
             try { setState(await api.translate(query)); }
             catch { setState({ language: 'unknown', translation: '' }); }
-          }}
-        >🌐</button>
+          }}>
+          <Languages size={13} />
+        </Button>
       )}
-      {state === 'loading' && <span className="text-[10px] text-slate-350 animate-pulse">…</span>}
-      {state && state !== 'loading' && state.translation && (
-        <span className="text-[10px] text-indigo-500 italic font-semibold" title={state.language}> “{state.translation}”</span>
-      )}
+      {state === 'loading' && <span className="text-xs text-faint">…</span>}
     </span>
   );
+  const result = state && state !== 'loading' && state.translation
+    ? <span className="block text-xs text-faint" title={state.language}>“{state.translation}”</span>
+    : null;
+  return children({ button, result });
 }
 
 function sparkSteps(from, to) {
   const a = Number(from) || 0, b = Number(to) || 0;
   return [a, a + (b - a) * 0.2, a + (b - a) * 0.45, a + (b - a) * 0.62, a + (b - a) * 0.82, b];
 }
-
-const S = { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.5, strokeLinecap: 'round', strokeLinejoin: 'round' };
-const TrendUp = () => (<svg {...S}><polyline points="22 7 13.5 15.5 8.5 10.5 2 17" /><polyline points="16 7 22 7 22 13" /></svg>);
-const TrendDown = () => (<svg {...S}><polyline points="22 17 13.5 8.5 8.5 13.5 2 7" /><polyline points="16 17 22 17 22 11" /></svg>);
-const Activity = () => (<svg {...S}><polyline points="22 12 18 12 15 21 9 3 6 12 2 12" /></svg>);
-const Target = () => (<svg {...S}><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="5" /><circle cx="12" cy="12" r="1" /></svg>);
-const Swap = () => (<svg {...S}><polyline points="17 4 21 8 17 12" /><path d="M21 8H7" /><polyline points="7 20 3 16 7 12" /><path d="M3 16h14" /></svg>);
-const Sparkle = () => (<svg {...S}><path d="M12 3v4M12 17v4M5 12H1M23 12h-4M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2" /></svg>);
-

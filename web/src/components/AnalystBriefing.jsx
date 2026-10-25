@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Sparkles } from 'lucide-react';
 import { api } from '../api.js';
+import { Tray, TrayCard } from './layout/Tray.jsx';
 
 // Per-client AI briefing — a short, fresh narrative generated for whichever
 // client is currently selected, not a fixed headline the way the rest of
@@ -31,18 +32,23 @@ export default function AnalystBriefing({ clientId }) {
   if (!loading && !text) return null;
 
   return (
-    <div className="an-panel p-4 flex items-start gap-3 bg-gradient-to-br from-indigo-50/60 to-white border-indigo-100/70">
-      <span className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white grid place-items-center shrink-0 shadow-sm">
-        <Sparkles size={14} />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="text-[9px] font-black uppercase tracking-widest text-indigo-500 mb-1">AI Briefing</div>
-        {loading ? (
-          <div className="h-3.5 w-3/4 rounded bg-slate-200 animate-pulse" />
-        ) : (
-          <p className="text-[12.5px] font-medium text-slate-700 leading-relaxed">{text}</p>
-        )}
-      </div>
-    </div>
+    <Tray>
+      <TrayCard>
+        <div className="p-4 flex items-start gap-3">
+          <span className="w-8 h-8 rounded-control bg-primary-tint text-primary grid place-items-center shrink-0"
+            style={{ boxShadow: 'inset 0 0 0 1px var(--primary-ring)' }}>
+            <Sparkles size={15} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-medium text-fg mb-1">AI briefing</div>
+            {loading ? (
+              <div className="h-3.5 w-3/4 rounded bg-muted animate-pulse" />
+            ) : (
+              <p className="text-sm leading-5 text-text">{text}</p>
+            )}
+          </div>
+        </div>
+      </TrayCard>
+    </Tray>
   );
 }

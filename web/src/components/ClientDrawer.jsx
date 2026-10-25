@@ -2,18 +2,20 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, timeAgo } from '../api.js';
 import {
-  Building, Globe, Clock, CheckCircle2, AlertTriangle, GitBranch, Key, Mail, Lock,
-  FolderPlus, RefreshCw, ShieldCheck, Settings, Sliders, PauseCircle, PlayCircle,
-  Trash2, AlertOctagon, HelpCircle, DollarSign, User, Bot, Palette, ArrowRight,
+  Building, Globe, Clock, CheckCircle2, AlertTriangle, GitBranch,
+  RefreshCw, ShieldCheck, PauseCircle, PlayCircle,
+  Trash2, AlertOctagon, HelpCircle, DollarSign, User, Bot, Palette, ArrowRight, Plus,
 } from 'lucide-react';
 import Drawer from './Drawer.jsx';
 import Tabs from './Tabs.jsx';
 import Avatar from './Avatar.jsx';
+import Badge from './Badge.jsx';
+import Button from './Button.jsx';
+import Field from './Field.jsx';
+import Select from './Select.jsx';
+import SegmentedTabs from './SegmentedTabs.jsx';
+import KpiStrip from './layout/KpiStrip.jsx';
 import ClientBusinessValuesPanel from './ClientBusinessValuesPanel.jsx';
-
-const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
-const labelCls = 'block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5';
-const inputMonoCls = 'w-full text-base sm:text-xs font-mono border border-slate-200/80 bg-slate-50/50 rounded-xl px-3.5 py-2.5 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 text-slate-800 placeholder:text-slate-400';
 
 // The ceiling on what this client's OAuth "Connect" flow (server/routes/
 // oauth-consent.js) can ever grant — 'admin' is deliberately not an option
@@ -27,60 +29,103 @@ const OAUTH_POLICY_OPTIONS = [
 ];
 
 const STATUS_PILLS = {
-  connected: { label: 'Active baseline', className: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
-  baselinePending: { label: 'Baseline pending', className: 'bg-amber-50 text-amber-700 border-amber-100' },
-  pending: { label: 'Awaiting integrations', className: 'bg-amber-50 text-amber-700 border-amber-100' },
+  connected: { label: 'Active baseline', tone: 'green' },
+  baselinePending: { label: 'Baseline pending', tone: 'amber' },
+  pending: { label: 'Awaiting integrations', tone: 'amber' },
 };
 
 const LIFECYCLE_PILLS = {
-  suspended: { label: 'Suspended', className: 'bg-amber-50 text-amber-700 border-amber-200' },
-  soft_deleted: { label: 'Soft-deleted', className: 'bg-rose-50 text-rose-700 border-rose-200' },
+  suspended: { label: 'Suspended', tone: 'amber' },
+  soft_deleted: { label: 'Soft-deleted', tone: 'red' },
 };
 
-function Field({ label, hint, icon: Icon, ...props }) {
+const ringStyle = { boxShadow: 'var(--ring)' };
+
+// ── Shared look for everything in the drawer ─────────────────────────────
+
+// Inline message: error / warning / success / info. Same colours the rest of
+// the app uses for these (see TeamCard's invite error + info note).
+const NOTICE_TONES = {
+  error: 'bg-[#fdecec] text-[#b42318]',
+  warn: 'bg-[#fdf3e1] text-[#8a5300]',
+  success: 'bg-[var(--green-tint)] text-[var(--green)]',
+  info: 'bg-muted text-text',
+};
+
+function Notice({ tone = 'info', icon: Icon, className = '', children }) {
   return (
-    <label className="block">
-      <span className={labelCls}>{label}</span>
-      <div className="relative">
-        {Icon && (
-          <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
-            <Icon size={14} />
-          </span>
-        )}
-        <input className={`${inputCls} ${Icon ? 'pl-10' : ''}`} {...props} />
+    <div role={tone === 'error' ? 'alert' : undefined}
+      className={`flex items-start gap-2.5 rounded-control px-3 py-2.5 text-[13px] leading-5 ${NOTICE_TONES[tone]} ${className}`.trim()}>
+      {Icon && <Icon size={15} className="shrink-0 mt-0.5" aria-hidden />}
+      <div className="min-w-0">{children}</div>
+    </div>
+  );
+}
+
+// A titled group inside a tab: heading (icon + title) with an optional control
+// on the right, then its content. Groups after the first are divided by a
+// hairline, the way the settings cards separate their rows.
+function Section({ icon: Icon, title, control, children }) {
+  return (
+    <section className="border-t border-border pt-5 first:border-t-0 first:pt-0">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <h3 className="flex items-center gap-2 text-[13px] font-medium text-fg">
+          {Icon && <Icon size={14} className="text-faint shrink-0" aria-hidden />}
+          {title}
+        </h3>
+        {control && <div className="flex items-center gap-2">{control}</div>}
       </div>
-      {hint && <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">{hint}</span>}
-    </label>
+      {children && <div className="mt-2.5 space-y-2.5">{children}</div>}
+    </section>
+  );
+}
+
+// A small read-only fact: label (icon) over value, in a ringed tile.
+function InfoTile({ icon: Icon, label, children, aside, wrap = false, className = '' }) {
+  return (
+    <div className={`rounded-control px-3.5 py-3 flex items-center justify-between gap-3 min-w-0 ${className}`.trim()} style={ringStyle}>
+      <div className="min-w-0">
+        <span className="text-xs text-faint flex items-center gap-1.5">
+          {Icon && <Icon size={12} aria-hidden />} {label}
+        </span>
+        <div className={`text-[13px] font-medium text-fg mt-1 ${wrap ? 'break-words' : 'truncate'}`}>{children}</div>
+      </div>
+      {aside}
+    </div>
+  );
+}
+
+// Two-state switch built from the app's own segmented `.toggle` (the same
+// control Overview's date presets use), with a disabled state.
+function OnOffToggle({ on, onChange, disabled, offLabel = 'Off', onLabel = 'On', ariaLabel }) {
+  const btn = 'disabled:opacity-60 disabled:cursor-not-allowed';
+  return (
+    <div className="toggle" role="group" aria-label={ariaLabel}>
+      <button type="button" disabled={disabled} className={`${btn} ${!on ? 'is-on' : ''}`.trim()} aria-pressed={!on}
+        onClick={() => { if (on) onChange(false); }}>{offLabel}</button>
+      <button type="button" disabled={disabled} className={`${btn} ${on ? 'is-on' : ''}`.trim()} aria-pressed={on}
+        onClick={() => { if (!on) onChange(true); }}>{onLabel}</button>
+    </div>
   );
 }
 
 function BaselineResult({ result }) {
   const { analysis, healthScore, discovery, ingestion } = result;
   return (
-    <div className="mt-4 rounded-2xl bg-gradient-to-r from-emerald-500/[0.04] to-emerald-500/[0.01] border border-emerald-500/20 p-5 space-y-4 animate-fade-in relative overflow-hidden">
-      <div className="absolute left-0 inset-y-0 w-1 bg-emerald-500" />
-      <div className="flex items-center gap-2">
-        <span className="w-6 h-6 rounded-lg bg-emerald-500/10 text-emerald-600 grid place-items-center">
-          <ShieldCheck size={14} />
-        </span>
-        <p className="text-xs font-black text-emerald-800 uppercase tracking-wider">Baseline Diagnostic Recorded</p>
+    <div className="mt-4 rounded-card overflow-hidden animate-fade-in" style={ringStyle}>
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
+        <ShieldCheck size={15} className="text-[var(--green)]" aria-hidden />
+        <p className="text-[13px] font-medium text-fg">Baseline diagnostic recorded</p>
       </div>
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-        {[
-          { label: 'Website Health Score', val: `${healthScore ?? '—'}/100`, highlight: true },
-          { label: 'Agents Activated', val: analysis?.ranAgentIds?.length ?? 0 },
-          { label: 'Findings Logged', val: analysis?.findingsCount ?? 0 },
-          { label: 'Sitemap Discoveries', val: discovery?.sitemapCount ?? 0 },
-          { label: 'Crawled Pages', val: discovery?.crawlCount ?? 0 },
-          { label: 'Ingested History', val: ingestion?.reportDate ? 'Through ' + ingestion.reportDate : '—' },
-        ].map((stat, i) => (
-          <div key={i} className="bg-white border border-slate-200/50 rounded-xl p-3 flex flex-col justify-between">
-            <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 leading-none">{stat.label}</span>
-            <span className={`text-sm font-black mt-2 font-mono ${stat.highlight ? 'text-emerald-600' : 'text-slate-800'}`}>{stat.val}</span>
-          </div>
-        ))}
-      </div>
-      <p className="text-[10px] text-emerald-700/80 font-medium leading-relaxed">
+      <KpiStrip bare cols={3} items={[
+        { label: 'Website health score', value: `${healthScore ?? '—'}/100` },
+        { label: 'Agents activated', value: analysis?.ranAgentIds?.length ?? 0 },
+        { label: 'Findings logged', value: analysis?.findingsCount ?? 0 },
+        { label: 'Sitemap discoveries', value: discovery?.sitemapCount ?? 0 },
+        { label: 'Crawled pages', value: discovery?.crawlCount ?? 0 },
+        { label: 'Ingested through', value: ingestion?.reportDate || '—' },
+      ]} />
+      <p className="px-4 py-3 border-t border-border text-xs leading-4 text-faint">
         Note: initial baseline captures represents day-0 audit state. Sparse metric graphs are expected for fresh properties and will accumulate delta records immediately upon the next agent cycle.
       </p>
     </div>
@@ -115,26 +160,19 @@ function ConnectStep({ client, onConnected }) {
 
   return (
     <form onSubmit={submit} className="space-y-4">
-      <div className="rounded-2xl bg-amber-500/[0.04] border border-amber-500/15 p-4 text-[11px] text-amber-800 font-semibold leading-relaxed flex gap-3">
-        <AlertTriangle size={16} className="text-amber-500 shrink-0 mt-0.5" />
-        <div>
-          Grant Google Access: Add the platform service account as a user on GSC and GA4 for <strong>{client.name}</strong> before connecting. The connection will perform real data ingestion and validation immediately.
-        </div>
-      </div>
+      <Notice tone="warn" icon={AlertTriangle}>
+        Grant Google Access: Add the platform service account as a user on GSC and GA4 for <strong>{client.name}</strong> before connecting. The connection will perform real data ingestion and validation immediately.
+      </Notice>
       <Field label="GSC Property" value={gscProperty} onChange={(e) => setGscProperty(e.target.value)}
-        placeholder="sc-domain:example.com" hint="Exact property ID from Search Console Settings Dashboard." required icon={Globe} />
+        placeholder="sc-domain:example.com" hint="Exact property ID from Search Console Settings Dashboard." required />
       <Field label="GA4 Property ID" value={ga4PropertyId} onChange={(e) => setGa4PropertyId(e.target.value)}
-        placeholder="123456789" hint="Numeric GA4 property reference ID." required icon={Sliders} />
+        placeholder="123456789" hint="Numeric GA4 property reference ID." required />
       <Field label="Report Email Destination (Optional)" type="email" value={reportEmailTo} onChange={(e) => setReportEmailTo(e.target.value)}
-        placeholder="client@example.com" icon={Mail} />
-      {state === 'error' && (
-        <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>
-      )}
-      <button type="submit" disabled={state === 'running'}
-        className="text-[10px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60 shadow-md shadow-indigo-500/10 hover:shadow-indigo-500/20"
-        style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
+        placeholder="client@example.com" />
+      {state === 'error' && <Notice tone="error">{error}</Notice>}
+      <Button type="submit" variant="primary" disabled={state === 'running'}>
         {state === 'running' ? 'Connecting and fetching real GSC/GA4 baseline…' : 'Connect & Fetch Baseline'}
-      </button>
+      </Button>
     </form>
   );
 }
@@ -199,57 +237,43 @@ function RepoConnectStep({ client, onConnected }) {
 
   if (state === 'done') {
     return (
-      <div className="rounded-2xl bg-gradient-to-r from-emerald-500/[0.04] to-emerald-500/[0.01] border border-emerald-500/20 p-4 flex items-center gap-3">
-        <CheckCircle2 size={16} className="text-emerald-500" />
-        <p className="text-xs font-bold text-emerald-800">GitHub repository connected successfully. Ready to deploy live PRs.</p>
-      </div>
+      <Notice tone="success" icon={CheckCircle2}>
+        GitHub repository connected successfully. Ready to deploy live PRs.
+      </Notice>
     );
   }
 
   return (
     <form onSubmit={submit} className="space-y-4">
-      <div className="rounded-2xl bg-indigo-500/[0.03] border border-indigo-500/10 p-4 text-[11px] text-indigo-900 font-semibold leading-relaxed flex gap-3">
-        <GitBranch size={16} className="text-indigo-500 shrink-0 mt-0.5" />
-        <div>
-          Git Setup: The Action Center relies on a hand-authored <code>url_file_map</code> to translate website routes to real file paths in your repository.
-        </div>
+      <Notice tone="info" icon={GitBranch}>
+        Git Setup: The Action Center relies on a hand-authored <code>url_file_map</code> to translate website routes to real file paths in your repository.
+      </Notice>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <Field label="Repo Owner" value={repoOwner} onChange={(e) => setRepoOwner(e.target.value)} placeholder="acme-inc" required />
+        <Field label="Repo Name" value={repoName} onChange={(e) => setRepoName(e.target.value)} placeholder="acme-website" required />
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Field label="Repo Owner" value={repoOwner} onChange={(e) => setRepoOwner(e.target.value)} placeholder="acme-inc" required icon={Building} />
-        <Field label="Repo Name" value={repoName} onChange={(e) => setRepoName(e.target.value)} placeholder="acme-website" required icon={FolderPlus} />
-      </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Field label="Default Branch" value={repoDefaultBranch} onChange={(e) => setRepoDefaultBranch(e.target.value)} placeholder="main" icon={GitBranch} />
-        <Field label="Tech Stack" value={techStack} onChange={(e) => setTechStack(e.target.value)} placeholder="e.g. astro, nextjs, nunjucks" icon={Settings} />
+        <Field label="Default Branch" value={repoDefaultBranch} onChange={(e) => setRepoDefaultBranch(e.target.value)} placeholder="main" />
+        <Field label="Tech Stack" value={techStack} onChange={(e) => setTechStack(e.target.value)} placeholder="e.g. astro, nextjs, nunjucks" />
       </div>
       <Field label="GitHub PAT Env Var Name" value={githubPatEnvVar} onChange={(e) => setGithubPatEnvVar(e.target.value)}
-        placeholder="GITHUB_PAT" hint="Server-side environment variable key naming the GitHub access token." icon={Key} />
+        placeholder="GITHUB_PAT" hint="Server-side environment variable key naming the GitHub access token." />
       <Field label="GitHub App Installation ID (optional)" value={githubAppInstallationId} onChange={(e) => setGithubAppInstallationId(e.target.value)}
         placeholder="e.g. 64837201"
-        hint="Overrides the PAT above entirely once set — tokens are minted per-installation instead of shared. Usually filled in automatically once the client installs the GitHub App; leave blank to keep using the PAT, or clear it to move back."
-        icon={Key} />
-      <label className="block">
-        <span className={labelCls}>url_file_map (JSON, optional)</span>
-        <textarea className={inputMonoCls} rows={8} value={urlFileMapText} onChange={(e) => setUrlFileMapText(e.target.value)}
-          placeholder={EXAMPLE_URL_FILE_MAP} />
-      </label>
-      {state === 'error' && (
-        <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>
-      )}
-      <button type="submit" disabled={state === 'running'}
-        className="text-[10px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60 shadow-md shadow-indigo-500/10 hover:shadow-indigo-500/20"
-        style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
+        hint="Overrides the PAT above entirely once set — tokens are minted per-installation instead of shared. Usually filled in automatically once the client installs the GitHub App; leave blank to keep using the PAT, or clear it to move back." />
+      <Field as="textarea" label="url_file_map (JSON, optional)" className="[&_textarea]:font-mono [&_textarea]:text-xs" rows={8}
+        value={urlFileMapText} onChange={(e) => setUrlFileMapText(e.target.value)} placeholder={EXAMPLE_URL_FILE_MAP} />
+      {state === 'error' && <Notice tone="error">{error}</Notice>}
+      <Button type="submit" variant="primary" disabled={state === 'running'}>
         {state === 'running' ? 'Connecting Repository…' : 'Save Repo Configuration'}
-      </button>
+      </Button>
     </form>
   );
 }
 
 function StatusPill({ client }) {
   const s = !client.connected ? STATUS_PILLS.pending : client.baselined ? STATUS_PILLS.connected : STATUS_PILLS.baselinePending;
-  return (
-    <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md border ${s.className}`}>{s.label}</span>
-  );
+  return <Badge tone={s.tone}>{s.label}</Badge>;
 }
 
 // ── General tab ──────────────────────────────────────────────────────────
@@ -259,45 +283,32 @@ function GeneralTab({ client, owner }) {
       <div className="flex items-center gap-3.5">
         <Avatar email={client.name} size="lg" />
         <div className="min-w-0">
-          <p className="text-sm font-black text-slate-900 truncate">{client.name}</p>
-          <p className="text-[11px] font-mono text-slate-400 truncate">{client.websiteDomain || 'no domain configured'}</p>
+          <p className="text-[15px] font-semibold text-fg truncate">{client.name}</p>
+          <p className="text-xs text-faint truncate">{client.websiteDomain || 'no domain configured'}</p>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        {[
-          { label: 'Website', icon: Globe, value: client.websiteDomain || '—' },
-          { label: 'Owner', icon: User, value: owner ? owner.email : '—' },
-          { label: 'Timezone', icon: Clock, value: client.timezone || '—' },
-          { label: 'Created', icon: Clock, value: client.onboardedAt ? timeAgo(client.onboardedAt) : (client.createdAt ? timeAgo(client.createdAt) : '—') },
-        ].map((f) => (
-          <div key={f.label} className="border border-slate-100 rounded-xl px-3.5 py-3">
-            <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
-              <f.icon size={11} /> {f.label}
-            </span>
-            <p className="text-xs font-bold text-slate-800 mt-1 truncate">{f.value}</p>
-          </div>
-        ))}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <InfoTile icon={Globe} label="Website">{client.websiteDomain || '—'}</InfoTile>
+        <InfoTile icon={User} label="Owner">{owner ? owner.email : '—'}</InfoTile>
+        <InfoTile icon={Clock} label="Timezone">{client.timezone || '—'}</InfoTile>
+        <InfoTile icon={Clock} label="Created">
+          {client.onboardedAt ? timeAgo(client.onboardedAt) : (client.createdAt ? timeAgo(client.createdAt) : '—')}
+        </InfoTile>
       </div>
 
       <div>
-        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 block mb-1.5">Status</span>
+        <span className="text-xs font-medium text-fg block mb-1.5">Status</span>
         <div className="flex items-center gap-1.5 flex-wrap">
           {LIFECYCLE_PILLS[client.status] && (
-            <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md border ${LIFECYCLE_PILLS[client.status].className}`}>
-              {LIFECYCLE_PILLS[client.status].label}
-            </span>
+            <Badge tone={LIFECYCLE_PILLS[client.status].tone}>{LIFECYCLE_PILLS[client.status].label}</Badge>
           )}
           <StatusPill client={client} />
-          {client.repoConnected && (
-            <span className="text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md border border-slate-200 text-slate-500 bg-slate-50">
-              Git link
-            </span>
-          )}
+          {client.repoConnected && <Badge tone="outline"><GitBranch size={11} />Git link</Badge>}
         </div>
       </div>
 
-      <p className="text-[10.5px] font-semibold text-slate-400 leading-relaxed border-t border-slate-100 pt-4">
+      <p className="text-xs leading-4 text-faint border-t border-border pt-4">
         Suspend and delete controls live under the Advanced tab's Danger Zone.
       </p>
     </div>
@@ -354,23 +365,12 @@ function IntegrationsTab({ client, onReload }) {
 
   return (
     <div className="space-y-5">
-      <div className="border border-slate-100 rounded-xl px-3.5 py-3 flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
-            <ShieldCheck size={11} /> OAuth status
-          </span>
-          <p className="text-xs font-bold text-slate-800 mt-1">
-            {!client.connected ? 'Not connected' : client.baselined ? 'Connected — active baseline' : 'Connected — baseline pending'}
-          </p>
-        </div>
-        <StatusPill client={client} />
-      </div>
+      <InfoTile icon={ShieldCheck} label="OAuth status" wrap aside={<StatusPill client={client} />}>
+        {!client.connected ? 'Not connected' : client.baselined ? 'Connected — active baseline' : 'Connected — baseline pending'}
+      </InfoTile>
 
       {!client.connected && !connecting && (
-        <button type="button" onClick={() => setConnecting(true)}
-          className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-650 transition">
-          Connect API
-        </button>
+        <Button variant="light" onClick={() => setConnecting(true)}>Connect API</Button>
       )}
       {!client.connected && connecting && (
         <ConnectStep client={client} onConnected={onReload} />
@@ -378,52 +378,40 @@ function IntegrationsTab({ client, onReload }) {
 
       {client.connected && !client.baselined && (
         <div>
-          <button type="button" onClick={retryBaseline} disabled={retrying}
-            className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-100 transition disabled:opacity-60 flex items-center gap-1.5">
-            <RefreshCw size={11} className={retrying ? 'animate-spin' : ''} />
+          <Button variant="light" onClick={retryBaseline} disabled={retrying}>
+            <RefreshCw size={14} className={retrying ? 'animate-spin' : ''} />
             <span>{retrying ? 'Syncing…' : 'Sync now (Retry Ingest)'}</span>
-          </button>
-          {retryError && (
-            <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mt-2">{retryError}</div>
-          )}
+          </Button>
+          {retryError && <Notice tone="error" className="mt-2">{retryError}</Notice>}
           {retryResult && !retryResult.error && <BaselineResult result={retryResult} />}
         </div>
       )}
 
-      <div className="border-t border-slate-100 pt-4">
-        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5 mb-1">
-          <GitBranch size={11} /> Repository connection
-        </span>
-        <p className="text-xs font-bold text-slate-800">{client.repoConnected ? 'Connected' : 'Not connected'}</p>
-        <p className="text-[10.5px] font-semibold text-slate-400 mt-1">Manage repository details in the Repository tab.</p>
-      </div>
+      <Section icon={GitBranch} title="Repository connection">
+        <p className="text-[13px] font-medium text-fg">{client.repoConnected ? 'Connected' : 'Not connected'}</p>
+        <p className="text-xs text-faint">Manage repository details in the Repository tab.</p>
+      </Section>
 
       {/* GA4/Meta Pixel install target — what the Action Center's
           analytics-install generator drafts a script for. Distinct from
           "GA4 Property ID" above (the reporting ingestion source). */}
-      <div className="border-t border-slate-100 pt-4">
-        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5 mb-2">
-          <Globe size={11} /> Analytics install (GA4 / Meta Pixel)
-        </span>
-        <div className="space-y-2.5">
-          <Field label="GA4 Measurement ID" value={ga4MeasurementId}
-            onChange={(e) => { setGa4MeasurementId(e.target.value); setAnalyticsIdsSaved(false); }}
-            placeholder="G-XXXXXXXXXX" hint="Used for the on-site gtag install script, not the reporting property above." />
-          <Field label="Meta (Facebook) Pixel ID" value={facebookPixelId}
-            onChange={(e) => { setFacebookPixelId(e.target.value); setAnalyticsIdsSaved(false); }}
-            placeholder="123456789012345" hint="Numeric Pixel ID from Meta Events Manager." />
+      <Section icon={Globe} title="Analytics install (GA4 / Meta Pixel)">
+        <Field label="GA4 Measurement ID" value={ga4MeasurementId}
+          onChange={(e) => { setGa4MeasurementId(e.target.value); setAnalyticsIdsSaved(false); }}
+          placeholder="G-XXXXXXXXXX" hint="Used for the on-site gtag install script, not the reporting property above." />
+        <Field label="Meta (Facebook) Pixel ID" value={facebookPixelId}
+          onChange={(e) => { setFacebookPixelId(e.target.value); setAnalyticsIdsSaved(false); }}
+          placeholder="123456789012345" hint="Numeric Pixel ID from Meta Events Manager." />
+        <div className="pt-1">
+          <Button variant="light" onClick={saveAnalyticsIds} disabled={analyticsIdsSaving}>
+            {analyticsIdsSaving ? 'Saving…' : 'Save Analytics IDs'}
+          </Button>
         </div>
-        <button type="button" onClick={saveAnalyticsIds} disabled={analyticsIdsSaving}
-          className="mt-2.5 text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-650 transition disabled:opacity-60">
-          {analyticsIdsSaving ? 'Saving…' : 'Save Analytics IDs'}
-        </button>
         {analyticsIdsSaved && !analyticsIdsError && (
-          <p className="text-[10px] font-bold text-emerald-700 mt-1.5">Saved — the next analytics-install draft will use this.</p>
+          <p className="text-[13px] text-[var(--green)]">Saved — the next analytics-install draft will use this.</p>
         )}
-        {analyticsIdsError && (
-          <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mt-2">{analyticsIdsError}</div>
-        )}
-      </div>
+        {analyticsIdsError && <Notice tone="error">{analyticsIdsError}</Notice>}
+      </Section>
     </div>
   );
 }
@@ -530,45 +518,37 @@ function AiConfigTab({ client, onReload }) {
           The no-repo case states its reason inline and disables the toggle
           rather than letting the click fail against the server's own guard —
           engineering lesson button-state-visibility. */}
-      <div>
-        <div className="flex items-center gap-2">
-          <Bot size={12} className="text-slate-400 shrink-0" />
-          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Autonomous fixes</span>
-          <button
-            type="button"
-            onClick={() => saveAutoRemediation(!autoOn, autoLimit)}
-            disabled={autoSaving || !client.repoConnected}
-            className={`text-[10px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-lg border transition disabled:opacity-50 disabled:cursor-not-allowed ${
-              autoOn
-                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                : 'bg-slate-50 text-slate-500 border-slate-200'
-            }`}
-          >
-            {autoSaving ? 'Saving…' : autoOn ? 'On' : 'Off'}
-          </button>
+      <Section icon={Bot} title="Autonomous fixes" control={(
+        <>
+          {autoSaving && <span className="text-xs text-faint">Saving…</span>}
+          <OnOffToggle ariaLabel="Autonomous fixes" on={autoOn} disabled={autoSaving || !client.repoConnected}
+            onChange={(next) => saveAutoRemediation(next, autoLimit)} />
           {autoOn && (
-            <>
-              <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Max/day</span>
-              <input
-                type="number" min="0" value={autoLimit} disabled={autoSaving}
-                onChange={(e) => setAutoLimit(Number(e.target.value))}
-                onBlur={(e) => {
-                  const n = Number(e.target.value);
-                  if (Number.isInteger(n) && n >= 0 && n !== (client.autoRemediationDailyLimit ?? 30)) saveAutoRemediation(autoOn, n);
-                }}
-                className="w-16 text-[10px] font-bold text-slate-700 border border-slate-200/80 rounded-lg px-2 py-1.5 bg-white disabled:opacity-60"
-              />
-            </>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-faint">Max/day</span>
+              <div className="fld w-20">
+                <input
+                  type="number" min="0" value={autoLimit} disabled={autoSaving} aria-label="Max fixes per day"
+                  onChange={(e) => setAutoLimit(Number(e.target.value))}
+                  onBlur={(e) => {
+                    const n = Number(e.target.value);
+                    if (Number.isInteger(n) && n >= 0 && n !== (client.autoRemediationDailyLimit ?? 30)) saveAutoRemediation(autoOn, n);
+                  }}
+                  className="disabled:opacity-60"
+                />
+              </div>
+            </div>
           )}
-        </div>
-        <p className="text-[10px] font-medium text-slate-500 mt-2 leading-relaxed">
+        </>
+      )}>
+        <p className="text-[13px] leading-5 text-text">
           {!client.repoConnected
             ? 'No GitHub repository is connected for this site, so autonomous fixes would have nowhere to open a pull request. Connect a repo first.'
             : autoOn
               ? `Every morning this site's safe-tier fixes are drafted, validated and pushed as pull requests — up to ${autoLimit} a day — without anyone clicking anything. A human still reviews and merges every PR; nothing is ever merged automatically.`
               : 'This site\'s agents will keep finding and recommending fixes, but nothing ships until someone acts on each one in the Action Center.'}
         </p>
-        {autoError && <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mt-2">{autoError}</div>}
+        {autoError && <Notice tone="error">{autoError}</Notice>}
         {/* The design-integrity gate: the server now REFUSES to enable
             autonomous fixes for a site whose design was never reviewed (or
             was re-derived since it was approved) — see
@@ -578,66 +558,57 @@ function AiConfigTab({ client, onReload }) {
         <button
           type="button"
           onClick={() => navigate(`/clients/${client.id}/design-review`)}
-          className="mt-2 inline-flex items-center gap-1.5 text-[10.5px] font-bold text-[#6C63FF] hover:text-[#5951e0] transition"
+          className="inline-flex items-center gap-1.5 text-[13px] font-medium text-primary hover:underline"
         >
-          <Palette size={11} /> Review this site's design <ArrowRight size={11} />
+          <Palette size={13} aria-hidden /> Review this site's design <ArrowRight size={13} aria-hidden />
         </button>
-      </div>
+      </Section>
 
       {/* OAuth "Connect" ceiling — the max permission_level this client's
           OAuth grants (server/routes/oauth-consent.js) can ever reach.
           'admin' deliberately isn't an option; see OAUTH_POLICY_OPTIONS. */}
-      <div>
-        <div className="flex items-center gap-2">
-          <ShieldCheck size={12} className="text-slate-400 shrink-0" />
-          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">OAuth ceiling</span>
-          <select value={oauthLevel} disabled={oauthSaving} onChange={(e) => changeOauthLevel(e.target.value)}
-            className="text-[10px] font-bold text-slate-700 border border-slate-200/80 rounded-lg px-2 py-1.5 bg-white disabled:opacity-60">
+      <Section icon={ShieldCheck} title="OAuth ceiling" control={(
+        <div className="fld w-40">
+          <select value={oauthLevel} disabled={oauthSaving} aria-label="OAuth ceiling" onChange={(e) => changeOauthLevel(e.target.value)}
+            className="disabled:opacity-60">
             {OAUTH_POLICY_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
           </select>
         </div>
-        {oauthError && <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mt-2">{oauthError}</div>}
-      </div>
+      )}>
+        {oauthError && <Notice tone="error">{oauthError}</Notice>}
+      </Section>
 
       {/* Sitewide visible-FAQ cap. */}
-      <div>
-        <div className="flex items-center gap-2">
-          <HelpCircle size={12} className="text-slate-400 shrink-0" />
-          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Visible FAQ cap</span>
-          <input type="number" min={0} step={1} value={faqCap} disabled={faqCapSaving}
-            onChange={(e) => changeFaqCap(Number(e.target.value))}
-            className="w-16 text-[10px] font-bold text-slate-700 border border-slate-200/80 rounded-lg px-2 py-1.5 bg-white disabled:opacity-60" />
+      <Section icon={HelpCircle} title="Visible FAQ cap" control={(
+        <div className="fld w-20">
+          <input type="number" min={0} step={1} value={faqCap} disabled={faqCapSaving} aria-label="Visible FAQ cap"
+            onChange={(e) => changeFaqCap(Number(e.target.value))} className="disabled:opacity-60" />
         </div>
-        {faqCapError && <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mt-2">{faqCapError}</div>}
-      </div>
+      )}>
+        {faqCapError && <Notice tone="error">{faqCapError}</Notice>}
+      </Section>
 
       {/* Real $ inputs for the Analyst dashboard's Expected Business Impact projections. */}
-      <div>
-        <div className="flex items-center gap-2">
-          <DollarSign size={12} className="text-slate-400 shrink-0" />
-          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Business values</span>
-          <button type="button" onClick={() => setBusinessValuesOpen((o) => !o)}
-            className="text-[10px] font-bold text-[#6C63FF] hover:text-[#5750d9] transition">
-            {businessValuesOpen ? 'Hide' : 'Configure…'}
-          </button>
-        </div>
-        {businessValuesOpen && <div className="mt-2"><ClientBusinessValuesPanel clientId={client.id} /></div>}
-      </div>
+      <Section icon={DollarSign} title="Business values" control={(
+        <Button variant="light" size="sm" onClick={() => setBusinessValuesOpen((o) => !o)}>
+          {businessValuesOpen ? 'Hide' : 'Configure…'}
+        </Button>
+      )}>
+        {businessValuesOpen && <ClientBusinessValuesPanel clientId={client.id} />}
+      </Section>
 
       {/* Organic (pre-existing) visible FAQ pages, added to the tool's own
           injected count before comparing against the cap above. */}
-      <div>
-        <div className="flex items-center gap-2">
-          <RefreshCw size={12} className="text-slate-400 shrink-0" />
-          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Existing FAQ pages</span>
-          <span className="text-[10px] font-bold text-slate-700">{faqBaseline}</span>
-          <button type="button" disabled={faqBaselineBusy} onClick={recalculateFaqBaseline}
-            className="text-[10px] font-bold text-blue-600 hover:text-blue-800 disabled:opacity-60 disabled:cursor-not-allowed">
+      <Section icon={RefreshCw} title="Existing FAQ pages" control={(
+        <>
+          <span className="text-[13px] font-medium text-fg tnum">{faqBaseline}</span>
+          <Button variant="light" size="sm" disabled={faqBaselineBusy} onClick={recalculateFaqBaseline}>
             {faqBaselineBusy ? 'Recalculating…' : 'Recalculate'}
-          </button>
-        </div>
-        {faqBaselineError && <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mt-2">{faqBaselineError}</div>}
-      </div>
+          </Button>
+        </>
+      )}>
+        {faqBaselineError && <Notice tone="error">{faqBaselineError}</Notice>}
+      </Section>
     </div>
   );
 }
@@ -652,29 +623,20 @@ function AiConfigTab({ client, onReload }) {
 function RepositoryTab({ client, onReload }) {
   return (
     <div className="space-y-5">
-      <div className="border border-slate-100 rounded-xl px-3.5 py-3 flex items-center justify-between gap-3">
-        <div>
-          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
-            <GitBranch size={11} /> Repository link
-          </span>
-          <p className="text-xs font-bold text-slate-800 mt-1">
-            {client.repoConnected ? `${client.repoOwner}/${client.repoName}` : 'Not connected'}
-          </p>
-          {client.repoConnected && (
-            <p className="text-[10.5px] font-semibold text-slate-400 mt-0.5">
-              {client.githubAppInstallationId
-                ? `Auth: GitHub App (installation #${client.githubAppInstallationId})`
-                : `Auth: PAT (${client.githubPatEnvVar || 'GITHUB_PAT'})`}
-            </p>
-          )}
-        </div>
+      <InfoTile icon={GitBranch} label="Repository link" wrap
+        aside={client.repoConnected ? <Badge tone="outline" className="shrink-0"><GitBranch size={11} />Git link</Badge> : null}>
+        {client.repoConnected ? `${client.repoOwner}/${client.repoName}` : 'Not connected'}
         {client.repoConnected && (
-          <span className="text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md border border-slate-200 text-slate-500 bg-slate-50">Git link</span>
+          <span className="block text-xs font-normal text-faint mt-0.5 break-words">
+            {client.githubAppInstallationId
+              ? `Auth: GitHub App (installation #${client.githubAppInstallationId})`
+              : `Auth: PAT (${client.githubPatEnvVar || 'GITHUB_PAT'})`}
+          </span>
         )}
-      </div>
+      </InfoTile>
 
       <div>
-        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 block mb-2">
+        <span className="text-[13px] font-medium text-fg block mb-3">
           {client.repoConnected ? 'Reconnect' : 'Connect repository'}
         </span>
         <RepoConnectStep client={client} onConnected={onReload} />
@@ -682,6 +644,13 @@ function RepositoryTab({ client, onReload }) {
     </div>
   );
 }
+
+// Destructive actions keep their meaning by colour: amber = reversible hold,
+// green = restore, red = delete.
+const AMBER_BTN = 'text-[#8a5300]';
+const GREEN_BTN = 'text-[var(--green)]';
+const RED_BTN = 'text-[#b42318]';
+const RED_SOLID_BTN = 'bg-[#b42318]! hover:bg-[#912018]! text-white! disabled:opacity-40';
 
 // ── Advanced tab ──────────────────────────────────────────────────────────
 function AdvancedTab({ client, onReload, onClose }) {
@@ -723,8 +692,10 @@ function AdvancedTab({ client, onReload, onClose }) {
 
   return (
     <div className="space-y-5">
-      <div className="rounded-2xl border border-rose-100 bg-rose-500/[0.03] p-4 space-y-3">
-        <p className="text-[10px] font-black uppercase tracking-widest text-rose-700">Danger Zone</p>
+      <div className="rounded-card p-4 space-y-3 bg-[#fdecec]/40" style={{ boxShadow: '0 0 0 1px #f3c9c5' }}>
+        <h3 className="flex items-center gap-2 text-[13px] font-medium text-[#b42318]">
+          <AlertOctagon size={14} aria-hidden /> Danger Zone
+        </h3>
 
         {/* Tenant lifecycle (PLATFORM-ADMIN-DESIGN.md §D, §K Phase 3/3.5).
             The company's own site never reaches an active suspend/delete
@@ -732,51 +703,43 @@ function AdvancedTab({ client, onReload, onClose }) {
             regardless of what this UI shows. */}
         <div className="flex items-center gap-2 flex-wrap">
           {client.status === 'active' && (
-            <button type="button" onClick={suspend} disabled={busy}
-              className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-100 transition disabled:opacity-60 flex items-center gap-1">
-              <PauseCircle size={9} /><span>Suspend</span>
-            </button>
+            <Button variant="light" className={AMBER_BTN} onClick={suspend} disabled={busy}>
+              <PauseCircle size={14} /><span>Suspend</span>
+            </Button>
           )}
           {(client.status === 'suspended' || client.status === 'soft_deleted') && (
-            <button type="button" onClick={reactivate} disabled={busy}
-              className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-100 transition disabled:opacity-60 flex items-center gap-1">
-              <PlayCircle size={9} /><span>Reactivate</span>
-            </button>
+            <Button variant="light" className={GREEN_BTN} onClick={reactivate} disabled={busy}>
+              <PlayCircle size={14} /><span>Reactivate</span>
+            </Button>
           )}
           {client.status === 'suspended' && (
-            <button type="button" onClick={softDelete} disabled={busy}
-              className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-100 transition disabled:opacity-60 flex items-center gap-1">
-              <Trash2 size={9} /><span>Soft Delete</span>
-            </button>
+            <Button variant="light" className={RED_BTN} onClick={softDelete} disabled={busy}>
+              <Trash2 size={14} /><span>Soft Delete</span>
+            </Button>
           )}
           {client.status === 'soft_deleted' && !hardDeleteOpen && (
-            <button type="button" onClick={() => setHardDeleteOpen(true)}
-              className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white transition flex items-center gap-1">
-              <AlertOctagon size={9} /><span>Hard Delete…</span>
-            </button>
+            <Button variant="dark" className={RED_SOLID_BTN} onClick={() => setHardDeleteOpen(true)}>
+              <AlertOctagon size={14} /><span>Hard Delete…</span>
+            </Button>
           )}
         </div>
 
-        {error && (
-          <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 leading-relaxed">{error}</div>
-        )}
+        {error && <Notice tone="error">{error}</Notice>}
 
         {client.status === 'soft_deleted' && hardDeleteOpen && (
-          <div className="rounded-xl bg-white border border-rose-200 p-4 space-y-3">
-            <p className="text-[11px] font-bold text-rose-800 leading-relaxed">
+          <div className="rounded-control bg-white p-4 space-y-3" style={{ boxShadow: '0 0 0 1px #f3c9c5' }}>
+            <p className="text-[13px] leading-5 text-[#b42318]">
               This permanently and irreversibly deletes <strong>{client.name}</strong> and all its data.
               Type the tenant's exact name to confirm.
             </p>
-            <input className={inputCls} value={hardDeleteName} onChange={(e) => setHardDeleteName(e.target.value)} placeholder={client.name} />
+            <Field value={hardDeleteName} onChange={(e) => setHardDeleteName(e.target.value)} placeholder={client.name} aria-label="Tenant name" />
             <div className="flex gap-2">
-              <button type="button" onClick={hardDelete} disabled={busy || hardDeleteName.trim() !== client.name}
-                className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white transition disabled:opacity-40">
+              <Button variant="dark" className={RED_SOLID_BTN} onClick={hardDelete} disabled={busy || hardDeleteName.trim() !== client.name}>
                 {busy ? 'Deleting…' : 'Permanently Delete'}
-              </button>
-              <button type="button" onClick={() => { setHardDeleteOpen(false); setHardDeleteName(''); }}
-                className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 transition">
+              </Button>
+              <Button variant="light" onClick={() => { setHardDeleteOpen(false); setHardDeleteName(''); }}>
                 Cancel
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -868,89 +831,70 @@ function ProductGrowthTab({ client }) {
     }
   };
 
-  if (config === null) return <p className="text-xs text-slate-400 font-semibold py-4">Loading…</p>;
+  if (config === null) return <p className="text-[13px] text-faint py-4">Loading…</p>;
 
   return (
     <form onSubmit={save} className="space-y-4">
-      <p className="text-[10.5px] font-semibold text-slate-400 leading-relaxed">
+      <p className="text-xs leading-5 text-faint">
         This property runs the visibility + demand-generation agent set instead of the traffic-history agents (see
         Universal Product Growth mode). Nothing here is required for those agents to start finding real issues —
         it only configures the demand-generation layer: which conversion event counts as success, and which
         prospects are worth surfacing.
       </p>
 
-      <label className="block">
-        <span className={labelCls}>Primary conversion event</span>
-        <input className={inputCls} value={conversionEvent} onChange={(e) => setConversionEvent(e.target.value)}
-          placeholder="e.g. booked_demo, trial, signup, purchase" />
-      </label>
+      <Field label="Primary conversion event" value={conversionEvent} onChange={(e) => setConversionEvent(e.target.value)}
+        placeholder="e.g. booked_demo, trial, signup, purchase" />
 
-      <label className="block">
-        <span className={labelCls}>Target markets</span>
-        <input className={inputCls} value={markets} onChange={(e) => setMarkets(e.target.value)} placeholder="Comma-separated, e.g. US, UK, South Asia" />
-      </label>
+      <Field label="Target markets" value={markets} onChange={(e) => setMarkets(e.target.value)}
+        placeholder="Comma-separated, e.g. US, UK, South Asia" />
 
-      <label className="block">
-        <span className={labelCls}>Target industries</span>
-        <input className={inputCls} value={industries} onChange={(e) => setIndustries(e.target.value)} placeholder="Comma-separated, e.g. Salons, Dental clinics" />
-      </label>
+      <Field label="Target industries" value={industries} onChange={(e) => setIndustries(e.target.value)}
+        placeholder="Comma-separated, e.g. Salons, Dental clinics" />
 
-      <label className="block">
-        <span className={labelCls}>ICP qualification signals</span>
-        <input className={inputCls} value={icpSignals} onChange={(e) => setIcpSignals(e.target.value)} placeholder="Comma-separated, e.g. 2+ locations, 5+ staff" />
-        <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">
-          Configurable per product — never a hardcoded rule. Used only to qualify prospects with real evidence; a
-          prospect the platform can't back with evidence is reported as insufficient-data, never guessed.
-        </span>
-      </label>
+      <Field label="ICP qualification signals" value={icpSignals} onChange={(e) => setIcpSignals(e.target.value)}
+        placeholder="Comma-separated, e.g. 2+ locations, 5+ staff"
+        hint="Configurable per product — never a hardcoded rule. Used only to qualify prospects with real evidence; a prospect the platform can't back with evidence is reported as insufficient-data, never guessed." />
 
-      <label className="block">
-        <span className={labelCls}>Competitor signal phrases</span>
-        <input className={inputCls} value={competitorSignals} onChange={(e) => setCompetitorSignals(e.target.value)} placeholder="Comma-separated, e.g. booking software, salon management platform" />
-        <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">
-          Language a same-category seller would use about itself. When a "see it live" trial signup's own real
-          homepage contains one of these — or matches an already-tracked real competitor's domain — it's flagged as
-          a competitor suspect on the Demand page, never auto-blocked.
-        </span>
-      </label>
+      <Field label="Competitor signal phrases" value={competitorSignals} onChange={(e) => setCompetitorSignals(e.target.value)}
+        placeholder="Comma-separated, e.g. booking software, salon management platform"
+        hint={'Language a same-category seller would use about itself. When a "see it live" trial signup\'s own real homepage contains one of these — or matches an already-tracked real competitor\'s domain — it\'s flagged as a competitor suspect on the Demand page, never auto-blocked.'} />
 
-      <label className="flex items-center gap-2.5 cursor-pointer">
-        <input type="checkbox" checked={outreachEnabled} onChange={(e) => setOutreachEnabled(e.target.checked)}
-          className="w-4 h-4 rounded border-slate-300 text-[#6C63FF] focus:ring-[#6C63FF]/20" />
-        <span className="text-xs font-bold text-slate-700">Outreach handoff enabled</span>
-      </label>
-      <p className="text-[9.5px] font-semibold text-slate-400 -mt-2.5 ml-6">
-        Qualified prospects are sent to the external CRM for a human to review — this platform never sends outreach
-        itself.
-      </p>
+      <div>
+        <label className="flex items-center gap-2.5 cursor-pointer">
+          <input type="checkbox" checked={outreachEnabled} onChange={(e) => setOutreachEnabled(e.target.checked)}
+            className="w-4 h-4 rounded accent-[var(--primary)]" />
+          <span className="text-[13px] font-medium text-fg">Outreach handoff enabled</span>
+        </label>
+        <p className="text-xs text-faint mt-1 ml-[26px]">
+          Qualified prospects are sent to the external CRM for a human to review — this platform never sends outreach
+          itself.
+        </p>
+      </div>
 
-      {error && <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>}
+      {error && <Notice tone="error">{error}</Notice>}
 
-      <div className="border-t border-slate-100 pt-4 space-y-4">
+      <div className="border-t border-border pt-4 space-y-4">
         <div className="flex items-center justify-between gap-3">
-          <div>
-            <span className="text-xs font-bold text-slate-700 block">Prospect discovery</span>
-            <span className="text-[9.5px] font-semibold text-slate-400">Own opt-in — real SERP-backed, evidence-gated, cron-only. Never gated on other DataForSEO features being present.</span>
+          <div className="min-w-0">
+            <span className="text-[13px] font-medium text-fg block">Prospect discovery</span>
+            <span className="text-xs text-faint">Own opt-in — real SERP-backed, evidence-gated, cron-only. Never gated on other DataForSEO features being present.</span>
           </div>
-          <button type="button" onClick={() => toggleProspectDiscovery(!prospectDiscoveryEnabled)} disabled={discoveryToggling}
-            className={`shrink-0 text-[9.5px] font-black uppercase tracking-wider px-3 py-2 rounded-lg transition disabled:opacity-60 ${
-              prospectDiscoveryEnabled ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'bg-slate-50 text-slate-500 border border-slate-200'
-            }`}>
-            {prospectDiscoveryEnabled ? 'Enabled' : 'Disabled'}
-          </button>
+          <div className="shrink-0">
+            <OnOffToggle ariaLabel="Prospect discovery" on={prospectDiscoveryEnabled} disabled={discoveryToggling}
+              offLabel="Disabled" onLabel="Enabled" onChange={toggleProspectDiscovery} />
+          </div>
         </div>
 
         <div>
-          <span className={labelCls}>CRM webhook token</span>
+          <span className="text-xs font-medium text-fg block mb-1.5">CRM webhook token</span>
           {crmToken ? (
-            <div className={`${inputMonoCls} select-all`}>{crmToken}</div>
+            <div className="rounded-control bg-muted px-3 py-2 font-mono text-xs text-fg break-all select-all">{crmToken}</div>
           ) : (
-            <button type="button" onClick={issueCrmToken} disabled={issuingToken}
-              className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition disabled:opacity-60">
+            <Button variant="light" onClick={issueCrmToken} disabled={issuingToken}>
               {issuingToken ? 'Generating…' : 'Generate CRM Token'}
-            </button>
+            </Button>
           )}
-          <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">
+          <span className="block text-xs text-faint mt-1.5">
             Give this to the external CRM: <code>GET /api/crm/export</code> to pull staff-approved prospects,
             <code> POST /api/crm/webhook</code> to report real outcome status back, both authenticated with
             <code> Authorization: Bearer &lt;token&gt;</code>.
@@ -958,11 +902,9 @@ function ProductGrowthTab({ client }) {
         </div>
       </div>
 
-      <button type="submit" disabled={saving}
-        className="text-[10px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60 shadow-md shadow-indigo-500/10"
-        style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
+      <Button type="submit" variant="primary" disabled={saving}>
         {saving ? 'Saving…' : 'Save Product Growth Config'}
-      </button>
+      </Button>
     </form>
   );
 }
@@ -1061,77 +1003,50 @@ function GoalForm({ clientId, initial, onCancel, onSubmit, submitLabel }) {
   };
 
   return (
-    <form onSubmit={submit} className="space-y-3 bg-slate-50/60 border border-slate-100 rounded-xl p-4">
-      <label className="block">
-        <span className={labelCls}>Goal type</span>
-        <select className={inputCls} value={form.goalType} onChange={set('goalType')}>
-          {GOAL_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-        </select>
-      </label>
+    <form onSubmit={submit} className="space-y-3 rounded-card bg-[#fcfcfb] p-4" style={ringStyle}>
+      <Select label="Goal type" value={form.goalType} onChange={set('goalType')}>
+        {GOAL_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+      </Select>
 
       {form.goalType === 'custom' && (
-        <div className="bg-white border border-indigo-100 rounded-xl p-3 space-y-2">
-          <span className={labelCls}>Describe the goal in your own words</span>
-          <textarea className={`${inputCls} min-h-16 resize-y`} value={customDescription}
+        <div className="rounded-control bg-white p-3 space-y-2" style={ringStyle}>
+          <Field as="textarea" label="Describe the goal in your own words" value={customDescription}
             onChange={(e) => setCustomDescription(e.target.value)}
             placeholder="e.g. We want more small teams finding us for our new team-scheduling feature" />
-          {proposeError && <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-lg px-2.5 py-1.5">{proposeError}</div>}
-          <button type="button" onClick={suggestStructure} disabled={proposing}
-            className="text-[10px] font-black uppercase tracking-wider px-3.5 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 transition disabled:opacity-60">
+          {proposeError && <Notice tone="error">{proposeError}</Notice>}
+          <Button variant="light" size="sm" onClick={suggestStructure} disabled={proposing}>
             {proposing ? 'Suggesting…' : 'Suggest structure with AI'}
-          </button>
+          </Button>
           {proposed && (
-            <p className="text-[9.5px] font-semibold text-indigo-500">
+            <p className="text-xs text-faint">
               AI-suggested below — review and edit before saving.
             </p>
           )}
         </div>
       )}
 
-      <label className="block">
-        <span className={labelCls}>Objective</span>
-        <input className={inputCls} value={form.objective} onChange={set('objective')}
-          placeholder="e.g. Grow qualified demo bookings from organic search 20% this quarter" />
-      </label>
+      <Field label="Objective" value={form.objective} onChange={set('objective')}
+        placeholder="e.g. Grow qualified demo bookings from organic search 20% this quarter" />
 
-      <div className="grid grid-cols-2 gap-3">
-        <label className="block">
-          <span className={labelCls}>Target business area</span>
-          <input className={inputCls} value={form.targetBusinessArea} onChange={set('targetBusinessArea')} placeholder="e.g. Pricing, Onboarding" />
-        </label>
-        <label className="block">
-          <span className={labelCls}>Primary metric</span>
-          <input className={inputCls} value={form.primaryMetric} onChange={set('primaryMetric')} placeholder="e.g. booked_demo conversions" />
-        </label>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Target business area" value={form.targetBusinessArea} onChange={set('targetBusinessArea')} placeholder="e.g. Pricing, Onboarding" />
+        <Field label="Primary metric" value={form.primaryMetric} onChange={set('primaryMetric')} placeholder="e.g. booked_demo conversions" />
       </div>
 
-      <label className="block">
-        <span className={labelCls}>Target page patterns</span>
-        <input className={inputCls} value={form.targetPagePatterns} onChange={set('targetPagePatterns')} placeholder="Comma-separated, e.g. /pricing, /blog/*" />
-      </label>
+      <Field label="Target page patterns" value={form.targetPagePatterns} onChange={set('targetPagePatterns')} placeholder="Comma-separated, e.g. /pricing, /blog/*" />
 
-      <label className="block">
-        <span className={labelCls}>Description</span>
-        <input className={inputCls} value={form.description} onChange={set('description')} placeholder="Optional context for how findings should be judged against this goal" />
-      </label>
+      <Field label="Description" value={form.description} onChange={set('description')} placeholder="Optional context for how findings should be judged against this goal" />
 
-      <label className="block w-28">
-        <span className={labelCls}>Importance</span>
-        <input type="number" min="1" className={inputCls} value={form.importance} onChange={set('importance')} />
-        <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">Lower number = higher priority on ties.</span>
-      </label>
+      <Field className="sm:max-w-[260px]" label="Importance" type="number" min="1" value={form.importance} onChange={set('importance')}
+        hint="Lower number = higher priority on ties." />
 
-      {error && <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>}
+      {error && <Notice tone="error">{error}</Notice>}
 
       <div className="flex items-center gap-2 pt-1">
-        <button type="submit" disabled={saving}
-          className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60 shadow-md shadow-indigo-500/10"
-          style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
+        <Button type="submit" variant="primary" disabled={saving}>
           {saving ? 'Saving…' : submitLabel}
-        </button>
-        <button type="button" onClick={onCancel} className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition">
-          Cancel
-        </button>
+        </Button>
+        <Button variant="light" onClick={onCancel}>Cancel</Button>
       </div>
     </form>
   );
@@ -1164,37 +1079,26 @@ function ProductGoalProgress({ clientId }) {
   ] : [];
 
   return (
-    <div className="border border-slate-100 rounded-xl p-3.5 space-y-3">
+    <div className="rounded-card p-4 space-y-3" style={ringStyle}>
       <div className="flex items-center justify-between gap-3">
-        <span className="text-[9.5px] font-black uppercase tracking-wider text-slate-500">Goal progress</span>
-        <div className="flex items-center gap-1">
-          {PROGRESS_WINDOWS.map((d) => (
-            <button
-              key={d}
-              type="button"
-              onClick={() => setDays(d)}
-              className={`text-[9.5px] font-black uppercase tracking-wider px-2 py-1 rounded-lg transition ${days === d ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-50 text-slate-400 hover:bg-slate-100'}`}
-            >
-              {d}d
-            </button>
-          ))}
-        </div>
+        <span className="text-[13px] font-medium text-fg">Goal progress</span>
+        <SegmentedTabs options={PROGRESS_WINDOWS.map((d) => ({ value: d, label: `${d}d` }))} value={days} onChange={setDays} />
       </div>
 
-      {loading && <p className="text-xs text-slate-400 font-semibold">Loading…</p>}
-      {error && <p className="text-xs font-semibold text-rose-700">{error}</p>}
+      {loading && <p className="text-[13px] text-faint">Loading…</p>}
+      {error && <p className="text-[13px] text-[#b42318]">{error}</p>}
 
       {funnel && (
         <>
           {funnel.headline ? (
             <div>
-              <p className="text-2xl font-black text-slate-800 leading-none">{funnel.headline.value}</p>
-              <p className="text-[10.5px] font-semibold text-slate-400 mt-1">
+              <p className="text-[24px] font-medium tracking-[-0.02em] text-fg leading-none tnum">{funnel.headline.value}</p>
+              <p className="text-xs text-faint mt-1.5">
                 {funnel.headline.label} · last {funnel.windowDays} days · conversion event: {funnel.conversionEvent}
               </p>
             </div>
           ) : (
-            <p className="text-[10.5px] font-semibold text-slate-400">
+            <p className="text-xs text-faint">
               {funnel.conversionEvent
                 ? `"${funnel.conversionEvent}" doesn't match a tracked funnel stage, so no single headline is shown.`
                 : 'Set a conversion event in the Product Growth tab to see a headline number.'}
@@ -1202,18 +1106,18 @@ function ProductGoalProgress({ clientId }) {
           )}
           <div className="grid grid-cols-3 gap-2">
             {stats.map((st) => (
-              <div key={st.label} className="rounded-lg bg-slate-50 px-3 py-2">
-                <p className="text-sm font-black text-slate-700">{st.value}</p>
-                <p className="text-[9.5px] font-semibold text-slate-400">{st.label}</p>
+              <div key={st.label} className="rounded-control bg-muted px-3 py-2">
+                <p className="text-[15px] font-medium text-fg tnum">{st.value}</p>
+                <p className="text-xs text-faint">{st.label}</p>
               </div>
             ))}
           </div>
           {funnel.counts.competitorSuspectSignups > 0 && (
-            <p className="text-[10px] font-semibold text-slate-400">
+            <p className="text-xs text-faint">
               {funnel.counts.competitorSuspectSignups} signup{funnel.counts.competitorSuspectSignups === 1 ? '' : 's'} flagged as likely competitors — not counted above.
             </p>
           )}
-          <p className="text-[9.5px] font-semibold text-slate-300">
+          <p className="text-xs text-faint-2">
             From the CRM pipeline and trial signups. Website-side events (visits, form views) are not included yet.
           </p>
         </>
@@ -1242,11 +1146,11 @@ function GoalsTab({ client }) {
     }
   };
 
-  if (goals === null) return <p className="text-xs text-slate-400 font-semibold py-4">Loading…</p>;
+  if (goals === null) return <p className="text-[13px] text-faint py-4">Loading…</p>;
 
   return (
     <div className="space-y-4">
-      <p className="text-[10.5px] font-semibold text-slate-400 leading-relaxed">
+      <p className="text-xs leading-5 text-faint">
         Business goals let the decision engine weigh findings against what this client actually cares about right
         now, instead of treating every recommendation as equally important. A goal only affects prioritization — it
         never blocks or forces a decision on its own.
@@ -1254,15 +1158,15 @@ function GoalsTab({ client }) {
 
       {client.propertyType === 'product' && <ProductGoalProgress clientId={client.id} />}
 
-      {error && <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>}
+      {error && <Notice tone="error">{error}</Notice>}
 
       {goals.length === 0 && !adding && (
-        <p className="text-xs text-slate-400 font-semibold py-2">No goals set yet.</p>
+        <p className="text-[13px] text-faint py-2">No goals set yet.</p>
       )}
 
       <div className="space-y-2">
         {goals.map((g) => (
-          <div key={g.id} className="border border-slate-100 rounded-xl p-3.5">
+          <div key={g.id} className={editingId === g.id ? '' : 'rounded-card p-4'} style={editingId === g.id ? undefined : ringStyle}>
             {editingId === g.id ? (
               <GoalForm
                 clientId={client.id}
@@ -1278,17 +1182,15 @@ function GoalsTab({ client }) {
             ) : (
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[9.5px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700">{g.goalType}</span>
-                    <span className={`text-[9.5px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${g.status === 'active' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
-                      {g.status}
-                    </span>
-                    <span className="text-[9.5px] font-semibold text-slate-400">priority {g.importance}</span>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <Badge tone="primary">{g.goalType}</Badge>
+                    <Badge tone={g.status === 'active' ? 'green' : 'grey'}>{g.status}</Badge>
+                    <span className="text-xs text-faint">priority {g.importance}</span>
                   </div>
-                  <p className="text-xs font-bold text-slate-700 mt-1.5">{g.objective}</p>
-                  {g.description && <p className="text-[10.5px] font-semibold text-slate-400 mt-1">{g.description}</p>}
+                  <p className="text-[13px] font-medium text-fg mt-2">{g.objective}</p>
+                  {g.description && <p className="text-xs text-text mt-1">{g.description}</p>}
                   {(g.targetPagePatterns?.length > 0 || g.primaryMetric) && (
-                    <p className="text-[9.5px] font-semibold text-slate-400 mt-1">
+                    <p className="text-xs text-faint mt-1">
                       {g.primaryMetric && <>metric: {g.primaryMetric}</>}
                       {g.primaryMetric && g.targetPagePatterns?.length > 0 && ' · '}
                       {g.targetPagePatterns?.length > 0 && <>pages: {g.targetPagePatterns.join(', ')}</>}
@@ -1296,12 +1198,10 @@ function GoalsTab({ client }) {
                   )}
                 </div>
                 <div className="flex flex-col items-end gap-1.5 shrink-0">
-                  <button type="button" onClick={() => setEditingId(g.id)} className="text-[9.5px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-600 transition">
-                    Edit
-                  </button>
-                  <button type="button" onClick={() => toggleStatus(g)} className="text-[9.5px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-600 transition">
+                  <Button variant="light" size="sm" onClick={() => setEditingId(g.id)}>Edit</Button>
+                  <Button variant="light" size="sm" onClick={() => toggleStatus(g)}>
                     {g.status === 'active' ? 'Pause' : 'Activate'}
-                  </button>
+                  </Button>
                 </div>
               </div>
             )}
@@ -1322,10 +1222,9 @@ function GoalsTab({ client }) {
           }}
         />
       ) : (
-        <button type="button" onClick={() => setAdding(true)}
-          className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition">
-          + Add Goal
-        </button>
+        <Button variant="light" onClick={() => setAdding(true)}>
+          <Plus size={14} />Add Goal
+        </Button>
       )}
     </div>
   );

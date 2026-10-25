@@ -11,7 +11,21 @@ import AnalystGrowKeyword from '../components/AnalystGrowKeyword.jsx';
 import AnalystChatDrawer from '../components/AnalystChatDrawer.jsx';
 import AnalystSkeletonLoader from '../components/AnalystSkeletonLoader.jsx';
 import AnalystEmptyState from '../components/AnalystEmptyState.jsx';
-import { Activity, AlertTriangle } from 'lucide-react';
+import PageToolbar from '../components/PageToolbar.jsx';
+import PageIntro from '../components/layout/PageIntro.jsx';
+import Button from '../components/Button.jsx';
+import { STATUS } from '../lib/palette.js';
+import UnderlineTabs from '../components/settings/UnderlineTabs.jsx';
+import { Activity, AlertTriangle, Gauge, Lightbulb, BookOpen } from 'lucide-react';
+
+// The page is split into three tabs so the first screen is the decision, not a
+// 4,000px scroll: Overview (briefing, outlook, what needs attention),
+// Opportunities (where to grow) and Evidence (reference the AI cites).
+const TABS = [
+  { key: 'overview', label: 'Overview', icon: Gauge },
+  { key: 'opportunities', label: 'Opportunities', icon: Lightbulb },
+  { key: 'evidence', label: 'Evidence', icon: BookOpen },
+];
 
 // The page reads top-to-bottom as one AI decision flow, future first:
 //
@@ -70,6 +84,13 @@ function AnalystBody({ clientId }) {
   // just showing the same generic "nothing here yet" every under-provisioned
   // client sees, indistinguishable from "connected but genuinely quiet."
   const [gscConnected, setGscConnected] = useState(null);
+  const [tab, setTab] = useState(() => {
+    try { const t = new URLSearchParams(window.location.search).get('tab'); return TABS.some((x) => x.key === t) ? t : 'overview'; } catch { return 'overview'; }
+  });
+  const changeTab = (t) => {
+    setTab(t);
+    try { const u = new URL(window.location.href); u.searchParams.set('tab', t); window.history.replaceState(null, '', u); } catch { /* url sync is a convenience */ }
+  };
 
   // Only the newest request may commit its result — switching clients quickly
   // otherwise lets a slower earlier response overwrite the current one.
@@ -102,64 +123,66 @@ function AnalystBody({ clientId }) {
 
   if (error) {
     return (
-      <div className="an-panel p-5 border-rose-500/30 bg-rose-500/[0.06] text-rose-600 font-semibold text-xs flex items-center justify-between gap-3">
+      <div className="rounded-card px-4 py-3 text-[13px] flex items-center justify-between gap-3"
+        style={{ background: STATUS.critical.tint, color: STATUS.critical.text }}>
         <div className="flex items-center gap-2 min-w-0">
           <AlertTriangle size={16} className="shrink-0" />
           <span>{error}</span>
         </div>
-        <button
-          type="button"
-          onClick={() => { setError(null); load(); }}
-          className="px-3 py-1 rounded-xl bg-slate-100 border border-rose-400/30 text-rose-600 text-xs font-bold hover:bg-slate-200 transition shrink-0 cursor-pointer"
-        >
+        <Button variant="light" size="sm" className="shrink-0" onClick={() => { setError(null); load(); }}>
           Retry
-        </button>
+        </Button>
       </div>
     );
   }
 
   return (
-    <div className="space-y-5">
-      <AnalystBriefing clientId={clientId} />
+    <div>
+      <UnderlineTabs tabs={TABS} value={tab} onChange={changeTab} />
 
-      {gscConnected === false && (
-        <div className="an-panel p-4 border-amber-300/50 bg-amber-50/60 text-amber-800 text-xs font-semibold flex items-center gap-2">
-          <AlertTriangle size={14} className="shrink-0" />
-          <span>Search Console isn't connected for this client — Growth Opportunities, Topic Map, and Keyword Opportunities below will stay empty until it is.</span>
-        </div>
-      )}
+      <div className="space-y-3 mt-4">
+        {gscConnected === false && tab !== 'overview' && (
+          <div className="rounded-card px-4 py-3 text-[13px] flex items-center gap-2"
+            style={{ background: STATUS.warning.tint, color: STATUS.warning.text }}>
+            <AlertTriangle size={14} className="shrink-0" />
+            <span>Search Console isn't connected for this client — Growth Opportunities, Topic Map, and Keyword Opportunities will stay empty until it is.</span>
+          </div>
+        )}
 
-      {dashboard === null ? (
-        <AnalystSkeletonLoader variant="card" />
-      ) : (
-        <AnalystGrowthOutlook clientId={clientId} dashboard={dashboard} />
-      )}
+        {tab === 'overview' && (
+          <>
+            <AnalystBriefing clientId={clientId} />
+            {dashboard === null ? (
+              <AnalystSkeletonLoader variant="card" />
+            ) : (
+              <AnalystGrowthOutlook clientId={clientId} dashboard={dashboard} />
+            )}
+            {dashboard === null ? (
+              <AnalystSkeletonLoader variant="card" />
+            ) : (
+              <AnalystMetricIntelligence clientId={clientId} dashboard={dashboard} onChanged={load} />
+            )}
+          </>
+        )}
 
-      {dashboard === null ? (
-        <AnalystSkeletonLoader variant="card" />
-      ) : (
-        <AnalystMetricIntelligence clientId={clientId} dashboard={dashboard} onChanged={load} />
-      )}
+        {tab === 'opportunities' && (
+          <>
+            <AnalystGrowthOpportunities clientId={clientId} />
+            <AnalystKeywordOpportunities clientId={clientId} refreshToken={keywordRefreshToken} />
+            <AnalystGrowKeyword
+              clientId={clientId}
+              onKeywordQueued={() => setKeywordRefreshToken((n) => n + 1)}
+            />
+          </>
+        )}
 
-      <AnalystGrowthOpportunities clientId={clientId} />
-
-      <AnalystKeywordOpportunities clientId={clientId} refreshToken={keywordRefreshToken} />
-
-      <AnalystGrowKeyword
-        clientId={clientId}
-        onKeywordQueued={() => setKeywordRefreshToken((n) => n + 1)}
-      />
-
-      {/* Evidence — context an AI decision above can cite, never a decision
-          in its own right. Both start collapsed (see each component's own
-          `expanded` state), so they sit last and stay quiet until opened. */}
-      <div className="space-y-2.5">
-        <div className="flex items-center gap-2 px-1">
-          <span className="an-label">Evidence</span>
-          <span className="text-[10.5px] font-medium text-slate-400">What the site sells, and how discovered keywords relate to it</span>
-        </div>
-        <AnalystProductCapabilities clientId={clientId} />
-        <AnalystTopicMap clientId={clientId} />
+        {tab === 'evidence' && (
+          <>
+            <p className="px-1 text-xs text-faint">What the site sells, and how discovered keywords relate to it</p>
+            <AnalystProductCapabilities clientId={clientId} />
+            <AnalystTopicMap clientId={clientId} />
+          </>
+        )}
       </div>
 
       <AnalystChatDrawer clientId={clientId} dashboard={dashboard} />
@@ -182,58 +205,38 @@ export default function Analyst() {
   }, []);
 
   return (
-    <div className="analyst-root min-h-screen">
-      <div
-        className="fixed inset-0 pointer-events-none -z-10"
-        style={{
-          background:
-            'radial-gradient(900px 420px at 8% -5%, rgba(108,99,255,0.10), transparent 55%),' +
-            'radial-gradient(700px 380px at 95% -8%, rgba(6,182,212,0.07), transparent 55%),' +
-            'linear-gradient(180deg,#f7f8fc 0%,#eef1f6 55%,#f7f8fc 100%)',
-        }}
-      />
+    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12 fade-up">
+      {clients?.length > 0 && (
+        <PageToolbar>
+          <label className="flex items-center gap-2 text-[13px] text-text w-full md:w-auto">
+            <span className="shrink-0">Client</span>
+            <select
+              value={clientId ?? ''}
+              onChange={(e) => setClientId(Number(e.target.value))}
+              className="h-8 flex-1 md:flex-none min-w-0 rounded-control bg-white text-[13px] text-fg px-2.5 outline-none cursor-pointer"
+              style={{ boxShadow: '0 0 0 1px var(--input)' }}
+            >
+              {clients.map((c) => (
+                <option key={c.id} value={c.id}>{c.name || c.domain || `Client #${c.id}`}</option>
+              ))}
+            </select>
+          </label>
+        </PageToolbar>
+      )}
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-5">
-        <div className="flex items-center justify-between gap-4 flex-wrap">
-          <div>
-            <h1 className="text-lg font-black text-slate-900 tracking-tight">Analyst</h1>
-            <p className="text-xs font-medium text-slate-500 mt-0.5">
-              What's growing, what's about to change, and where this site can grow next
-            </p>
-          </div>
+      <PageIntro title="Analyst" subtitle="What's growing, what's about to change, and where this site can grow next" />
 
-          {clients?.length > 0 && (
-            <label className="flex items-center gap-2">
-              <span className="an-label">Client</span>
-              <select
-                value={clientId ?? ''}
-                onChange={(e) => setClientId(Number(e.target.value))}
-                className="an-input text-xs font-bold py-2 pr-8 cursor-pointer"
-              >
-                {clients.map((c) => (
-                  <option key={c.id} value={c.id}>{c.name || c.domain || `Client #${c.id}`}</option>
-                ))}
-              </select>
-            </label>
-          )}
-        </div>
-
-        {clients === null ? (
-          <div className="py-12">
-            <AnalystSkeletonLoader variant="hero" />
-          </div>
-        ) : clients.length === 0 ? (
-          <div className="py-12">
-            <AnalystEmptyState
-              icon={Activity}
-              title="No Active Clients Onboarded"
-              description="Onboard your first site in Platform Administration to start tracking keywords and forecasts."
-            />
-          </div>
-        ) : clientId ? (
-          <AnalystBody key={clientId} clientId={clientId} />
-        ) : null}
-      </div>
+      {clients === null ? (
+        <AnalystSkeletonLoader variant="hero" />
+      ) : clients.length === 0 ? (
+        <AnalystEmptyState
+          icon={Activity}
+          title="No Active Clients Onboarded"
+          description="Onboard your first site in Platform Administration to start tracking keywords and forecasts."
+        />
+      ) : clientId ? (
+        <AnalystBody key={clientId} clientId={clientId} />
+      ) : null}
     </div>
   );
 }

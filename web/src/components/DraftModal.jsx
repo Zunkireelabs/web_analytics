@@ -1,26 +1,34 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../api.js';
 import DraftPreview from './DraftPreview.jsx';
-import { 
-  FileText, 
-  GitBranch, 
-  Check, 
-  AlertTriangle, 
-  Trash2, 
-  Copy, 
-  Edit3, 
-  Sparkles, 
-  X, 
+import Button from './Button.jsx';
+import Badge from './Badge.jsx';
+import {
+  GitBranch,
+  Check,
+  AlertTriangle,
+  Trash2,
+  Copy,
+  Edit3,
+  Sparkles,
+  X,
   ExternalLink,
   Save,
   Undo,
   RotateCcw,
-  ChevronDown,
-  ChevronUp,
-  ShieldCheck,
-  ShieldAlert,
-  ShieldQuestion
 } from 'lucide-react';
+import { STATUS } from '../lib/palette.js';
+
+// Callout styles shared by every banner/notice in the modal body.
+const CALLOUT = 'mx-5 mt-4 rounded-control px-3.5 py-3 text-[13px]';
+const CALLOUT_TONE = {
+  error: 'bg-[#fdecec] text-[#b42318]',
+  warning: 'bg-[#fdf3e1] text-[#8a5300]',
+  info: 'bg-muted text-text',
+  success: 'bg-[#e8f7ee] text-[#1a7f4b]',
+};
+const LINK = 'font-medium underline underline-offset-2';
 
 const ACTION_LABELS = {
   'meta-title': 'Meta Title & Description', faq: 'FAQ', schema: 'Schema Markup',
@@ -35,35 +43,6 @@ const ACTION_LABELS = {
   'cookie-policy': 'Cookie Policy', 'privacy-policy': 'Privacy Policy', 'terms-of-service': 'Terms of Service',
   'duplicate-id-fix': 'Duplicate ID Fix Plan', breadcrumbs: 'Breadcrumbs Schema',
   'schema-repair': 'Structured Data Repair', 'alt-text': 'Image Alt Text',
-};
-
-const GENERATOR_COLORS = {
-  'meta-title': '#6C63FF',
-  faq: '#0ea5e9',
-  schema: '#8b5cf6',
-  'internal-links': '#14b8a6',
-  'blog-outline': '#ec4899',
-  'landing-page': '#c2410c',
-  translation: '#06b6d4',
-  'llms-txt': '#10b981',
-  'security-headers': '#ef4444',
-  'html-lang': '#0891b2',
-  viewport: '#0d9488',
-  canonical: '#7c3aed',
-  'robots-fix': '#059669',
-  'open-graph': '#db2777',
-  'broken-link-fix': '#dc2626',
-  'redirect-fix': '#d97706',
-  'expand-content': '#4f46e5',
-  sitemap: '#65a30d',
-  'geo-audit': '#0ea5e9',
-  'cookie-policy': '#f59e0b',
-  'privacy-policy': '#d97706',
-  'terms-of-service': '#b45309',
-  'duplicate-id-fix': '#f97316',
-  breadcrumbs: '#84cc16',
-  'schema-repair': '#a855f7',
-  'alt-text': '#f472b6',
 };
 
 // Must match server/store/drafts.js's MERGE_MANDATORY_TYPES EXACTLY — every
@@ -110,15 +89,16 @@ const ADVISORY_ONLY_TYPES = ['geo-audit'];
 // guaranteed, and the manual fallback stays available for the refusals.
 const PARTIAL_AUTO_APPLY_TYPES = ['duplicate-id-fix'];
 
+// label + Badge tone for the header status pill.
 const STATUS_INFO = {
-  draft: { label: 'Draft · never published', color: '#6366f1', bg: '#6366f10c', border: '#6366f120' },
-  edited: { label: 'Edited draft · never published', color: '#f59e0b', bg: '#f59e0b0c', border: '#f59e0b20' },
-  submitted_for_approval: { label: 'Submitted for approval', color: '#f59e0b', bg: '#f59e0b0c', border: '#f59e0b20' },
-  approved: { label: 'Approved · not yet live', color: '#059669', bg: '#0596690c', border: '#05966920' },
-  branch_pushed: { label: 'Branch pushed · review before opening PR', color: '#7c3aed', bg: '#7c3aed0c', border: '#7c3aed20' },
-  merged_to_stage: { label: 'Merged to stage', color: '#2563eb', bg: '#2563eb0c', border: '#2563eb20' },
-  pr_opened: { label: 'PR opened · review & merge on GitHub', color: '#2563eb', bg: '#2563eb0c', border: '#2563eb20' },
-  implemented: { label: 'Implemented · live on main', color: '#16a34a', bg: '#16a34a0c', border: '#16a34a20' },
+  draft: { label: 'Draft · never published', tone: 'grey' },
+  edited: { label: 'Edited draft · never published', tone: 'grey' },
+  submitted_for_approval: { label: 'Submitted for approval', tone: 'amber' },
+  approved: { label: 'Approved · not yet live', tone: 'green' },
+  branch_pushed: { label: 'Branch pushed · review before opening PR', tone: 'outline' },
+  merged_to_stage: { label: 'Merged to stage', tone: 'green' },
+  pr_opened: { label: 'PR opened · review & merge on GitHub', tone: 'outline' },
+  implemented: { label: 'Implemented · live on main', tone: 'green' },
 };
 
 // The Approval Gate's persisted validation_status (server/routes/lib/
@@ -141,24 +121,18 @@ function ValidationBadge({ checkKey, check }) {
   const label = VALIDATION_LABELS[checkKey] || checkKey;
   if (check.ok === true) {
     return (
-      <span className="text-[10px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
-        <ShieldCheck size={11} /> {label}
-      </span>
+      <Badge tone="outline"><Check size={12} strokeWidth={2.5} style={{ color: STATUS.good.color }} /> {label}</Badge>
     );
   }
   if (check.ok === false) {
     return (
-      <span className="text-[10px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200 flex items-center gap-1">
-        <ShieldAlert size={11} /> {label}
-      </span>
+      <Badge tone="outline"><X size={12} strokeWidth={2.5} style={{ color: STATUS.critical.color }} /> {label}</Badge>
     );
   }
   // ok === null/undefined — not yet known (clientBuild before a PR exists,
   // or before this repo has the CI workflow installed).
   return (
-    <span className="text-[10px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full bg-slate-50 text-slate-500 border border-slate-200 flex items-center gap-1">
-      <ShieldQuestion size={11} /> {label}
-    </span>
+    <Badge tone="outline"><AlertTriangle size={12} style={{ color: STATUS.warning.color }} /> {label}</Badge>
   );
 }
 
@@ -180,30 +154,28 @@ function ValidationStatusBanner({ draft }) {
   const allPassing = checks.every((k) => v[k].ok === true);
 
   return (
-    <div className={`px-6 py-3 border-b border-slate-100 text-xs leading-relaxed ${failing ? 'bg-rose-50' : pending ? 'bg-slate-50' : 'bg-emerald-50/40'}`}>
-      <div className="flex items-center gap-2 flex-wrap">
-        {checks.map((k) => <ValidationBadge key={k} checkKey={k} check={v[k]} />)}
-      </div>
+    <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-border text-[13px]">
+      {checks.map((k) => <ValidationBadge key={k} checkKey={k} check={v[k]} />)}
       {failing && (
-        <div className="flex items-start gap-2 mt-2 text-rose-700">
-          <AlertTriangle size={13} className="shrink-0 mt-0.5" />
-          <span><span className="font-extrabold">{VALIDATION_LABELS[failing]} failed:</span> {v[failing].error || 'validation failed'}</span>
+        <div className="w-full flex items-start gap-2" style={{ color: '#b42318' }}>
+          <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+          <span><span className="font-medium">{VALIDATION_LABELS[failing]} failed:</span> {v[failing].error || 'validation failed'}</span>
         </div>
       )}
       {v.clientBuild?.mergedDespiteNotPassing && (
-        <div className="flex items-start gap-2 mt-2 text-amber-700">
-          <AlertTriangle size={13} className="shrink-0 mt-0.5" />
-          <span><span className="font-extrabold">Merged despite a non-passing build check</span> — this was merged on GitHub before (or without) the rendering-validation check passing. Check the live page.</span>
+        <div className="w-full flex items-start gap-2" style={{ color: '#8a5300' }}>
+          <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+          <span><span className="font-medium">Merged despite a non-passing build check</span> — this was merged on GitHub before (or without) the rendering-validation check passing. Check the live page.</span>
         </div>
       )}
       {v.clientBuild?.checksUrl && (v.clientBuild.ok !== true || v.clientBuild.mergedDespiteNotPassing) && (
-        <a href={v.clientBuild.checksUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 mt-2 font-bold text-indigo-600 hover:underline">
-          View client CI logs <ExternalLink size={11} />
+        <a href={v.clientBuild.checksUrl} target="_blank" rel="noopener noreferrer" className="w-full inline-flex items-center gap-1 text-primary font-medium hover:underline">
+          View client CI logs <ExternalLink size={12} />
         </a>
       )}
       {allPassing && !v.clientBuild?.mergedDespiteNotPassing && (
-        <div className="flex items-center gap-1.5 mt-2 text-emerald-700 font-bold">
-          <Check size={12} strokeWidth={3} /> All checked validations passing.
+        <div className="w-full flex items-center gap-1.5" style={{ color: '#1a7f4b' }}>
+          <Check size={14} strokeWidth={2.5} /> All checked validations passing.
         </div>
       )}
     </div>
@@ -216,7 +188,7 @@ function ValidationStatusBanner({ draft }) {
 function MatchedViaCaption({ matchedVia, matchedFrom }) {
   if (!matchedVia) return null;
   return (
-    <p className="text-[10px] text-slate-400 italic mt-1">
+    <p className="text-xs text-faint px-3 py-2 border-b border-border">
       {matchedVia === 'code-search'
         ? 'Found via GitHub code search — not in url_file_map, review carefully before merging.'
         : `Found on source page: ${matchedFrom}`}
@@ -224,16 +196,17 @@ function MatchedViaCaption({ matchedVia, matchedFrom }) {
   );
 }
 
+const DIFF_RING = { boxShadow: 'inset 0 0 0 1px var(--border-2)' };
+const DIFF_LINES = 'font-mono text-xs leading-5 px-3 py-2 whitespace-pre-wrap max-h-48 overflow-y-auto custom-scrollbar';
+
 function FileDiffBlock({ filePath, renderMode, live, changedRegions, oldContent, newContent, matchedVia, matchedFrom }) {
   const header = (
-    <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-extrabold uppercase tracking-wide flex-wrap">
-      <GitBranch size={12} />
+    <div className="flex items-center gap-2 flex-wrap px-3 py-2 bg-[#fcfcfb] border-b border-border font-mono text-xs text-text">
+      <GitBranch size={12} className="text-faint" />
       <span>Target:</span>
-      <code className="font-mono text-slate-600 bg-slate-100 rounded px-1.5 py-0.5">{filePath}</code>
+      <code className="font-mono text-fg break-all">{filePath}</code>
       {renderMode === 'schema-only' && (
-        <span className="ml-1 px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 border border-indigo-100 normal-case tracking-normal font-bold">
-          Schema only — visible page content unchanged
-        </span>
+        <Badge tone="outline" className="font-sans">Schema only — visible page content unchanged</Badge>
       )}
     </div>
   );
@@ -244,21 +217,21 @@ function FileDiffBlock({ filePath, renderMode, live, changedRegions, oldContent,
   // before/after.
   if (live) {
     return (
-      <div className="mt-4 space-y-4 animate-slide-down">
+      <div className="mt-4 rounded-control overflow-hidden animate-slide-down" style={DIFF_RING}>
         {header}
         <MatchedViaCaption matchedVia={matchedVia} matchedFrom={matchedFrom} />
         {changedRegions.map((r, i) => (
-          <div key={i} className="space-y-2 border border-slate-100 rounded-2xl overflow-hidden">
+          <div key={i} className="border-b border-border last:border-0">
             {r.field && (
-              <div className="bg-slate-50 px-4 py-2 border-b border-slate-100 text-[10px] font-black uppercase tracking-wider text-slate-450">
+              <div className="bg-[#fcfcfb] px-3 py-2 border-b border-border font-mono text-xs text-text">
                 Field: {r.field}
               </div>
             )}
-            <div className="bg-emerald-50/20 p-4">
-              <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600 mb-2 flex items-center gap-1">
-                <span>✓ Currently Live</span>
+            <div className="bg-[#e8f7ee] text-[#14532d]">
+              <p className="text-xs px-3 pt-2 flex items-center gap-1">
+                <Check size={12} strokeWidth={2.5} /> <span>Currently live</span>
               </p>
-              <pre className="text-[11px] font-mono whitespace-pre-wrap text-emerald-950/85 leading-relaxed max-h-48 overflow-y-auto custom-scrollbar">{r.content}</pre>
+              <pre className={DIFF_LINES}>{r.content}</pre>
             </div>
           </div>
         ))}
@@ -270,28 +243,24 @@ function FileDiffBlock({ filePath, renderMode, live, changedRegions, oldContent,
     ? changedRegions
     : [{ field: filePath, before: oldContent, after: newContent }];
   return (
-    <div className="mt-4 space-y-4 animate-slide-down">
+    <div className="mt-4 rounded-control overflow-hidden animate-slide-down" style={DIFF_RING}>
       {header}
       <MatchedViaCaption matchedVia={matchedVia} matchedFrom={matchedFrom} />
       {regions.map((r, i) => (
-        <div key={i} className="space-y-2 border border-slate-100 rounded-2xl overflow-hidden">
+        <div key={i} className="border-b border-border last:border-0">
           {r.field && r.field !== filePath && (
-            <div className="bg-slate-50 px-4 py-2 border-b border-slate-100 text-[10px] font-black uppercase tracking-wider text-slate-450">
+            <div className="bg-[#fcfcfb] px-3 py-2 border-b border-border font-mono text-xs text-text">
               Field: {r.field}
             </div>
           )}
-          <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-slate-100">
-            <div className="bg-rose-50/20 p-4">
-              <p className="text-[10px] font-black uppercase tracking-widest text-rose-500 mb-2 flex items-center gap-1">
-                <span>− Current Staged</span>
-              </p>
-              <pre className="text-[11px] font-mono whitespace-pre-wrap text-rose-950/80 leading-relaxed max-h-48 overflow-y-auto custom-scrollbar">{r.before || '(empty)'}</pre>
+          <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-border">
+            <div className="bg-[#fdecec] text-[#7f1d1d]">
+              <p className="text-xs px-3 pt-2">− Current staged</p>
+              <pre className={DIFF_LINES}>{r.before || '(empty)'}</pre>
             </div>
-            <div className="bg-emerald-50/20 p-4">
-              <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600 mb-2 flex items-center gap-1">
-                <span>+ Draft Proposal</span>
-              </p>
-              <pre className="text-[11px] font-mono whitespace-pre-wrap text-emerald-950/85 leading-relaxed max-h-48 overflow-y-auto custom-scrollbar">{r.after}</pre>
+            <div className="bg-[#e8f7ee] text-[#14532d]">
+              <p className="text-xs px-3 pt-2">+ Draft proposal</p>
+              <pre className={DIFF_LINES}>{r.after}</pre>
             </div>
           </div>
         </div>
@@ -331,8 +300,14 @@ export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted 
   // button is disabled (they'd just 404 too) in favor of one clear way out.
   const [draftGone, setDraftGone] = useState(false);
   const status = STATUS_INFO[draft.status] || STATUS_INFO.draft;
-  const brandColor = GENERATOR_COLORS[draft.action_type] || '#6366f1';
   const [showDiff, setShowDiff] = useState(true);
+
+  // Escape closes the modal, like the shared Modal/Drawer.
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
 
   const selectTitle = async (title) => {
     try {
@@ -505,512 +480,390 @@ export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted 
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-md flex items-center justify-center p-4" onClick={onClose}>
-      <div 
-        className="bg-white/95 backdrop-blur-md rounded-3xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col border border-slate-200/60 overflow-hidden animate-slide-up" 
+  const leftActions = draft.status !== 'implemented';
+  // Rollback only ever shows for a merged/implemented draft; the single
+  // control covers both statuses (identical conditions in each).
+  const rollbackable = draft.status === 'merged_to_stage' || draft.status === 'implemented';
+  const dangerGhost = 'text-[#b42318] hover:text-[#912018]';
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 bg-neutral-900/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div
+        className="w-full max-w-[720px] max-h-[90vh] flex flex-col bg-white rounded-card overflow-hidden"
+        style={{ boxShadow: '0 0 0 1px rgba(0,0,0,.06), 0 30px 60px -20px rgba(0,0,0,.12)' }}
+        role="dialog" aria-label="Draft"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Color stripe for branding */}
-        <div className="h-1.5 shrink-0" style={{ background: `linear-gradient(to right, ${brandColor}, ${brandColor}44)` }} />
-
         {/* Modal Header */}
-        <div className="flex items-center justify-between px-6 py-5 border-b border-slate-100 bg-slate-50/20">
-          <div className="flex items-center gap-3">
-            <span className="w-8 h-8 rounded-xl grid place-items-center text-sm shrink-0 shadow-sm border border-slate-150 bg-white"
-              style={{ color: brandColor }}>
-              <Sparkles size={14} />
-            </span>
-            <div>
-              <div className="text-[10px] font-black uppercase tracking-wider text-slate-400">
-                {ACTION_LABELS[draft.action_type] || draft.action_type}
-              </div>
-              <div 
-                className="text-xs font-black uppercase tracking-wide mt-1 px-2.5 py-0.5 rounded-full border w-fit"
-                style={{ color: status.color, backgroundColor: status.bg, borderColor: status.border }}
-              >
-                {status.label}
-              </div>
+        <div className="flex items-center gap-2.5 px-4 py-3 border-b border-border">
+          <span className="w-8 h-8 rounded-control bg-primary-tint text-primary grid place-items-center shrink-0"
+            style={{ boxShadow: 'inset 0 0 0 1px var(--primary-ring)' }}>
+            <Sparkles size={15} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium text-fg">
+              {ACTION_LABELS[draft.action_type] || draft.action_type}
             </div>
+            <Badge tone={status.tone} className="mt-1">{status.label}</Badge>
           </div>
-          <button
-            onClick={onClose}
-            className="w-10 h-10 rounded-full border border-slate-200/70 hover:border-slate-300 grid place-items-center text-slate-400 hover:text-slate-700 transition active:scale-95 shrink-0"
-            aria-label="Close modal"
-          >
-            <X size={15} />
-          </button>
+          <Button variant="ghost" size="sm" icon aria-label="Close" onClick={onClose}>
+            <X size={14} />
+          </Button>
         </div>
 
-        {/* Error/Notice banners */}
-        {draftGone && (
-          <div className="px-6 py-3 border-b border-slate-100 bg-rose-50 text-xs text-rose-700 leading-relaxed flex items-center justify-between gap-2">
-            <span className="flex items-center gap-2">
-              <AlertTriangle size={14} className="text-rose-500 shrink-0" />
-              <span><span className="font-extrabold">This draft no longer exists on the server.</span> It was likely discarded or already handled from another tab or session — this view is showing stale data. Close it and refresh the list.</span>
-            </span>
-            <button
-              type="button"
-              onClick={() => onDeleted(draft.id)}
-              className="text-[11px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-rose-600 text-white hover:bg-rose-700 transition shrink-0"
-            >
-              Close &amp; Refresh
-            </button>
-          </div>
-        )}
-        {draft.apply_error && (
-          <div className="px-6 py-3 border-b border-slate-100 bg-rose-50 text-xs text-rose-700 leading-relaxed flex items-center gap-2">
-            <AlertTriangle size={14} className="text-rose-500 shrink-0" />
-            <span><span className="font-extrabold">Deployment Attempt Failed:</span> {draft.apply_error}</span>
-          </div>
-        )}
+        {/* Modal Scrollable Content Body (banners + content) */}
+        <div className="flex-1 overflow-y-auto custom-scrollbar">
+          {/* Error/Notice banners */}
+          {draftGone && (
+            <div className={`${CALLOUT} ${CALLOUT_TONE.error} flex items-center justify-between gap-3 flex-wrap`}>
+              <span className="flex items-start gap-2">
+                <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                <span><span className="font-medium">This draft no longer exists on the server.</span> It was likely discarded or already handled from another tab or session — this view is showing stale data. Close it and refresh the list.</span>
+              </span>
+              <Button variant="light" size="sm" onClick={() => onDeleted(draft.id)}>Close &amp; refresh</Button>
+            </div>
+          )}
+          {draft.apply_error && (
+            <div className={`${CALLOUT} ${CALLOUT_TONE.error} flex items-start gap-2`}>
+              <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+              <span><span className="font-medium">Deployment attempt failed:</span> {draft.apply_error}</span>
+            </div>
+          )}
 
-        {draft.stage_merge_url && (
-          <div className="px-6 py-3 border-b border-slate-100 bg-indigo-50/30 flex items-center justify-between gap-3 text-xs">
-            <a href={draft.stage_merge_url} target="_blank" rel="noopener noreferrer" className="font-bold text-indigo-600 hover:underline flex items-center gap-1">
-              View merge commit on GitHub <ExternalLink size={12} />
-            </a>
-            <span className="font-extrabold text-emerald-600 flex items-center gap-1">
-              <Check size={12} strokeWidth={3} /> Merged to stage
-            </span>
-          </div>
-        )}
+          {draft.stage_merge_url && (
+            <div className={`${CALLOUT} ${CALLOUT_TONE.info} flex items-center justify-between gap-3`}>
+              <a href={draft.stage_merge_url} target="_blank" rel="noopener noreferrer" className={`${LINK} text-primary flex items-center gap-1`}>
+                View merge commit on GitHub <ExternalLink size={12} />
+              </a>
+              <span className="font-medium flex items-center gap-1" style={{ color: STATUS.good.text }}>
+                <Check size={12} strokeWidth={2.5} /> Merged to stage
+              </span>
+            </div>
+          )}
 
-        {draft.pr_url && (
-          <div className="px-6 py-3 border-b border-slate-100 bg-indigo-50/30 flex items-center justify-between gap-3 text-xs">
-            <a href={draft.pr_url} target="_blank" rel="noopener noreferrer" className="font-bold text-indigo-600 hover:underline flex items-center gap-1">
-              View PR on GitHub <ExternalLink size={12} />
-            </a>
-            <div className="flex items-center gap-2">
-              {draft.sibling_count > 0 && (
-                <span
-                  className="text-[10px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200"
-                  title={`This branch also contains ${draft.sibling_count} other approved draft(s) pushed today.`}
-                >
-                  Shared · +{draft.sibling_count}
-                </span>
-              )}
-              {draft.status === 'implemented' ? (
-                <span className="font-extrabold text-emerald-600 flex items-center gap-1">
-                  <Check size={12} strokeWidth={3} /> Merged to main
-                </span>
+          {draft.pr_url && (
+            <div className={`${CALLOUT} ${CALLOUT_TONE.info} flex items-center justify-between gap-3 flex-wrap`}>
+              <a href={draft.pr_url} target="_blank" rel="noopener noreferrer" className={`${LINK} text-primary flex items-center gap-1`}>
+                View PR on GitHub <ExternalLink size={12} />
+              </a>
+              <div className="flex items-center gap-2">
+                {draft.sibling_count > 0 && (
+                  <span title={`This branch also contains ${draft.sibling_count} other approved draft(s) pushed today.`}>
+                    <Badge tone="amber">Shared · +{draft.sibling_count}</Badge>
+                  </span>
+                )}
+                {draft.status === 'implemented' ? (
+                  <span className="font-medium flex items-center gap-1" style={{ color: STATUS.good.text }}>
+                    <Check size={12} strokeWidth={2.5} /> Merged to main
+                  </span>
+                ) : (
+                  <span className="font-medium" style={{ color: STATUS.warning.text }}>
+                    {draft.pr_state === 'closed' ? 'PR closed' : 'Awaiting merge'}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Real evidence from GitHub's own mergeable_state (recorded by
+              checkDraftPrStatus — manual click, webhook, or the hourly poll
+              fallback) — this is what would have caught today's incident days
+              earlier instead of only at merge time. 'dirty' is GitHub's own
+              "has real, unresolvable-by-GitHub conflicts" signal. */}
+          {draft.status === 'pr_opened' && draft.pr_mergeable_state === 'dirty' && (
+            <div className={`${CALLOUT} ${CALLOUT_TONE.error} flex items-start gap-2`}>
+              <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+              <span><span className="font-medium">This PR has conflicts:</span> its branch has diverged from the target branch and can no longer auto-merge on GitHub. Resolve the conflict there before merging.</span>
+            </div>
+          )}
+
+          <ValidationStatusBanner draft={draft} />
+
+          {draft.rolled_back_at && !rollbackPr && (
+            <div className={`${CALLOUT} ${CALLOUT_TONE.warning} flex items-start gap-2`}>
+              <Undo size={14} className="shrink-0 mt-0.5" />
+              <span><span className="font-medium">Rolled back:</span> a revert PR was opened for this draft. Its finding has reopened in Recommendations for another attempt.</span>
+            </div>
+          )}
+
+          {rollbackPr && (
+            <div className={`${CALLOUT} ${CALLOUT_TONE.info} flex items-center justify-between gap-3`}>
+              <a href={rollbackPr.prUrl} target="_blank" rel="noopener noreferrer" className={`${LINK} text-primary flex items-center gap-1`}>
+                View rollback PR on GitHub <ExternalLink size={12} />
+              </a>
+              <span className="font-medium" style={{ color: STATUS.warning.text }}>Awaiting merge</span>
+            </div>
+          )}
+
+          {draft.gsc_notification && !draft.gsc_notification.skipped && (
+            <div className={`${CALLOUT} flex items-center gap-2 ${draft.gsc_notification.sitemapSubmit?.ok ? CALLOUT_TONE.success : CALLOUT_TONE.warning}`}>
+              {draft.gsc_notification.sitemapSubmit?.ok ? (
+                <>
+                  <Check size={14} className="shrink-0" strokeWidth={2.5} />
+                  <span>Sitemap resubmitted to Search Console — this page is prioritized for a faster recrawl.</span>
+                </>
               ) : (
-                <span className="font-extrabold text-amber-600">
-                  {draft.pr_state === 'closed' ? 'PR closed' : 'Awaiting merge'}
-                </span>
+                <>
+                  <AlertTriangle size={14} className="shrink-0" />
+                  <span>Search Console sitemap resubmission didn't go through: {draft.gsc_notification.sitemapSubmit?.error || 'unknown error'}.</span>
+                </>
               )}
             </div>
-          </div>
-        )}
+          )}
 
-        {/* Real evidence from GitHub's own mergeable_state (recorded by
-            checkDraftPrStatus — manual click, webhook, or the hourly poll
-            fallback) — this is what would have caught today's incident days
-            earlier instead of only at merge time. 'dirty' is GitHub's own
-            "has real, unresolvable-by-GitHub conflicts" signal. */}
-        {draft.status === 'pr_opened' && draft.pr_mergeable_state === 'dirty' && (
-          <div className="px-6 py-3 border-b border-slate-100 bg-rose-50 text-xs text-rose-700 leading-relaxed flex items-center gap-2">
-            <AlertTriangle size={14} className="text-rose-500 shrink-0" />
-            <span><span className="font-extrabold">This PR has conflicts:</span> its branch has diverged from the target branch and can no longer auto-merge on GitHub. Resolve the conflict there before merging.</span>
-          </div>
-        )}
-
-        <ValidationStatusBanner draft={draft} />
-
-        {draft.rolled_back_at && !rollbackPr && (
-          <div className="px-6 py-3 border-b border-slate-100 bg-amber-50 text-xs text-amber-800 leading-relaxed flex items-center gap-2">
-            <Undo size={14} className="text-amber-500 shrink-0" />
-            <span><span className="font-extrabold">Rolled back:</span> a revert PR was opened for this draft. Its finding has reopened in Recommendations for another attempt.</span>
-          </div>
-        )}
-
-        {rollbackPr && (
-          <div className="px-6 py-3 border-b border-slate-100 bg-indigo-50/30 flex items-center justify-between gap-3 text-xs">
-            <a href={rollbackPr.prUrl} target="_blank" rel="noopener noreferrer" className="font-bold text-indigo-600 hover:underline flex items-center gap-1">
-              View rollback PR on GitHub <ExternalLink size={12} />
-            </a>
-            <span className="font-extrabold text-amber-600">Awaiting merge</span>
-          </div>
-        )}
-
-        {draft.gsc_notification && !draft.gsc_notification.skipped && (
-          <div className="px-6 py-3 border-b border-slate-100 bg-slate-50 text-xs text-slate-500 flex items-center gap-2">
-            {draft.gsc_notification.sitemapSubmit?.ok ? (
-              <>
-                <Check size={12} className="text-emerald-500 shrink-0" strokeWidth={3} />
-                <span>Sitemap resubmitted to Search Console — this page is prioritized for a faster recrawl.</span>
-              </>
+          <div className="px-4 py-3 space-y-5">
+            {editing ? (
+              <div className="space-y-2">
+                <div className="text-xs flex items-center justify-between gap-3 flex-wrap">
+                  <span className="font-medium text-fg">Direct JSON editor</span>
+                  <span style={{ color: STATUS.critical.text }}>Caution: formatting errors will reject compile</span>
+                </div>
+                <textarea
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  className="w-full h-64 sm:h-96 max-h-[50vh] rounded-control px-3 py-2.5 font-mono text-xs leading-5 text-fg bg-white outline-none transition-shadow shadow-[0_0_0_1px_var(--input),0_1px_2px_rgba(0,0,0,.03)] focus:shadow-[0_0_0_1px_var(--primary),0_0_0_4px_var(--primary-tint)]"
+                  spellCheck={false}
+                />
+              </div>
             ) : (
               <>
-                <AlertTriangle size={12} className="text-amber-500 shrink-0" />
-                <span>Search Console sitemap resubmission didn't go through: {draft.gsc_notification.sitemapSubmit?.error || 'unknown error'}.</span>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Modal Scrollable Content Body */}
-        <div className="flex-1 overflow-y-auto px-6 py-5 custom-scrollbar">
-          {editing ? (
-            <div className="space-y-2">
-              <div className="text-[10px] font-black uppercase tracking-wider text-slate-400 flex items-center justify-between">
-                <span>Direct JSON Editor</span>
-                <span className="text-rose-500">Caution: formatting errors will reject compile</span>
-              </div>
-              <textarea
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                className="w-full h-64 sm:h-96 max-h-[50vh] text-xs font-mono border border-slate-200 rounded-2xl p-4 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-400 bg-slate-950 text-slate-200 scrollbar-thin"
-                spellCheck={false}
-              />
-            </div>
-          ) : (
-            <>
-              {/* Draft Content Card Wrapper */}
-              <div className="bg-slate-50/50 border border-slate-150 rounded-3xl p-5">
                 <DraftPreview actionType={draft.action_type} content={draft.content}
                   onSelectTitle={draft.action_type === 'meta-title' && draft.status !== 'implemented' ? selectTitle : undefined} />
-              </div>
 
-              {/* GitHub File Diff Preview Section — for an implemented draft
-                  this shows the real, currently-live content instead of a
-                  pending diff (see FileDiffPreview's `result.live` branch).
-                  Skipped entirely for advisory-only types (no implementer
-                  exists, so there is no file diff to fetch — see
-                  ADVISORY_ONLY_TYPES above) in favor of a plain explanation,
-                  so this never invites a "No implementer wired" dead end. */}
-              {ADVISORY_ONLY_TYPES.includes(draft.action_type) ? (
-                <div className="mt-5 pt-5 border-t border-slate-100">
-                  <div className="text-xs text-slate-600 bg-slate-50 border border-slate-150 rounded-2xl p-4 leading-relaxed flex items-start gap-2.5">
-                    <AlertTriangle size={16} className="text-slate-400 shrink-0 mt-0.5" />
-                    <p>
-                      This is a report, not a file change — there's nothing here to push to your repo. Read the findings above and use the prioritized fix list to decide what to act on; each item names the generator that can draft the real fix for it.
-                    </p>
+                {/* GitHub File Diff Preview Section — for an implemented draft
+                    this shows the real, currently-live content instead of a
+                    pending diff (see FileDiffPreview's `result.live` branch).
+                    Skipped entirely for advisory-only types (no implementer
+                    exists, so there is no file diff to fetch — see
+                    ADVISORY_ONLY_TYPES above) in favor of a plain explanation,
+                    so this never invites a "No implementer wired" dead end. */}
+                {ADVISORY_ONLY_TYPES.includes(draft.action_type) ? (
+                  <div className="pt-5 border-t border-border">
+                    <div className={`${CALLOUT_TONE.info} rounded-control px-3.5 py-3 text-[13px] flex items-start gap-2`}>
+                      <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                      <p>
+                        This is a report, not a file change — there's nothing here to push to your repo. Read the findings above and use the prioritized fix list to decide what to act on; each item names the generator that can draft the real fix for it.
+                      </p>
+                    </div>
                   </div>
-                </div>
-              ) : (
-              <div className="mt-5 pt-5 border-t border-slate-100">
-                  {/* Sets the expectation BEFORE the click rather than
-                      letting a refusal come back as a bare error — the
-                      refusal is the designed-for outcome here, not a fault
-                      (see PARTIAL_AUTO_APPLY_TYPES above). */}
-                  {PARTIAL_AUTO_APPLY_TYPES.includes(draft.action_type) && draft.status !== 'implemented' && (
-                    <div className="text-xs text-amber-800 bg-amber-50/70 border border-amber-100 rounded-2xl p-4 mb-4 leading-relaxed flex items-start gap-2.5">
-                      <AlertTriangle size={16} className="text-amber-500 shrink-0 mt-0.5" />
-                      <p>
-                        Only part of this plan can be applied automatically: a duplicate id on an SVG gradient/clip/mask that nothing outside its own <code>&lt;svg&gt;</code> references. If any id in the plan is referenced by a CSS selector, a JS call, or an <code>#anchor</code>, Push Branch will refuse the whole draft rather than half-rename the page — apply those by hand and mark this draft implemented instead.
-                      </p>
-                    </div>
-                  )}
-                  {draft.status === 'branch_pushed' && (
-                    <div className="text-xs text-indigo-700 bg-indigo-50/60 border border-indigo-100/50 rounded-2xl p-4 mb-4 leading-relaxed flex items-start gap-2.5">
-                      <GitBranch size={16} className="text-indigo-500 shrink-0 mt-0.5" />
-                      <p>
-                        This branch has been pushed to GitHub. Review the real file diff below, then open a PR — a human still needs to review and merge it into <code>main</code> on GitHub before it's live.
-                      </p>
-                    </div>
-                  )}
-                  {draft.status === 'pr_opened' && (
-                    <div className="text-xs text-indigo-700 bg-indigo-50/60 border border-indigo-100/50 rounded-2xl p-4 mb-4 leading-relaxed flex items-start gap-2.5">
-                      <GitBranch size={16} className="text-indigo-500 shrink-0 mt-0.5" />
-                      <p>
-                        A PR is open against <code>main</code>. Review and merge it on GitHub, then click Check PR Status here to mark this draft implemented.
-                      </p>
-                    </div>
-                  )}
+                ) : (
+                  <div className="pt-5 border-t border-border space-y-4">
+                    {/* Sets the expectation BEFORE the click rather than
+                        letting a refusal come back as a bare error — the
+                        refusal is the designed-for outcome here, not a fault
+                        (see PARTIAL_AUTO_APPLY_TYPES above). */}
+                    {PARTIAL_AUTO_APPLY_TYPES.includes(draft.action_type) && draft.status !== 'implemented' && (
+                      <div className={`${CALLOUT_TONE.warning} rounded-control px-3.5 py-3 text-[13px] flex items-start gap-2`}>
+                        <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                        <p>
+                          Only part of this plan can be applied automatically: a duplicate id on an SVG gradient/clip/mask that nothing outside its own <code className="font-mono text-xs">&lt;svg&gt;</code> references. If any id in the plan is referenced by a CSS selector, a JS call, or an <code className="font-mono text-xs">#anchor</code>, Push Branch will refuse the whole draft rather than half-rename the page — apply those by hand and mark this draft implemented instead.
+                        </p>
+                      </div>
+                    )}
+                    {draft.status === 'branch_pushed' && (
+                      <div className={`${CALLOUT_TONE.info} rounded-control px-3.5 py-3 text-[13px] flex items-start gap-2`}>
+                        <GitBranch size={14} className="shrink-0 mt-0.5" />
+                        <p>
+                          This branch has been pushed to GitHub. Review the real file diff below, then open a PR — a human still needs to review and merge it into <code className="font-mono text-xs">main</code> on GitHub before it's live.
+                        </p>
+                      </div>
+                    )}
+                    {draft.status === 'pr_opened' && (
+                      <div className={`${CALLOUT_TONE.info} rounded-control px-3.5 py-3 text-[13px] flex items-start gap-2`}>
+                        <GitBranch size={14} className="shrink-0 mt-0.5" />
+                        <p>
+                          A PR is open against <code className="font-mono text-xs">main</code>. Review and merge it on GitHub, then click Check PR Status here to mark this draft implemented.
+                        </p>
+                      </div>
+                    )}
 
-                  {!filePreview && (
-                    <button
-                      type="button"
-                      onClick={loadFilePreview}
-                      className="text-[11px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-slate-650 hover:bg-slate-100 border border-slate-250 transition duration-150 active:scale-[0.98] shadow-sm flex items-center gap-1.5"
-                    >
-                      <GitBranch size={12} /> {draft.status === 'implemented' ? 'Show what\'s live on GitHub' : 'Show real file diff from GitHub'}
-                    </button>
-                  )}
-                  {filePreview === 'loading' && (
-                    <div className="text-xs text-slate-400 flex items-center gap-1.5 animate-pulse">
-                      <div className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
-                      Fetching real git repository diff…
-                    </div>
-                  )}
-                  {filePreview && filePreview !== 'loading' && (
-                    <div className="space-y-3 mt-3">
-                      <button 
-                        type="button" 
-                        onClick={() => setShowDiff(!showDiff)}
-                        className="text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-500 hover:text-indigo-650 hover:border-slate-350 transition duration-150 flex items-center gap-1 shadow-sm active:scale-95 focus:outline-none"
-                      >
-                        <span>{showDiff ? 'Hide File Diff' : 'Show File Diff'}</span>
-                        {showDiff ? <ChevronUp size={10} strokeWidth={2.5} /> : <ChevronDown size={10} strokeWidth={2.5} />}
-                      </button>
-                      
-                      {showDiff && (
-                        filePreview.ok ? <FileDiffPreview result={filePreview} /> : (
-                          <div className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-2xl p-4 leading-relaxed flex items-center gap-2">
-                            <AlertTriangle size={14} className="text-amber-500 shrink-0" />
-                            <span>{filePreview.error}</span>
-                          </div>
-                        )
-                      )}
-                    </div>
-                  )}
+                    {!filePreview && (
+                      <Button variant="light" onClick={loadFilePreview}>
+                        <GitBranch size={14} /> {draft.status === 'implemented' ? 'Show what\'s live on GitHub' : 'Show real file diff from GitHub'}
+                      </Button>
+                    )}
+                    {filePreview === 'loading' && (
+                      <div className="text-[13px] text-faint">Fetching real git repository diff…</div>
+                    )}
+                    {filePreview && filePreview !== 'loading' && (
+                      <div className="space-y-3">
+                        <Button variant="ghost" size="sm" className="-ml-2.5" onClick={() => setShowDiff(!showDiff)} aria-expanded={showDiff}>
+                          {showDiff ? 'Hide file diff' : 'Show file diff'}
+                        </Button>
+
+                        {showDiff && (
+                          filePreview.ok ? <FileDiffPreview result={filePreview} /> : (
+                            <div className={`${CALLOUT_TONE.warning} rounded-control px-3.5 py-3 text-[13px] flex items-center gap-2`}>
+                              <AlertTriangle size={14} className="shrink-0" />
+                              <span>{filePreview.error}</span>
+                            </div>
+                          )
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+            {error && (
+              <div className={`${CALLOUT_TONE.error} rounded-control px-3.5 py-3 text-[13px] flex items-center gap-2`}>
+                <AlertTriangle size={14} className="shrink-0" />
+                <span>{error}</span>
+              </div>
+            )}
+            {activeRenderModeConfirm && (
+              <div className="bg-muted text-text rounded-control p-4 text-[13px] space-y-3">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle size={14} className="shrink-0 mt-0.5" style={{ color: STATUS.warning.color }} />
+                  <span>
+                    <span className="font-medium text-fg">Render mode unclear</span>
+                    {typeof activeRenderModeConfirm.confidence === 'number' && ` (${activeRenderModeConfirm.confidence}% confidence)`}
+                    {': '}{activeRenderModeConfirm.reason}
+                  </span>
                 </div>
-              )}
-            </>
-          )}
-          {error && (
-            <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-2xl p-3 mt-3 flex items-center gap-2">
-              <AlertTriangle size={14} className="text-rose-500 shrink-0" />
-              <span>{error}</span>
-            </div>
-          )}
-          {activeRenderModeConfirm && (
-            <div className="text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-100 rounded-2xl p-4 mt-3 space-y-3">
-              <div className="flex items-start gap-2">
-                <AlertTriangle size={14} className="text-amber-500 shrink-0 mt-0.5" />
-                <span>
-                  <span className="font-extrabold">Render mode unclear</span>
-                  {typeof activeRenderModeConfirm.confidence === 'number' && ` (${activeRenderModeConfirm.confidence}% confidence)`}
-                  {': '}{activeRenderModeConfirm.reason}
-                </span>
+                <div className="flex flex-wrap items-center gap-2 pl-6">
+                  <Button variant="light" onClick={() => runPublishAction(activeRenderModeConfirm.call, 'visible')} disabled={transitioning}>
+                    Use visible
+                  </Button>
+                  <Button variant="light" onClick={() => runPublishAction(activeRenderModeConfirm.call, 'schema-only')} disabled={transitioning}>
+                    Use schema-only
+                  </Button>
+                </div>
               </div>
-              <div className="flex items-center gap-2 pl-6">
-                <button
-                  onClick={() => runPublishAction(activeRenderModeConfirm.call, 'visible')}
-                  disabled={transitioning}
-                  className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2 rounded-xl bg-white border border-amber-200 text-amber-800 hover:bg-amber-100 transition disabled:opacity-60"
-                >
-                  Use Visible
-                </button>
-                <button
-                  onClick={() => runPublishAction(activeRenderModeConfirm.call, 'schema-only')}
-                  disabled={transitioning}
-                  className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2 rounded-xl bg-white border border-amber-200 text-amber-800 hover:bg-amber-100 transition disabled:opacity-60"
-                >
-                  Use Schema-only
-                </button>
-              </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
         {/* Modal Footer Controls */}
-        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-6 py-4 border-t border-slate-100 bg-slate-50/50 rounded-b-3xl">
+        <div className="flex flex-wrap items-center gap-2 px-4 py-3.5 border-t border-border bg-white">
           {draftGone ? (
-            <button
-              onClick={() => onDeleted(draft.id)}
-              className="text-[11px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-sm ml-auto"
-              style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-            >
-              Close &amp; Refresh
-            </button>
-          ) : draft.status !== 'implemented' ? (
-            <div className="flex items-center gap-1">
-              <button
-                onClick={sendBackToRecommendation}
-                disabled={transitioning}
-                title="Abandon this draft and reopen its finding in Recommendations"
-                className="text-[11px] font-black uppercase tracking-wider text-amber-600 hover:text-amber-700 flex items-center gap-1 px-2.5 py-2 rounded-lg hover:bg-amber-50/60 transition disabled:opacity-60"
-              >
-                <RotateCcw size={12} /> Send Back to Recommendation
-              </button>
-              <button
-                onClick={remove}
-                className="text-[11px] font-black uppercase tracking-wider text-rose-500 hover:text-rose-700 flex items-center gap-1 px-2.5 py-2 rounded-lg hover:bg-rose-50/40 transition"
-              >
-                <Trash2 size={12} /> Discard Draft
-              </button>
+            <Button variant="primary" className="ml-auto" onClick={() => onDeleted(draft.id)}>Close &amp; refresh</Button>
+          ) : (
+            <div className="flex flex-wrap items-center gap-1 w-full sm:w-auto">
+              {leftActions && (
+                <>
+                  <Button variant="ghost" onClick={sendBackToRecommendation} disabled={transitioning}
+                    title="Abandon this draft and reopen its finding in Recommendations">
+                    <RotateCcw size={14} /> Send back to recommendation
+                  </Button>
+                  <Button variant="ghost" className={dangerGhost} onClick={remove}>
+                    <Trash2 size={14} /> Discard draft
+                  </Button>
+                </>
+              )}
+              {!editing && rollbackable && draft.rollback_snapshot && (draft.status === 'implemented' || draft.status === 'merged_to_stage') && !draft.sibling_count && !draft.rolled_back_at && (
+                <Button variant="ghost" className={dangerGhost} onClick={rollback} disabled={transitioning}
+                  title="Restore this file to exactly what it was right before this draft's merge">
+                  <Undo size={14} /> {transitioning ? 'Opening PR…' : 'Rollback'}
+                </Button>
+              )}
+              {!editing && rollbackable && draft.rollback_snapshot && draft.sibling_count > 0 && (
+                <span className="text-xs text-faint px-2" title="Rollback is disabled because this branch is shared with other drafts.">
+                  Rollback unavailable (shared branch)
+                </span>
+              )}
             </div>
-          ) : <span />}
+          )}
 
           {!draftGone && (
-          <div className="flex flex-wrap items-center justify-end gap-2 ml-auto">
-            {editing ? (
-              <>
-                <button
-                  onClick={() => setEditing(false)}
-                  className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-slate-500 hover:bg-slate-100 transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={save}
-                  disabled={saving}
-                  className="text-[11px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-sm hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
-                  style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-                >
-                  <Save size={12} /> {saving ? 'Saving…' : 'Save Draft'}
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  onClick={copy}
-                  className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-slate-600 hover:bg-slate-100 border border-slate-205 transition duration-150 shadow-sm active:scale-[0.98] flex items-center gap-1"
-                >
-                  <Copy size={12} /> {copyLabel}
-                </button>
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2 w-full sm:w-auto [&>button]:flex-1 sm:[&>button]:flex-none">
+              {editing ? (
+                <>
+                  <Button variant="light" onClick={() => setEditing(false)}>Cancel</Button>
+                  <Button variant="dark" onClick={save} disabled={saving}>
+                    <Save size={14} /> {saving ? 'Saving…' : 'Save draft'}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button variant="light" onClick={copy}>
+                    <Copy size={14} /> {copyLabel}
+                  </Button>
 
-                {(draft.status === 'draft' || draft.status === 'edited') && (
-                  <>
-                    <button
-                      onClick={startEdit}
-                      className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-indigo-600 hover:bg-indigo-50 border border-indigo-200 transition duration-150 shadow-sm active:scale-[0.98] flex items-center gap-1"
-                    >
-                      <Edit3 size={12} /> Edit
-                    </button>
-                    <button
-                      onClick={() => transition(() => api.actionCenter.submitDraft(draft.id, siteId))}
-                      disabled={transitioning}
-                      className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-indigo-100 hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
-                      style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-                    >
-                      <Check size={12} strokeWidth={2.5} /> {transitioning ? 'Submitting…' : 'Submit for Approval'}
-                    </button>
-                  </>
-                )}
+                  {(draft.status === 'draft' || draft.status === 'edited') && (
+                    <>
+                      <Button variant="light" onClick={startEdit}>
+                        <Edit3 size={14} /> Edit
+                      </Button>
+                      <Button variant="primary" onClick={() => transition(() => api.actionCenter.submitDraft(draft.id, siteId))} disabled={transitioning}>
+                        <Check size={14} strokeWidth={2.5} /> {transitioning ? 'Submitting…' : 'Submit for approval'}
+                      </Button>
+                    </>
+                  )}
 
-                {draft.status === 'submitted_for_approval' && (
-                  <button
-                    onClick={() => runPublishAction('approve')}
-                    disabled={transitioning}
-                    className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-emerald-100 hover:shadow-emerald-500/15 disabled:opacity-60 flex items-center gap-1"
-                    style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}
-                  >
-                    <Check size={12} strokeWidth={2.5} /> {transitioning ? 'Publishing…' : 'Approve & Publish'}
-                  </button>
-                )}
+                  {draft.status === 'submitted_for_approval' && (
+                    <Button variant="primary" onClick={() => runPublishAction('approve')} disabled={transitioning}>
+                      <Check size={14} strokeWidth={2.5} /> {transitioning ? 'Publishing…' : 'Approve & publish'}
+                    </Button>
+                  )}
 
-                {draft.status === 'approved' && (
-                  <>
-                    {!MERGE_MANDATORY_TYPES.includes(draft.action_type) && (
-                      <button
-                        onClick={() => transition(() => api.actionCenter.implementDraft(draft.id, siteId))}
-                        disabled={transitioning}
-                        className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-slate-500 hover:bg-slate-100 border border-slate-200 disabled:opacity-60 transition"
-                      >
-                        Mark Implemented manually
-                      </button>
-                    )}
-                    {!ADVISORY_ONLY_TYPES.includes(draft.action_type) && (
-                      <button
-                        onClick={() => runPublishAction('push-branch')}
-                        disabled={transitioning}
-                        className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
-                        style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-                      >
-                        <GitBranch size={12} /> {transitioning ? 'Pushing…' : 'Push Branch'}
-                      </button>
-                    )}
-                  </>
-                )}
+                  {draft.status === 'approved' && (
+                    <>
+                      {!MERGE_MANDATORY_TYPES.includes(draft.action_type) && (
+                        <Button variant="light" onClick={() => transition(() => api.actionCenter.implementDraft(draft.id, siteId))} disabled={transitioning}>
+                          Mark implemented manually
+                        </Button>
+                      )}
+                      {!ADVISORY_ONLY_TYPES.includes(draft.action_type) && (
+                        <Button variant="primary" onClick={() => runPublishAction('push-branch')} disabled={transitioning}>
+                          <GitBranch size={14} /> {transitioning ? 'Pushing…' : 'Push branch'}
+                        </Button>
+                      )}
+                    </>
+                  )}
 
-                {draft.status === 'branch_pushed' && (
-                  <>
-                    <span
-                      className="text-[10px] font-mono text-slate-400 truncate max-w-[140px] hidden sm:inline-block bg-slate-100 rounded-lg px-2 py-1"
-                      title={draft.branch_name}
-                    >
-                      {draft.branch_name}
-                    </span>
-                    {draft.sibling_count > 0 && (
-                      <span
-                        className="text-[10px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200"
-                        title={`This branch also contains ${draft.sibling_count} other approved draft(s) pushed today.`}
-                      >
-                        Shared · +{draft.sibling_count}
+                  {draft.status === 'branch_pushed' && (
+                    <>
+                      <span className="text-xs font-mono text-text truncate max-w-[140px] hidden sm:inline-block bg-muted rounded-control px-2 py-1"
+                        title={draft.branch_name}>
+                        {draft.branch_name}
                       </span>
-                    )}
-                    <button
-                      onClick={() => transition(() => api.actionCenter.openPr(draft.id, siteId))}
-                      disabled={transitioning}
-                      className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
-                      style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-                    >
-                      <GitBranch size={12} /> {transitioning ? 'Opening PR…' : 'Open PR'}
-                    </button>
-                  </>
-                )}
+                      {draft.sibling_count > 0 && (
+                        <span title={`This branch also contains ${draft.sibling_count} other approved draft(s) pushed today.`}>
+                          <Badge tone="amber">Shared · +{draft.sibling_count}</Badge>
+                        </span>
+                      )}
+                      <Button variant="primary" onClick={() => transition(() => api.actionCenter.openPr(draft.id, siteId))} disabled={transitioning}>
+                        <GitBranch size={14} /> {transitioning ? 'Opening PR…' : 'Open PR'}
+                      </Button>
+                    </>
+                  )}
 
-                {draft.status === 'pr_opened' && (
-                  <>
-                    <span className="text-[10px] font-semibold text-slate-400 max-w-[200px] leading-snug">
-                      Waiting on a human to review and merge the PR on GitHub. This also refreshes the client build (CI) check above.
-                    </span>
-                    <button
-                      onClick={() => transition(() => api.actionCenter.checkPrStatus(draft.id, siteId))}
-                      disabled={transitioning}
-                      className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
-                      style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-                    >
-                      <Check size={12} strokeWidth={2.5} /> {transitioning ? 'Checking…' : 'Check PR Status'}
-                    </button>
-                  </>
-                )}
-
-                {draft.status === 'merged_to_stage' && (
-                  <>
-                    <span className="text-[10px] font-semibold text-slate-400 max-w-[200px] leading-snug">
-                      Live on staging.
-                    </span>
-                    {draft.rollback_snapshot && !draft.sibling_count && !draft.rolled_back_at && (
-                      <button
-                        onClick={rollback}
-                        disabled={transitioning}
-                        title="Restore this file to exactly what it was right before this draft's merge"
-                        className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-slate-500 hover:bg-slate-100 border border-slate-200 disabled:opacity-60 transition flex items-center gap-1"
-                      >
-                        <Undo size={12} /> {transitioning ? 'Opening PR…' : 'Rollback'}
-                      </button>
-                    )}
-                    {draft.rollback_snapshot && draft.sibling_count > 0 && (
-                      <span
-                        className="text-[10px] font-semibold text-slate-400"
-                        title="Rollback is disabled because this branch is shared with other drafts."
-                      >
-                        Rollback unavailable (shared branch)
+                  {draft.status === 'pr_opened' && (
+                    <>
+                      <span className="text-xs text-faint max-w-[200px] leading-snug">
+                        Waiting on a human to review and merge the PR on GitHub. This also refreshes the client build (CI) check above.
                       </span>
-                    )}
-                    <button
-                      onClick={() => transition(() => api.actionCenter.implementDraft(draft.id, siteId))}
-                      disabled={transitioning}
-                      className="text-[11px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-emerald-500/15 disabled:opacity-60 shrink-0"
-                      style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}
-                    >
-                      Mark Implemented
-                    </button>
-                  </>
-                )}
+                      <Button variant="light" onClick={() => transition(() => api.actionCenter.checkPrStatus(draft.id, siteId))} disabled={transitioning}>
+                        <Check size={14} strokeWidth={2.5} /> {transitioning ? 'Checking…' : 'Check PR status'}
+                      </Button>
+                    </>
+                  )}
 
-                {/* implemented is terminal for the transitions above, but a real
-                    rollback_snapshot (captured at merge time) is still valid — the
-                    merge that snapshot reverts happened regardless of whether this
-                    draft was additionally marked implemented afterward. */}
-                {draft.status === 'implemented' && draft.rollback_snapshot && !draft.sibling_count && !draft.rolled_back_at && (
-                  <button
-                    onClick={rollback}
-                    disabled={transitioning}
-                    title="Restore this file to exactly what it was right before this draft's merge"
-                    className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-slate-500 hover:bg-slate-100 border border-slate-200 disabled:opacity-60 transition flex items-center gap-1"
-                  >
-                    <Undo size={12} /> {transitioning ? 'Opening PR…' : 'Rollback'}
-                  </button>
-                )}
-                {draft.status === 'implemented' && draft.rollback_snapshot && draft.sibling_count > 0 && (
-                  <span
-                    className="text-[10px] font-semibold text-slate-400"
-                    title="Rollback is disabled because this branch is shared with other drafts."
-                  >
-                    Rollback unavailable (shared branch)
-                  </span>
-                )}
-              </>
-            )}
-          </div>
+                  {draft.status === 'merged_to_stage' && (
+                    <>
+                      <span className="text-xs text-faint max-w-[200px] leading-snug">
+                        Live on staging.
+                      </span>
+                      <Button variant="primary" onClick={() => transition(() => api.actionCenter.implementDraft(draft.id, siteId))} disabled={transitioning}>
+                        Mark implemented
+                      </Button>
+                    </>
+                  )}
+
+                  {/* implemented is terminal for the transitions above, but a real
+                      rollback_snapshot (captured at merge time) is still valid — the
+                      merge that snapshot reverts happened regardless of whether this
+                      draft was additionally marked implemented afterward. (Rollback
+                      itself, for merged_to_stage and implemented alike, sits in the
+                      left group above.) */}
+                </>
+              )}
+            </div>
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

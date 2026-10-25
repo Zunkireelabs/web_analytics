@@ -1,5 +1,7 @@
 import { FileDown, Sparkles } from 'lucide-react';
 import MarkdownReport from './MarkdownReport.jsx';
+import Section from './layout/Section.jsx';
+import Button from './Button.jsx';
 import { api } from '../api.js';
 
 // The client-facing "day 0" document (server/agents/lib/baseline-report.js) —
@@ -18,33 +20,24 @@ export default function BaselineReportCard({ report, siteId, isInternal, onGener
   const downloadUrl = api.baselineReportDownloadUrl(isInternal ? siteId : undefined);
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-emerald-500" />
-          <h2 className="text-xs font-black text-slate-900 uppercase tracking-widest">Your Baseline Report</h2>
-        </div>
-        {report.available && (
-          <a href={downloadUrl}
-            className="inline-flex items-center gap-1.5 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-xl px-3 py-1.5 shadow-sm transition">
-            <FileDown size={13} /> Download PDF
-          </a>
-        )}
-      </div>
-
+    <Section tray title="Your baseline report" subtitle="Where the site stood at onboarding"
+      action={report.available && (
+        <a href={downloadUrl} className="btn btn--light">
+          <FileDown size={14} /> Download PDF
+        </a>
+      )}>
       {report.available ? (
-        <MarkdownReport content={report.narrativeMd} />
+        <MarkdownReport bare content={report.narrativeMd} />
       ) : (
-        <div className="card p-8 text-center space-y-3">
-          <p className="text-sm font-semibold text-slate-700">{report.message}</p>
+        <div className="px-4 py-8 text-center space-y-3 border-t border-border">
+          <p className="text-sm text-text">{report.message}</p>
           {isInternal && siteId && (
-            <button onClick={() => api.generateBaselineReport(siteId).then(onGenerated).catch(() => {})}
-              className="inline-flex items-center gap-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl px-3.5 py-2 shadow-sm transition">
-              <Sparkles size={13} /> Generate Now
-            </button>
+            <Button variant="light" size="sm" onClick={() => api.generateBaselineReport(siteId).then(onGenerated).catch(() => {})}>
+              <Sparkles size={14} /> Generate Now
+            </Button>
           )}
         </div>
       )}
-    </div>
+    </Section>
   );
 }

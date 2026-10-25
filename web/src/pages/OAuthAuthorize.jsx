@@ -69,7 +69,7 @@ export default function OAuthAuthorize() {
           <div className="w-12 h-12 rounded-2xl grid place-items-center shadow-md mb-3" style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
             <ShieldCheck size={22} className="text-white" />
           </div>
-          <h1 className="text-sm font-black text-slate-900">Connect to your Zunkiree Analytics account</h1>
+          <h1 className="text-sm font-black text-slate-900">Connect to your SuperRank account</h1>
         </div>
 
         {error && (
@@ -84,7 +84,7 @@ export default function OAuthAuthorize() {
           <div className="space-y-4">
             <p className="text-sm text-slate-700 font-semibold leading-relaxed text-center">
               <span className="font-black text-slate-900">{info.clientName}</span> wants to access{' '}
-              <span className="font-black text-slate-900">{info.siteName}</span>'s Zunkiree Analytics.
+              <span className="font-black text-slate-900">{info.siteName}</span>'s SuperRank data.
             </p>
 
             <div className="bg-slate-50 border border-slate-200/80 rounded-xl px-4 py-3.5">

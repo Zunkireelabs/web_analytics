@@ -1,70 +1,47 @@
 import { timeAgo } from '../api.js';
-import { 
-  Target, 
-  Globe, 
-  FileText, 
-  BrainCircuit, 
-  Activity,
-  AlertCircle
-} from 'lucide-react';
+import { Target, Globe, FileText, BrainCircuit, Activity, AlertCircle } from 'lucide-react';
+import { CATEGORY } from './AgentCard.jsx';
+import { STATUS } from '../lib/palette.js';
 
 const CATEGORY_META = {
-  seo: { label: 'SEO', icon: Target, color: '#6C63FF', bgLight: '#6C63FF0c' },
-  geo: { label: 'Audience', icon: Globe, color: '#0ea5e9', bgLight: '#0ea5e90c' },
-  content: { label: 'Content', icon: FileText, color: '#14b8a6', bgLight: '#14b8a60c' },
-  meta: { label: 'Overview', icon: BrainCircuit, color: '#ec4899', bgLight: '#ec48990c' }
+  seo: { label: 'SEO', icon: Target, color: CATEGORY.seo.color },
+  geo: { label: 'Audience', icon: Globe, color: CATEGORY.geo.color },
+  content: { label: 'Content', icon: FileText, color: CATEGORY.content.color },
+  meta: { label: 'Overview', icon: BrainCircuit, color: CATEGORY.meta.color },
 };
 
 export default function ActivityFeed({ items }) {
   if (!items?.length) {
-    return <div className="card p-6 text-center text-xs font-semibold text-slate-400">No activity logged yet.</div>;
+    return <div className="border-t border-border py-10 text-center text-sm text-faint">No activity logged yet.</div>;
   }
 
   return (
-    <div className="relative pl-10 pr-4 space-y-4">
-      {/* Vertical Timeline Bar */}
-      <div className="absolute left-[8px] top-2 bottom-2 w-[1.5px] bg-indigo-100/40" />
-
+    <div className="border-t border-border">
       {items.map((a, i) => {
         const attempted = a.status !== 'ok';
-        const catKey = a.category || 'seo';
-        const cat = CATEGORY_META[catKey] || { label: 'Audit', icon: Activity, color: '#64748b', bgLight: '#f8fafc' };
+        const cat = CATEGORY_META[a.category || 'seo'] || { label: 'Audit', icon: Activity, color: STATUS.neutral.color };
         const IconComponent = cat.icon;
 
         return (
-          <div key={i} className="relative group min-h-[64px]">
-            {/* Timeline Dot Indicator */}
-            <span 
-              className="absolute left-[-32px] top-[22px] -translate-x-1/2 -translate-y-1/2 w-7 h-7 rounded-full grid place-items-center border z-10 bg-white transition-all duration-300 shadow-sm group-hover:scale-110 group-hover:shadow-md"
-              style={attempted ? { borderColor: '#e2e8f0', color: '#94a3b8' } : { borderColor: `${cat.color}44`, color: cat.color, boxShadow: `0 0 10px ${cat.color}15` }}
-            >
-              <IconComponent size={11} strokeWidth={2.5} />
+          <div key={i} className="flex gap-3 px-4 py-3 border-b border-border last:border-0">
+            <span className="w-7 h-7 rounded-control bg-muted text-text grid place-items-center shrink-0">
+              <IconComponent size={14} />
             </span>
-
-            {/* Content card info */}
-            <div className="bg-gradient-to-br from-white to-slate-50/50 border border-slate-200/80 rounded-2xl p-3 hover:-translate-y-0.5 hover:shadow-md hover:bg-white hover:border-slate-300 transition-all duration-300 shadow-sm">
-              <div className="flex items-center justify-between gap-2 mb-1.5">
-                <span 
-                  className="text-[9px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full border shadow-sm"
-                  style={attempted ? { color: '#64748b', backgroundColor: '#f1f5f9', borderColor: '#e2e8f0' } : { color: cat.color, backgroundColor: cat.bgLight, borderColor: `${cat.color}25` }}
-                >
-                  {attempted ? 'Attempted' : cat.label}
-                </span>
-                
-                <span className="text-[10px] text-slate-400 font-mono font-bold">
-                  {timeAgo(a.createdAt)}
-                </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5 text-xs text-faint">
+                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: attempted ? STATUS.neutral.color : cat.color }} />
+                <span>{attempted ? 'Attempted' : cat.label}</span>
               </div>
-
-              <p className={`text-[11.5px] font-semibold leading-relaxed ${attempted ? 'text-slate-400 italic' : 'text-slate-700'}`}>
+              <p className={`text-sm mt-0.5 ${attempted ? 'text-text' : 'text-fg'}`}>
                 {attempted ? (
-                  <span className="flex items-center gap-1">
-                    <AlertCircle size={10} className="text-rose-500 shrink-0" />
+                  <span className="flex items-center gap-1.5">
+                    <AlertCircle size={13} className="shrink-0" style={{ color: STATUS.critical.color }} />
                     <span>Failed: {a.label}</span>
                   </span>
                 ) : a.label}
               </p>
             </div>
+            <span className="text-xs text-faint shrink-0">{timeAgo(a.createdAt)}</span>
           </div>
         );
       })}

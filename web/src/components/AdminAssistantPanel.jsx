@@ -2,10 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 import AssistantMessage from './AssistantMessage.jsx';
 import AssistantEvidence from './AssistantEvidence.jsx';
-import {
-  Sparkles, Send, Bot, AlertTriangle, X, Compass,
-  TrendingUp, ShieldAlert, Activity, ListChecks, Hammer,
-} from 'lucide-react';
+import Button from './Button.jsx';
+import { Sparkles, ArrowUp, AlertTriangle, X } from 'lucide-react';
 
 // The staff-only Admin Assistant for /analyst — one chat that answers
 // operational questions (why didn't this ship, run today's safe fixes) via
@@ -29,10 +27,10 @@ import {
 // exactly the site this page's own picker has selected, so there is no
 // separate in-chat site switcher to keep in sync.
 const STARTER_PROMPTS = [
-  { text: 'Which keywords are closest to page 1?', desc: 'Fastest wins', icon: TrendingUp, color: '#059669', bg: 'from-emerald-50 to-emerald-100/30' },
-  { text: "What's putting impressions at risk?", desc: 'Early warnings', icon: ShieldAlert, color: '#dc2626', bg: 'from-rose-50 to-rose-100/30' },
-  { text: 'What do you need from me?', desc: 'Pending decisions', icon: ListChecks, color: '#6C63FF', bg: 'from-violet-50 to-violet-100/30' },
-  { text: "Run today's safe fixes", desc: 'Ship what\'s ready', icon: Hammer, color: '#d97706', bg: 'from-amber-50 to-amber-100/30' },
+  { text: 'Which keywords are closest to page 1?', desc: 'Fastest wins' },
+  { text: "What's putting impressions at risk?", desc: 'Early warnings' },
+  { text: 'What do you need from me?', desc: 'Pending decisions' },
+  { text: "Run today's safe fixes", desc: "Ship what's ready" },
 ];
 
 export default function AdminAssistantPanel({ clientId, onClose }) {
@@ -87,117 +85,100 @@ export default function AdminAssistantPanel({ clientId, onClose }) {
 
   return (
     <div className="flex flex-col overflow-hidden h-full">
-      <div className="relative flex items-center gap-3 px-5 py-4 border-b border-slate-200 shrink-0 bg-gradient-to-br from-indigo-500/[0.07] via-transparent to-transparent overflow-hidden">
-        <div className="absolute -top-10 -right-10 w-32 h-32 rounded-full bg-indigo-500/10 blur-2xl pointer-events-none" />
-        <div className="relative w-9 h-9 rounded-xl grid place-items-center bg-gradient-to-br from-indigo-500 to-violet-600 text-white shrink-0 shadow-lg shadow-indigo-500/20">
-          <Sparkles size={16} />
-          <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-white" />
-        </div>
-        <div className="relative min-w-0 flex-1">
-          <h2 className="text-xs font-black uppercase tracking-widest text-slate-800">Admin Assistant</h2>
-          <p className="text-[11px] font-medium text-slate-500">Operations and performance for this client — ask anything</p>
+      <div className="h-14 px-4 border-b border-border-canvas shrink-0 flex items-center gap-2.5">
+        <span className="w-7 h-7 rounded-control bg-primary-tint text-primary grid place-items-center shrink-0"
+          style={{ boxShadow: 'inset 0 0 0 1px var(--primary-ring)' }}>
+          <Sparkles size={14} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-fg leading-tight">Admin assistant</div>
+          <div className="text-xs text-faint leading-tight truncate">Operations and performance for this client</div>
         </div>
         {onClose && (
-          <button type="button" onClick={onClose} aria-label="Close chat"
-            className="relative w-8 h-8 rounded-full border border-slate-200 bg-white grid place-items-center text-slate-400 hover:text-slate-700 hover:border-slate-300 transition shrink-0 shadow-sm">
+          <Button variant="ghost" size="sm" icon aria-label="Close chat" onClick={onClose}>
             <X size={14} />
-          </button>
+          </Button>
         )}
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-3 min-h-[16rem]">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4 min-h-[16rem]">
         {messages.length === 0 && (
-          <div className="space-y-4">
-            <div className="bg-white border border-slate-200/60 rounded-2xl p-4 shadow-sm">
-              <p className="text-[12.5px] font-extrabold text-slate-800 leading-snug">
-                {siteName ? `Hi, ${siteName} 👋 — how can I help today?` : 'Hi — how can I help with this client today?'}
+          <div className="space-y-4 pt-2">
+            <div>
+              <p className="text-lg font-medium tracking-[-0.02em] text-fg">
+                {siteName ? `Hi, ${siteName}` : 'Hi there'}
               </p>
-              <p className="text-[10.5px] font-medium text-slate-400 mt-1 leading-relaxed">
+              <p className="text-sm text-text mt-1">
                 Ask about onboarding, pending decisions, agent activity, or performance and forecasts.
               </p>
             </div>
-
-            <div className="flex items-center gap-1.5">
-              <Compass size={11} className="text-slate-400" />
-              <span className="an-label">Select starter prompt</span>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {STARTER_PROMPTS.map((q) => {
-                const Icon = q.icon;
-                return (
-                  <button key={q.text} type="button" onClick={() => ask(q.text)}
-                    className={`group text-left bg-gradient-to-br ${q.bg} hover:scale-[1.02] border border-slate-200/60 hover:border-slate-300 rounded-2xl p-3.5 transition-all duration-200 flex flex-col justify-between min-h-[92px] shadow-sm hover:shadow-md`}>
-                    <span className="w-7 h-7 rounded-xl bg-white border border-slate-200/50 grid place-items-center shadow-sm shrink-0" style={{ color: q.color }}>
-                      <Icon size={13} strokeWidth={2.5} />
-                    </span>
-                    <div className="mt-2.5">
-                      <div className="text-[11px] font-extrabold text-slate-800 leading-snug">{q.text}</div>
-                      <div className="text-[9px] font-bold text-slate-400 mt-0.5 uppercase tracking-wider">{q.desc}</div>
-                    </div>
-                  </button>
-                );
-              })}
+            <div className="space-y-2">
+              {STARTER_PROMPTS.map((q) => (
+                <button key={q.text} type="button" onClick={() => ask(q.text)}
+                  className="w-full text-left rounded-[10px] px-3.5 py-3 text-sm hover:bg-[#fafafa] cursor-pointer"
+                  style={{ boxShadow: '0 0 0 1px var(--border-canvas)' }}>
+                  <div className="text-fg">{q.text}</div>
+                  <div className="text-xs text-faint mt-0.5">{q.desc}</div>
+                </button>
+              ))}
             </div>
           </div>
         )}
 
         {messages.map((m, i) => (
-          <div key={i} className={`flex gap-2.5 ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            {m.role !== 'user' && (
-              <span className="w-7 h-7 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white grid place-items-center shrink-0">
-                <Bot size={12} />
-              </span>
-            )}
-            <div className={`${m.role === 'user' ? 'max-w-[85%]' : 'max-w-[92%]'} rounded-2xl px-3.5 py-2.5 text-[11px] leading-relaxed border ${
-              m.role === 'user'
-                ? 'bg-indigo-600 text-white border-indigo-500 rounded-tr-none font-semibold'
-                : 'bg-slate-100/70 border-slate-200 text-slate-700 rounded-tl-none font-medium'
-            }`}>
-              {m.role === 'user' ? <p className="whitespace-pre-line">{m.content}</p> : <AssistantMessage content={m.content} />}
-              {m.role !== 'user' && <AssistantEvidence findings={m.citedFindings} />}
+          m.role === 'user' ? (
+            <div key={i} className="flex justify-end">
+              <div className="ml-auto max-w-[85%] rounded-xl bg-muted px-3.5 py-2.5 text-sm">
+                <p className="whitespace-pre-line">{m.content}</p>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div key={i} className="flex justify-start">
+              <div className="text-sm leading-[22px] text-fg min-w-0 max-w-full">
+                <AssistantMessage content={m.content} />
+                <AssistantEvidence findings={m.citedFindings} />
+              </div>
+            </div>
+          )
         ))}
 
         {asking && (
-          <div className="flex justify-start gap-2.5">
-            <span className="w-7 h-7 rounded-xl bg-slate-100 border border-slate-200 grid place-items-center text-indigo-600 shrink-0">
-              <Bot size={12} />
-            </span>
-            <div className="bg-slate-100/70 border border-slate-200 rounded-2xl rounded-tl-none px-3.5 py-2.5 flex gap-1.5 items-center">
+          <div className="flex justify-start">
+            <div className="flex gap-1.5 items-center py-2">
               {[0, 120, 240].map((d) => (
-                <span key={d} className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: `${d}ms` }} />
+                <span key={d} className="w-1.5 h-1.5 rounded-full bg-faint-2 animate-bounce" style={{ animationDelay: `${d}ms` }} />
               ))}
             </div>
           </div>
         )}
 
         {error && (
-          <div className="text-[11px] font-semibold text-rose-600 bg-rose-500/[0.06] border border-rose-500/25 rounded-xl p-3 flex items-center gap-2">
-            <AlertTriangle size={12} className="shrink-0" />
+          <div className="rounded-control bg-[#fdecec] text-[#b42318] text-[13px] px-3 py-2.5 flex items-center gap-2">
+            <AlertTriangle size={14} className="shrink-0" />
             <span>{error}</span>
           </div>
         )}
       </div>
 
       {actions.length > 0 && !asking && (
-        <div className="px-5 pb-2 flex flex-wrap gap-1.5 shrink-0">
+        <div className="px-4 pb-3 flex flex-wrap gap-1.5 shrink-0">
           {actions.map((a) => (
-            <button key={a.id + (a.subject || '')} type="button" onClick={() => ask(a.label)}
-              className="text-[10px] font-black uppercase tracking-wider text-indigo-650 bg-white border border-slate-200/80 hover:border-slate-300 rounded-xl px-3 py-2 transition active:scale-95 shadow-sm">
+            <Button key={a.id + (a.subject || '')} variant="light" size="sm" onClick={() => ask(a.label)}>
               {a.label}
-            </button>
+            </Button>
           ))}
         </div>
       )}
 
-      <form onSubmit={(e) => { e.preventDefault(); ask(); }} className="px-5 py-3 border-t border-slate-200 shrink-0 flex items-center gap-2">
-        <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Ask about this client…" disabled={asking}
-          className="an-input flex-1 text-[11px] font-semibold py-2.5" />
-        <button type="submit" disabled={asking || !input.trim()} aria-label="Send message"
-          className="an-grad-btn w-9 h-9 rounded-xl grid place-items-center text-white shrink-0">
-          <Send size={12} />
-        </button>
+      <form onSubmit={(e) => { e.preventDefault(); ask(); }} className="p-4 border-t border-border-canvas shrink-0">
+        <div className="flex items-center gap-2 rounded-[10px] pl-3.5 pr-1.5 py-1.5 bg-white shadow-[0_0_0_1px_var(--input),0_1px_2px_rgba(0,0,0,.03)] focus-within:shadow-[0_0_0_1px_var(--primary),0_0_0_4px_var(--primary-tint)] transition-shadow">
+          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Ask about this client…" disabled={asking}
+            className="flex-1 min-w-0 bg-transparent border-0 outline-none text-sm text-fg placeholder:text-faint disabled:opacity-60" />
+          <button type="submit" disabled={asking || !input.trim()} aria-label="Send message"
+            className="w-7 h-7 rounded-control bg-primary text-white grid place-items-center disabled:opacity-40 shrink-0 cursor-pointer">
+            <ArrowUp size={14} />
+          </button>
+        </div>
       </form>
     </div>
   );

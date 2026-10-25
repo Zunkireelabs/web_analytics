@@ -16,14 +16,16 @@ function generateInvitationToken() {
 // site_id/role/invitedBy are exactly what the calling route already derived
 // server-side from the inviter's own identity (§E) — this function trusts
 // them as given, it does not re-derive or validate them itself.
-export async function createInvitation({ siteId, email, role, invitedBy }) {
+// workspaceId/workspaceRole (migration 192) are set only for a workspace
+// invitation; accepting it also adds the new account to that workspace.
+export async function createInvitation({ siteId, email, role, invitedBy, workspaceId = null, workspaceRole = null }) {
   const { raw, hash } = generateInvitationToken();
   const expiresAt = new Date(Date.now() + INVITATION_TTL_MS);
   const { rows } = await query(
-    `INSERT INTO user_invitations (site_id, email, role, invited_by, token_hash, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO user_invitations (site_id, email, role, invited_by, token_hash, expires_at, workspace_id, workspace_role)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING id, site_id, email, role, expires_at`,
-    [siteId, email, role, invitedBy, hash, expiresAt]
+    [siteId, email, role, invitedBy, hash, expiresAt, workspaceId, workspaceRole]
   );
   return { ...rows[0], token: raw };
 }
@@ -39,7 +41,7 @@ export async function acceptInvitation(rawToken) {
   const { rows } = await query(
     `UPDATE user_invitations SET accepted_at = now()
      WHERE token_hash = $1 AND accepted_at IS NULL AND expires_at > now()
-     RETURNING id, site_id, email, role`,
+     RETURNING id, site_id, email, role, workspace_id, workspace_role`,
     [hash]
   );
   return rows[0] || null;

@@ -1,14 +1,17 @@
 import { Link } from 'react-router-dom';
 import { TrendingUp, Search, FileText, Lightbulb } from 'lucide-react';
+import { TrayCard } from './layout/Tray.jsx';
+import Badge from './Badge.jsx';
 
 const num = (v) => Number(v || 0);
 const pathname = (v) => { try { return new URL(v).pathname || '/'; } catch { return v || '/'; } };
 
+// Icon-tile colour per insight tone; only 'warning' is tinted, the rest are neutral.
 const TONE = {
-  success: { bg: 'rgba(16,185,129,0.06)', fg: '#10b981', border: 'rgba(16,185,129,0.1)' },
-  warning: { bg: 'rgba(245,158,11,0.06)', fg: '#f59e0b', border: 'rgba(245,158,11,0.1)' },
-  info: { bg: 'rgba(14,165,233,0.06)', fg: '#0ea5e9', border: 'rgba(14,165,233,0.1)' },
-  purple: { bg: 'rgba(139,92,246,0.06)', fg: '#8b5cf6', border: 'rgba(139,92,246,0.1)' },
+  success: 'bg-muted text-text',
+  warning: 'bg-[#fdf3e1] text-[#8a5300]',
+  info: 'bg-muted text-text',
+  purple: 'bg-muted text-text',
 };
 
 function buildInsights({ channels, queries, pages }) {
@@ -67,51 +70,34 @@ export default function AiInsightsPanel({ channels, queries, pages, loading }) {
   const insights = buildInsights({ channels, queries, pages });
 
   return (
-    <div className="card p-6 flex flex-col justify-between">
-      <div>
-        <div className="flex items-center justify-between mb-5">
-          <h3 className="text-base font-bold text-slate-900 tracking-tight">Quick Insights</h3>
-          <span className="text-[9px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-full bg-slate-100/80 border border-slate-200/30 text-slate-500">
-            Rule Engine
-          </span>
-        </div>
-
+    <TrayCard title="Quick insights" subtitle="What changed and what to do next" action={<Badge tone="outline">Rule-based</Badge>}>
+      <div className="border-t border-border">
         {loading ? (
-          <div className="py-14 text-center text-sm text-slate-400 animate-pulse font-medium">Analyzing…</div>
+          <div className="py-14 text-center text-sm text-faint">Analyzing…</div>
         ) : insights.length === 0 ? (
-          <div className="py-14 text-center text-sm text-slate-400 font-medium">Not enough data yet for insights.</div>
+          <div className="py-14 text-center text-sm text-faint">Not enough data yet for insights.</div>
         ) : (
-          <div className="space-y-3">
-            {insights.map((ins, i) => {
-              const tone = TONE[ins.tone];
-              const Icon = ins.icon;
-              return (
-                <div 
-                  key={i} 
-                  className="flex items-start gap-3 p-3 rounded-2xl border transition duration-200 hover:translate-x-0.5"
-                  style={{ background: tone.bg, borderColor: tone.border }}
-                >
-                  <span 
-                    className="w-7 h-7 rounded-xl grid place-items-center shrink-0 shadow-sm" 
-                    style={{ background: '#fff', color: tone.fg }}
-                  >
-                    <Icon size={14} strokeWidth={2.5} />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs font-bold text-slate-900 leading-snug">{ins.title}</div>
-                    <p className="text-[11px] font-medium text-slate-500 leading-relaxed mt-1">
-                      {ins.text}{' '}
-                      {ins.action && (ins.to
-                        ? <Link to={ins.to} className="font-bold text-indigo-600 hover:text-indigo-700 underline decoration-indigo-200/60 decoration-2 underline-offset-1">{ins.action}.</Link>
-                        : <span className="font-bold text-slate-700">{ins.action}.</span>)}
-                    </p>
-                  </div>
+          insights.map((ins, i) => {
+            const Icon = ins.icon;
+            return (
+              <div key={i} className="flex gap-3 px-4 py-3.5 border-b border-border last:border-0">
+                <span className={`w-7 h-7 rounded-control grid place-items-center shrink-0 ${TONE[ins.tone]}`}>
+                  <Icon size={14} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-fg">{ins.title}</div>
+                  <p className="text-[13px] text-text mt-0.5">
+                    {ins.text}{' '}
+                    {ins.action && (ins.to
+                      ? <Link to={ins.to} className="text-primary font-medium hover:underline">{ins.action}.</Link>
+                      : <span className="text-fg font-medium">{ins.action}.</span>)}
+                  </p>
                 </div>
-              );
-            })}
-          </div>
+              </div>
+            );
+          })
         )}
       </div>
-    </div>
+    </TrayCard>
   );
 }

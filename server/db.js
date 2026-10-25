@@ -126,11 +126,14 @@ export async function getOrCreateSite() {
 // A 'product' site is schedulable by job.js's listConnectedSites() without
 // GSC/GA4; per-agent eligibility is still enforced by runner.js's
 // requiresCapabilities gate regardless of which property_type this is.
-export async function createClientSite({ name, websiteDomain, timezone, propertyType }) {
+// workspaceId (optional): the workspace this site is a project of. Omitted for
+// a brand-new client, whose workspace is created together with its first login
+// (store/workspaces.js attachNewClientWorkspace).
+export async function createClientSite({ name, websiteDomain, timezone, propertyType, workspaceId }) {
   const inserted = await query(
-    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain, client_number, property_type)
-     VALUES ($1, NULL, NULL, $2, $3, nextval('sites_client_number_seq'), $4) RETURNING *`,
-    [name, timezone || 'Asia/Kolkata', websiteDomain || null, propertyType === 'product' ? 'product' : 'website']
+    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain, client_number, property_type, workspace_id)
+     VALUES ($1, NULL, NULL, $2, $3, nextval('sites_client_number_seq'), $4, $5) RETURNING *`,
+    [name, timezone || 'Asia/Kolkata', websiteDomain || null, propertyType === 'product' ? 'product' : 'website', workspaceId ?? null]
   );
   return inserted.rows[0];
 }

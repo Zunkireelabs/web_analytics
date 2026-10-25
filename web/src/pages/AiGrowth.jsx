@@ -5,6 +5,7 @@ import OrchestrationDiagram from '../components/orchestration/OrchestrationDiagr
 import AgentDetailPanel from '../components/orchestration/AgentDetailPanel.jsx';
 import LiveActivityRail from '../components/orchestration/LiveActivityRail.jsx';
 import GrowthScores from '../components/GrowthScores.jsx';
+import { Tray, TrayCard } from '../components/layout/Tray.jsx';
 import ExecutiveSummaryPanel from '../components/ExecutiveSummaryPanel.jsx';
 import CompetitorLeaderboard from '../components/CompetitorLeaderboard.jsx';
 import AuthorityScoreCard from '../components/AuthorityScoreCard.jsx';
@@ -16,59 +17,42 @@ import GeoIntelligenceCard from '../components/GeoIntelligenceCard.jsx';
 import ActivityFeed from '../components/ActivityFeed.jsx';
 import ChangesTimeline from '../components/ChangesTimeline.jsx';
 import { ORCH_CATEGORY as CATEGORY } from '../components/orchestration/palette.js';
-import {
-  Play,
-  Terminal,
-  Cpu,
-  Activity,
-  CheckCircle,
-  CheckCircle2,
-  Workflow,
-  BrainCircuit,
-  AlertTriangle,
-  RotateCw,
-  ChevronRight,
-  ChevronDown,
-  ChevronUp,
-  Target,
-  Globe,
-  FileText,
-  Database,
-  Send,
-  History,
-  Bot,
-  ScrollText,
-  Clock
-} from 'lucide-react';
+import { Play, RotateCw, CheckCircle, ChevronDown, Database, Cpu, Activity, Send } from 'lucide-react';
+import PageToolbar from '../components/PageToolbar.jsx';
+import PageIntro from '../components/layout/PageIntro.jsx';
+import Section from '../components/layout/Section.jsx';
+import SegmentedTabs from '../components/SegmentedTabs.jsx';
+import Button from '../components/Button.jsx';
+import Badge from '../components/Badge.jsx';
+import { CHART, STATUS } from '../lib/palette.js';
 
 const FALLBACK_POLL_MS = 45000;
 const REFRESH_START = daysAgo(7);
 const REFRESH_END = daysAgo(0);
-
-// Category → icon for the Live Agent Findings Feed cards — findings are
-// keyed by CATEGORY, a small fixed set, unlike the live per-agent lookup
-// used for SSE log labels (agentsRef, below).
-const ICONS = { seo: Target, geo: Globe, content: FileText, meta: BrainCircuit };
 
 // The real, fixed shape of the pipeline (server/agents/orchestrator.js ->
 // runner.js -> the shared agent_runs table -> its readers) — rendered as a
 // persistent strip on both tabs so the page reads as "a pipeline" even at
 // rest, not just while the Systems Map graph is open.
 const SIGNAL_STAGES = [
-  { label: 'Sources', icon: Database, color: CATEGORY.seo.color },
-  { label: 'Agents', icon: Cpu, color: CATEGORY.seo.color },
-  { label: 'Findings Store', icon: Activity, color: CATEGORY.content.color },
-  { label: 'Reports', icon: Send, color: CATEGORY.meta.color },
+  { label: 'Sources', icon: Database, caption: 'GSC, GA4, crawls' },
+  { label: 'Agents', icon: Cpu, caption: null },
+  { label: 'Findings store', icon: Activity, caption: 'Verified issues' },
+  { label: 'Reports', icon: Send, caption: 'Summaries & drafts' },
 ];
 
-// Run-status badge styling for the Platform Operations section (Agent
-// Taskforce / Execution Timeline) — migrated as-is from admin/AiOperationsCenter.jsx.
+// Run-status badge for the Platform Operations section (Agent Taskforce /
+// Execution Timeline) — migrated as-is from admin/AiOperationsCenter.jsx.
+// ok → green Healthy, insufficient-data → amber Idle, error → red Failed,
+// never run (null) → grey.
 const OPS_RUN_STATUS = {
-  ok: { color: '#059669', bg: '#ecfdf5', border: '#a7f3d0', label: 'Healthy', icon: CheckCircle2 },
-  'insufficient-data': { color: '#d97706', bg: '#fffbeb', border: '#fde68a', label: 'Idle', icon: Clock },
-  error: { color: '#dc2626', bg: '#fef2f2', border: '#fecaca', label: 'Failed', icon: AlertTriangle },
-  null: { color: '#94a3b8', bg: '#f8fafc', border: '#e2e8f0', label: 'Never run', icon: Clock },
+  ok: { tone: 'green', label: 'Healthy' },
+  'insufficient-data': { tone: 'amber', label: 'Idle' },
+  error: { tone: 'red', label: 'Failed' },
+  null: { tone: 'grey', label: 'Never run' },
 };
+
+const fmtDuration = (ms) => (ms != null ? `${(ms / 1000).toFixed(1)}s` : '—');
 
 export default function AiGrowth({ isInternal }) {
   const [agents, setAgents] = useState(null);
@@ -80,6 +64,7 @@ export default function AiGrowth({ isInternal }) {
 
   // Operations History collapsible (migrated from the old Command Center).
   const [showOpsHistory, setShowOpsHistory] = useState(false);
+  const [showAllAgents, setShowAllAgents] = useState(false); // Agent Taskforce: first 10 rows vs all
 
   // Admin/internal-only platform operations data — Agent Taskforce,
   // Execution Timeline, Model Status (migrated from admin/AiOperationsCenter.jsx).
@@ -206,7 +191,7 @@ export default function AiGrowth({ isInternal }) {
     const t = setTimeout(() => setHighlightActive(false), 4000);
     return () => clearTimeout(t);
   }, [highlightId, highlightedAgentId, revealedFindings]);
-  const highlightClass = (active) => (active && highlightActive ? 'ring-2 ring-[#6C63FF] ring-offset-2 rounded-2xl transition-shadow' : '');
+  const highlightClass = (active) => (active && highlightActive ? 'ring-2 ring-primary ring-offset-2 rounded-card transition-shadow' : '');
 
   // Load findings already persisted from prior runs on mount — without this,
   // the feed only ever shows findings from a run triggered in this exact
@@ -312,567 +297,386 @@ export default function AiGrowth({ isInternal }) {
   useEffect(() => {
     if (consoleLogs.length === 0) {
       addLog('Analytics Agent Core initialized. All systems standby.', 'system');
-      addLog('Diagnostic triggers active. Click "▶ Run Agent Pipeline" to run audit.', 'info');
+      addLog('Diagnostic triggers active. Click "Run audit" to run audit.', 'info');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return (
-    <div className="relative min-h-screen w-full overflow-hidden"
-      style={{ background: 'linear-gradient(160deg, #eafaf6 0%, #eef6ff 50%, #f5f0ff 100%)' }}>
 
-      {/* Visual background ambient grids — teal -> violet, echoing the
-          signal-path hue sweep (ingest/teal through synthesis/violet). */}
-      <div aria-hidden className="pointer-events-none absolute inset-0 -z-0">
-        <div className="absolute top-0 left-1/4 w-[700px] h-[700px] rounded-full blur-[145px]"
-          style={{ background: 'radial-gradient(circle, rgba(13,148,136,0.10), transparent 60%)' }} />
-        <div className="absolute bottom-0 right-1/4 w-[600px] h-[600px] rounded-full blur-[135px]"
-          style={{ background: 'radial-gradient(circle, rgba(124,58,237,0.10), transparent 60%)' }} />
+  const running = refreshing || runningAgents.size > 0;
+  const active = isThinking || runningAgents.size > 0;
+
+  // Newest real agent run (the activity feed is newest-first) — drives "Last run".
+  const lastRunAt = (activity || []).reduce((best, a) => (a.createdAt && (!best || new Date(a.createdAt) > new Date(best)) ? a.createdAt : best), null);
+
+  const introTitle = runningAgents.size > 0 ? `${runningAgents.size} agents are auditing your site`
+    : isThinking ? 'Agents are auditing your site'
+    : 'Agents are on standby';
+
+  const opsAgents = ops?.agentTaskforce || [];
+  const shownOpsAgents = showAllAgents ? opsAgents : opsAgents.slice(0, 10);
+
+  const statusBadge = (status) => {
+    const s = OPS_RUN_STATUS[status] || OPS_RUN_STATUS.null;
+    return <Badge tone={s.tone}>{s.label}</Badge>;
+  };
+
+  return (
+    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12">
+      <PageToolbar>
+        <SegmentedTabs
+          options={[{ value: 'console', label: 'Interactive' }, { value: 'diagram', label: 'Systems map' }]}
+          value={viewMode} onChange={setViewMode} />
+        <div className="ml-auto flex items-center gap-3">
+          {lastRunAt && <span className="hidden md:inline text-[13px] text-faint">Last run {timeAgo(lastRunAt)}</span>}
+          <Button variant="primary" onClick={runAll} disabled={running}>
+            {running ? (
+              <><RotateCw size={12} className="animate-spin" /> Running…</>
+            ) : (
+              <><Play size={12} fill="currentColor" /> Run audit</>
+            )}
+          </Button>
+        </div>
+      </PageToolbar>
+
+      <PageIntro
+        title={introTitle}
+        subtitle={`SEO, AEO and GEO agents scan, verify and document your site's performance.${lastRunAt ? ` Last full run ${timeAgo(lastRunAt)}.` : ''}`}
+      />
+
+      {refreshError && (
+        <div className="rounded-card bg-[#fdecec] text-[#b42318] text-sm px-4 py-3 mb-6">{refreshError}</div>
+      )}
+
+      {/* GrowthScores: Overall / SEO / AEO / GEO — same real-score row as the
+          Command Center, so the runner console leads with current performance
+          before diving into the live agent stream. */}
+      <div data-finding-id="health-score">
+        <div className={highlightClass(highlightId === 'health-score')}>
+          <GrowthScores data={ccData} loading={ccData === null} />
+        </div>
       </div>
 
-      <div className="relative max-w-[1400px] mx-auto px-4 sm:px-6 md:px-10 py-8">
-
-        {/* Main top title bar */}
-        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 mb-8">
-          <div>
-            <span className="inline-flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-indigo-600 px-3 py-1 rounded-full mb-3 border border-indigo-500/15 bg-indigo-500/5">
-              <BrainCircuit size={11} className="animate-pulse" /> Agent Intelligence Console
-            </span>
-            <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">AI Agent Audit Runner</h1>
-            <p className="text-xs text-slate-500 mt-1 max-w-xl font-medium">
-              Watch SEO, Geo, and Content specialist agents scan, verify, and document site performance diagnostics in real-time.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-3">
-            {/* View Mode Segment Switcher */}
-            <div className="flex bg-white/70 p-0.5 rounded-xl border border-slate-200">
-              <button
-                onClick={() => setViewMode('console')}
-                className={`flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-lg transition ${
-                  viewMode === 'console' ? 'bg-slate-900 text-white font-black shadow-sm' : 'text-slate-500 hover:text-slate-800'
-                }`}
-              >
-                <Terminal size={12} /> Interactive
-              </button>
-              <button
-                onClick={() => setViewMode('diagram')}
-                className={`flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-lg transition ${
-                  viewMode === 'diagram' ? 'bg-slate-900 text-white font-black shadow-sm' : 'text-slate-500 hover:text-slate-800'
-                }`}
-              >
-                <Workflow size={12} /> Systems Map
-              </button>
-            </div>
-
-            <button 
-              type="button" 
-              onClick={runAll} 
-              disabled={refreshing || runningAgents.size > 0}
-              className="text-[10px] font-black uppercase tracking-wider px-4 py-2 rounded-xl text-white transition disabled:opacity-50 flex items-center gap-1.5 active-pill-shadow hover:brightness-105"
-              style={{ background: 'linear-gradient(135deg, #6C63FF, #8b5cf6)' }}
-            >
-              {refreshing || runningAgents.size > 0 ? (
-                <>
-                  <RotateCw size={11} className="animate-spin" /> Running...
-                </>
-              ) : (
-                <>
-                  <Play size={11} fill="currentColor" /> Run Audit
-                </>
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* Executive summary — leads the page, same pattern as Reports.jsx
-            (mounted directly under the page header, first content block). */}
-        <div className="mb-6">
+      {/* Executive summary — same pattern as Reports.jsx. */}
+      <div className="mt-3">
+        <Tray>
           <ExecutiveSummaryPanel
             text={ccData?.executiveSummary?.narrative}
             source={ccData?.executiveSummary?.narrative ? 'executive-report' : null}
             generatedAt={ccData?.executiveSummary?.generatedAt}
           />
-        </div>
+        </Tray>
+      </div>
 
-        {/* GrowthScores: Overall / SEO / AEO / GEO — same real-score row as
-            the Command Center, so the runner console leads with current
-            performance before diving into the live agent stream. */}
-        <div className="mb-6" data-finding-id="health-score">
-          <div className={highlightClass(highlightId === 'health-score')}>
-            <GrowthScores data={ccData} loading={ccData === null} />
-          </div>
-        </div>
-
-        {/* Signal Path strip — the fixed pipeline shape, always visible so
-            the page reads as "a pipeline" on both tabs, even at rest. */}
-        <div className="card rounded-2xl mb-6 px-5 py-4 flex items-center gap-1 overflow-x-auto custom-scrollbar">
-          {SIGNAL_STAGES.map((stage, i) => (
-            <div key={stage.label} className="flex items-center gap-1 shrink-0">
-              {i > 0 && (
-                <span aria-hidden className="w-6 sm:w-10 h-px mx-1 shrink-0"
-                  style={{ backgroundImage: 'repeating-linear-gradient(90deg, rgba(108,99,255,0.4) 0 6px, transparent 6px 12px)' }} />
-              )}
-              <div className="flex flex-col items-center gap-1.5 w-20 sm:w-24 shrink-0">
-                <span className="w-8 h-8 rounded-lg grid place-items-center"
-                  style={{ background: `${stage.color}1a`, color: stage.color }}>
-                  <stage.icon size={14} />
-                </span>
-                <span className="text-[9px] font-black uppercase tracking-wider text-slate-500 text-center leading-tight">
-                  {stage.label}
-                </span>
+      {/* Pipeline strip — the fixed pipeline shape, always visible so the page
+          reads as "a pipeline" on both tabs, even at rest. */}
+      <Section tray className="mt-3" title="Agent pipeline" subtitle="How a run moves from data to your reports">
+        <div className="flex items-center px-4 py-3 overflow-x-auto border-t border-border">
+          {SIGNAL_STAGES.map((stage, i) => {
+            const caption = stage.label === 'Agents'
+              ? (agents?.length ? `${agents.length} specialists` : 'Specialist agents')
+              : stage.caption;
+            return (
+              <div key={stage.label} className="contents">
+                {i > 0 && <span aria-hidden className="flex-1 min-w-6 h-px bg-border-2 mx-3.5" />}
+                <div className="flex items-center gap-2.5 shrink-0">
+                  <span className="w-[30px] h-[30px] rounded-control bg-muted text-text grid place-items-center">
+                    <stage.icon size={15} />
+                  </span>
+                  <div>
+                    <div className="text-sm font-medium text-fg">{stage.label}</div>
+                    <div className="hidden md:block text-xs text-faint">{caption}</div>
+                  </div>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
+      </Section>
 
+      <div className="mt-3">
         {viewMode === 'console' ? (
           /* ================= INTERACTIVE RUNNING CONSOLE ================= */
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-            
-            {/* Left side: Pulsing Reactor and Live Log Console */}
-            <div className="lg:col-span-5 flex flex-col gap-6">
-              
-              {/* Pulsing Core Reactor card */}
-              <div className="card rounded-3xl p-6 flex flex-col items-center justify-center text-center relative overflow-hidden min-h-[220px]">
-                <div aria-hidden className="absolute inset-0 opacity-40 pointer-events-none"
-                  style={{ background: 'radial-gradient(circle at 50% 20%, rgba(108,99,255,0.12), transparent 65%)' }} />
-
-                {isThinking || runningAgents.size > 0 ? (
-                  <div className="relative">
-                    {/* Glowing outer rotating ring */}
-                    <div className="w-20 h-20 rounded-full border-2 border-indigo-500/20 border-t-indigo-500 animate-spin" />
-                    {/* Glowing inner core */}
-                    <div className="absolute inset-2 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 animate-pulse blur-[1px] grid place-items-center">
-                      <Cpu size={24} className="text-white" />
-                    </div>
-                  </div>
-                ) : (
-                  <div className="relative w-20 h-20 rounded-full bg-slate-50 border border-slate-200 grid place-items-center">
-                    <svg viewBox="0 0 80 80" fill="none" className="absolute inset-0">
-                      <circle cx="40" cy="40" r="38" stroke={CATEGORY.seo.color} strokeOpacity="0.18" strokeWidth="1.5" strokeDasharray="2 5" />
-                    </svg>
-                    <BrainCircuit size={28} className="text-slate-400" />
-                  </div>
-                )}
-
-                <div className="mt-4 z-10">
-                  <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">
-                    {isThinking || runningAgents.size > 0 ? 'Agent Intelligence Active' : 'Cluster Idle'}
-                  </h3>
-                  <p className="text-[10px] text-slate-500 font-semibold mt-1">
+          <Tray className="lg:grid-cols-[1fr_1.5fr] items-start">
+            <TrayCard title="Agent status" subtitle="Live output from the current run">
+              <div className="flex items-center gap-2.5 px-4 py-3.5 border-y border-border">
+                <span className={`w-2 h-2 rounded-full shrink-0 ${active ? 'bg-primary' : 'bg-faint-2'}`}
+                  style={{ boxShadow: '0 0 0 3px var(--muted)' }} />
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-fg">{active ? 'Agents running' : 'Cluster idle'}</div>
+                  <div className="text-[13px] text-faint">
                     {runningAgents.size > 0
                       ? `${runningAgents.size} agents currently auditing site streams`
                       : 'Standby for diagnostic commands'}
-                  </p>
-                  {!(isThinking || runningAgents.size > 0) && (
-                    <div className="flex items-center justify-center gap-1.5 mt-2.5">
-                      {Object.values(CATEGORY).map((cat) => (
-                        <span key={cat.label} className="w-1.5 h-1.5 rounded-full" style={{ background: cat.color }} />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Terminal Logs Panel */}
-              <div className="card rounded-3xl p-4 flex-1 flex flex-col min-h-[250px]">
-                <div className="flex items-center gap-2 border-b border-slate-200 pb-2 mb-3">
-                  <span className="w-2.5 h-2.5 rounded-full bg-rose-400" />
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-400" />
-                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
-                  <span className="text-[9px] font-black uppercase tracking-widest text-slate-500 ml-2">Console Output Stream</span>
-                </div>
-
-                <div className="flex-1 overflow-y-auto max-h-[300px] font-mono text-[10px] space-y-2.5 pr-1.5 custom-scrollbar text-slate-600">
-                  {consoleLogs.map((log, idx) => (
-                    <div key={idx} className="leading-relaxed flex items-start gap-2.5">
-                      <span className="text-slate-500 shrink-0 select-none">[{log.time}]</span>
-                      <span className={
-                        log.type === 'success' ? 'text-emerald-600'
-                          : log.type === 'error' ? 'text-rose-600'
-                          : log.type === 'start' ? 'text-purple-600'
-                          : log.type === 'system' ? 'text-indigo-600 font-bold'
-                          : 'text-slate-600'
-                      }>
-                        {log.text}
-                      </span>
-                    </div>
-                  ))}
-                  <div ref={terminalEndRef} />
-                </div>
-              </div>
-            </div>
-
-            {/* Right side: Revealed Diagnostic analysis cards list */}
-            <div className="lg:col-span-7 card p-6 flex flex-col justify-between min-h-[450px]">
-              <div>
-                <div className="flex items-baseline justify-between border-b border-slate-200 pb-3 mb-5">
-                  <h3 className="text-sm font-black uppercase tracking-wider text-slate-800">Live Agent Findings Feed</h3>
-                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-                    {revealedFindings.length} findings revealed
-                  </span>
-                </div>
-
-                {revealedFindings.length === 0 ? (
-                  <div>
-                    <p className="text-[10px] text-slate-400 mb-4">
-                      Awaiting analysis stream — diagnostic findings will fill these in one-by-one as agents complete auditing.
-                    </p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      {Object.entries(CATEGORY).map(([key, cat]) => {
-                        const ItemIcon = ICONS[key] || Target;
-                        return (
-                          <div key={key} className="rounded-2xl p-4 flex flex-col gap-3 min-h-[110px]"
-                            style={{ border: `1.5px dashed ${cat.color}40`, background: `${cat.color}0a` }}>
-                            <span className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-wider opacity-80" style={{ color: cat.color }}>
-                              <ItemIcon size={12} /> {cat.label}
-                            </span>
-                            <div className="space-y-1.5">
-                              <span className="block h-1.5 rounded-full w-4/5" style={{ background: `${cat.color}30` }} />
-                              <span className="block h-1.5 rounded-full w-3/5" style={{ background: `${cat.color}30` }} />
-                            </div>
-                            <span className="text-[9px] text-slate-400 mt-auto">Waiting on {cat.label} agents…</span>
-                          </div>
-                        );
-                      })}
-                    </div>
                   </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-[460px] overflow-y-auto pr-1.5 custom-scrollbar">
-                    {revealedFindings.map((f, i) => {
-                      const itemCat = CATEGORY[f.category] || CATEGORY.seo;
-                      const ItemIcon = ICONS[f.category] || Target;
-                      return (
-                        <div
-                          key={f.agentId || i}
-                          data-finding-agent={f.agentId}
-                          className={`bg-white border border-slate-200 rounded-2xl p-4 flex flex-col justify-between hover:border-slate-300 hover:shadow-md transition-all duration-300 ${highlightClass(Boolean(highlightedAgentId) && f.agentId === highlightedAgentId)}`}
-                        >
-                          <div>
-                            <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-3">
-                              <span className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-wider" style={{ color: itemCat.color }}>
-                                <ItemIcon size={12} /> {itemCat.label}
-                              </span>
-                              {f.stat && (
-                                <span
-                                  className="text-[9px] font-bold px-2 py-0.5 rounded-full border bg-slate-50"
-                                  style={{ color: itemCat.color, borderColor: `${itemCat.color}25` }}
-                                >
-                                  {f.stat}
-                                </span>
-                              )}
-                            </div>
-                            <h4 className="text-xs font-extrabold text-slate-800 leading-snug">{f.headline}</h4>
-                            {f.narrative && f.narrative !== f.headline && (
-                              <div className="mt-2.5">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleExpand(i)}
-                                  className="text-[9px] font-black uppercase tracking-wider hover:underline transition-colors"
-                                  style={{ color: itemCat.color }}
-                                >
-                                  {expandedIndices.has(i) ? 'Hide Details ↑' : 'View Details →'}
-                                </button>
-                                {expandedIndices.has(i) && (
-                                  <p className="text-[10px] font-medium text-slate-600 mt-2 leading-relaxed break-words bg-slate-50 p-2.5 border-l-2 rounded-r-xl border-slate-200" style={{ borderLeftColor: itemCat.color }}>
-                                    {f.narrative}
-                                  </p>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                          <div className="mt-4 pt-2 border-t border-slate-100 flex items-center justify-between">
-                            <span className="text-[9px] font-bold text-slate-500">Agent: {f.name}</span>
-                            {f.generatedAt && (
-                              <span className="text-slate-500 text-[10px] flex items-center gap-0.5 font-bold">
-                                <CheckCircle size={10} /> {timeAgo(f.generatedAt)}
-                              </span>
-                            )}
+                </div>
+              </div>
+              <div className="bg-[#fcfcfb] px-4 py-3 min-h-[150px] max-h-[300px] overflow-y-auto font-mono text-xs leading-5 text-text custom-scrollbar">
+                {consoleLogs.map((log, idx) => (
+                  <div key={idx} className="flex items-start gap-2.5">
+                    <span className="text-faint shrink-0 select-none">[{log.time}]</span>
+                    <span className={log.type === 'system' || log.type === 'error' ? 'text-fg font-medium' : undefined}>{log.text}</span>
+                  </div>
+                ))}
+                <div ref={terminalEndRef} />
+              </div>
+            </TrayCard>
+
+            <TrayCard title="Live findings" subtitle={`${revealedFindings.length} findings from the latest runs`}
+              action={revealedFindings.length > 0 && !isThinking ? (
+                <span className="inline-flex items-center gap-1.5 text-[13px] text-[#1a7f4b]">
+                  <CheckCircle size={13} /> Processing cycle complete
+                </span>
+              ) : null}>
+              {revealedFindings.length === 0 ? (
+                <div className="px-4 py-10 text-sm text-faint text-center border-t border-border">
+                  Awaiting analysis stream — diagnostic findings will fill these in one-by-one as agents complete auditing.
+                </div>
+              ) : (
+                <div className="max-h-[460px] overflow-y-auto custom-scrollbar border-t border-border">
+                  {revealedFindings.map((f, i) => {
+                    const itemCat = CATEGORY[f.category] || CATEGORY.seo;
+                    const hasDetails = f.narrative && f.narrative !== f.headline;
+                    return (
+                      <div
+                        key={f.agentId || i}
+                        data-finding-agent={f.agentId}
+                        className={`grid grid-cols-1 sm:grid-cols-[auto_1fr_auto] gap-x-3 gap-y-1 px-4 py-3.5 border-b border-border last:border-0 ${highlightClass(Boolean(highlightedAgentId) && f.agentId === highlightedAgentId)}`}
+                      >
+                        <span className="inline-flex items-center gap-1.5 h-[22px] px-2 rounded-[6px] text-xs font-medium text-text bg-white self-start w-fit"
+                          style={{ boxShadow: 'inset 0 0 0 1px var(--border-2)' }}>
+                          <span className="w-1.5 h-1.5 rounded-full" style={{ background: itemCat.color }} />
+                          {itemCat.label}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-fg">{f.headline}</div>
+                          <div className="text-xs text-faint mt-1">
+                            {f.name}{f.generatedAt ? ` · ${timeAgo(f.generatedAt)}` : ''}{f.stat ? ` · ${f.stat}` : ''}
                           </div>
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {revealedFindings.length > 0 && !isThinking && (
-                <div className="mt-6 pt-4 border-t border-slate-200 flex items-center justify-between">
-                  <span className="text-[10px] font-bold text-emerald-600 flex items-center gap-1.5">
-                    <CheckCircle size={12} /> Processing cycle complete
-                  </span>
-                  <a
-                    href="/reports"
-                    className="text-[10px] font-black uppercase tracking-wider text-indigo-600 hover:text-indigo-500 flex items-center gap-1 hover:underline"
-                  >
-                    View executive report summary <ChevronRight size={12} />
-                  </a>
+                        {hasDetails ? (
+                          <button type="button" onClick={() => toggleExpand(i)} aria-expanded={expandedIndices.has(i)}
+                            className="text-[13px] font-medium text-primary hover:underline whitespace-nowrap self-start text-left">
+                            {expandedIndices.has(i) ? 'Hide details' : 'View details'}
+                          </button>
+                        ) : <span />}
+                        {hasDetails && expandedIndices.has(i) && (
+                          <p className="sm:col-span-3 text-[13px] text-text break-words">{f.narrative}</p>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {isThinking && (
+                    <div className="px-4 py-3.5"><div className="h-4 w-2/3 bg-muted rounded-control animate-pulse" /></div>
+                  )}
                 </div>
               )}
-            </div>
-          </div>
+              {revealedFindings.length > 0 && !isThinking && (
+                <div className="tbl-foot">
+                  <span>{revealedFindings.length} findings</span>
+                  <a href="/reports" className="btn btn--ghost btn--sm">View executive report summary</a>
+                </div>
+              )}
+            </TrayCard>
+          </Tray>
         ) : (
           /* ================= ARCHITECTURE SYSTEM DIAGRAM ================= */
-          <div className="space-y-6">
-            <div className="grid lg:grid-cols-3 gap-6 items-stretch">
-              <div className="lg:col-span-2 card rounded-2xl p-5 flex flex-col justify-center">
-                <p className="text-xs text-slate-600 leading-relaxed font-medium mb-4">
-                  This view illustrates the parallel execution path. The status of each agent reacts live to system runner calls.
-                </p>
+          <div>
+            <Section tray title="Systems map" subtitle="The parallel path each run takes. Node status updates live.">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 border-y border-border text-[13px] text-text">
+                {[
+                  ['Running', CHART.highlight],
+                  ['Ran recently', STATUS.good.color],
+                  ['Failed last run', STATUS.warning.color],
+                  ['Idle / not yet run', STATUS.neutral.color],
+                ].map(([label, color]) => (
+                  <span key={label} className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full" style={{ background: color }} /> {label}
+                  </span>
+                ))}
+              </div>
+              <div className="px-4 pt-3 pb-3 text-[13px] text-faint space-y-2">
+                <p>This view illustrates the parallel execution path. The status of each agent reacts live to system runner calls.</p>
                 {agenticStats?.byMode?.length > 0 && (
-                  <p className="text-[11px] text-indigo-600 font-semibold mb-4 -mt-2">
+                  <p>
                     Agentic mode also ran {agenticStats.byMode.reduce((s, m) => s + m.sessions, 0)} time(s) in the last 30 days
                     {(() => {
                       const agentic = agenticStats.byMode.find((m) => m.mode !== 'question');
                       return agentic ? ` (avg ${agentic.avg_rounds} rounds, ${agentic.avg_tool_calls} tool calls)` : '';
-                    })()} — the diagram above reflects the fixed parallel path only.
+                    })()} — the diagram below reflects the fixed parallel path only.
                   </p>
                 )}
-                <div className="flex flex-wrap items-center gap-x-5 gap-y-2 pt-4 border-t border-slate-200">
-                  <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 mr-1">Node status</span>
-                  <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-600">
-                    <span className="w-2 h-2 rounded-full" style={{ background: '#a78bfa' }} /> Running
-                  </span>
-                  <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-600">
-                    <span className="w-2 h-2 rounded-full" style={{ background: '#059669' }} /> Ran recently
-                  </span>
-                  <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-600">
-                    <span className="w-2 h-2 rounded-full" style={{ background: '#f59e0b' }} /> Failed last run
-                  </span>
-                  <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-600">
-                    <span className="w-2 h-2 rounded-full" style={{ background: '#64748b' }} /> Idle / not yet run
-                  </span>
-                </div>
               </div>
+
+              <div className="border-t border-border">
+                {agents !== null && agents.length === 0 ? (
+                  <div className="py-12 text-center text-sm text-faint">No agents available yet.</div>
+                ) : agents === null ? (
+                  // Matches OrchestrationDiagram's real responsive canvas height
+                  // exactly, so there's no layout jump when the graph replaces it.
+                  <div className="h-[300px] md:h-[680px] bg-muted animate-pulse" />
+                ) : (
+                  <OrchestrationDiagram agents={agents} onSelectAgent={setSelected} runningAgents={runningAgents} />
+                )}
+              </div>
+            </Section>
+            <Section tray className="mt-3" title="Live activity" subtitle="Latest agent events">
               <LiveActivityRail items={activity} />
-            </div>
-
-            {agents !== null && agents.length === 0 ? (
-              <div className="rounded-2xl p-12 text-center text-sm text-slate-400" style={{ border: '1px solid rgba(15,23,42,0.08)' }}>
-                No agents available yet.
-              </div>
-            ) : agents === null ? (
-              // Matches OrchestrationDiagram's real responsive canvas height
-              // exactly, so there's no layout jump when the graph replaces it.
-              <div className="rounded-3xl h-[300px] md:h-[680px] animate-pulse" style={{ background: 'rgba(15,23,42,0.04)' }} />
-            ) : (
-              <OrchestrationDiagram agents={agents} onSelectAgent={setSelected} runningAgents={runningAgents} />
-            )}
-          </div>
-        )}
-
-        {/* ============= COMPETITOR OVERVIEW ============= */}
-        {/* Migrated from the old Command Center page — real competitor
-            standings, driven by the same ccData already powering the score
-            row above. (Executive summary now leads the page, above.) */}
-        <div className="relative card border border-slate-200 bg-gradient-to-br from-white to-orange-50/10 p-5 shadow-sm rounded-3xl flex flex-col justify-between overflow-hidden mt-8">
-          <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-orange-400 to-rose-400" />
-          <div>
-            <div className="flex items-center gap-2.5 mb-4 border-b border-slate-100 pb-3">
-              <span className="w-8 h-8 rounded-xl grid place-items-center bg-orange-50 text-orange-600 shrink-0 border border-orange-100 shadow-sm">
-                <Globe size={14} />
-              </span>
-              <div className="leading-tight">
-                <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">Competitor Overview</h3>
-                <span className="text-[8px] font-bold text-slate-400 uppercase tracking-widest block mt-0.5">How you compare online</span>
-              </div>
-            </div>
-            {ccData?.competitors && ccData.competitors.length > 0 ? (
-              <CompetitorLeaderboard profiles={ccData.competitors} />
-            ) : (
-              <div className="text-xs text-slate-455 italic p-4 text-center">No competitors logged.</div>
-            )}
-          </div>
-          <div className="text-[9px] font-bold text-slate-400 border-t border-slate-100 pt-2.5">
-            Click a competitor to see why.
-          </div>
-        </div>
-
-        {/* ============= DETAILED AGENT INSIGHTS ============= */}
-        {/* Migrated per-category detail cards from the old Command Center's
-            3-tab agent workspace — shown together here rather than behind
-            tabs, since the tab-switching findings-by-category UI itself
-            duplicated this page's own Live Agent Findings Feed above. */}
-        <div className="mt-8 space-y-6">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-indigo-600" />
-            <h2 className="text-xs font-black text-slate-900 uppercase tracking-widest">Detailed Agent Insights</h2>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <AuthorityScoreCard authority={ccData?.authority} meta={ccData?.authorityMeta} loading={ccData === null} />
-            <ReferringDomainsCard
-              summary={ccDomainUnresolved ? null : ccBacklinks}
-              loading={!ccDomainUnresolved && ccBacklinks === null}
-            />
-            <CompetitorBacklinkCard
-              backlinkComparison={ccData?.backlinkComparison}
-              meta={ccData?.backlinkComparisonMeta}
-              loading={ccData === null}
-            />
-            <CompetitorRankingCard
-              rankingComparison={ccData?.rankingComparison}
-              meta={ccData?.rankingComparisonMeta}
-              loading={ccData === null}
-            />
-          </div>
-
-          <AiRecommendationCard aiRecommendation={ccData?.aiRecommendation} meta={ccData?.aiRecommendationMeta} loading={ccData === null} />
-
-          <GeoIntelligenceCard geoIntelligence={ccData?.geoIntelligence} meta={ccData?.geoIntelligenceMeta} loading={ccData === null} />
-        </div>
-
-        {/* ============= OPERATIONS HISTORY ============= */}
-        <section className="border-t border-slate-200 pt-5 mt-8">
-          <button
-            onClick={() => setShowOpsHistory(!showOpsHistory)}
-            className="w-full flex items-center justify-between text-xs font-black text-slate-500 uppercase tracking-widest pb-3 cursor-pointer hover:text-slate-800 transition-colors focus:outline-none"
-          >
-            <span className="flex items-center gap-2">
-              <History size={14} className="text-indigo-500" />
-              <span>Operations History Logs</span>
-            </span>
-            {showOpsHistory ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-          </button>
-
-          {showOpsHistory && (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 p-6 items-start animate-slide-down bg-gradient-to-tr from-indigo-50/20 via-transparent to-violet-50/15 border border-indigo-100/50 rounded-[32px] mt-2 shadow-inner">
-              <div className="relative card border border-indigo-100 bg-gradient-to-br from-white/90 via-white/80 to-slate-50/50 backdrop-blur-md p-6 shadow-md rounded-[28px] flex flex-col justify-start overflow-hidden hover:shadow-lg transition-all duration-300">
-                <div className="absolute -right-8 -top-8 w-20 h-20 rounded-full blur-2xl opacity-20 bg-indigo-400 pointer-events-none" />
-                <div>
-                  <div className="flex items-center gap-2.5 mb-6 border-b border-slate-100 pb-4">
-                    <span className="w-8 h-8 rounded-xl grid place-items-center bg-indigo-50 text-indigo-650 shrink-0 border border-indigo-100/80 shadow-sm">
-                      <Activity size={14} />
-                    </span>
-                    <div className="leading-tight">
-                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">AI Audit Activity</h3>
-                      <span className="text-[8px] font-bold text-slate-405 uppercase tracking-widest block mt-0.5">What our AI checked</span>
-                    </div>
-                  </div>
-                  <div className="max-h-[380px] overflow-y-auto pr-1.5 custom-scrollbar">
-                    <ActivityFeed items={ccData?.activity || []} />
-                  </div>
-                </div>
-              </div>
-
-              <div className="relative card border border-slate-200 bg-gradient-to-br from-white/90 via-white/80 to-slate-50/50 backdrop-blur-md p-6 shadow-md rounded-[28px] flex flex-col justify-start overflow-hidden hover:shadow-lg transition-all duration-300">
-                <div className="absolute -right-8 -top-8 w-20 h-20 rounded-full blur-2xl opacity-20 bg-slate-400 pointer-events-none" />
-                <div>
-                  <div className="flex items-center gap-2.5 mb-6 border-b border-slate-100 pb-4">
-                    <span className="w-8 h-8 rounded-xl grid place-items-center bg-slate-55 text-slate-650 shrink-0 border border-slate-200/85 shadow-sm">
-                      <History size={14} />
-                    </span>
-                    <div className="leading-tight">
-                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">Recent Website Changes</h3>
-                      <span className="text-[8px] font-bold text-slate-405 uppercase tracking-widest block mt-0.5">What changed on your site</span>
-                    </div>
-                  </div>
-                  <div className="max-h-[380px] overflow-y-auto pr-1.5 custom-scrollbar">
-                    <ChangesTimeline items={ccData?.recentChanges || []} />
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-        </section>
-
-        {/* ============= PLATFORM OPERATIONS (admin/internal only) ============= */}
-        {/* Migrated from admin/AiOperationsCenter.jsx — Agent Taskforce,
-            Execution Timeline, Model Status. Everything else on that page
-            (status strip, hero health score, metric cards, executive
-            summary bullets, critical findings, pipeline health, scheduler,
-            audit/system-health links, roadmap list) was either a duplicate
-            of what Orchestration already shows or explicitly dropped. */}
-        {isInternal && ops && (
-          <div className="mt-8 space-y-6">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-fuchsia-600" />
-              <h2 className="text-xs font-black text-slate-900 uppercase tracking-widest">Platform Operations</h2>
-              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Staff only — across every tenant</span>
-            </div>
-
-            <div className="bg-white rounded-3xl border border-slate-150 shadow-sm p-6">
-              <div className="flex items-center gap-3 mb-5 border-b border-slate-100 pb-4">
-                <span className="w-9 h-9 rounded-2xl bg-indigo-50 grid place-items-center text-indigo-500 shrink-0"><Bot size={15} /></span>
-                <div>
-                  <h3 className="text-sm font-black text-slate-800">Agent Taskforce</h3>
-                  <p className="text-[11px] font-semibold text-slate-400 mt-0.5">Every registered agent's most recent run, across all tenants</p>
-                </div>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                {ops.agentTaskforce.map((a) => {
-                  const s = OPS_RUN_STATUS[a.lastRunStatus] || OPS_RUN_STATUS.null;
-                  const Icon = s.icon;
-                  return (
-                    <div key={a.id} className="rounded-2xl border border-slate-150 bg-gradient-to-br from-slate-50/80 to-white p-4 flex flex-col gap-2 hover:shadow-md hover:-translate-y-0.5 transition-all duration-300">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-black text-slate-800 truncate">{a.name}</span>
-                        <span className="text-[8px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border shrink-0 flex items-center gap-1" style={{ color: s.color, backgroundColor: s.bg, borderColor: s.border }}>
-                          <Icon size={9} />{s.label}
-                        </span>
-                      </div>
-                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wide">{a.category}</span>
-                      <div className="flex items-center justify-between text-[10px] font-semibold text-slate-500 mt-1 pt-2 border-t border-slate-100">
-                        <span>{a.lastRunAt ? timeAgo(a.lastRunAt) : 'Never run'}</span>
-                        <span className="font-mono font-black text-slate-600">{a.tookMs != null ? `${a.tookMs}ms` : '—'}</span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="bg-white rounded-3xl border border-slate-150 shadow-sm p-6">
-              <div className="flex items-center gap-3 mb-5 border-b border-slate-100 pb-4">
-                <span className="w-9 h-9 rounded-2xl bg-indigo-50 grid place-items-center text-indigo-500 shrink-0"><ScrollText size={15} /></span>
-                <div>
-                  <h3 className="text-sm font-black text-slate-800">Execution Timeline</h3>
-                  <p className="text-[11px] font-semibold text-slate-400 mt-0.5">Most recent agent runs across every tenant</p>
-                </div>
-              </div>
-              {ops.executionLog.length === 0 ? (
-                <p className="text-xs text-slate-400 italic py-2">No agent runs recorded yet.</p>
-              ) : (
-                <div className="relative max-h-96 overflow-y-auto pl-1">
-                  <div className="absolute left-[7px] top-2 bottom-2 w-px bg-slate-150" />
-                  <div className="space-y-4">
-                    {ops.executionLog.map((r, i) => {
-                      const s = OPS_RUN_STATUS[r.status] || OPS_RUN_STATUS.null;
-                      return (
-                        <div key={i} className="relative pl-6">
-                          <span className="absolute left-0 top-1 w-3.5 h-3.5 rounded-full border-2 border-white shadow" style={{ background: s.color }} />
-                          <div className="flex items-center justify-between gap-3 text-xs">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <span className="text-[9px] font-mono text-slate-400 shrink-0">{new Date(r.createdAt).toLocaleTimeString()}</span>
-                              <span className="font-black text-slate-800 truncate">{r.agentId}</span>
-                              <span className="text-slate-400 font-medium truncate">· {r.siteName}</span>
-                            </div>
-                            <span className="text-[9px] font-black uppercase tracking-wider" style={{ color: s.color }}>{s.label}</span>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="bg-white rounded-3xl border border-slate-150 shadow-sm p-6">
-              <div className="flex items-center gap-3 mb-5 border-b border-slate-100 pb-4">
-                <span className="w-9 h-9 rounded-2xl bg-indigo-50 grid place-items-center text-indigo-500 shrink-0"><Cpu size={15} /></span>
-                <h3 className="text-sm font-black text-slate-800">Model Status</h3>
-              </div>
-              <div className="space-y-3 text-[12px] font-semibold text-slate-600">
-                <div className="flex justify-between items-center"><span className="text-slate-400">Active provider</span><span className="font-black text-slate-800 capitalize bg-slate-50 px-2.5 py-1 rounded-lg">{ops.modelStatus.provider}</span></div>
-                <div className="flex justify-between items-center"><span className="text-slate-400">Daily-tier model</span><span className="font-mono text-[11px]">{ops.modelStatus.dailyModel}</span></div>
-                <div className="flex justify-between items-center"><span className="text-slate-400">Monthly-tier model</span><span className="font-mono text-[11px]">{ops.modelStatus.monthlyModel}</span></div>
-                <div className="flex justify-between items-center"><span className="text-slate-400">Forecast engine model</span><span className="font-mono text-[11px]">{ops.modelStatus.forecastModel}</span></div>
-              </div>
-            </div>
+            </Section>
           </div>
         )}
       </div>
+
+      {/* ============= COMPETITOR OVERVIEW ============= */}
+      {/* Real competitor standings, driven by the same ccData already powering
+          the score row above. */}
+      <Section tray className="mt-3" title="Competitors" subtitle="How you compare online · click a competitor to see why">
+        {ccData?.competitors && ccData.competitors.length > 0 ? (
+          <CompetitorLeaderboard profiles={ccData.competitors} />
+        ) : (
+          <div className="text-sm text-faint text-center py-10 border-t border-border">No competitors logged yet.</div>
+        )}
+      </Section>
+
+      {/* ============= DETAILED AGENT INSIGHTS ============= */}
+      {/* Per-category detail cards, shown together here rather than behind
+          tabs. Card insides are restyled in part 2. */}
+      <Tray className="mt-3 md:grid-cols-2" title="Detailed agent insights" subtitle="What each specialist agent found this cycle" source="Backlinks & rankings">
+        <AuthorityScoreCard authority={ccData?.authority} meta={ccData?.authorityMeta} loading={ccData === null} />
+        <ReferringDomainsCard
+          summary={ccDomainUnresolved ? null : ccBacklinks}
+          loading={!ccDomainUnresolved && ccBacklinks === null}
+        />
+        <CompetitorBacklinkCard
+          backlinkComparison={ccData?.backlinkComparison}
+          meta={ccData?.backlinkComparisonMeta}
+          loading={ccData === null}
+        />
+        <CompetitorRankingCard
+          rankingComparison={ccData?.rankingComparison}
+          meta={ccData?.rankingComparisonMeta}
+          loading={ccData === null}
+        />
+      </Tray>
+
+      <Tray className="mt-3" title="AI search visibility" source="ChatGPT buyer-intent prompts">
+        <AiRecommendationCard aiRecommendation={ccData?.aiRecommendation} meta={ccData?.aiRecommendationMeta} loading={ccData === null} />
+      </Tray>
+
+      <Tray className="mt-3" title="Geographic audience" subtitle="Where your sessions come from" source="Google Analytics">
+        <GeoIntelligenceCard geoIntelligence={ccData?.geoIntelligence} meta={ccData?.geoIntelligenceMeta} loading={ccData === null} />
+      </Tray>
+
+      {/* ============= OPERATIONS HISTORY ============= */}
+      <section>
+        <div className="tray mt-3">
+        <button type="button" onClick={() => setShowOpsHistory(!showOpsHistory)} aria-expanded={showOpsHistory}
+          className="tray-card w-full flex items-center justify-between px-4 py-3.5 text-sm font-medium text-fg">
+          <span>Operations history</span>
+          <span className="flex items-center gap-2 text-[13px] text-faint font-normal">
+            Agent activity and recent site changes
+            <ChevronDown size={14} className={`transition-transform duration-200 ${showOpsHistory ? 'rotate-180' : ''}`} />
+          </span>
+        </button>
+        </div>
+
+        {showOpsHistory && (
+          <Tray className="mt-3 lg:grid-cols-2 items-start">
+            <TrayCard title="Agent activity">
+              <ActivityFeed items={ccData?.activity || []} />
+            </TrayCard>
+            <TrayCard title="Recent site changes">
+              <ChangesTimeline items={ccData?.recentChanges || []} />
+            </TrayCard>
+          </Tray>
+        )}
+      </section>
+
+      {/* ============= PLATFORM OPERATIONS (admin/internal only) ============= */}
+      {/* Agent Taskforce, Execution Timeline, Model Status, migrated from
+          admin/AiOperationsCenter.jsx. */}
+      {isInternal && ops && (
+        <div className="mt-3 space-y-3">
+          <Section tray source="Staff only · across every tenant" title="Agent taskforce"
+            subtitle="Every registered agent's most recent run">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Agent</th>
+                  <th className="hidden sm:table-cell">Category</th>
+                  <th>Status</th>
+                  <th className="num hidden sm:table-cell">Last run</th>
+                  <th className="num">Duration</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shownOpsAgents.map((a) => (
+                  <tr key={a.id}>
+                    <td className="font-medium">{a.name}</td>
+                    <td className="hidden sm:table-cell text-text">{CATEGORY[a.category]?.label ?? a.category}</td>
+                    <td>{statusBadge(a.lastRunStatus)}</td>
+                    <td className="num hidden sm:table-cell">{a.lastRunAt ? timeAgo(a.lastRunAt) : 'Never run'}</td>
+                    <td className="num">{fmtDuration(a.tookMs)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="tbl-foot">
+              <span>Showing {shownOpsAgents.length} of {opsAgents.length} agents</span>
+              {opsAgents.length > 10 && (
+                <Button variant="ghost" size="sm" onClick={() => setShowAllAgents((v) => !v)}>
+                  {showAllAgents ? 'Show fewer' : 'Show all agents'}
+                </Button>
+              )}
+            </div>
+          </Section>
+
+          <Tray className="lg:grid-cols-[1.5fr_1fr] items-start">
+            <TrayCard title="Execution timeline" subtitle="Most recent agent runs across every tenant">
+              {ops.executionLog.length === 0 ? (
+                <div className="text-sm text-faint text-center py-10 border-t border-border">No agent runs recorded yet.</div>
+              ) : (
+                <>
+                <div className="max-h-96 overflow-y-auto">
+                  <table className="tbl">
+                    <thead>
+                      <tr>
+                        <th>Time</th>
+                        <th>Agent</th>
+                        <th className="hidden sm:table-cell">Client</th>
+                        <th className="num">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ops.executionLog.map((r, i) => (
+                        <tr key={i}>
+                          <td className="text-text whitespace-nowrap">{new Date(r.createdAt).toLocaleTimeString()}</td>
+                          <td className="font-mono text-[13px] font-medium">{r.agentId}</td>
+                          <td className="hidden sm:table-cell">{r.siteName}</td>
+                          <td className="num">{statusBadge(r.status)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="tbl-foot"><span>Latest {ops.executionLog.length} runs</span></div>
+                </>
+              )}
+            </TrayCard>
+
+            <TrayCard title="Model status" subtitle="Models behind each tier">
+              <table className="tbl">
+                <tbody>
+                  <tr><td className="text-text">Active provider</td><td className="num capitalize">{ops.modelStatus.provider}</td></tr>
+                  <tr><td className="text-text">Daily-tier model</td><td className="num font-mono text-[13px]">{ops.modelStatus.dailyModel}</td></tr>
+                  <tr><td className="text-text">Monthly-tier model</td><td className="num font-mono text-[13px]">{ops.modelStatus.monthlyModel}</td></tr>
+                  <tr><td className="text-text">Forecast engine model</td><td className="num font-mono text-[13px]">{ops.modelStatus.forecastModel}</td></tr>
+                </tbody>
+              </table>
+            </TrayCard>
+          </Tray>
+        </div>
+      )}
 
       <AgentDetailPanel agent={selected} onClose={() => setSelected(null)} />
     </div>
