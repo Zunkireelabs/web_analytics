@@ -91,9 +91,22 @@ export default function App() {
     }).catch(() => {}).finally(() => setSitesLoaded(true));
   }, [authed]);
 
+  // Switch the active project. The server verifies the user's workspace
+  // membership before changing its session; only then do we reload the site
+  // and let the routes below remount (key={siteId}) so every page refetches
+  // for the new project instead of showing the previous one's data.
+  const switchProject = async (id) => {
+    await api.switchProject(id);
+    const list = await api.sites();
+    setSites(list);
+    setSiteId(list[0]?.id ?? id);
+  };
+
   const logout = async () => {
     await api.logout().catch(() => {});
-    setAuthed(false);
+    // Signing out leaves the app for the marketing site, not the app's own login page.
+    const landing = import.meta.env.VITE_LANDING_URL || 'https://superrank.si';
+    window.location.assign(landing);
   };
 
   if (authed === null) return <div className="p-8 text-gray-400">Loading…</div>;
@@ -129,7 +142,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex text-sm">
-      <Sidebar sites={sites} siteId={siteId} isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} onSite={setSiteId} onLogout={logout}
+      <Sidebar sites={sites} siteId={siteId} isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} onSwitchProject={switchProject} onLogout={logout}
         mobileOpen={mobileNavOpen} onCloseMobile={() => setMobileNavOpen(false)}
         email={email} role={role} agentOpen={agentOpen} onAgent={setAssistantOpen} agentAvailable={agentAvailable} />
       <div className="flex-1 min-w-0 flex flex-col bg-white md:my-2 md:mr-2 md:rounded-[14px] md:shadow-[0_0_0_1px_var(--panel-ring)] md:overflow-clip md:min-h-[calc(100vh-16px)]">
@@ -141,7 +154,7 @@ export default function App() {
           <main className="flex-1 min-w-0">
         {siteId ? (
           <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>
-            <Routes>
+            <Routes key={siteId}>
               {/* No standalone marketing homepage in the authenticated app — land straight on AI Growth (the agent runner console, AiGrowth.jsx). */}
               <Route path="/" element={<Navigate to="/ai-orchestration" replace />} />
               <Route path="/overview" element={<Overview siteId={siteId} />} />
@@ -166,7 +179,7 @@ export default function App() {
                   when the session's own site has property_type 'product'. */}
               <Route path="/demand" element={<Demand siteId={siteId} />} />
               {/* Every account, not internal-only — same session's own password either way. */}
-              <Route path="/settings" element={<Settings sites={sites} siteId={siteId} role={role} onSite={setSiteId} />} />
+              <Route path="/settings" element={<Settings sites={sites} siteId={siteId} role={role} onSite={switchProject} />} />
               {/* Staff-only — operates across every client's site, not just this
                   session's own. Gated on isPlatformAdmin, NOT isInternal:
                   both routes' entire API surface is requirePlatformRole

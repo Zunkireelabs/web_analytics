@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { DollarSign } from 'lucide-react';
 import { api } from '../api.js';
-
-const fieldCls = 'w-full text-[11px] font-bold text-slate-700 border border-slate-200/80 rounded-lg px-2.5 py-1.5 bg-white disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF]';
-const labelCls = 'block text-[9px] font-black uppercase tracking-widest text-slate-400 mb-1';
+import Button from './Button.jsx';
+import Field from './Field.jsx';
+import Select from './Select.jsx';
 
 const FIELDS = [
   { key: 'conversion_value', label: 'Conversion value', hint: 'Revenue per conversion event (e.g. a lead form submit)' },
@@ -56,56 +56,46 @@ export default function ClientBusinessValuesPanel({ clientId }) {
   };
 
   if (loadError) {
-    return <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{loadError}</div>;
+    return <div role="alert" className="rounded-control bg-[#fdecec] text-[#b42318] text-[13px] px-3 py-2">{loadError}</div>;
   }
   if (values === null) {
-    return <div className="text-[10px] font-semibold text-slate-400 px-1 py-2">Loading business values…</div>;
+    return <div className="text-[13px] text-faint px-1 py-2">Loading business values…</div>;
   }
 
   return (
-    <div className="rounded-2xl bg-[#6C63FF]/[0.04] border border-[#6C63FF]/15 p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <DollarSign size={11} className="text-[#6C63FF] shrink-0" />
-        <p className="text-[10px] font-bold text-slate-600 leading-relaxed">
+    <div className="rounded-card bg-[#fcfcfb] p-4 space-y-3" style={{ boxShadow: 'var(--ring)' }}>
+      <div className="flex items-start gap-2">
+        <DollarSign size={14} className="text-faint shrink-0 mt-0.5" aria-hidden />
+        <p className="text-xs leading-5 text-text">
           Real $ inputs for this client's Expected Business Impact projections. Leave a field blank if it doesn't apply — only one needs to be set.
         </p>
       </div>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {FIELDS.map((f) => (
-          <div key={f.key}>
-            <label className={labelCls} title={f.hint}>{f.label}</label>
-            <input
-              type="number" min={0} step="0.01"
-              className={fieldCls}
-              disabled={saveState === 'running'}
-              value={values[f.key] ?? ''}
-              onChange={(e) => setField(f.key, e.target.value)}
-              placeholder="Not set"
-            />
-          </div>
-        ))}
-        <div>
-          <label className={labelCls}>Currency</label>
-          <select
-            className={fieldCls}
+          <Field
+            key={f.key} label={f.label} title={f.hint}
+            type="number" min={0} step="0.01"
             disabled={saveState === 'running'}
-            value={values.currency || 'USD'}
-            onChange={(e) => setValues((v) => ({ ...v, currency: e.target.value }))}
-          >
-            {['USD', 'GBP', 'EUR', 'CAD', 'AUD'].map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
-        </div>
+            value={values[f.key] ?? ''}
+            onChange={(e) => setField(f.key, e.target.value)}
+            placeholder="Not set"
+          />
+        ))}
+        <Select
+          label="Currency"
+          disabled={saveState === 'running'}
+          value={values.currency || 'USD'}
+          onChange={(e) => setValues((v) => ({ ...v, currency: e.target.value }))}
+        >
+          {['USD', 'GBP', 'EUR', 'CAD', 'AUD'].map((c) => <option key={c} value={c}>{c}</option>)}
+        </Select>
       </div>
       <div className="flex items-center gap-3">
-        <button
-          type="button" onClick={save} disabled={saveState === 'running'}
-          className="text-[10px] font-black uppercase tracking-wider px-4 py-2 rounded-xl text-white transition disabled:opacity-50 active:scale-95"
-          style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-        >
+        <Button variant="primary" onClick={save} disabled={saveState === 'running'}>
           {saveState === 'running' ? 'Saving…' : 'Save Business Values'}
-        </button>
-        {saveState === 'done' && <span className="text-[10px] font-bold text-emerald-600">Saved.</span>}
-        {saveState === 'error' && <span className="text-[10px] font-bold text-rose-600">{saveError}</span>}
+        </Button>
+        {saveState === 'done' && <span className="text-[13px] text-[var(--green)]">Saved.</span>}
+        {saveState === 'error' && <span className="text-[13px] text-[#b42318]">{saveError}</span>}
       </div>
     </div>
   );

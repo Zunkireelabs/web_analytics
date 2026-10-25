@@ -1,47 +1,36 @@
 import { useEffect, useState } from 'react';
 import { api, timeAgo } from '../../api.js';
-import PageHeader from '../../components/PageHeader.jsx';
-import Tabs from '../../components/Tabs.jsx';
-import { Database, Activity, Clock, AlertTriangle, ScrollText, CheckCircle2, XCircle } from 'lucide-react';
+import PageToolbar from '../../components/PageToolbar.jsx';
+import PageIntro from '../../components/layout/PageIntro.jsx';
+import KpiStrip from '../../components/layout/KpiStrip.jsx';
+import { Tray, TrayCard } from '../../components/layout/Tray.jsx';
+import SegmentedTabs from '../../components/SegmentedTabs.jsx';
+import Badge from '../../components/Badge.jsx';
+import Button from '../../components/Button.jsx';
+import Field from '../../components/Field.jsx';
+import Select from '../../components/Select.jsx';
+import { SettingsRows } from '../../components/settings/SettingsCard.jsx';
+import { ScrollText, CheckCircle2, XCircle, Plug, Filter } from 'lucide-react';
 import { STATUS } from '../../lib/palette.js';
-
-const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
-const labelCls = 'block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5';
 
 const ACTOR_TYPES = ['platform_user', 'tenant_user', 'mcp_token', 'system'];
 
 const TABS = [
-  { value: 'health', label: 'System Health' },
-  { value: 'audit', label: 'Audit Log' },
+  { value: 'health', label: 'System health' },
+  { value: 'audit', label: 'Audit log' },
 ];
 
-const STATUS_COLORS = {
-  ok: { color: STATUS.good.text, bg: STATUS.good.tint, border: STATUS.good.ring },
-  unknown: { color: STATUS.neutral.text, bg: STATUS.neutral.tint, border: STATUS.neutral.ring },
-  error: { color: STATUS.critical.text, bg: STATUS.critical.tint, border: STATUS.critical.ring },
-};
+const STATUS_TONES = { ok: 'green', unknown: 'grey', error: 'red' };
 
-function StatusPill({ status }) {
-  const s = STATUS_COLORS[status] || STATUS_COLORS.unknown;
-  return (
-    <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded border leading-none"
-      style={{ color: s.color, backgroundColor: s.bg, borderColor: s.border }}>
-      {status}
-    </span>
-  );
-}
+const ErrorBanner = ({ children }) => (
+  <div className="rounded-control bg-[#fdecec] text-[#b42318] text-[13px] px-3 py-2 mb-3">{children}</div>
+);
 
-function Tile({ label, value, icon: Icon, tone = 'slate' }) {
-  return (
-    <div className="bg-white border border-slate-200/50 rounded-xl p-4 flex flex-col gap-2">
-      <div className="flex items-center gap-2 text-slate-400">
-        {Icon && <Icon size={13} />}
-        <span className="text-[9px] font-black uppercase tracking-widest">{label}</span>
-      </div>
-      <span className={`text-sm font-black ${tone === 'rose' ? 'text-rose-600' : tone === 'emerald' ? 'text-emerald-600' : 'text-slate-800'}`}>{value}</span>
-    </div>
-  );
-}
+const Skeleton = () => (
+  <div className="px-5 py-4">
+    <div className="h-5 bg-muted rounded-control animate-pulse" />
+  </div>
+);
 
 function SystemHealthTab() {
   const [data, setData] = useState(null); // null = loading
@@ -51,77 +40,88 @@ function SystemHealthTab() {
     api.systemHealth.get().then(setData).catch((e) => setError(e.message || 'Could not load system health.'));
   }, []);
 
+  const kpis = data ? [
+    {
+      label: 'Database',
+      value: data.db.connected ? 'Connected' : 'Unreachable',
+      delta: { text: data.db.connected ? 'OK' : 'Down', tone: data.db.connected ? 'good' : 'bad' },
+    },
+    ...Object.entries(data.tenantsByStatus).map(([status, count]) => ({
+      label: `Tenants: ${status}`,
+      value: count,
+      delta: status === 'active' ? { text: 'Active', tone: 'good' } : undefined,
+    })),
+  ] : [];
+
   return (
-    <div className="space-y-6">
-      {error && (
-        <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>
-      )}
+    <>
+      {error && <ErrorBanner>{error}</ErrorBanner>}
 
       {!data ? (
-        <div className="p-8 text-center text-xs text-slate-400 animate-pulse">Checking system status…</div>
+        error ? null : (
+          <Tray>
+            <TrayCard title="Checking system status…"><Skeleton /></TrayCard>
+          </Tray>
+        )
       ) : (
         <>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <Tile label="Database" icon={Database} value={data.db.connected ? 'Connected' : 'Unreachable'} tone={data.db.connected ? 'emerald' : 'rose'} />
-            {Object.entries(data.tenantsByStatus).map(([status, count]) => (
-              <Tile key={status} label={`Tenants: ${status}`} icon={Activity} value={count} tone={status === 'active' ? 'emerald' : 'slate'} />
-            ))}
-          </div>
+          <KpiStrip items={kpis} cols={Math.min(6, Math.max(3, kpis.length))} />
 
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-3">
-            <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 border-b border-slate-100 pb-3">Integrations</h3>
-            <div className="divide-y divide-slate-100/70">
-              {data.integrations.map((i) => (
-                <div key={i.id} className="py-3 flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-xs font-bold text-slate-800">{i.name}</p>
-                    {i.errorMessage && <p className="text-[10px] font-semibold text-rose-600 mt-0.5">{i.errorMessage}</p>}
-                    <p className="text-[10px] font-semibold text-slate-400 mt-0.5">
-                      {i.lastCheckedAt ? `Checked ${timeAgo(i.lastCheckedAt)}` : 'Never checked'}
-                    </p>
+          <Tray className="mt-3">
+            <TrayCard title="Integrations" subtitle="Last recorded health check for each connected service">
+              <div className="border-t border-border">
+                {data.integrations.map((i) => (
+                  <div key={i.id} className="px-5 py-3 border-b border-border last:border-0 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-[13px] font-medium text-fg flex items-center gap-2">
+                        <Plug size={13} className="text-faint shrink-0" aria-hidden />{i.name}
+                      </p>
+                      {i.errorMessage && <p className="text-xs text-[#b42318] mt-0.5 break-words">{i.errorMessage}</p>}
+                      <p className="text-xs text-faint mt-0.5">
+                        {i.lastCheckedAt ? `Checked ${timeAgo(i.lastCheckedAt)}` : 'Never checked'}
+                      </p>
+                    </div>
+                    <Badge tone={STATUS_TONES[i.status] || 'grey'} className="shrink-0">{i.status}</Badge>
                   </div>
-                  <StatusPill status={i.status} />
-                </div>
-              ))}
-            </div>
-          </div>
+                ))}
+              </div>
+            </TrayCard>
+          </Tray>
 
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-3">
-            <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 border-b border-slate-100 pb-3 flex items-center gap-2">
-              <Clock size={12} /> Cron Schedule
-            </h3>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-[11px] font-semibold text-slate-600">
-              <div><span className="text-slate-400">Daily job:</span> {data.cron.daily}</div>
-              <div><span className="text-slate-400">Weekly report:</span> {data.cron.weekly}</div>
-              <div><span className="text-slate-400">Hourly catch-up:</span> {data.cron.hourlyCatchupGuard}</div>
-              <div><span className="text-slate-400">Fix verification:</span> {data.cron.fixVerification}</div>
-              <div><span className="text-slate-400">Timezone:</span> {data.cron.timezone}</div>
-            </div>
-          </div>
+          <Tray className="mt-3" cols={2}>
+            <TrayCard title="Cron schedule" subtitle="When each scheduled job runs">
+              <div className="border-t border-border">
+                <SettingsRows rows={[
+                  ['Daily job', data.cron.daily],
+                  ['Weekly report', data.cron.weekly],
+                  ['Hourly catch-up', data.cron.hourlyCatchupGuard],
+                  ['Fix verification', data.cron.fixVerification],
+                  ['Timezone', data.cron.timezone],
+                ]} />
+              </div>
+            </TrayCard>
 
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-3">
-            <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 border-b border-slate-100 pb-3 flex items-center gap-2">
-              <AlertTriangle size={12} /> Agent Failures — Last 24h
-            </h3>
-            {data.agentRunFailures24h.length === 0 ? (
-              <p className="text-xs text-slate-400 italic py-2">No agent run failures in the last 24 hours.</p>
-            ) : (
-              <div className="divide-y divide-slate-100/70">
-                {data.agentRunFailures24h.map((f) => (
-                  <div key={`${f.site_id}-${f.agent_id}`} className="py-2.5 flex items-center justify-between gap-3">
-                    <div className="text-xs font-bold text-slate-800">{f.agent_id} <span className="text-slate-400 font-medium">· Site #{f.site_id}</span></div>
+            <TrayCard title="Agent failures" subtitle="Last 24 hours">
+              <div className="border-t border-border">
+                {data.agentRunFailures24h.length === 0 ? (
+                  <p className="px-5 py-4 text-[13px] text-faint">No agent run failures in the last 24 hours.</p>
+                ) : data.agentRunFailures24h.map((f) => (
+                  <div key={`${f.site_id}-${f.agent_id}`} className="px-5 py-3 border-b border-border last:border-0 flex items-center justify-between gap-3">
+                    <div className="min-w-0 text-[13px] font-medium text-fg truncate">
+                      {f.agent_id} <span className="text-faint font-normal">· Site #{f.site_id}</span>
+                    </div>
                     <div className="flex items-center gap-3 shrink-0">
-                      <span className="text-[10px] font-semibold text-slate-400">{timeAgo(f.last_failure_at)}</span>
-                      <span className="text-[10px] font-black text-rose-600 bg-rose-50 border border-rose-100 rounded-full px-2 py-0.5">{f.failure_count}</span>
+                      <span className="text-xs text-faint">{timeAgo(f.last_failure_at)}</span>
+                      <Badge tone="red">{f.failure_count}</Badge>
                     </div>
                   </div>
                 ))}
               </div>
-            )}
-          </div>
+            </TrayCard>
+          </Tray>
         </>
       )}
-    </div>
+    </>
   );
 }
 
@@ -161,90 +161,67 @@ function AuditLogTab() {
   };
 
   return (
-    <div className="space-y-6">
-      {error && (
-        <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>
-      )}
+    <>
+      {error && <ErrorBanner>{error}</ErrorBanner>}
 
-      <form onSubmit={applyFilters} className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 grid grid-cols-2 sm:grid-cols-5 gap-4">
-        <label className="block">
-          <span className={labelCls}>Tenant</span>
-          <select className={inputCls} value={tenantSiteId} onChange={(e) => setTenantSiteId(e.target.value)}>
-            <option value="">All tenants</option>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-        </label>
-        <label className="block">
-          <span className={labelCls}>Actor type</span>
-          <select className={inputCls} value={actorType} onChange={(e) => setActorType(e.target.value)}>
-            <option value="">All actors</option>
-            {ACTOR_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-          </select>
-        </label>
-        <label className="block">
-          <span className={labelCls}>Action contains</span>
-          <input className={inputCls} value={action} onChange={(e) => setAction(e.target.value)} placeholder="e.g. tenant.suspended" />
-        </label>
-        <label className="block">
-          <span className={labelCls}>Since</span>
-          <input type="date" className={inputCls} value={since} onChange={(e) => setSince(e.target.value)} />
-        </label>
-        <label className="block">
-          <span className={labelCls}>Until</span>
-          <input type="date" className={inputCls} value={until} onChange={(e) => setUntil(e.target.value)} />
-        </label>
-        <div className="col-span-2 sm:col-span-5">
-          <button type="submit"
-            className="text-[10px] font-black uppercase tracking-wider px-5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-indigo-500/10"
-            style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
-            Apply Filters
-          </button>
-        </div>
-      </form>
+      <Tray>
+        <TrayCard title="Filters" subtitle="Narrow the audit trail by tenant, actor, action or date">
+          <form onSubmit={applyFilters} className="border-t border-border px-4 sm:px-5 py-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+            <Select label="Tenant" value={tenantSiteId} onChange={(e) => setTenantSiteId(e.target.value)}>
+              <option value="">All tenants</option>
+              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </Select>
+            <Select label="Actor type" value={actorType} onChange={(e) => setActorType(e.target.value)}>
+              <option value="">All actors</option>
+              {ACTOR_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </Select>
+            <Field label="Action contains" value={action} onChange={(e) => setAction(e.target.value)} placeholder="e.g. tenant.suspended" />
+            <Field label="Since" type="date" value={since} onChange={(e) => setSince(e.target.value)} />
+            <Field label="Until" type="date" value={until} onChange={(e) => setUntil(e.target.value)} />
+            <div className="sm:col-span-2 lg:col-span-5">
+              <Button type="submit" variant="primary"><Filter size={14} />Apply filters</Button>
+            </div>
+          </form>
+        </TrayCard>
+      </Tray>
 
-      <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6">
-        {rows === null ? (
-          <div className="p-8 text-center text-xs text-slate-400 animate-pulse">Loading audit trail…</div>
-        ) : rows.length === 0 ? (
-          <div className="p-8 text-center text-xs text-slate-400 italic">No matching events.</div>
-        ) : (
-          <div className="divide-y divide-slate-100/70">
-            {rows.map((r) => (
-              <div key={r.id} className="py-3 flex items-start gap-3">
+      <Tray className="mt-3">
+        <TrayCard title="Events" subtitle={rows ? `${rows.length} shown` : undefined}>
+          <div className="border-t border-border">
+            {rows === null ? (
+              <Skeleton />
+            ) : rows.length === 0 ? (
+              <p className="px-5 py-6 text-center text-[13px] text-faint">No matching events.</p>
+            ) : rows.map((r) => (
+              <div key={r.id} className="px-4 sm:px-5 py-3 border-b border-border last:border-0 flex items-start gap-3">
                 {r.success ? (
-                  <CheckCircle2 size={14} className="text-emerald-500 shrink-0 mt-0.5" />
+                  <CheckCircle2 size={15} className="shrink-0 mt-0.5" style={{ color: STATUS.good.color }} aria-label="Succeeded" />
                 ) : (
-                  <XCircle size={14} className="text-rose-500 shrink-0 mt-0.5" />
+                  <XCircle size={15} className="shrink-0 mt-0.5" style={{ color: STATUS.critical.color }} aria-label="Failed" />
                 )}
                 <div className="min-w-0 flex-1">
-                  <p className="text-xs font-black text-slate-900 flex items-center gap-2 flex-wrap">
-                    <ScrollText size={12} className="text-slate-400" />
+                  <p className="text-[13px] font-medium text-fg flex items-center gap-2 flex-wrap break-all">
+                    <ScrollText size={13} className="text-faint shrink-0" aria-hidden />
                     {r.action}
-                    {r.tenant_name && <span className="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-500">{r.tenant_name}</span>}
+                    {r.tenant_name && <Badge tone="grey">{r.tenant_name}</Badge>}
                   </p>
-                  <p className="text-[10px] font-semibold text-slate-400 mt-0.5">
+                  <p className="text-xs text-faint mt-0.5 break-words">
                     {r.actor_email || r.actor_type} {r.actor_role ? `(${r.actor_role})` : ''} · {new Date(r.created_at).toLocaleString()}
                     {r.target_type && ` · ${r.target_type} #${r.target_id}`}
                   </p>
-                  {r.error_message && <p className="text-[10px] font-semibold text-rose-600 mt-0.5">{r.error_message}</p>}
+                  {r.error_message && <p className="text-xs text-[#b42318] mt-0.5 break-words">{r.error_message}</p>}
                 </div>
               </div>
             ))}
           </div>
-        )}
 
-        <div className="flex items-center justify-between pt-4 border-t border-slate-100 mt-2">
-          <button type="button" disabled={offset === 0} onClick={() => load(Math.max(0, offset - LIMIT))}
-            className="text-[10px] font-black uppercase tracking-wider px-4 py-2 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-500 transition disabled:opacity-40">
-            Newer
-          </button>
-          <button type="button" disabled={!rows || rows.length < LIMIT} onClick={() => load(offset + LIMIT)}
-            className="text-[10px] font-black uppercase tracking-wider px-4 py-2 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-500 transition disabled:opacity-40">
-            Older
-          </button>
-        </div>
-      </div>
-    </div>
+          <div className="flex items-center justify-between px-4 sm:px-5 py-3 border-t border-border">
+            <Button disabled={offset === 0} onClick={() => load(Math.max(0, offset - LIMIT))}>Newer</Button>
+            <Button disabled={!rows || rows.length < LIMIT} onClick={() => load(offset + LIMIT)}>Older</Button>
+          </div>
+        </TrayCard>
+      </Tray>
+    </>
   );
 }
 
@@ -252,15 +229,17 @@ export default function Monitoring() {
   const [tab, setTab] = useState('health');
 
   return (
-    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-      <PageHeader
+    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12 fade-up">
+      <PageToolbar>
+        <SegmentedTabs options={TABS} value={tab} onChange={setTab} />
+      </PageToolbar>
+
+      <PageIntro
         title="Monitoring"
-        icon="🩺"
         subtitle={tab === 'health'
           ? 'Existing-data rollups only — DB connectivity, integrations, cron, and recent agent failures.'
           : 'Every mutating platform, tenant, and MCP-token action — append-only.'}
       />
-      <Tabs tabs={TABS} active={tab} onChange={setTab} />
       {tab === 'health' ? <SystemHealthTab /> : <AuditLogTab />}
     </div>
   );

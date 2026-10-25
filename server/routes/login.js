@@ -5,6 +5,7 @@ import { createSignupRequest } from '../store/signup-requests.js';
 import { createContactRequest } from '../store/contact-requests.js';
 import { sendContactLeadEmail, sendPasswordResetEmail } from '../report/email.js';
 import { getSiteStatus } from '../store/read.js';
+import { getAccessContext, decideSiteAccess, listWorkspacesForUser, pickLoginSite } from '../store/workspaces.js';
 import { createPasswordReset, consumePasswordReset } from '../store/password-resets.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
 
@@ -23,8 +24,18 @@ router.post('/login', async (req, res, next) => {
     const user = await getUserByEmail(String(email).trim().toLowerCase());
     const ok = user && (await bcrypt.compare(password, user.password_hash));
     if (!ok) return res.status(401).json({ error: 'Invalid email or password.' });
+    // Land in the user's home project when they can still reach it, else in
+    // another workspace they belong to; belonging to none is a refusal, not
+    // a session every route would then 403.
+    const landingSiteId = await pickLoginSite(user, { companySiteId: Number(process.env.COMPANY_SITE_ID) });
+    if (!landingSiteId) return res.status(403).json({ error: 'Your account is not a member of any workspace.' });
     req.session.userId = user.id;
-    req.session.siteId = user.site_id;
+    req.session.siteId = landingSiteId;
+    // siteId is the ACTIVE project and changes when the user switches
+    // projects (POST /workspaces/switch). homeSiteId never does: it is what
+    // the internal/platform gates key on, so a platform admin who switches
+    // into a client's project is still a platform admin.
+    req.session.homeSiteId = user.site_id;
     return res.json({ ok: true });
   } catch (e) { next(e); }
 });
@@ -236,10 +247,38 @@ router.get('/me', async (req, res, next) => {
     const user = await getUserById(req.session.userId);
     res.json({
       authed: true,
-      isInternal: isInternalSite(req.session.siteId),
+      isInternal: isInternalSite(req.session.homeSiteId ?? req.session.siteId),
       role: user?.role || null,
       email: user?.email || null,
+      siteId: req.session.siteId,
     });
+  } catch (e) { next(e); }
+});
+
+// Workspaces the signed-in user can see, each with its projects, and the
+// active project. A client user only ever gets their own workspace(s); only a
+// platform admin gets every one.
+router.get('/workspaces', requireAuth, async (req, res, next) => {
+  try {
+    const user = await getUserById(req.userId);
+    const workspaces = await listWorkspacesForUser(user, { companySiteId: Number(process.env.COMPANY_SITE_ID) });
+    res.json({ activeSiteId: req.siteId, workspaces });
+  } catch (e) { next(e); }
+});
+
+// Switch the active project. The target is checked against the user's real
+// access (membership, or platform admin) on the server; a siteId the user
+// cannot access is a 404, not a 403, so it does not confirm the site exists.
+router.post('/workspaces/switch', requireAuth, async (req, res, next) => {
+  try {
+    const siteId = Number(req.body?.siteId);
+    if (!Number.isInteger(siteId) || siteId <= 0) return res.status(400).json({ error: 'siteId is required.' });
+    const ctx = await getAccessContext(req.userId, siteId);
+    const decision = ctx && decideSiteAccess({ ...ctx, companySiteId: Number(process.env.COMPANY_SITE_ID) });
+    if (!decision?.allowed) return res.status(404).json({ error: 'Not found.' });
+    if (await getSiteStatus(siteId) !== 'active') return res.status(403).json({ error: 'This project is suspended.' });
+    req.session.siteId = siteId;
+    res.json({ ok: true, siteId });
   } catch (e) { next(e); }
 });
 
@@ -275,16 +314,28 @@ export async function requireAuth(req, res, next) {
   if (req.session?.userId && req.session?.siteId) {
     req.userId = req.session.userId;
     req.siteId = req.session.siteId;
+    // Sessions created before workspaces have no homeSiteId; until the user
+    // switches project, their active site IS their home site.
+    req.homeSiteId = req.session.homeSiteId ?? req.session.siteId;
     try {
-      const [siteStatus, userStatus] = await Promise.all([
+      const [siteStatus, userStatus, access] = await Promise.all([
         getSiteStatus(req.siteId),
         getUserStatus(req.userId),
+        getAccessContext(req.userId, req.siteId),
       ]);
       if (siteStatus !== 'active') {
         return res.status(403).json({ error: 'This account is suspended.' });
       }
       if (userStatus !== 'active') {
         return res.status(403).json({ error: 'This user has been disabled.' });
+      }
+      // Membership is checked on EVERY request, not just at switch time, so
+      // removing someone from a workspace (or a project moving out of it)
+      // locks them out of that project on their very next request. Same
+      // bounded-staleness posture as the two checks above.
+      const decision = access && decideSiteAccess({ ...access, companySiteId: Number(process.env.COMPANY_SITE_ID) });
+      if (!decision?.allowed) {
+        return res.status(403).json({ error: 'You do not have access to this project.' });
       }
     } catch (e) { return next(e); }
     return next();
@@ -317,7 +368,9 @@ export function requirePlatformRole(minRole) {
   if (!minRank) throw new Error(`requirePlatformRole: unknown role "${minRole}"`);
   return async function (req, res, next) {
     try {
-      if (!isInternalSite(req.siteId)) return res.status(404).json({ error: 'Not found.' });
+      // Keyed on the HOME site, not the active project: a platform admin
+      // switched into a client's project is still a platform admin.
+      if (!isInternalSite(req.homeSiteId ?? req.siteId)) return res.status(404).json({ error: 'Not found.' });
       const user = await getUserById(req.userId);
       const rank = PLATFORM_ROLE_RANK[user?.role];
       if (!rank || rank < minRank) return res.status(404).json({ error: 'Not found.' });

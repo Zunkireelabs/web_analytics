@@ -11,7 +11,10 @@ import {
   formatByUnit, finding, supportingLine, groupDeclinesByMetric, lowConfidenceReason,
   SEVERITY_META, TYPE_META,
 } from '../lib/analystFormat.js';
-import { CHART, SERIES, AXIS_TICK } from '../lib/palette.js';
+import { CHART, SERIES, STATUS, AXIS_TICK } from '../lib/palette.js';
+import Badge from './Badge.jsx';
+import Button from './Button.jsx';
+import { Tray, TrayCard } from './layout/Tray.jsx';
 
 // Compact past-vs-forecast picture for one metric, fetched only when a card is
 // actually expanded — the dashboard payload carries summary numbers, and the
@@ -49,9 +52,9 @@ function MiniTrend({ clientId, metric }) {
     return { merged: [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date)), lastActual };
   }, [data]);
 
-  if (error) return <p className="text-[11px] font-semibold text-rose-600 py-6 text-center">{error}</p>;
-  if (!data) return <p className="text-[11px] font-medium text-slate-400 py-6 text-center animate-pulse">Loading trend…</p>;
-  if (!rows.merged?.length) return <p className="text-[11px] font-medium text-slate-400 py-6 text-center">No series data for this metric.</p>;
+  if (error) return <p className="text-xs text-[#b42318] py-6 text-center">{error}</p>;
+  if (!data) return <p className="text-xs text-faint py-6 text-center animate-pulse">Loading trend…</p>;
+  if (!rows.merged?.length) return <p className="text-xs text-faint py-6 text-center">No series data for this metric.</p>;
 
   return (
     <div>
@@ -68,7 +71,9 @@ function MiniTrend({ clientId, metric }) {
             tickFormatter={(v) => (metric.unit === 'ratio' ? `${Math.round(v * 100)}%` : Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(v))}
           />
           <Tooltip
-            contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #e6e6e6' }}
+            contentStyle={{ fontSize: 12, borderRadius: 8, border: 'none', background: CHART.ink, color: '#fff', padding: '8px 10px' }}
+            labelStyle={{ color: '#a3a3a3', marginBottom: 2 }}
+            itemStyle={{ color: '#fff', padding: 0 }}
             formatter={(v, name) => [formatByUnit(v, metric.unit), name === 'forecast' ? 'Forecast' : 'Observed']}
             labelFormatter={(d) => new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { dateStyle: 'medium', timeZone: 'UTC' })}
           />
@@ -83,9 +88,9 @@ function MiniTrend({ clientId, metric }) {
           <Line type="monotone" dataKey="forecast" stroke={SERIES[1]} strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls={false} />
         </ComposedChart>
       </ResponsiveContainer>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[9px] font-bold text-slate-400 mt-1.5">
-        <span className="inline-flex items-center gap-1"><span className="w-2.5 h-[2px] bg-violet-500" /> Observed</span>
-        <span className="inline-flex items-center gap-1"><span className="w-2.5 h-[2px] bg-sky-400" /> Forecast</span>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-faint mt-1.5">
+        <span className="inline-flex items-center gap-1.5"><span className="w-3 h-[2px]" style={{ background: CHART.highlight }} /> Observed</span>
+        <span className="inline-flex items-center gap-1.5"><span className="w-3 h-[2px]" style={{ background: SERIES[1] }} /> Forecast</span>
         {data.forecast?.status === 'ok' && data.forecast.model && <span>Model: {data.forecast.model}</span>}
       </div>
     </div>
@@ -106,43 +111,28 @@ function cardTitle(group) {
 // weight differs between the featured and compact presentations below.
 function CardActions({ clientId, primary, canDraft, draftedId, busy, sendToActionCenter, act, compact }) {
   if (!primary) {
-    return <span className="text-[10px] font-semibold text-slate-400">Monitoring only — no fix queued for this one yet.</span>;
+    return <span className="text-xs text-faint">Monitoring only — no fix queued for this one yet.</span>;
   }
-  const primaryBtnClass = compact
-    ? 'text-[11.5px] font-bold text-indigo-600 hover:text-indigo-500 flex items-center gap-1.5 cursor-pointer'
-    : 'an-grad-btn text-[12.5px] font-bold px-4 py-2.5 rounded-xl text-white flex items-center gap-1.5 cursor-pointer';
+  const size = compact ? 'sm' : 'md';
+  const iconSize = compact ? 12 : 14;
   return (
-    <div className={`flex items-center gap-3 flex-wrap ${compact ? '' : 'gap-4'}`}>
+    <div className="flex items-center gap-2 flex-wrap">
       {draftedId ? (
-        <a href={`/action-center?siteId=${clientId}`} className="text-[11.5px] font-bold text-emerald-700 hover:underline flex items-center gap-1.5">
-          <CheckCircle2 size={compact ? 11 : 13} /> In Action Center
+        <a href={`/action-center?siteId=${clientId}`} className="text-[13px] font-medium flex items-center gap-1.5 hover:underline" style={{ color: STATUS.good.text }}>
+          <CheckCircle2 size={iconSize} /> In Action Center
         </a>
       ) : canDraft ? (
-        <button type="button" onClick={sendToActionCenter} disabled={busy} className={primaryBtnClass}>
-          {busy ? <Loader2 size={compact ? 11 : 13} className="animate-spin" /> : <Send size={compact ? 11 : 13} />}
+        <Button variant={compact ? 'light' : 'primary'} size={size} onClick={sendToActionCenter} disabled={busy}>
+          {busy ? <Loader2 size={iconSize} className="animate-spin" /> : <Send size={iconSize} />}
           Send to Action Center
-        </button>
+        </Button>
       ) : (
-        <span className="text-[10px] font-medium text-slate-400">
+        <span className="text-xs text-faint">
           Site-wide — no single page to rewrite, so this is handled by hand rather than drafted.
         </span>
       )}
-      <button
-        type="button" onClick={() => act('resolve')} disabled={busy}
-        className={compact
-          ? 'text-[11.5px] font-semibold text-slate-500 hover:text-emerald-700 cursor-pointer'
-          : 'text-[12px] font-bold text-slate-600 hover:text-emerald-700 cursor-pointer'}
-      >
-        Fixed
-      </button>
-      <button
-        type="button" onClick={() => act('dismiss')} disabled={busy}
-        className={compact
-          ? 'text-[11.5px] font-semibold text-slate-400 hover:text-rose-600 cursor-pointer'
-          : 'text-[12px] font-bold text-slate-400 hover:text-rose-600 cursor-pointer'}
-      >
-        Dismiss
-      </button>
+      <Button variant="light" size={size} onClick={() => act('resolve')} disabled={busy}>Fixed</Button>
+      <Button variant="ghost" size={size} onClick={() => act('dismiss')} disabled={busy}>Dismiss</Button>
     </div>
   );
 }
@@ -155,25 +145,25 @@ function CardDetail({ clientId, group, primary }) {
   const { metric, narrated } = group;
   return (
     <div className="space-y-4">
-      <div className="rounded-xl bg-white/70 border border-slate-200 p-3">
+      <div className="rounded-card bg-muted p-3">
         <MiniTrend clientId={clientId} metric={metric} />
       </div>
 
       {narrated?.root_cause && (
-        <p className="text-[12.5px] leading-relaxed text-slate-700 font-medium">
-          <span className="an-label mr-1.5">Why</span>
+        <p className="text-[13px] leading-5 text-text">
+          <span className="font-medium text-fg mr-1.5">Why</span>
           {narrated.root_cause}
-          <span className="text-[9.5px] font-bold text-slate-400 ml-1.5 uppercase tracking-wider">AI inference</span>
+          <span className="text-xs text-faint ml-1.5">AI inference</span>
         </p>
       )}
 
       <div>
-        <span className="block text-[10.5px] font-black uppercase tracking-wider text-indigo-500 mb-1.5">AI recommendation</span>
+        <span className="block text-[13px] font-medium text-primary mb-1">AI recommendation</span>
         {narrated?.recommendation ? (
-          <p className="text-[12.5px] leading-relaxed text-slate-800 font-medium">{narrated.recommendation}</p>
+          <p className="text-[13px] leading-5 text-fg">{narrated.recommendation}</p>
         ) : (
-          <p className="text-[11.5px] leading-relaxed text-slate-500 font-medium flex items-start gap-1.5">
-            <Search size={11} className="shrink-0 mt-0.5 text-slate-400" />
+          <p className="text-xs leading-5 text-faint flex items-start gap-1.5">
+            <Search size={12} className="shrink-0 mt-0.5" />
             {group.all.some((i) => i.narration_status === 'failed')
               ? 'Fix guidance could not be generated for this one — the finding itself still stands, and the chart above is the evidence.'
               : 'No fix guidance written for this yet. The finding and its evidence are shown above; guidance is added by the nightly pass.'}
@@ -183,14 +173,14 @@ function CardDetail({ clientId, group, primary }) {
 
       {group.all.length > 1 && (
         <div className="space-y-1 pt-1">
-          <div className="an-label">All signals ({group.all.length})</div>
+          <div className="text-xs font-medium text-fg">All signals ({group.all.length})</div>
           {group.all.map((i) => {
             const TypeIcon = TYPE_META[i.insight_type]?.icon || Activity;
             return (
-              <div key={i.id} className="flex items-start gap-1.5 text-[10.5px] font-medium text-slate-600">
-                <TypeIcon size={10} className="shrink-0 mt-0.5" style={{ color: TYPE_META[i.insight_type]?.color }} />
+              <div key={i.id} className="flex items-start gap-1.5 text-xs text-text">
+                <TypeIcon size={12} className="shrink-0 mt-0.5" style={{ color: TYPE_META[i.insight_type]?.color }} />
                 <span>
-                  <span className="font-bold">{TYPE_META[i.insight_type]?.label || i.insight_type}</span>
+                  <span className="font-medium text-fg">{TYPE_META[i.insight_type]?.label || i.insight_type}</span>
                   {' · '}{supportingLine(i, metric)}
                 </span>
               </div>
@@ -251,36 +241,29 @@ function FeaturedCard({ clientId, group, onChanged }) {
   const { primary, canDraft, busy, actionError, draftedId, sendToActionCenter, act } = useCardActions(clientId, group, onChanged);
 
   const explain = happened.length > 0
-    ? <>{finding(happened[0], group.metric)} <span className="text-slate-500 font-medium">· {supportingLine(happened[0], group.metric)}</span></>
+    ? <>{finding(happened[0], group.metric)} <span className="text-faint">· {supportingLine(happened[0], group.metric)}</span></>
     : expected.length > 0
-      ? <>{finding(expected[0], group.metric)} <span className="text-slate-500 font-medium">· {supportingLine(expected[0], group.metric)}</span></>
+      ? <>{finding(expected[0], group.metric)} <span className="text-faint">· {supportingLine(expected[0], group.metric)}</span></>
       : <>Moving the wrong way but not yet past the warning threshold{health.bandCrosses ? ' — the forecast range still reaches it.' : '.'}</>;
 
   const sevMeta = SEVERITY_META[group.severity] || SEVERITY_META.low;
 
   return (
-    <article className="relative bg-white rounded-2xl border border-slate-200 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_16px_32px_-24px_rgba(15,23,42,0.18)] pl-8 pr-7 py-7">
-      <div className="absolute left-0 top-5 bottom-5 w-[3px] rounded-full" style={{ backgroundColor: sevMeta.color }} />
+    <article className="rounded-card bg-white p-5" style={{ boxShadow: 'var(--ring)' }}>
+      <Badge tone={sevMeta.tone} dot className="mb-2.5">{sevMeta.label} priority</Badge>
 
-      <div className="flex items-center gap-1.5 text-[10.5px] font-black uppercase tracking-wider mb-2.5" style={{ color: sevMeta.color }}>
-        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: sevMeta.color }} />
-        {sevMeta.label} priority
-      </div>
+      <h3 className="text-[18px] leading-6 font-semibold tracking-[-0.02em] text-fg mb-1.5">{cardTitle(group)}</h3>
+      <p className="text-sm leading-5 text-text mb-4 max-w-[64ch]">{explain}</p>
 
-      <h3 className="text-[21px] font-black tracking-tight text-slate-900 leading-tight mb-2">{cardTitle(group)}</h3>
-      <p className="text-[13.5px] leading-relaxed text-slate-700 font-semibold mb-5 max-w-[56ch]">{explain}</p>
-
-      <div className="pb-2">
-        <CardDetail clientId={clientId} group={group} primary={primary} />
-      </div>
+      <CardDetail clientId={clientId} group={group} primary={primary} />
 
       {actionError && (
-        <p className="text-[11px] font-semibold text-rose-600 flex items-center gap-1.5 mt-3">
-          <AlertTriangle size={11} className="shrink-0" />{actionError}
+        <p className="text-xs text-[#b42318] flex items-center gap-1.5 mt-3">
+          <AlertTriangle size={12} className="shrink-0" />{actionError}
         </p>
       )}
 
-      <div className="mt-6">
+      <div className="mt-5">
         <CardActions
           clientId={clientId} primary={primary} canDraft={canDraft} draftedId={draftedId}
           busy={busy} sendToActionCenter={sendToActionCenter} act={act}
@@ -307,17 +290,14 @@ function CompactCard({ clientId, group, onChanged }) {
   const sevMeta = SEVERITY_META[group.severity] || SEVERITY_META.low;
 
   return (
-    <div className="bg-white rounded-xl border border-slate-200 p-4">
-      <div className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider mb-1.5" style={{ color: sevMeta.color }}>
-        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: sevMeta.color }} />
-        {sevMeta.label}
-      </div>
-      <h4 className="text-[13.5px] font-bold text-slate-900 leading-snug mb-1">{cardTitle(group)}</h4>
-      <p className="text-[11.5px] text-slate-500 font-medium leading-snug mb-3">{summary}</p>
+    <div className="rounded-card bg-white p-4" style={{ boxShadow: 'var(--ring)' }}>
+      <Badge tone={sevMeta.tone} dot className="mb-1.5">{sevMeta.label}</Badge>
+      <h4 className="text-[14px] font-medium text-fg leading-snug mb-1">{cardTitle(group)}</h4>
+      <p className="text-xs text-faint leading-snug mb-3">{summary}</p>
 
       {actionError && (
-        <p className="text-[10.5px] font-semibold text-rose-600 flex items-center gap-1.5 mb-2">
-          <AlertTriangle size={10} className="shrink-0" />{actionError}
+        <p className="text-xs text-[#b42318] flex items-center gap-1.5 mb-2">
+          <AlertTriangle size={12} className="shrink-0" />{actionError}
         </p>
       )}
 
@@ -326,17 +306,14 @@ function CompactCard({ clientId, group, onChanged }) {
           clientId={clientId} primary={primary} canDraft={canDraft} draftedId={draftedId}
           busy={busy} sendToActionCenter={sendToActionCenter} act={act} compact
         />
-        <button
-          type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open}
-          className="text-[10.5px] font-bold text-slate-400 hover:text-slate-600 flex items-center gap-1 cursor-pointer shrink-0"
-        >
+        <Button variant="ghost" size="sm" onClick={() => setOpen((v) => !v)} aria-expanded={open} className="shrink-0">
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           {open ? 'Hide evidence' : 'View evidence'}
-        </button>
+        </Button>
       </div>
 
       {open && (
-        <div className="mt-4 pt-4 border-t border-slate-100">
+        <div className="mt-4 pt-4 border-t border-border">
           <CardDetail clientId={clientId} group={group} primary={primary} />
         </div>
       )}
@@ -361,84 +338,74 @@ export default function AnalystMetricIntelligence({ clientId, dashboard, onChang
   const [showLow, setShowLow] = useState(false);
 
   return (
-    <div className="an-panel p-5 space-y-4" id="an-needs-attention">
-      <div className="flex items-center gap-2.5">
-        <div className="w-8 h-8 rounded-xl grid place-items-center bg-rose-500/10 border border-rose-500/25 text-rose-600 shrink-0">
-          <AlertTriangle size={15} />
-        </div>
-        <div className="min-w-0">
-          <h2 className="text-xs font-black uppercase tracking-widest text-slate-800">What needs attention</h2>
-          <p className="text-[11px] font-medium text-slate-500">
-            What happened, what's expected next, why, and what to fix
-          </p>
-        </div>
-        {primary.length > 0 && <span className="an-chip an-chip-rose ml-auto">{primary.length}</span>}
-      </div>
-
-      {primary.length === 0 ? (
-        <div className="flex items-start gap-2.5 bg-emerald-500/[0.05] border border-emerald-500/20 rounded-xl px-4 py-3">
-          <ShieldCheck size={15} className="text-emerald-600 shrink-0 mt-0.5" />
-          <p className="text-xs font-semibold text-slate-700">
-            Nothing material is declining or projected to decline right now.
-            {lowConfidence.length > 0 && ' Only very low-volume observations were found — they are below.'}
-          </p>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {/* The single highest-priority finding — groups is already sorted by
-              severity/health (groupDeclinesByMetric), so index 0 is the real
-              one to feature, not an arbitrary pick. */}
-          <FeaturedCard clientId={clientId} group={primary[0]} onChanged={onChanged} />
-
-          {primary.length > 1 && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {primary.slice(1).map((group) => (
-                <CompactCard key={group.metricKey} clientId={clientId} group={group} onChanged={onChanged} />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Demoted, never deleted. A 1 → 0 click change is a real observation and
-          is still inspectable here; it just does not get to look like a
-          site-wide emergency next to a 14,542 → 9,212 move. */}
-      {lowConfidence.length > 0 && (
-        <div className="pt-1">
-          <button
-            type="button"
-            onClick={() => setShowLow((v) => !v)}
-            aria-expanded={showLow}
-            className="flex items-center gap-1.5 text-[11px] font-bold text-slate-500 hover:text-slate-800 transition cursor-pointer"
-          >
-            {showLow ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-            <EyeOff size={11} />
-            Low-confidence observations ({lowConfidence.length})
-          </button>
-          {showLow && (
-            <div className="mt-2 space-y-2">
-              <p className="text-[10.5px] font-medium text-slate-400">
-                Statistically real, but on too little volume for the percentage to mean much. Shown
-                for completeness, ranked below everything above.
+    <div id="an-needs-attention"><Tray>
+      <TrayCard
+        title="What needs attention"
+        subtitle="What happened, what's expected next, why, and what to fix"
+        action={primary.length > 0 ? <Badge tone="red">{primary.length}</Badge> : null}
+      >
+        <div className="px-4 pb-4 space-y-3">
+          {primary.length === 0 ? (
+            <div className="flex items-start gap-2.5 rounded-card px-4 py-3" style={{ background: STATUS.good.tint }}>
+              <ShieldCheck size={16} className="shrink-0 mt-0.5" style={{ color: STATUS.good.color }} />
+              <p className="text-[13px] text-fg">
+                Nothing material is declining or projected to decline right now.
+                {lowConfidence.length > 0 && ' Only very low-volume observations were found — they are below.'}
               </p>
-              {lowConfidence.map((group) => (
-                <div key={group.metricKey} className="rounded-xl border border-slate-200 bg-slate-100/40 p-3">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[11.5px] font-black text-slate-700">{group.metric.display_name}</span>
-                    <span className="an-chip an-chip-slate">low volume</span>
-                  </div>
-                  {group.all.map((i) => (
-                    <p key={i.id} className="text-[10.5px] font-medium text-slate-500 mt-1">
-                      {finding(i, group.metric)} · {supportingLine(i, group.metric)}
-                      <span className="block text-slate-400">{lowConfidenceReason(i, group.metric)}</span>
-                    </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {/* The single highest-priority finding — groups is already sorted by
+                  severity/health (groupDeclinesByMetric), so index 0 is the real
+                  one to feature, not an arbitrary pick. */}
+              <FeaturedCard clientId={clientId} group={primary[0]} onChanged={onChanged} />
+
+              {primary.length > 1 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {primary.slice(1).map((group) => (
+                    <CompactCard key={group.metricKey} clientId={clientId} group={group} onChanged={onChanged} />
                   ))}
                 </div>
-              ))}
+              )}
+            </div>
+          )}
+
+          {/* Demoted, never deleted. A 1 → 0 click change is a real observation and
+              is still inspectable here; it just does not get to look like a
+              site-wide emergency next to a 14,542 → 9,212 move. */}
+          {lowConfidence.length > 0 && (
+            <div>
+              <Button variant="ghost" size="sm" onClick={() => setShowLow((v) => !v)} aria-expanded={showLow}>
+                {showLow ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                <EyeOff size={12} />
+                Low-confidence observations ({lowConfidence.length})
+              </Button>
+              {showLow && (
+                <div className="mt-2 space-y-2">
+                  <p className="text-xs text-faint">
+                    Statistically real, but on too little volume for the percentage to mean much. Shown
+                    for completeness, ranked below everything above.
+                  </p>
+                  {lowConfidence.map((group) => (
+                    <div key={group.metricKey} className="rounded-card bg-muted p-3">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-[13px] font-medium text-fg">{group.metric.display_name}</span>
+                        <Badge tone="grey">low volume</Badge>
+                      </div>
+                      {group.all.map((i) => (
+                        <p key={i.id} className="text-xs text-text mt-1">
+                          {finding(i, group.metric)} · {supportingLine(i, group.metric)}
+                          <span className="block text-faint">{lowConfidenceReason(i, group.metric)}</span>
+                        </p>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
-      )}
-    </div>
+      </TrayCard>
+    </Tray></div>
   );
 }

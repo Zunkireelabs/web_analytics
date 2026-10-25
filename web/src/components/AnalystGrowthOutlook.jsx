@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BrainCircuit, TrendingUp, TrendingDown, Minus, Clock, CircleSlash, Search, Wrench } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, Clock, CircleSlash } from 'lucide-react';
 import {
   formatByUnit, pct, horizonChange, forecastHealth, isLowerBetter, horizonUnit, insufficientHistoryLabel, HEALTH_META,
-  groupDeclinesByMetric, finding, supportingLine,
 } from '../lib/analystFormat.js';
 import AnalystTrendCard from './AnalystTrendCard.jsx';
+import Badge from './Badge.jsx';
+import { Tray, TrayCard } from './layout/Tray.jsx';
+import { STATUS } from '../lib/palette.js';
 
 // The metrics worth leading with, in the order a reader wants them. This is a
 // PREFERENCE, not a filter: any of these that the client's catalog actually
@@ -47,9 +49,9 @@ function MetricTile({ metric, health, selected, onSelect }) {
   const Icon = health.state === 'no-data' ? CircleSlash
     : adverse == null || Math.abs(adverse) < 1 ? Minus
     : adverse < 0 ? TrendingDown : TrendingUp;
-  const tone = health.state === 'no-data' ? 'text-slate-400'
-    : adverse == null || Math.abs(adverse) < 1 ? 'text-slate-500'
-    : adverse < 0 ? 'text-rose-600' : 'text-emerald-600';
+  const toneColor = health.state === 'no-data' ? STATUS.neutral.color
+    : adverse == null || Math.abs(adverse) < 1 ? STATUS.neutral.text
+    : adverse < 0 ? STATUS.critical.text : STATUS.good.text;
   const delta = deltaLabel(change, metric);
 
   return (
@@ -57,26 +59,20 @@ function MetricTile({ metric, health, selected, onSelect }) {
       type="button"
       onClick={() => onSelect(metric.metric_key)}
       aria-pressed={selected}
-      className={`text-left rounded-2xl border p-4 transition cursor-pointer w-full ${
-        selected ? 'ring-2 ring-indigo-500/40 border-indigo-300 bg-white' : 'bg-white/60 hover:bg-white border-slate-200'
-      }`}
+      className={`text-left rounded-card p-4 transition cursor-pointer w-full ${selected ? 'bg-primary-tint' : 'bg-white hover:bg-muted'}`}
+      style={{ boxShadow: selected ? '0 0 0 1px var(--primary), 0 0 0 4px var(--primary-tint)' : 'var(--ring)' }}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="an-label truncate">{metric.display_name}</div>
-        <span
-          className="text-[8.5px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0"
-          style={{ color: meta.color, backgroundColor: meta.bg }}
-        >
-          {meta.label}
-        </span>
+      <div className="flex items-start justify-between gap-x-2 gap-y-1 flex-wrap">
+        <div className="text-[13px] leading-snug text-text min-w-0 break-words">{metric.display_name}</div>
+        <Badge tone={meta.tone} className="shrink-0">{meta.label}</Badge>
       </div>
 
       {health.state === 'no-data' ? (
         <>
-          <div className="text-lg font-black text-slate-400 tabular-nums mt-1.5">
+          <div className="text-[20px] font-medium tracking-[-0.02em] text-faint tnum mt-1.5">
             {metric.latest_value != null ? formatByUnit(metric.latest_value, metric.unit) : '—'}
           </div>
-          <p className="text-[10.5px] font-semibold text-slate-400 mt-1 leading-snug">
+          <p className="text-xs text-faint mt-1 leading-snug">
             {insufficientHistoryLabel(metric)}
           </p>
         </>
@@ -88,23 +84,23 @@ function MetricTile({ metric, health, selected, onSelect }) {
           <div className="flex items-baseline gap-1.5 mt-1.5 flex-wrap">
             {change.baseline != null && (
               <>
-                <span className="text-lg font-black text-slate-900 tabular-nums">
+                <span className="text-[20px] font-medium tracking-[-0.02em] text-fg tnum">
                   {formatByUnit(change.baseline, metric.unit)}
                 </span>
-                <span className="text-slate-300 text-xs font-bold">→</span>
+                <span className="text-faint-2 text-sm">→</span>
               </>
             )}
-            <span className={`text-lg font-black tabular-nums ${change.baseline != null ? 'text-slate-500' : 'text-slate-900'}`}>
+            <span className={`text-[20px] font-medium tracking-[-0.02em] tnum ${change.baseline != null ? 'text-text' : 'text-fg'}`}>
               {formatByUnit(change.endValue, metric.unit)}
             </span>
           </div>
           <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-            <span className={`flex items-center gap-1 text-[11px] font-black ${tone}`}>
-              <Icon size={11} />
+            <span className="flex items-center gap-1 text-xs font-medium" style={{ color: toneColor }}>
+              <Icon size={12} />
               {delta || `in ${change.horizon}${horizonUnit(metric)}`}
             </span>
             {delta && (
-              <span className="text-[10px] font-semibold text-slate-400">
+              <span className="text-xs text-faint">
                 projected · {change.horizon}{horizonUnit(metric)}
               </span>
             )}
@@ -115,69 +111,6 @@ function MetricTile({ metric, health, selected, onSelect }) {
   );
 }
 
-// What happened / what's expected / why / what to fix, for the tile the
-// reader has selected — same real, backend-narrated data
-// AnalystMetricIntelligence's MetricCard already shows below the fold
-// (groupDeclinesByMetric's `narrated.root_cause`/`narrated.recommendation`
-// come verbatim from the nightly recommendation pass, never synthesized
-// here), just also surfaced at the hero level so the reader doesn't have to
-// scroll down to see why the metric they just clicked is doing what it's
-// doing. A healthy metric with no decline insight has no group at all —
-// that's the honest "nothing to report" case, shown as such rather than
-// with an empty box.
-function SelectedTileNarrative({ metric, insights }) {
-  const group = useMemo(
-    () => groupDeclinesByMetric(insights, [metric]).find((g) => g.metricKey === metric.metric_key) || null,
-    [insights, metric]
-  );
-  if (!group) return null;
-
-  const happenedInsight = group.happened[0];
-  const expectedInsight = group.expected[0];
-
-  return (
-    <div className="relative mt-4 rounded-xl bg-white/70 border border-slate-200 p-3.5 space-y-1.5">
-      {happenedInsight && (
-        <p className="text-[11.5px] font-semibold text-slate-800 leading-snug">
-          <span className="an-label mr-1.5">What happened</span>
-          {finding(happenedInsight, metric)}
-          <span className="font-medium text-slate-500"> · {supportingLine(happenedInsight, metric)}</span>
-        </p>
-      )}
-      {expectedInsight && (
-        <p className="text-[11.5px] font-semibold text-slate-800 leading-snug">
-          <span className="an-label mr-1.5">What's expected</span>
-          {finding(expectedInsight, metric)}
-          <span className="font-medium text-slate-500"> · {supportingLine(expectedInsight, metric)}</span>
-        </p>
-      )}
-      {group.narrated?.root_cause && (
-        <p className="text-[11px] font-medium text-slate-700">
-          <span className="an-label mr-1.5">Why</span>
-          {group.narrated.root_cause}
-          <span className="text-[9.5px] font-bold text-slate-400 ml-1.5 uppercase tracking-wider">AI inference</span>
-        </p>
-      )}
-      {group.narrated?.recommendation ? (
-        <p className="text-[11px] font-semibold text-slate-800 flex items-start gap-1.5">
-          <Wrench size={11} className="shrink-0 mt-0.5 text-indigo-600" />
-          <span><span className="an-label mr-1.5">What to fix</span>{group.narrated.recommendation}</span>
-        </p>
-      ) : (
-        <p className="text-[10.5px] font-medium text-slate-500 flex items-start gap-1.5">
-          <Search size={11} className="shrink-0 mt-0.5 text-slate-400" />
-          No fix guidance written for this yet. The finding and its evidence are shown above; guidance is added by the nightly pass.
-        </p>
-      )}
-    </div>
-  );
-}
-
-// The Analyst page's hero: where every forecastable headline metric is
-// heading, and which of them are in trouble — the future stated first, before
-// any backward-looking detail. The chart underneath is the same
-// AnalystTrendCard that used to be buried inside Impression Forecast at the
-// bottom of the page; clicking a tile drives it.
 export default function AnalystGrowthOutlook({ clientId, dashboard }) {
   const metrics = useMemo(() => Object.values(dashboard?.groups || {}).flat(), [dashboard]);
   const insights = dashboard?.insights || [];
@@ -229,73 +162,61 @@ export default function AnalystGrowthOutlook({ clientId, dashboard }) {
     ? 'Nothing is projected to decline'
     : 'Not enough history to project yet';
 
-  return (
-    <div className="an-panel p-6 relative overflow-hidden">
-      <div aria-hidden className="absolute -top-16 -right-16 w-64 h-64 rounded-full bg-indigo-500/10 blur-3xl pointer-events-none" />
-      <div aria-hidden className="absolute -bottom-20 -left-10 w-56 h-56 rounded-full bg-violet-500/8 blur-3xl pointer-events-none" />
+  const statusBadges = (
+    <>
+      <Badge tone={atRisk.length ? 'red' : watching.length ? 'amber' : 'green'}>{headline}</Badge>
+      {soonest != null && (
+        <Badge tone="grey"><Clock size={11} />soonest {daysLabel(soonest)}</Badge>
+      )}
+    </>
+  );
 
-      <div className="relative flex items-start gap-3 mb-5 flex-wrap">
-        <div className="w-10 h-10 rounded-2xl grid place-items-center bg-gradient-to-br from-indigo-500 to-violet-600 text-white shrink-0 shadow-lg shadow-indigo-500/25">
-          <BrainCircuit size={19} />
-        </div>
-        <div className="min-w-0 flex-1">
-          <h2 className="text-sm font-black text-slate-900 tracking-tight">Growth Outlook</h2>
-          <p className="text-[11px] font-medium text-slate-500">
-            Where the site is heading over the next two weeks — site-wide, not per page
-          </p>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className={`an-chip ${atRisk.length ? 'an-chip-rose' : watching.length ? 'an-chip-amber' : 'an-chip-emerald'}`}>
-            {headline}
-          </span>
-          {soonest != null && (
-            <span className="an-chip an-chip-slate">
-              <Clock size={9} />
-              soonest {daysLabel(soonest)}
-            </span>
+  return (
+    <Tray>
+      <TrayCard
+        title="Growth outlook"
+        subtitle="Where the site is heading over the next two weeks — site-wide, not per page"
+        action={<div className="hidden lg:flex items-center justify-end gap-2 flex-wrap">{statusBadges}</div>}
+      >
+        <div className="px-4 pb-4">
+          {/* Below lg the header has no room beside the title, so the status
+              badges move into the body (same content, shown once either way). */}
+          <div className="lg:hidden flex items-center gap-2 flex-wrap pb-3">{statusBadges}</div>
+          {tiles.length === 0 ? (
+            <p className="text-[13px] text-text bg-muted rounded-card px-4 py-3">
+              No forecastable metrics for this client yet. Tiles appear here once Search Console data has
+              been collected and the nightly models have run.
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {tiles.map(({ metric, health }) => (
+                <MetricTile
+                  key={metric.metric_key}
+                  metric={metric}
+                  health={health}
+                  selected={selectedMetricKey === metric.metric_key}
+                  onSelect={setSelectedMetricKey}
+                />
+              ))}
+            </div>
           )}
         </div>
-      </div>
 
-      {tiles.length === 0 ? (
-        <p className="relative text-xs font-medium text-slate-500 bg-slate-100/60 border border-slate-200 rounded-xl px-4 py-3">
-          No forecastable metrics for this client yet. Tiles appear here once Search Console data has
-          been collected and the nightly models have run.
-        </p>
-      ) : (
-        <div className="relative grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {tiles.map(({ metric, health }) => (
-            <MetricTile
-              key={metric.metric_key}
-              metric={metric}
-              health={health}
-              selected={selectedMetricKey === metric.metric_key}
-              onSelect={setSelectedMetricKey}
-            />
-          ))}
-        </div>
-      )}
-
-      {selectedMetricKey && tiles.find((t) => t.metric.metric_key === selectedMetricKey) && (
-        <SelectedTileNarrative
-          metric={tiles.find((t) => t.metric.metric_key === selectedMetricKey).metric}
-          insights={insights}
-        />
-      )}
-
-      {/* The forecast made visible. Past, today and the projected band in one
-          picture — the thing a reader can understand without parsing "-12%". */}
-      {selectedMetricKey && metrics.length > 0 && (
-        <div className="relative mt-4">
+        {/* The forecast made visible. Past, today and the projected band in one
+            picture — the thing a reader can understand without parsing "-12%". */}
+        {selectedMetricKey && metrics.length > 0 && (
           <AnalystTrendCard
             clientId={clientId}
             metrics={metrics}
             selectedMetricKey={selectedMetricKey}
             onSelectMetric={setSelectedMetricKey}
+            // The tiles above already pick the metric; keep the dropdown only for
+            // metrics that have no tile of their own.
+            showMetricPicker={metrics.length > tiles.length}
             insights={insights}
           />
-        </div>
-      )}
-    </div>
+        )}
+      </TrayCard>
+    </Tray>
   );
 }

@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { ChevronDown, ChevronsUpDown, LogOut, Settings as SettingsIcon } from 'lucide-react';
 import Logo from './Logo.jsx';
+import WorkspaceSwitcher from './WorkspaceSwitcher.jsx';
 import Avatar from './Avatar.jsx';
 import Button from './Button.jsx';
 import SegmentedTabs from './SegmentedTabs.jsx';
 import { ROLE_LABELS } from './RoleBadge.jsx';
-import { visibleGroups, SETTINGS_ITEM, currentSiteOf, siteDomain, siteInitials } from '../lib/nav.js';
+import { visibleGroups, SETTINGS_ITEM, currentSiteOf } from '../lib/nav.js';
 
 const COLLAPSE_STORAGE_KEY = 'sidebar-collapsed-sections';
 
@@ -34,7 +35,7 @@ function emailInitials(email) {
 }
 
 export default function Sidebar({
-  sites, siteId, isInternal, isPlatformAdmin, onSite, onLogout, mobileOpen, onCloseMobile,
+  sites, siteId, isInternal, isPlatformAdmin, onSwitchProject, onLogout, mobileOpen, onCloseMobile,
   email, role, agentOpen, onAgent, agentAvailable,
 }) {
   const loc = useLocation();
@@ -137,29 +138,7 @@ export default function Sidebar({
             </Button>
           </div>
 
-          <div className="relative mx-3 mb-2 rounded-[10px] bg-white px-2 py-1.5 flex items-center gap-2.5"
-            style={{ boxShadow: 'var(--ring)' }}>
-            {currentSite?.logo_data_url ? (
-              <img src={currentSite.logo_data_url} alt="" className="w-6 h-6 rounded-[7px] object-contain shrink-0" />
-            ) : (
-              <span className="w-6 h-6 rounded-[7px] bg-primary text-white text-[10px] font-medium grid place-items-center shrink-0">
-                {siteInitials(currentSite?.name)}
-              </span>
-            )}
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium text-fg truncate">{currentSite?.name || 'No site'}</div>
-              <div className="text-xs text-faint truncate">{siteDomain(currentSite)}</div>
-            </div>
-            {sites?.length > 1 && (
-              <>
-                <ChevronsUpDown size={14} className="text-faint shrink-0" aria-hidden />
-                <select value={siteId || ''} onChange={(e) => onSite(Number(e.target.value))} aria-label="Switch site"
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer">
-                  {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-              </>
-            )}
-          </div>
+          <WorkspaceSwitcher currentSite={currentSite} siteId={siteId} onSwitch={onSwitchProject} />
 
           {agentAvailable && (
             <div className="mx-3 mb-1.5">

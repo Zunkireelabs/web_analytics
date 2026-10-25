@@ -1,30 +1,35 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, timeAgo } from '../api.js';
-import { Users, Ban, MoreHorizontal, UserPlus, Info } from 'lucide-react';
+import { Users, Ban, MoreHorizontal, UserPlus, Info, Mail } from 'lucide-react';
 import Avatar from './Avatar.jsx';
 import Badge from './Badge.jsx';
 import Button from './Button.jsx';
 import Field from './Field.jsx';
 import Modal from './Modal.jsx';
 import RichSelect from './RichSelect.jsx';
-import { ROLE_LABELS } from './RoleBadge.jsx';
 import SettingsCard from './settings/SettingsCard.jsx';
 import { STATUS } from '../lib/palette.js';
 import { siteInitials } from '../lib/nav.js';
 
-// Mirrors login.js's TENANT_ROLE_RANK — a Tenant Admin can only ever grant a
-// tenant-tier role to their own tenant's users (PLATFORM-ADMIN-DESIGN.md §E);
-// platform tiers are only reachable from admin/Users.jsx.
-const TENANT_ROLES = ['tenant_admin', 'tenant_member'];
+// Workspace roles, highest first. The server is the real gate (every route
+// checks the caller's role in THIS workspace); this only decides which
+// controls to show. Owner is only offered to an owner — an admin cannot grant it.
+const ROLE_LABELS = { owner: 'Owner', admin: 'Admin', member: 'Member' };
+const ROLE_DESCRIPTIONS = {
+  owner: 'Full control, including billing-level changes and other owners.',
+  admin: 'Can add projects, invite teammates, change roles and remove members.',
+  member: "Can use every project in the workspace; can't manage it.",
+};
 
-const ROLE_OPTIONS = [
-  { value: 'tenant_admin', label: 'Admin', description: 'Can invite teammates, change roles and remove members.' },
-  { value: 'tenant_member', label: 'Member', description: "Can use the dashboard; can't manage the team." },
-];
+const roleOptions = (actorRole) => ['owner', 'admin', 'member']
+  .filter((r) => r !== 'owner' || actorRole === 'owner')
+  .map((value) => ({ value, label: ROLE_LABELS[value], description: ROLE_DESCRIPTIONS[value] }));
 
-function RowMenu({ user, roleSaving, disabling, onChangeRole, onDisable }) {
+function RowMenu({ member, actorRole, roleSaving, removing, onChangeRole, onRemove }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
+  // An admin cannot change or remove an owner — hide the menu rather than offer a button the server will refuse.
+  const locked = member.role === 'owner' && actorRole !== 'owner';
 
   useEffect(() => {
     if (!open) return;
@@ -39,6 +44,8 @@ function RowMenu({ user, roleSaving, disabling, onChangeRole, onDisable }) {
     return () => { document.removeEventListener('mousedown', onDocClick); document.removeEventListener('keydown', onKey); };
   }, [open]);
 
+  if (locked) return <span className="w-8 shrink-0" aria-hidden />;
+
   return (
     <div className="relative shrink-0" ref={ref}>
       <Button variant="ghost" size="sm" icon title="More actions" aria-label="More actions" onClick={() => setOpen((o) => !o)}>
@@ -49,53 +56,58 @@ function RowMenu({ user, roleSaving, disabling, onChangeRole, onDisable }) {
           style={{ boxShadow: '0 0 0 1px rgba(0,0,0,.06), 0 20px 40px -12px rgba(0,0,0,.18)' }}>
           <div className="px-0.5">
             <span className="block text-xs font-medium text-fg mb-1">Role</span>
-            <RichSelect block align="left" label="Role" value={user.role} disabled={!!roleSaving[user.id]}
-              onChange={(r) => onChangeRole(user, r)} options={ROLE_OPTIONS} />
+            <RichSelect block align="left" label="Role" value={member.role} disabled={!!roleSaving[member.id]}
+              onChange={(r) => onChangeRole(member, r)} options={roleOptions(actorRole)} />
           </div>
-          {user.status !== 'disabled' && (
-            <button type="button" onClick={() => { setOpen(false); onDisable(user); }} disabled={!!disabling[user.id]}
-              className="w-full flex items-center gap-2 h-8 px-2 rounded-control text-[13px] text-[#b42318] hover:bg-[#fdecec] disabled:opacity-60">
-              <Ban size={13} /> Remove from team
-            </button>
-          )}
+          <button type="button" onClick={() => { setOpen(false); onRemove(member); }} disabled={!!removing[member.id]}
+            className="w-full flex items-center gap-2 h-8 px-2 rounded-control text-[13px] text-[#b42318] hover:bg-[#fdecec] disabled:opacity-60">
+            <Ban size={13} /> Remove from workspace
+          </button>
         </div>
       )}
     </div>
   );
 }
 
-// Visible to every tenant user (own-tenant read is unrestricted), but the
-// invite/role-change/disable controls only render for a Tenant Admin — the
-// same boundary the server enforces independently via requireTenantRole
-// (server/routes/users.js), this is UX, not the real access-control layer.
-export default function TeamCard({ role, workspaceName, projects, currentProjectId }) {
-  const isAdmin = role === 'tenant_admin';
-  const [users, setUsers] = useState(null); // null = loading
+// Members of one workspace. Anyone in the workspace can read the list; invite,
+// role changes and removal render only for an owner or admin, and the server
+// enforces the same boundary independently (server/routes/workspaces.js).
+export default function TeamCard({ workspace }) {
+  const [data, setData] = useState(null); // null = loading: { yourRole, members, invitations }
   const [error, setError] = useState(null);
 
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState('tenant_member');
+  const [inviteRole, setInviteRole] = useState('member');
   const [inviteState, setInviteState] = useState('idle');
   const [inviteError, setInviteError] = useState(null);
 
   const [roleSaving, setRoleSaving] = useState({});
-  const [disabling, setDisabling] = useState({});
+  const [removing, setRemoving] = useState({});
 
-  const load = () => api.team.list().then(setUsers).catch((e) => setError(e.message || 'Could not load your team.'));
+  const workspaceId = workspace?.id;
+  const load = () => api.workspace.members(workspaceId).then(setData).catch((e) => setError(e.message || 'Could not load your team.'));
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { setData(null); setError(null); if (workspaceId) load(); }, [workspaceId]);
+
+  const actorRole = data?.yourRole;
+  const isAdmin = actorRole === 'owner' || actorRole === 'admin';
+
+  const closeInvite = () => {
+    setInviteOpen(false);
+    setInviteEmail('');
+    setInviteRole('member');
+    setInviteError(null);
+    setInviteState('idle');
+  };
 
   const submitInvite = async (e) => {
     e.preventDefault();
     setInviteState('sending');
     setInviteError(null);
     try {
-      await api.team.invite({ email: inviteEmail.trim(), role: inviteRole });
-      setInviteEmail('');
-      setInviteRole('tenant_member');
-      setInviteState('idle');
-      setInviteOpen(false);
+      await api.workspace.invite(workspaceId, { email: inviteEmail.trim(), role: inviteRole });
+      closeInvite();
       await load();
     } catch (err) {
       setInviteError(err.message || 'Could not send invitation.');
@@ -103,43 +115,37 @@ export default function TeamCard({ role, workspaceName, projects, currentProject
     }
   };
 
-  const closeInvite = () => {
-    setInviteOpen(false);
-    setInviteEmail('');
-    setInviteRole('tenant_member');
-    setInviteError(null);
-    setInviteState('idle');
-  };
-
-  const changeRole = async (user, newRole) => {
-    if (newRole === user.role) return;
-    setRoleSaving((s) => ({ ...s, [user.id]: true }));
+  const changeRole = async (member, newRole) => {
+    if (newRole === member.role) return;
+    setRoleSaving((s) => ({ ...s, [member.id]: true }));
     try {
-      await api.team.updateRole(user.id, newRole);
+      await api.workspace.setRole(workspaceId, member.id, newRole);
       await load();
     } catch (err) {
       setError(err.message || 'Could not change role.');
     } finally {
-      setRoleSaving((s) => ({ ...s, [user.id]: false }));
+      setRoleSaving((s) => ({ ...s, [member.id]: false }));
     }
   };
 
-  const disable = async (user) => {
-    if (!confirm(`Remove ${user.email} from your team? They will be logged out and lose access immediately.`)) return;
-    setDisabling((s) => ({ ...s, [user.id]: true }));
+  const remove = async (member) => {
+    if (!confirm(`Remove ${member.email} from ${workspace.name}? They lose access to all of its projects immediately.`)) return;
+    setRemoving((s) => ({ ...s, [member.id]: true }));
     try {
-      await api.team.disable(user.id);
+      await api.workspace.remove(workspaceId, member.id);
       await load();
     } catch (err) {
-      setError(err.message || 'Could not remove user.');
+      setError(err.message || 'Could not remove member.');
     } finally {
-      setDisabling((s) => ({ ...s, [user.id]: false }));
+      setRemoving((s) => ({ ...s, [member.id]: false }));
     }
   };
+
+  const projects = workspace?.projects || [];
 
   return (
     <SettingsCard icon={Users} title="Members"
-      description={isAdmin ? `Invite teammates to ${workspaceName || 'this workspace'} and manage their access` : 'Everyone with access to this workspace'}
+      description={isAdmin ? `Invite teammates to ${workspace?.name || 'this workspace'} and manage their access` : 'Everyone with access to this workspace'}
       action={isAdmin && (
         <Button variant="light" onClick={() => setInviteOpen(true)}><UserPlus size={14} />Invite</Button>
       )}>
@@ -147,39 +153,57 @@ export default function TeamCard({ role, workspaceName, projects, currentProject
         <div className="mx-5 my-3 rounded-control bg-[#fdecec] text-[#b42318] text-[13px] px-3 py-2">{error}</div>
       )}
 
-      {!users ? (
+      {!data ? (
         <div>
           {[0, 1].map((i) => (
             <div key={i} className="px-5 py-3 border-b border-border last:border-0"><div className="h-5 bg-muted rounded-control animate-pulse" /></div>
           ))}
         </div>
-      ) : users.length === 0 ? (
+      ) : data.members.length === 0 ? (
         <div className="px-5 py-8 text-center text-[13px] text-faint">No teammates yet.</div>
       ) : (
         <div>
-          {users.map((u) => (
-            <div key={u.id} className="flex items-center gap-3 px-5 py-3 border-b border-border last:border-0">
-              <span className="w-1.5 h-1.5 rounded-full shrink-0" title={u.status === 'disabled' ? 'Disabled' : 'Active'}
-                style={{ background: u.status === 'disabled' ? STATUS.critical.color : STATUS.good.color }} />
-              <Avatar email={u.email} size="sm" />
+          {data.members.map((m) => (
+            <div key={m.id} className="flex items-center gap-3 px-5 py-3 border-b border-border last:border-0">
+              <span className="w-1.5 h-1.5 rounded-full shrink-0" title={m.status === 'disabled' ? 'Disabled' : 'Active'}
+                style={{ background: m.status === 'disabled' ? STATUS.critical.color : STATUS.good.color }} />
+              <Avatar email={m.email} size="sm" />
               <div className="min-w-0 flex-1">
-                <p className="text-[13px] font-medium text-fg truncate">{u.email}</p>
+                <p className="text-[13px] font-medium text-fg truncate">{m.email}</p>
                 <p className="text-xs text-faint">
-                  {u.last_login_at ? `Last active ${timeAgo(u.last_login_at)}` : 'Never logged in'}
+                  {m.last_login_at ? `Last active ${timeAgo(m.last_login_at)}` : 'Never logged in'}
                 </p>
               </div>
-              {u.status === 'disabled' && <Badge tone="red" className="shrink-0">Disabled</Badge>}
-              <Badge tone="grey" className="shrink-0">{ROLE_LABELS[u.role] || u.role}</Badge>
+              {m.status === 'disabled' && <Badge tone="red" className="shrink-0">Disabled</Badge>}
+              <Badge tone="grey" className="shrink-0">{ROLE_LABELS[m.role] || m.role}</Badge>
               {isAdmin && (
-                <RowMenu user={u} roleSaving={roleSaving} disabling={disabling} onChangeRole={changeRole} onDisable={disable} />
+                <RowMenu member={m} actorRole={actorRole} roleSaving={roleSaving} removing={removing}
+                  onChangeRole={changeRole} onRemove={remove} />
               )}
             </div>
           ))}
         </div>
       )}
+
+      {data?.invitations?.length > 0 && (
+        <div className="border-t border-border">
+          <div className="px-5 pt-3 pb-1 text-[11px] font-medium tracking-[.08em] uppercase text-faint">Pending invitations</div>
+          {data.invitations.map((inv) => (
+            <div key={inv.id} className="flex items-center gap-3 px-5 py-2.5 border-b border-border last:border-0">
+              <span className="w-7 h-7 rounded-full bg-muted text-faint grid place-items-center shrink-0"><Mail size={13} aria-hidden /></span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-medium text-fg truncate">{inv.email}</p>
+                <p className="text-xs text-faint">Invited {timeAgo(inv.created_at)} · expires {new Date(inv.expires_at).toLocaleDateString()}</p>
+              </div>
+              <Badge tone="outline" className="shrink-0">{ROLE_LABELS[inv.role] || inv.role}</Badge>
+            </div>
+          ))}
+        </div>
+      )}
+
       {isAdmin && (
         <Modal isOpen={inviteOpen} onClose={closeInvite} icon={Users} title="Invite team member"
-          subtitle={<>Invite to <span className="text-fg font-medium">{workspaceName}</span></>} maxWidth="max-w-[520px]"
+          subtitle={<>Invite to <span className="text-fg font-medium">{workspace?.name}</span></>} maxWidth="max-w-[520px]"
           footer={(
             <>
               <Button variant="light" onClick={closeInvite}>Cancel</Button>
@@ -192,34 +216,24 @@ export default function TeamCard({ role, workspaceName, projects, currentProject
             <Field label="Email" type="email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="colleague@company.com" required />
 
             <div>
-              <div className="text-[13px] font-medium text-fg">Access per project</div>
-              <div className="text-xs text-faint">What they can do in each project of this workspace</div>
-              <div className="mt-1">
-                {(projects?.length ? projects : [{ id: currentProjectId ?? 'current', name: workspaceName }]).map((p) => {
-                  const isCurrent = projects?.length ? p.id === currentProjectId : true;
-                  return (
-                    <div key={p.id} className="flex items-center gap-2.5 py-2.5 border-b border-border last:border-0">
-                      {p.logo ? (
-                        <img src={p.logo} alt="" className="w-6 h-6 rounded-[7px] object-contain shrink-0" />
-                      ) : (
-                        <span className="w-6 h-6 rounded-[7px] bg-primary text-white text-[10px] font-medium grid place-items-center shrink-0">{siteInitials(p.name)}</span>
-                      )}
+              <div className="text-[13px] font-medium text-fg">Role in this workspace</div>
+              <div className="text-xs text-faint">Applies to every project below</div>
+              <div className="mt-2">
+                <RichSelect block label="Role" value={inviteRole} onChange={setInviteRole} options={roleOptions(actorRole)} />
+              </div>
+              {projects.length > 0 && (
+                <div className="mt-2">
+                  {projects.map((p) => (
+                    <div key={p.id} className="flex items-center gap-2.5 py-2 border-b border-border last:border-0">
+                      <span className="w-6 h-6 rounded-[7px] bg-primary text-white text-[10px] font-medium grid place-items-center shrink-0">{siteInitials(p.name)}</span>
                       <div className="min-w-0 flex-1">
                         <div className="text-[13px] font-medium text-fg truncate">{p.name}</div>
                         {p.domain && <div className="text-xs text-faint truncate">{p.domain}</div>}
                       </div>
-                      {isCurrent ? (
-                        <RichSelect label={`Access to ${p.name}`} value={inviteRole} onChange={setInviteRole} options={ROLE_OPTIONS} />
-                      ) : (
-                        <span title="Invite from that project's settings">
-                          <RichSelect label={`Access to ${p.name}`} value="none" onChange={() => {}} disabled
-                            options={[{ value: 'none', label: 'No access' }]} />
-                        </span>
-                      )}
                     </div>
-                  );
-                })}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {inviteState === 'error' && inviteError && (
@@ -228,7 +242,7 @@ export default function TeamCard({ role, workspaceName, projects, currentProject
 
             <div className="flex items-start gap-2.5 rounded-control bg-muted px-3 py-2.5 text-[13px] leading-5 text-text">
               <Info size={15} className="text-faint shrink-0 mt-0.5" />
-              <span>We'll email them a link to join. They get access once they accept.</span>
+              <span>New people get an email with a link to join. Someone who already has an account is added straight away.</span>
             </div>
           </form>
         </Modal>

@@ -3,6 +3,7 @@ import { ComposedChart, Area, Line, ReferenceLine, ReferenceDot, ResponsiveConta
 import { api } from '../api.js';
 import { horizonUnit } from '../lib/analystFormat.js';
 import { CHART, SERIES, STATUS, AXIS_TICK } from '../lib/palette.js';
+import SegmentedTabs from './SegmentedTabs.jsx';
 
 const GRANULARITIES = ['Day', 'Week', 'Month'];
 
@@ -75,11 +76,11 @@ function CustomTooltip({ active, payload, label, unit }) {
   if (!active || !payload?.length) return null;
   const format = (v) => (unit === 'ratio' ? `${(v * 100).toFixed(1)}%` : Math.round(v * 100) / 100).toLocaleString();
   return (
-    <div className="bg-slate-950/90 backdrop-blur-md text-slate-900 text-xs rounded-xl p-3 shadow-xl border border-slate-800 space-y-1">
-      <div className="text-slate-400 font-medium mb-1">{label}</div>
+    <div className="bg-fg text-white text-xs rounded-control p-3 space-y-1">
+      <div className="text-faint-2 mb-1">{label}</div>
       {payload.map((p) => p.value != null && (
-        <div key={p.dataKey} className="font-bold flex items-center gap-1.5 text-sm">
-          <span className={`w-1.5 h-1.5 rounded-full ${p.dataKey === 'forecast' ? 'bg-violet-400' : 'bg-sky-400'}`} />
+        <div key={p.dataKey} className="font-medium flex items-center gap-1.5 text-sm">
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: p.dataKey === 'forecast' ? SERIES[1] : CHART.highlight }} />
           {p.dataKey === 'forecast' ? 'Forecast: ' : ''}{format(p.value)}
         </div>
       ))}
@@ -87,7 +88,7 @@ function CustomTooltip({ active, payload, label, unit }) {
   );
 }
 
-export default function AnalystTrendCard({ clientId, metrics, selectedMetricKey, onSelectMetric, insights = [] }) {
+export default function AnalystTrendCard({ clientId, metrics, selectedMetricKey, onSelectMetric, insights = [], showMetricPicker = true }) {
   const [granularity, setGranularity] = useState('Week');
   const [data, setData] = useState(null); // null = loading
   const [error, setError] = useState(null);
@@ -157,44 +158,40 @@ export default function AnalystTrendCard({ clientId, metrics, selectedMetricKey,
   }, [data, granularity, metric?.unit, metric?.anomalies, metric?.metric_key, insights]);
 
   return (
-    <div className="an-panel p-6 flex flex-col justify-between">
-      <div>
-        <div className="flex flex-wrap items-start justify-between mb-6 gap-3">
+    <div className="border-t border-border">
+      <div className="px-4 py-4">
+        <div className="flex flex-wrap items-start justify-between mb-4 gap-3">
           <div>
-            <h3 className="text-base font-bold text-slate-900 tracking-tight">Trend & Forecast</h3>
-            <p className="text-xs text-slate-500 font-medium mt-0.5">
+            <h3 className="text-[15px] font-semibold tracking-[-0.01em] text-fg">Trend &amp; forecast</h3>
+            <p className="text-xs text-faint mt-0.5">
               {metric?.display_name || 'Metric'} · {granularity.toLowerCase()} view, forecast band shaded
             </p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <select
+            {showMetricPicker && <select
               value={metric?.metric_key || ''}
               onChange={(e) => onSelectMetric(e.target.value)}
-              className="an-input text-[11px] font-bold px-3 py-1.5 cursor-pointer"
+              aria-label="Metric"
+              className="h-8 rounded-control bg-white text-[13px] text-fg px-2.5 outline-none cursor-pointer"
+              style={{ boxShadow: '0 0 0 1px var(--input)' }}
             >
-              {metrics.map((m) => <option key={m.metric_key} value={m.metric_key} className="bg-white text-slate-800">{m.display_name}</option>)}
-            </select>
-            <div className="flex bg-slate-100 p-1 rounded-2xl border border-slate-200 shrink-0">
-              {GRANULARITIES.map((g) => (
-                <button key={g} onClick={() => setGranularity(g)}
-                  className={`text-[11px] font-bold px-3 py-1.5 rounded-xl transition cursor-pointer ${
-                    granularity === g
-                      ? 'bg-slate-100 text-indigo-500 border border-white/10'
-                      : 'text-slate-400 hover:text-slate-800'
-                  }`}>
-                  {g}
-                </button>
-              ))}
-            </div>
+              {metrics.map((m) => <option key={m.metric_key} value={m.metric_key}>{m.display_name}</option>)}
+            </select>}
+            <SegmentedTabs
+              className="shrink-0"
+              options={GRANULARITIES.map((g) => ({ value: g, label: g }))}
+              value={granularity}
+              onChange={setGranularity}
+            />
           </div>
         </div>
 
         {error ? (
-          <div className="py-20 text-center text-sm text-rose-600 font-medium">{error}</div>
+          <div className="py-20 text-center text-sm text-[#b42318]">{error}</div>
         ) : !data ? (
-          <div className="py-20 text-center text-sm text-slate-500 animate-pulse font-medium">Loading trend…</div>
+          <div className="py-20 text-center text-sm text-faint animate-pulse">Loading trend…</div>
         ) : chartRows.rows.length === 0 ? (
-          <div className="py-20 text-center text-sm text-slate-500 font-medium">No data yet for this metric.</div>
+          <div className="py-20 text-center text-sm text-faint">No data yet for this metric.</div>
         ) : (
           <ResponsiveContainer width="100%" height={260}>
             <ComposedChart data={chartRows.rows} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
@@ -227,14 +224,14 @@ export default function AnalystTrendCard({ clientId, metrics, selectedMetricKey,
           </ResponsiveContainer>
         )}
         {data?.forecast?.status === 'ok' && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-[9px] font-bold text-slate-500">
-            <span>Model: <span className="text-slate-700">{data.forecast.model}</span></span>
-            {data.forecast.horizon_periods && <span>Horizon: <span className="text-slate-700">{data.forecast.horizon_periods}{horizonUnit(metric)}</span></span>}
-            {data.forecast.confidence != null && <span>Confidence: <span className="text-slate-700">{Math.round(data.forecast.confidence * 100)}%</span></span>}
-            <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500" /> High anomaly</span>
-            <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-sky-400" /> Low anomaly</span>
-            <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rotate-45 bg-emerald-400" /> Trend shift</span>
-            <span className="inline-flex items-center gap-1"><span className="w-2 h-2 bg-violet-400" /> Forecast band</span>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-xs text-faint">
+            <span>Model: <span className="text-text">{data.forecast.model}</span></span>
+            {data.forecast.horizon_periods && <span>Horizon: <span className="text-text">{data.forecast.horizon_periods}{horizonUnit(metric)}</span></span>}
+            {data.forecast.confidence != null && <span>Confidence: <span className="text-text">{Math.round(data.forecast.confidence * 100)}%</span></span>}
+            <span className="inline-flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{ background: STATUS.critical.color }} /> High anomaly</span>
+            <span className="inline-flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{ background: SERIES[1] }} /> Low anomaly</span>
+            <span className="inline-flex items-center gap-1.5"><span className="w-2 h-2 rotate-45" style={{ background: STATUS.good.color }} /> Trend shift</span>
+            <span className="inline-flex items-center gap-1.5"><span className="w-2 h-2" style={{ background: CHART.highlight, opacity: 0.4 }} /> Forecast band</span>
           </div>
         )}
       </div>

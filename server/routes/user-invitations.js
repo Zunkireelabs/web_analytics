@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { acceptInvitation } from '../store/user-invitations.js';
 import { getUserByEmail, createUser } from '../store/users.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
+import { addMember } from '../store/workspaces.js';
 
 // Public — no requireAuth, parallel to the existing public
 // POST /signup-requests (server/routes/login.js). An invitation is never a
@@ -42,6 +43,13 @@ router.post('/invitations/:token/accept', async (req, res, next) => {
       passwordHash,
       role: invitation.role,
     });
+
+    // A workspace invitation also grants the membership it was issued with.
+    // Without this row the new account would exist but could not reach any
+    // project (requireAuth checks membership on every request).
+    if (invitation.workspace_id) {
+      await addMember(invitation.workspace_id, user.id, invitation.workspace_role || 'member');
+    }
 
     // No session exists at this public route — attribute the audit event to
     // the account that was just created by setting req.userId/siteId

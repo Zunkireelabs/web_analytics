@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
-import { Search, TrendingUp, Send, AlertTriangle, CheckCircle2, ExternalLink, Loader2, Ban } from 'lucide-react';
+import { Send, AlertTriangle, CheckCircle2, ExternalLink, Loader2, Ban } from 'lucide-react';
+import { STATUS } from '../lib/palette.js';
+import Badge from './Badge.jsx';
+import Button from './Button.jsx';
+import { Tray, TrayCard } from './layout/Tray.jsx';
 
 const MAX_KEYWORD_ROWS = 15;
 
-const PRIORITY_CHIP = { high: 'an-chip-rose', medium: 'an-chip-amber', low: 'an-chip-slate' };
+const PRIORITY_TONE = { high: 'red', medium: 'amber', low: 'grey' };
 const SOURCE_LABEL = {
   user_request: 'You asked for this',
   claude_research: 'Keyword research',
@@ -16,16 +20,11 @@ const SOURCE_LABEL = {
 // first appearing (analyst-seo-mapping.js's refreshPendingKeywordGapObservations,
 // run weekly) — a genuinely brand-new gap still simply has no chip yet, not
 // "unrelated".
-const RELEVANCE_CHIP = { direct: 'an-chip-emerald', supporting: 'an-chip-amber', unrelated: 'an-chip-slate' };
 const RELEVANCE_LABEL = { direct: 'Product match', supporting: 'Supports product', unrelated: 'Not product-related' };
 
 // Coverage verdicts (server/agents/lib/keyword-coverage.js). SAME TOPIC DOES NOT
 // MEAN SAME SEO TARGET, so a keyword another page covers only in a different
 // language, country or intent is shown as an expansion, never hidden as covered.
-const COVERAGE_CHIP = {
-  opportunity: 'an-chip-emerald', market_gap: 'an-chip-violet', language_gap: 'an-chip-violet',
-  intent_gap: 'an-chip-amber', covered: 'an-chip-slate', duplicate: 'an-chip-slate', uncertain: 'an-chip-rose',
-};
 const COVERAGE_LABEL = {
   opportunity: 'New opportunity', market_gap: 'Market gap', language_gap: 'Language gap', intent_gap: 'Intent gap',
   covered: 'Already covered', duplicate: 'Already targeted', uncertain: 'Uncertain',
@@ -53,7 +52,6 @@ function recommendedAction(gap) {
 // reimplements the qualification threshold itself, just labels what that
 // same comparison would say so a reviewer can see the trend the autonomous
 // ship cycle is actually gating on, before it's ever eligible to ship.
-const TREND_CHIP = { new: 'an-chip-slate', rising: 'an-chip-emerald', stable: 'an-chip-amber', falling: 'an-chip-rose' };
 const TREND_LABEL = { new: 'New — no trend yet', rising: 'Rising demand', stable: 'Stable demand', falling: 'Falling demand' };
 function evidenceTrend(gap) {
   const snapshots = Array.isArray(gap.evidence_snapshots) ? gap.evidence_snapshots : [];
@@ -76,8 +74,8 @@ function formatSeenDate(iso) {
 function Gloss({ translation, inline = false }) {
   if (!translation) return null;
   return (
-    <span className={`${inline ? '' : 'block mt-0.5 '}text-[10px] font-medium text-slate-500`}>
-      <span className="an-chip an-chip-slate mr-1">{translation.language}</span>
+    <span className={`${inline ? '' : 'block mt-0.5 '}text-xs text-faint`}>
+      <Badge tone="grey" className="mr-1.5">{translation.language}</Badge>
       {translation.english}
     </span>
   );
@@ -209,7 +207,7 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
 
   if (error) {
     return (
-      <div className="an-panel p-5 border-rose-500/30 bg-rose-500/[0.06] text-rose-600 font-semibold text-xs flex items-center gap-2">
+      <div className="rounded-card px-4 py-3 text-[13px] flex items-center gap-2" style={{ background: STATUS.critical.tint, color: STATUS.critical.text }}>
         <AlertTriangle size={15} className="shrink-0" />
         <span>{error}</span>
       </div>
@@ -222,256 +220,209 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
 
   if (loading) {
     return (
-      <div className="an-panel p-5 space-y-2">
-        {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="h-11 rounded-xl bg-slate-200/50 animate-pulse" />
-        ))}
-      </div>
+      <Tray>
+        <TrayCard>
+          <div className="p-4 space-y-2">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="h-11 rounded-control bg-muted animate-pulse" />
+            ))}
+          </div>
+        </TrayCard>
+      </Tray>
     );
   }
 
   return (
-    <div className="space-y-5">
+    <Tray>
       {/* ── Close to page 1 — real performance data, already ranking ─── */}
-      <div className="an-panel p-5 space-y-2.5 border-t-2 border-t-emerald-500/60">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-xl grid place-items-center bg-emerald-500/10 border border-emerald-500/25 text-emerald-600 shrink-0">
-            <TrendingUp size={15} />
-          </div>
-          <div>
-            <h2 className="text-xs font-black uppercase tracking-widest text-slate-800">Close to page 1</h2>
-            <p className="text-[11px] font-medium text-slate-500">
-              Real Search Console impressions this site already earns — the fastest wins
+      <TrayCard
+        title="Close to page 1"
+        subtitle="Real Search Console impressions this site already earns — the fastest wins"
+      >
+        {keywords.length === 0 ? (
+          <p className="mx-4 mb-4 text-[13px] text-text bg-muted rounded-card px-4 py-3">
+            No keywords just outside page 1 right now. This fills in once real Search Console
+            traffic lands a query at position 10-20 for this client.
+          </p>
+        ) : (
+          <>
+            <div className="overflow-x-auto border-t border-border">
+              <table className="tbl min-w-[640px]">
+                <thead>
+                  <tr>
+                    <th>Keyword</th>
+                    <th>Opportunity</th>
+                    <th className="num">Impressions</th>
+                    <th className="num">CTR</th>
+                    <th className="num">Position</th>
+                    <th>Target</th>
+                    <th>Recommended</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {keywords.map((k, i) => (
+                    <tr key={`${k.query}-${i}`}>
+                      <td>
+                        <div className="font-medium">{k.query}</div>
+                        <Gloss translation={translations[k.query]} />
+                      </td>
+                      <td>
+                        <Badge tone={PRIORITY_TONE[k.severity] || 'grey'}>{k.severity || 'low'}</Badge>
+                      </td>
+                      <td className="num">{Math.round(k.impressions ?? 0).toLocaleString()}</td>
+                      <td className="num text-text">{k.ctr != null ? `${(k.ctr * 100).toFixed(1)}%` : '—'}</td>
+                      <td className="num" style={{ color: STATUS.warning.text }}>{k.avgPosition != null ? k.avgPosition.toFixed(1) : '—'}</td>
+                      <td>
+                        {k.page ? (
+                          <a href={k.page} target="_blank" rel="noreferrer" className="text-[13px] text-primary hover:underline inline-flex items-center gap-1">
+                            Existing page <ExternalLink size={11} />
+                          </a>
+                        ) : (
+                          <span className="text-xs text-faint">No strong existing page</span>
+                        )}
+                      </td>
+                      <td className="text-xs text-text max-w-[16rem]">{k.recommendedAction}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="px-4 py-3 text-xs text-faint border-t border-border">
+              Not an estimated search volume — these are searches you're already being shown
+              for but not clicked on yet. Same source as Growth Opportunities above, filtered
+              to page-1-adjacent queries.
             </p>
-          </div>
-        </div>
-
-        <div className="pt-1">
-            {keywords.length === 0 ? (
-              <p className="text-xs font-medium text-slate-500 bg-slate-100/60 border border-slate-200 rounded-xl px-4 py-3">
-                No keywords just outside page 1 right now. This fills in once real Search Console
-                traffic lands a query at position 10-20 for this client.
-              </p>
-            ) : (
-              <>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse min-w-[560px]">
-                    <thead>
-                      <tr className="border-b border-slate-200">
-                        <th className="an-label py-2 pr-3 font-black">Keyword</th>
-                        <th className="an-label py-2 px-3 font-black whitespace-nowrap">Opportunity</th>
-                        <th className="an-label py-2 px-3 font-black text-right whitespace-nowrap">Impressions</th>
-                        <th className="an-label py-2 px-3 font-black text-right whitespace-nowrap">CTR</th>
-                        <th className="an-label py-2 px-3 font-black text-right whitespace-nowrap">Position</th>
-                        <th className="an-label py-2 px-3 font-black">Target</th>
-                        <th className="an-label py-2 pl-3 font-black">Recommended</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {keywords.map((k, i) => (
-                        <tr key={`${k.query}-${i}`} className="border-b border-slate-100 last:border-0">
-                          <td className="py-2.5 pr-3">
-                            <div className="text-xs font-bold text-slate-800">{k.query}</div>
-                            <Gloss translation={translations[k.query]} />
-                          </td>
-                          <td className="py-2.5 px-3">
-                            <span className={`an-chip ${PRIORITY_CHIP[k.severity] || 'an-chip-slate'}`}>
-                              {k.severity || 'low'}
-                            </span>
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-xs font-black text-slate-800 tabular-nums">
-                            {Math.round(k.impressions ?? 0).toLocaleString()}
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-xs font-bold text-slate-600 tabular-nums">
-                            {k.ctr != null ? `${(k.ctr * 100).toFixed(1)}%` : '—'}
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-xs font-bold text-amber-600 tabular-nums">
-                            {k.avgPosition != null ? k.avgPosition.toFixed(1) : '—'}
-                          </td>
-                          <td className="py-2.5 px-3">
-                            {k.page ? (
-                              <a href={k.page} target="_blank" rel="noreferrer" className="text-[11px] font-bold text-indigo-600 hover:underline inline-flex items-center gap-1">
-                                Existing page <ExternalLink size={10} />
-                              </a>
-                            ) : (
-                              <span className="text-[11px] font-semibold text-slate-400">No strong existing page</span>
-                            )}
-                          </td>
-                          <td className="py-2.5 pl-3 text-[11px] font-medium text-slate-500 max-w-[16rem]">
-                            {k.recommendedAction}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <p className="text-[10px] font-medium text-slate-400">
-                  Not an estimated search volume — these are searches you're already being shown
-                  for but not clicked on yet. Same source as Growth Opportunities above, filtered
-                  to page-1-adjacent queries.
-                </p>
-              </>
-            )}
-        </div>
-      </div>
+          </>
+        )}
+      </TrayCard>
 
       {/* ── Content gaps — net-new topics to discover and publish ─────── */}
-      <div className="an-panel p-5 space-y-2.5 border-t-2 border-t-indigo-500/60 bg-gradient-to-b from-indigo-500/[0.03] to-transparent">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-xl grid place-items-center bg-indigo-500/10 border border-indigo-500/25 text-indigo-600 shrink-0">
-            <Send size={15} />
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <h2 className="text-xs font-black uppercase tracking-widest text-slate-800">Keyword Discovery</h2>
-              {pendingCount > 0 && <span className="an-chip an-chip-violet">{pendingCount} waiting</span>}
-            </div>
-            <p className="text-[11px] font-medium text-slate-500">
-              Topics you don't rank for yet — queued to draft and publish
+      <TrayCard
+        title="Keyword discovery"
+        subtitle="Topics you don't rank for yet — queued to draft and publish"
+        action={pendingCount > 0 ? <Badge tone="primary">{pendingCount} waiting</Badge> : null}
+      >
+        <div className="px-4 pb-4">
+          {visibleGaps.length === 0 ? (
+            <p className="text-[13px] text-text bg-muted rounded-card px-4 py-3">
+              Nothing waiting for review. Ask the analyst for a keyword you want to grow for and it
+              will show up here, ready to send to Action Center.
             </p>
-          </div>
-        </div>
-
-        <div className="pt-1">
-            {visibleGaps.length === 0 ? (
-              <p className="text-xs font-medium text-slate-500 bg-slate-100/60 border border-slate-200 rounded-xl px-4 py-3">
-                Nothing waiting for review. Ask the analyst for a keyword you want to grow for and it
-                will show up here, ready to send to Action Center.
-              </p>
-            ) : (
-              <div className="max-h-[34rem] overflow-y-auto custom-scrollbar pr-1 -mr-1 space-y-4">
+          ) : (
+            <div className="max-h-[34rem] overflow-y-auto custom-scrollbar pr-1 -mr-1 space-y-4">
               {COVERAGE_GROUPS.map((group) => {
                 const items = visibleGaps.filter(group.match);
                 if (!items.length) return null;
                 return (
                   <div key={group.id} className="space-y-2">
-                    <div className="flex items-baseline gap-2">
-                      <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-600">{group.title}</h3>
-                      <span className="text-[10px] font-semibold text-slate-400">{items.length} · {group.hint}</span>
+                    <div className="flex items-baseline gap-2 flex-wrap">
+                      <h3 className="text-[13px] font-medium text-fg">{group.title}</h3>
+                      <span className="text-xs text-faint">{items.length} · {group.hint}</span>
                     </div>
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
-                {items.map((gap) => {
-                  const state = gapAction[gap.id];
-                  const sending = state === 'sending';
-                  const done = state && state !== 'sending';
-                  return (
-                    <div
-                      key={gap.id}
-                      className="rounded-xl border border-indigo-200/60 bg-indigo-500/[0.04] p-3.5 flex flex-col gap-3"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs font-black text-slate-800">{gap.topic}</span>
-                          <Gloss translation={translations[gap.topic]} inline />
-                          <span className={`an-chip ${PRIORITY_CHIP[gap.priority] || 'an-chip-slate'}`}>
-                            {gap.priority}
-                          </span>
-                          <span className="an-chip an-chip-slate">
-                            {SOURCE_LABEL[gap.source] || gap.source}
-                          </span>
-                          {gap.product_relevance && (
-                            <span className={`an-chip ${RELEVANCE_CHIP[gap.product_relevance] || 'an-chip-slate'}`}>
-                              {RELEVANCE_LABEL[gap.product_relevance] || gap.product_relevance}
-                            </span>
-                          )}
-                          {gap.coverage_status && (
-                            <span className={`an-chip ${COVERAGE_CHIP[gap.coverage_status] || 'an-chip-slate'}`} title={gap.coverage_reason || undefined}>
-                              {COVERAGE_LABEL[gap.coverage_status] || gap.coverage_status}
-                            </span>
-                          )}
-                          {recommendedAction(gap) && (
-                            <span className="an-chip an-chip-slate" title={recommendedAction(gap).reason || undefined}>
-                              {recommendedAction(gap).label}
-                            </span>
-                          )}
-                          <span className={`an-chip ${TREND_CHIP[evidenceTrend(gap)]}`} title="Based on the two most recent weekly demand snapshots">
-                            {TREND_LABEL[evidenceTrend(gap)]}
-                          </span>
-                        </div>
-                        {gap.reason && (
-                          <p className="text-[11px] font-medium text-slate-500 mt-1 line-clamp-2">{gap.reason}</p>
-                        )}
-                        {gap.coverage_status && gap.coverage_status !== 'opportunity' && gap.coverage_reason && (
-                          <p className="text-[11px] font-medium text-indigo-700/80 mt-1 line-clamp-2">{gap.coverage_reason}</p>
-                        )}
-                        <p className="text-[10px] font-medium text-slate-400 mt-1">
-                          Seen {gap.observation_count || 1}x
-                          {formatSeenDate(gap.first_seen_at) && ` · first ${formatSeenDate(gap.first_seen_at)}`}
-                          {formatSeenDate(gap.last_seen_at) && ` · last ${formatSeenDate(gap.last_seen_at)}`}
-                        </p>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      {items.map((gap) => {
+                        const state = gapAction[gap.id];
+                        const sending = state === 'sending';
+                        const done = state && state !== 'sending';
+                        return (
+                          <div
+                            key={gap.id}
+                            className="rounded-card bg-white p-3.5 flex flex-col gap-3"
+                            style={{ boxShadow: 'var(--ring)' }}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-[13px] font-medium text-fg">{gap.topic}</span>
+                                <Gloss translation={translations[gap.topic]} inline />
+                                <Badge tone={PRIORITY_TONE[gap.priority] || 'grey'}>{gap.priority}</Badge>
+                                {recommendedAction(gap) && (
+                                  <Badge tone="outline" title={recommendedAction(gap).reason || undefined}>
+                                    {recommendedAction(gap).label}
+                                  </Badge>
+                                )}
+                              </div>
+                              <p className="text-xs text-faint mt-1.5" title="Based on the two most recent weekly demand snapshots">
+                                {[
+                                  SOURCE_LABEL[gap.source] || gap.source,
+                                  gap.product_relevance && (RELEVANCE_LABEL[gap.product_relevance] || gap.product_relevance),
+                                  gap.coverage_status && (COVERAGE_LABEL[gap.coverage_status] || gap.coverage_status),
+                                  TREND_LABEL[evidenceTrend(gap)],
+                                ].filter(Boolean).join(' · ')}
+                              </p>
+                              {gap.reason && (
+                                <p className="text-xs text-text mt-1.5 line-clamp-2">{gap.reason}</p>
+                              )}
+                              {gap.coverage_status && gap.coverage_status !== 'opportunity' && gap.coverage_reason && (
+                                <p className="text-xs text-faint mt-1 line-clamp-2">{gap.coverage_reason}</p>
+                              )}
+                              <p className="text-xs text-faint-2 mt-1">
+                                Seen {gap.observation_count || 1}x
+                                {formatSeenDate(gap.first_seen_at) && ` · first ${formatSeenDate(gap.first_seen_at)}`}
+                                {formatSeenDate(gap.last_seen_at) && ` · last ${formatSeenDate(gap.last_seen_at)}`}
+                              </p>
 
-                        {done && state.draftId && (
-                          <a
-                            href="/action-center"
-                            className="inline-flex items-center gap-1.5 mt-2 text-[11px] font-bold text-emerald-700 hover:underline"
-                          >
-                            <CheckCircle2 size={11} />
-                            Draft ready in Action Center
-                            <ExternalLink size={10} />
-                          </a>
-                        )}
-                        {done && state.rejected && !state.draftError && (
-                          <p className="text-[11px] font-bold text-slate-500 mt-2">Dismissed.</p>
-                        )}
-                        {done && state.draftError && (
-                          <p className="text-[11px] font-semibold text-rose-600 mt-2 flex items-start gap-1.5">
-                            <AlertTriangle size={11} className="shrink-0 mt-0.5" />
-                            <span>
-                              Queued in Action Center, but the draft couldn't be generated:{' '}
-                              {state.draftError}
-                            </span>
-                          </p>
-                        )}
-                        {done && state.requiresFutureInfrastructure && (
-                          <p className="text-[11px] font-semibold text-amber-700 mt-2 flex items-start gap-1.5">
-                            <Ban size={11} className="shrink-0 mt-0.5" />
-                            <span>
-                              Real comparison-page opportunity — recorded in Action Center, but no generator can
-                              build a standalone comparison page yet. Needs new infrastructure before it can draft.
-                            </span>
-                          </p>
-                        )}
-                        {done && !state.draftId && !state.draftError && !state.rejected && !state.requiresFutureInfrastructure && (
-                          <p className="text-[11px] font-semibold text-slate-500 mt-2">
-                            Queued in Action Center — no draft was generated for this one.
-                          </p>
-                        )}
-                      </div>
+                              {done && state.draftId && (
+                                <a
+                                  href="/action-center"
+                                  className="inline-flex items-center gap-1.5 mt-2 text-[13px] font-medium hover:underline"
+                                  style={{ color: STATUS.good.text }}
+                                >
+                                  <CheckCircle2 size={13} />
+                                  Draft ready in Action Center
+                                  <ExternalLink size={11} />
+                                </a>
+                              )}
+                              {done && state.rejected && !state.draftError && (
+                                <p className="text-xs text-faint mt-2">Dismissed.</p>
+                              )}
+                              {done && state.draftError && (
+                                <p className="text-xs mt-2 flex items-start gap-1.5" style={{ color: STATUS.critical.text }}>
+                                  <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+                                  <span>
+                                    Queued in Action Center, but the draft couldn't be generated:{' '}
+                                    {state.draftError}
+                                  </span>
+                                </p>
+                              )}
+                              {done && state.requiresFutureInfrastructure && (
+                                <p className="text-xs mt-2 flex items-start gap-1.5" style={{ color: STATUS.warning.text }}>
+                                  <Ban size={12} className="shrink-0 mt-0.5" />
+                                  <span>
+                                    Real comparison-page opportunity — recorded in Action Center, but no generator can
+                                    build a standalone comparison page yet. Needs new infrastructure before it can draft.
+                                  </span>
+                                </p>
+                              )}
+                              {done && !state.draftId && !state.draftError && !state.rejected && !state.requiresFutureInfrastructure && (
+                                <p className="text-xs text-faint mt-2">
+                                  Queued in Action Center — no draft was generated for this one.
+                                </p>
+                              )}
+                            </div>
 
-                      {!done && (
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => act(gap, 'approved')}
-                            disabled={sending}
-                            className="an-grad-btn flex-1 text-[11px] font-bold px-3 py-2 rounded-xl text-white flex items-center justify-center gap-1.5 cursor-pointer"
-                          >
-                            {sending ? <Loader2 size={11} className="animate-spin" /> : <Send size={11} />}
-                            {sending ? 'Sending…' : 'Send to Action Center'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => act(gap, 'rejected')}
-                            disabled={sending}
-                            title="Dismiss"
-                            aria-label="Dismiss"
-                            className="p-2 rounded-xl border border-slate-300 text-slate-400 hover:text-rose-600 hover:border-rose-300 transition disabled:opacity-40 cursor-pointer shrink-0"
-                          >
-                            <Ban size={12} />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                            {!done && (
+                              <div className="flex items-center gap-2">
+                                <Button variant="primary" onClick={() => act(gap, 'approved')} disabled={sending}>
+                                  {sending ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+                                  {sending ? 'Sending…' : 'Send to Action Center'}
+                                </Button>
+                                <Button variant="light" icon className="shrink-0" onClick={() => act(gap, 'rejected')}
+                                  disabled={sending} title="Dismiss" aria-label="Dismiss">
+                                  <Ban size={14} />
+                                </Button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 );
               })}
-              </div>
-            )}
+            </div>
+          )}
         </div>
-      </div>
-    </div>
+      </TrayCard>
+    </Tray>
   );
 }

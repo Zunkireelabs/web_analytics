@@ -16,6 +16,7 @@ import { baseBranch } from '../implementers/lib/github-ops.js';
 import { hasVisibleFaqSignal } from '../implementers/lib/render-inspector.js';
 import { PERMISSION_LEVELS } from '../../mcp-server/permissions.js';
 import { getUserByEmail, createUser } from '../store/users.js';
+import { attachNewClientWorkspace } from '../store/workspaces.js';
 import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed, setSignupRequestCreatedSite } from '../store/signup-requests.js';
 import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { getProductGrowthConfig, saveProductGrowthConfig, setProspectDiscoveryEnabled, ensureCrmWebhookToken } from '../store/product-growth-config.js';
@@ -68,6 +69,7 @@ router.get('/internal/clients', async (req, res, next) => {
     res.json(sites.map((s) => ({
       id: s.id, name: s.name, websiteDomain: s.website_domain, timezone: s.timezone,
       propertyType: s.property_type,
+      workspaceId: s.workspace_id ?? null,
       connected: !!(s.gsc_property && s.ga4_property_id),
       baselined: !!s.onboarded_at,
       repoConnected: !!(s.repo_owner && s.repo_name),
@@ -114,6 +116,18 @@ router.get('/internal/clients/growth-summary', async (req, res, next) => {
 // unconnected (same as createClientSite always has) — this is a real,
 // separate step (below) since it depends on the client granting access,
 // which doesn't happen at the same moment as deciding to onboard them.
+// A brand-new client gets its own workspace (the site becomes its first project,
+// the new login its owner). Never fails client creation: until the workspace
+// exists the login still works through the legacy home-site rule in
+// decideSiteAccess; it just will not appear in the workspace switcher.
+async function giveNewClientWorkspace(site, user) {
+  try {
+    await attachNewClientWorkspace({ site, userId: user.id });
+  } catch (err) {
+    console.error(`[clients] workspace for site #${site.id} could not be created:`, err.message);
+  }
+}
+
 router.post('/internal/clients', async (req, res, next) => {
   try {
     const {
@@ -138,7 +152,8 @@ router.post('/internal/clients', async (req, res, next) => {
     const site = await createClientSite({ name: String(name).trim(), websiteDomain, timezone, propertyType });
     try {
       const passwordHash = await bcrypt.hash(password, 10);
-      await createUser({ siteId: site.id, email: normalizedEmail, passwordHash });
+      const created = await createUser({ siteId: site.id, email: normalizedEmail, passwordHash });
+      await giveNewClientWorkspace(site, created);
     } catch (err) {
       // Site is left in place (harmless — nothing ingests against it until
       // connected below) — same recovery shape create-client.js documents.
@@ -232,7 +247,8 @@ router.post('/internal/signup-requests/:id/approve', async (req, res, next) => {
 
     const site = await createClientSite({ name: request.company_name, websiteDomain: request.website_domain, timezone: undefined });
     try {
-      await createUser({ siteId: site.id, email: request.contact_email, passwordHash: request.password_hash });
+      const created = await createUser({ siteId: site.id, email: request.contact_email, passwordHash: request.password_hash });
+      await giveNewClientWorkspace(site, created);
     } catch (err) {
       // Site created but login failed — same orphaned-but-harmless recovery
       // shape as POST /internal/clients above (siteId is returned so staff

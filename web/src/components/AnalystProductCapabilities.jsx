@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
-import { Layers, Plus, Loader2, AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react';
+import { Plus, Loader2, AlertTriangle } from 'lucide-react';
+import { STATUS } from '../lib/palette.js';
+import Badge from './Badge.jsx';
+import Button from './Button.jsx';
+import Field from './Field.jsx';
+import Select from './Select.jsx';
+import AnalystCollapsible from './AnalystCollapsible.jsx';
 
 const CATEGORY_OPTIONS = [
   'CRM', 'Booking', 'Appointment Management', 'Billing/Payments', 'Customer Management', 'Operations', 'Other',
@@ -46,7 +52,7 @@ function DetailLines({ kind, details }) {
     return (
       <ol className="mt-1.5 space-y-0.5 list-decimal list-inside">
         {details.steps.map((st, i) => (
-          <li key={i} className="text-[11px] font-medium text-slate-600">{st}</li>
+          <li key={i} className="text-xs text-text">{st}</li>
         ))}
       </ol>
     );
@@ -57,7 +63,7 @@ function DetailLines({ kind, details }) {
     if (details.includes) parts.push(`includes ${details.includes}`);
   }
   if (kind === 'proof' && details.source) parts.push(`source: ${details.source}`);
-  return parts.length ? <p className="text-[11px] font-semibold text-slate-600 mt-1">{parts.join(' · ')}</p> : null;
+  return parts.length ? <p className="text-xs text-text mt-1">{parts.join(' · ')}</p> : null;
 }
 
 // Ground truth for what this site's product actually does — read by
@@ -115,157 +121,137 @@ export default function AnalystProductCapabilities({ clientId }) {
   const loading = capabilities === null;
 
   return (
-    <div className="an-panel p-5">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="w-full flex items-center gap-2.5 cursor-pointer"
-      >
-        <div className="w-8 h-8 rounded-xl grid place-items-center bg-indigo-500/10 border border-indigo-500/25 text-indigo-600 shrink-0">
-          <Layers size={15} />
+    <AnalystCollapsible
+      title="Product capabilities"
+      subtitle="What this product does, how it works, what it costs, who it is for and the proof behind it — agents write from these verified facts instead of guessing"
+      badge={!loading ? <Badge tone="grey">{capabilities.length}</Badge> : null}
+      expanded={expanded}
+      onToggle={() => setExpanded((v) => !v)}
+    >
+      {error && (
+        <p className="text-xs flex items-center gap-1.5" style={{ color: STATUS.critical.text }}>
+          <AlertTriangle size={12} className="shrink-0" />
+          {error}
+        </p>
+      )}
+
+      {loading ? (
+        <div className="space-y-2">
+          {[0, 1].map((i) => <div key={i} className="h-11 rounded-card bg-muted animate-pulse" />)}
         </div>
-        <div className="flex-1 min-w-0 text-left">
-          <h2 className="text-xs font-black uppercase tracking-widest text-slate-800">Product Capabilities</h2>
-          <p className="text-[11px] font-medium text-slate-500">
-            What this product does, how it works, what it costs, who it is for and the proof behind it — agents write
-            from these verified facts instead of guessing
-          </p>
-        </div>
-        {!loading && (
-          <span className="an-chip an-chip-slate shrink-0">{capabilities.length}</span>
-        )}
-        {expanded ? <ChevronUp size={14} className="text-slate-400 shrink-0" /> : <ChevronDown size={14} className="text-slate-400 shrink-0" />}
-      </button>
-
-      {expanded && (
-        <div className="mt-4 space-y-4">
-          {error && (
-            <p className="text-[11px] font-semibold text-rose-600 flex items-center gap-1.5">
-              <AlertTriangle size={11} className="shrink-0" />
-              {error}
-            </p>
-          )}
-
-          {loading ? (
-            <div className="space-y-2">
-              {[0, 1].map((i) => <div key={i} className="h-11 rounded-xl bg-slate-200/50 animate-pulse" />)}
-            </div>
-          ) : capabilities.length === 0 ? (
-            <p className="text-xs font-medium text-slate-500 bg-slate-100/60 border border-slate-200 rounded-xl px-4 py-3">
-              Nothing added yet. Agents only describe the product using what is verified here — add what this product
-              does, how it works, its pricing, audience and proof below.
-            </p>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {capabilities.map((c) => (
-                <div key={c.id} className="rounded-xl border border-slate-200 bg-slate-100/40 p-3">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-xs font-black text-slate-800">{c.name}</span>
-                    {(c.kind || 'capability') !== 'capability' && (
-                      <span className="an-chip an-chip-slate">{KIND_LABEL[c.kind] || c.kind}</span>
-                    )}
-                    {c.category && <span className="an-chip an-chip-violet">{c.category}</span>}
-                  </div>
-                  {c.description && (
-                    <p className="text-[11px] font-medium text-slate-500 mt-1 line-clamp-2">{c.description}</p>
-                  )}
-                  <DetailLines kind={c.kind} details={c.details} />
-                </div>
-              ))}
-            </div>
-          )}
-
-          <form onSubmit={submit} className="space-y-2 pt-1">
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-              <select
-                value={form.kind}
-                onChange={(e) => setForm((f) => ({ ...f, kind: e.target.value }))}
-                disabled={saving}
-                className="an-input text-[11px] font-bold py-2.5 pr-8 cursor-pointer"
-                aria-label="Kind of product knowledge"
-              >
-                {KIND_OPTIONS.map((k) => <option key={k.value} value={k.value}>{k.label}</option>)}
-              </select>
-              <input
-                value={form.name}
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                placeholder={KIND_OPTIONS.find((k) => k.value === form.kind)?.placeholder}
-                maxLength={120}
-                disabled={saving}
-                className="an-input flex-1 text-[11px] font-semibold py-2.5"
-              />
-              {form.kind === 'capability' && (
-                <select
-                  value={form.category}
-                  onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}
-                  disabled={saving}
-                  className="an-input text-[11px] font-bold py-2.5 pr-8 cursor-pointer"
-                >
-                  {CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
-                </select>
-              )}
-            </div>
-            <input
-              value={form.description}
-              onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
-              placeholder="Short description (optional)"
-              maxLength={300}
-              disabled={saving}
-              className="an-input w-full text-[11px] font-semibold py-2.5"
-            />
-            {form.kind === 'flow' && (
-              <textarea
-                value={form.steps}
-                onChange={(e) => setForm((f) => ({ ...f, steps: e.target.value }))}
-                placeholder={'Steps, one per line\ne.g. Customer picks a service\nChoose a branch and staff member\nConfirm the booking'}
-                rows={4}
-                disabled={saving}
-                className="an-input w-full text-[11px] font-semibold py-2.5"
-              />
-            )}
-            {form.kind === 'pricing' && (
-              <div className="flex flex-col sm:flex-row gap-2">
-                <input
-                  value={form.price}
-                  onChange={(e) => setForm((f) => ({ ...f, price: e.target.value }))}
-                  placeholder="Price, e.g. NPR 5,000 / month"
-                  maxLength={120}
-                  disabled={saving}
-                  className="an-input flex-1 text-[11px] font-semibold py-2.5"
-                />
-                <input
-                  value={form.includes}
-                  onChange={(e) => setForm((f) => ({ ...f, includes: e.target.value }))}
-                  placeholder="What it includes (optional)"
-                  maxLength={200}
-                  disabled={saving}
-                  className="an-input flex-[1.5] text-[11px] font-semibold py-2.5"
-                />
+      ) : capabilities.length === 0 ? (
+        <p className="text-[13px] text-text bg-muted rounded-card px-4 py-3">
+          Nothing added yet. Agents only describe the product using what is verified here — add what this product
+          does, how it works, its pricing, audience and proof below.
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {capabilities.map((c) => (
+            <div key={c.id} className="rounded-card bg-white p-3" style={{ boxShadow: 'var(--ring)' }}>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[13px] font-medium text-fg">{c.name}</span>
+                {(c.kind || 'capability') !== 'capability' && (
+                  <Badge tone="grey">{KIND_LABEL[c.kind] || c.kind}</Badge>
+                )}
+                {c.category && <Badge tone="primary">{c.category}</Badge>}
               </div>
-            )}
-            {form.kind === 'proof' && (
-              <input
-                value={form.source}
-                onChange={(e) => setForm((f) => ({ ...f, source: e.target.value }))}
-                placeholder="Where this can be verified (customer, case study URL…)"
-                maxLength={200}
-                disabled={saving}
-                className="an-input w-full text-[11px] font-semibold py-2.5"
-              />
-            )}
-            <div className="flex justify-end">
-              <button
-                type="submit"
-                disabled={saving || !form.name.trim()}
-                className="an-grad-btn text-[11px] font-bold px-3 py-2.5 rounded-xl text-white shrink-0 flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                {saving ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />}
-                Add
-              </button>
+              {c.description && (
+                <p className="text-xs text-faint mt-1 line-clamp-2">{c.description}</p>
+              )}
+              <DetailLines kind={c.kind} details={c.details} />
             </div>
-          </form>
+          ))}
         </div>
       )}
-    </div>
+
+      <form onSubmit={submit} className="space-y-2 pt-1">
+        <div className="flex flex-col sm:flex-row items-stretch gap-2">
+          <Select
+            value={form.kind}
+            onChange={(e) => setForm((f) => ({ ...f, kind: e.target.value }))}
+            disabled={saving}
+            aria-label="Kind of product knowledge"
+          >
+            {KIND_OPTIONS.map((k) => <option key={k.value} value={k.value}>{k.label}</option>)}
+          </Select>
+          <Field
+            className="flex-1"
+            aria-label="Name"
+            value={form.name}
+            onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+            placeholder={KIND_OPTIONS.find((k) => k.value === form.kind)?.placeholder}
+            maxLength={120}
+            disabled={saving}
+          />
+          {form.kind === 'capability' && (
+            <Select
+              value={form.category}
+              onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}
+              disabled={saving}
+              aria-label="Category"
+            >
+              {CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+            </Select>
+          )}
+        </div>
+        <Field
+          aria-label="Description"
+          value={form.description}
+          onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+          placeholder="Short description (optional)"
+          maxLength={300}
+          disabled={saving}
+        />
+        {form.kind === 'flow' && (
+          <Field
+            as="textarea"
+            aria-label="Steps"
+            value={form.steps}
+            onChange={(e) => setForm((f) => ({ ...f, steps: e.target.value }))}
+            placeholder={'Steps, one per line\ne.g. Customer picks a service\nChoose a branch and staff member\nConfirm the booking'}
+            rows={4}
+            disabled={saving}
+          />
+        )}
+        {form.kind === 'pricing' && (
+          <div className="flex flex-col sm:flex-row gap-2">
+            <Field
+              className="flex-1"
+              aria-label="Price"
+              value={form.price}
+              onChange={(e) => setForm((f) => ({ ...f, price: e.target.value }))}
+              placeholder="Price, e.g. NPR 5,000 / month"
+              maxLength={120}
+              disabled={saving}
+            />
+            <Field
+              className="flex-[1.5]"
+              aria-label="What it includes"
+              value={form.includes}
+              onChange={(e) => setForm((f) => ({ ...f, includes: e.target.value }))}
+              placeholder="What it includes (optional)"
+              maxLength={200}
+              disabled={saving}
+            />
+          </div>
+        )}
+        {form.kind === 'proof' && (
+          <Field
+            aria-label="Source"
+            value={form.source}
+            onChange={(e) => setForm((f) => ({ ...f, source: e.target.value }))}
+            placeholder="Where this can be verified (customer, case study URL…)"
+            maxLength={200}
+            disabled={saving}
+          />
+        )}
+        <div className="flex justify-end">
+          <Button type="submit" variant="primary" disabled={saving || !form.name.trim()}>
+            {saving ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+            Add
+          </Button>
+        </div>
+      </form>
+    </AnalystCollapsible>
   );
 }

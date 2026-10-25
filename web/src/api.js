@@ -76,6 +76,17 @@ export const api = {
     req('/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
   verifyPassword: (password) => req('/verify-password', { method: 'POST', body: JSON.stringify({ password }) }),
   sites: () => req('/sites'),
+  // Workspaces the signed-in user belongs to (a platform admin sees all), each
+  // with its projects, and the switch endpoint that changes the active project.
+  workspaces: () => req('/workspaces'),
+  switchProject: (siteId) => req('/workspaces/switch', { method: 'POST', body: JSON.stringify({ siteId }) }),
+  workspace: {
+    members: (id) => req(`/workspaces/${id}/members`),
+    createProject: (id, body) => req(`/workspaces/${id}/projects`, { method: 'POST', body: JSON.stringify(body) }),
+    invite: (id, body) => req(`/workspaces/${id}/members`, { method: 'POST', body: JSON.stringify(body) }),
+    setRole: (id, userId, role) => req(`/workspaces/${id}/members/${userId}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
+    remove: (id, userId) => req(`/workspaces/${id}/members/${userId}`, { method: 'DELETE' }),
+  },
   demand: {
     prospects: () => req('/demand/prospects'),
     approve: (id) => req(`/demand/prospects/${id}/approve`, { method: 'POST' }),

@@ -31,6 +31,7 @@ import crmWebhookRouter from './routes/crm-webhook.js';
 import trialSignupRouter from './routes/trial-signup.js';
 import oauthConsentRouter from './routes/oauth-consent.js';
 import usersRouter from './routes/users.js';
+import workspacesRouter from './routes/workspaces.js';
 import userInvitationsRouter from './routes/user-invitations.js';
 import mcpAdminRouter from './routes/mcp-admin.js';
 import systemHealthRouter from './routes/system-health.js';
@@ -144,6 +145,9 @@ app.use('/api', mcpTokensRouter);
 // identically) — so unlike mcpTokensRouter above, its mount position here
 // is for logical grouping only, not a mount-order hazard to avoid.
 app.use('/api', usersRouter);
+// Per-route requireAuth + requireWorkspaceRole (no router-wide blanket), same
+// as usersRouter above, so its position is logical grouping only.
+app.use('/api', workspacesRouter);
 // requireAuth-gated (session cookie) — backs the OAuth consent screen
 // (web/src/pages/OAuthAuthorize.jsx). Same tier as mcpTokensRouter above;
 // must still precede the internal-only block below.
