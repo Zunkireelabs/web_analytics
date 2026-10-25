@@ -28,12 +28,14 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=hosting"
-      # Set ANALYTICS_DOMAIN in .env, e.g. analytics.zunkireelabs.com
-      - "traefik.http.routers.analytics-prod.rule=Host(`${ANALYTICS_DOMAIN}`)"
+      # Set ANALYTICS_DOMAIN in .env, e.g. analytics.zunkireelabs.com.
+      # APP_DOMAIN is a second address for the same multi-tenant dashboard
+      # (app.superrank.si); tenant comes from the login, not the host.
+      - "traefik.http.routers.analytics-prod.rule=Host(`${ANALYTICS_DOMAIN}`) || Host(`${APP_DOMAIN:-app.invalid}`)"
       - "traefik.http.routers.analytics-prod.entrypoints=websecure"
       - "traefik.http.routers.analytics-prod.tls=true"
       - "traefik.http.routers.analytics-prod.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.analytics-prod-http.rule=Host(`${ANALYTICS_DOMAIN}`)"
+      - "traefik.http.routers.analytics-prod-http.rule=Host(`${ANALYTICS_DOMAIN}`) || Host(`${APP_DOMAIN:-app.invalid}`)"
       - "traefik.http.routers.analytics-prod-http.entrypoints=web"
       - "traefik.http.routers.analytics-prod-http.middlewares=analytics-prod-redirect"
       - "traefik.http.middlewares.analytics-prod-redirect.redirectscheme.scheme=https"

@@ -155,6 +155,7 @@ jobs:
 
             # ── Deployment ───────────────────────────────────────────────────
             ANALYTICS_DOMAIN=${{ vars.PROD_DOMAIN }}
+            APP_DOMAIN=${{ vars.APP_DOMAIN }}
 
             # Sibling container's name on the shared "hosting" Docker network —
             # not a secret, just an internal hostname. See .env.example.
