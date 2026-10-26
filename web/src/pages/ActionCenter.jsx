@@ -25,6 +25,7 @@ import {
   Check,
 } from 'lucide-react';
 import { STATUS } from '../lib/palette.js';
+import { inDraftScope } from '../lib/draft-scope.js';
 
 const GENERATOR_META = {
   'meta-title': { label: 'Meta Titles' },
@@ -239,7 +240,11 @@ function DraftStepper({ status }) {
   );
 }
 
-export default function ActionCenter() {
+// scope: 'fixes' is the Action Center (every issue and fix); 'content' is the Content page (the
+// blog posts, landing pages and translations the agent drafts). They are two views of the same
+// board, so nothing is hidden twice or lost: see lib/draft-scope.js. Undefined = everything.
+export default function ActionCenter({ scope }) {
+  const isContent = scope === 'content';
   const [searchParams, setSearchParams] = useSearchParams();
   // Set only when a platform_admin arrived here via a cross-client deep link
   // (e.g. the Analyst's "Send to Action Center" — see AnalystGrowthOpportunities.jsx
@@ -296,13 +301,15 @@ export default function ActionCenter() {
     setSelectedRecommendation(null);
   }, [activeCategory, tab]);
 
-  const loadRecs = () => api.actionCenter.recommendations(siteId).then((data) => {
+  const loadRecs = () => api.actionCenter.recommendations(siteId).then((all) => {
+    const data = all && { ...all, items: (all.items || []).filter((item) => inDraftScope(item.generatorId, scope)) };
     setRecs(data);
     const categories = [...new Set((data?.items || []).map((item) => item.category || 'Technical Fixes'))];
     if (categories.length > 0) setActiveCategory(categories[0]);
   }).catch(() => setRecs({ items: [], lastAnalyzedAt: {} }));
 
-  const loadDrafts = () => api.actionCenter.drafts({}, siteId).then((data) => {
+  const loadDrafts = () => api.actionCenter.drafts({}, siteId).then((all) => {
+    const data = (all || []).filter((d) => inDraftScope(d.action_type, scope));
     setDrafts(data);
     if (data && data.length > 0) setSelectedDraftItem(data[0]);
   }).catch((e) => {
@@ -314,7 +321,9 @@ export default function ActionCenter() {
     setError(e.message || 'Could not load drafts');
   });
 
-  const loadDraftCounts = () => api.actionCenter.draftCounts(siteId).then(setDraftCounts).catch(() => {});
+  // The server's exact counts cover every draft on the board, so on a scoped page they would count the other
+  // page's drafts too. A scoped page counts its own (already filtered) list instead.
+  const loadDraftCounts = () => (scope ? Promise.resolve() : api.actionCenter.draftCounts(siteId).then(setDraftCounts).catch(() => {}));
 
   const [todayStats, setTodayStats] = useState(null); // null | { shipped, failed, batchLimit }
   // The server's real cap (routes/action-center.js's SAFE_FIX_BATCH_LIMIT),
@@ -510,7 +519,7 @@ export default function ActionCenter() {
     setError(null);
     setBulkApproveResult(null);
     try {
-      const result = await api.actionCenter.bulkApproveDrafts(undefined, siteId);
+      const result = await api.actionCenter.bulkApproveDrafts(undefined, siteId, scope);
       setBulkApproveResult(result);
       loadDrafts();
       loadDraftCounts();
@@ -664,18 +673,20 @@ export default function ActionCenter() {
 
   const plural = (n, one, many) => (n === 1 ? one : many);
   const introTitle = tab === 'recommendations'
-    ? (recs === null ? 'Loading recommendations…'
-      : highPriorityCount > 0 ? `${highPriorityCount} high-priority fixes are waiting` : 'No high-priority fixes right now')
+    ? (recs === null ? (isContent ? 'Loading content ideas…' : 'Loading recommendations…')
+      : highPriorityCount > 0 ? `${highPriorityCount} high-priority ${isContent ? 'content ideas are' : 'fixes are'} waiting` : `No high-priority ${isContent ? 'content ideas' : 'fixes'} right now`)
     : tab === 'drafts'
       ? (pendingApprovalCount > 0
         ? `${pendingApprovalCount} draft${pendingApprovalCount === 1 ? '' : 's'} ${plural(pendingApprovalCount, 'is', 'are')} waiting for approval`
         : 'No drafts waiting for approval')
-      : `${implementedThisWeekCount} change${implementedThisWeekCount === 1 ? '' : 's'} shipped this week`;
+      : `${implementedThisWeekCount} ${isContent ? 'piece' : 'change'}${implementedThisWeekCount === 1 ? '' : 's'} shipped this week`;
   const introSubtitle = tab === 'recommendations'
-    ? `${recs?.items.length ?? 0} recommendations from your agents. ${safeEligibleCount} are safe to ship automatically; review the rest before they go to staging.`
+    ? (isContent
+      ? `${recs?.items.length ?? 0} content ideas from your agents. Content is always reviewed by a person: generate a draft, read it, then approve it.`
+      : `${recs?.items.length ?? 0} recommendations from your agents. ${safeEligibleCount} are safe to ship automatically; review the rest before they go to staging.`)
     : tab === 'drafts'
       ? 'Review each draft, then approve it to push a branch and open a pull request.'
-      : 'Changes your agents shipped to your site, newest first.';
+      : (isContent ? 'Content your agents drafted and you approved, newest first.' : 'Changes your agents shipped to your site, newest first.');
 
   const kpis = [
     { label: 'Recommendations', value: recs?.items.length ?? 0, sub: `across ${Object.keys(grouped).length} categories` },
@@ -758,7 +769,7 @@ export default function ActionCenter() {
             </span>
           )}
           <Button variant="light" onClick={refresh} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</Button>
-          {tab === 'recommendations' && recs && (
+          {tab === 'recommendations' && recs && !isContent && (
             <Button variant="primary" onClick={executeSafeFixes} disabled={executingSafeFixes || safeEligibleCount === 0}
               title={safeEligibleCount === 0
                 ? 'No safe-tier recommendations open right now'

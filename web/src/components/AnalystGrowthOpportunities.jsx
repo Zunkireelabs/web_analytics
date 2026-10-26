@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   ExternalLink, Send, Loader2, CheckCircle2, ChevronDown, ChevronRight, Layers,
 } from 'lucide-react';
-import { api } from '../api.js';
+import { api, SELF } from '../api.js';
 import { STATUS } from '../lib/palette.js';
 import Badge from './Badge.jsx';
 import Button from './Button.jsx';
@@ -66,7 +66,7 @@ function OpportunityRow({ opp, clientId, onGapResolved }) {
   };
 
   const inActionCenter = (
-    <a href={`/action-center?siteId=${clientId}`} className="text-[13px] font-medium flex items-center gap-1.5 hover:underline" style={{ color: STATUS.good.text }}>
+    <a href={clientId === SELF ? '/action-center' : `/action-center?siteId=${clientId}`} className="text-[13px] font-medium flex items-center gap-1.5 hover:underline" style={{ color: STATUS.good.text }}>
       <CheckCircle2 size={13} /> In Action Center
     </a>
   );

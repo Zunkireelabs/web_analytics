@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import { Bell } from 'lucide-react';
+import { Bell, UserPlus } from 'lucide-react';
 import { api, timeAgo } from '../api.js';
 import { STATUS } from '../lib/palette.js';
 import Button from './Button.jsx';
@@ -10,10 +10,13 @@ const PANEL_WIDTH = 320; // must match the `md:w-80` on the panel below
 
 // In-app notifications — the first (and today, only) subscriber to the
 // channel-agnostic event system (server/notifications/). Polls every
-// minute rather than websockets — notification-worthy events only happen
+// minute (every 20 seconds for staff, and on returning to the tab) rather than websockets — notification-worthy events only happen
 // once a day (the daily agent run) or once a week (competitor check), so a
 // push channel would be pure overhead for how often this actually changes.
-export default function NotificationBell() {
+// `isPlatformAdmin`: SuperRank staff also see the sign-up requests waiting for them here. Those are not
+// stored notifications (they belong to no project, and there is nothing to mark read): they are the live list
+// of requests still awaiting approval, so each one counts in the badge until it is approved or rejected.
+export default function NotificationBell({ isPlatformAdmin = false }) {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState(null); // { items, unread }
   // Desktop-only: the bell's on-screen position (it lives in the top bar,
@@ -27,12 +30,29 @@ export default function NotificationBell() {
   const panelRef = useRef(null); // the portaled panel lives outside `ref`'s subtree
   const navigate = useNavigate();
 
-  const load = () => api.notifications.list().then(setData).catch(() => {});
+  const [signups, setSignups] = useState([]); // requests waiting for approval (staff only)
+
+  const loadSignups = () => (isPlatformAdmin
+    ? api.clients.signupRequests.list().then((r) => setSignups(Array.isArray(r) ? r : [])).catch(() => setSignups([]))
+    : Promise.resolve());
+  const load = () => { api.notifications.list().then(setData).catch(() => {}); loadSignups(); };
   useEffect(() => {
     load();
-    const t = setInterval(load, 60000);
-    return () => clearInterval(t);
-  }, []);
+    // Staff are waiting on people, so they get a faster check than the once-a-minute daily-agent events need.
+    const t = setInterval(load, isPlatformAdmin ? 20000 : 60000);
+    // Coming back to this tab (from the page where someone just signed up, say) checks straight away.
+    const onVisible = () => { if (document.visibilityState === 'visible') load(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', load);
+    // The approval page announces when it approves or rejects, so the badge drops at once.
+    window.addEventListener('signups:changed', load);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', load);
+      window.removeEventListener('signups:changed', load);
+    };
+  }, [isPlatformAdmin]);
 
   // Computed with useLayoutEffect (not useEffect) so it's resolved before
   // the browser paints — otherwise the panel would flash at its mobile
@@ -99,11 +119,11 @@ export default function NotificationBell() {
     if (target) { setOpen(false); navigate(target); }
   };
 
-  const unread = data?.unread || 0;
+  const unread = (data?.unread || 0) + signups.length;
 
   return (
     <div className="relative" ref={ref}>
-      <Button variant="ghost" size="sm" icon onClick={() => setOpen((o) => !o)} aria-label="Notifications">
+      <Button variant="ghost" size="sm" icon onClick={() => { setOpen((o) => !o); if (!open) loadSignups(); }} aria-label={unread > 0 ? `Notifications, ${unread} waiting` : 'Notifications'}>
         <Bell size={16} strokeWidth={1.75} />
       </Button>
       {unread > 0 && (
@@ -135,11 +155,28 @@ export default function NotificationBell() {
         >
           <div className="flex items-center justify-between px-4 py-3 border-b border-border sticky top-0 bg-white">
             <span className="text-sm font-medium text-fg">Notifications</span>
-            {unread > 0 && <Button variant="ghost" size="sm" onClick={markAllRead}>Mark all read</Button>}
+            {(data?.unread || 0) > 0 && <Button variant="ghost" size="sm" onClick={markAllRead}>Mark all read</Button>}
           </div>
-          {!data?.items?.length ? (
+          {signups.length > 0 && (
+            <div>
+              <p className="px-4 pt-3 pb-1 text-[11px] font-medium uppercase tracking-[.08em] text-faint">Needs your approval</p>
+              {signups.map((r) => (
+                <button key={`signup-${r.id}`} type="button" onClick={() => { setOpen(false); navigate('/clients'); }}
+                  className="w-full text-left px-4 py-3 border-b border-border flex gap-2.5 hover:bg-[#fafafa] bg-primary-tint/40">
+                  <span className="w-6 h-6 rounded-control bg-primary-tint text-primary grid place-items-center shrink-0 mt-0.5"
+                    style={{ boxShadow: 'inset 0 0 0 1px var(--primary-ring)' }}><UserPlus size={13} /></span>
+                  <div className="min-w-0">
+                    <p className="text-[13px] font-medium text-fg">New sign-up request: {r.companyName}</p>
+                    <p className="text-xs text-text mt-0.5 truncate">{r.contactEmail}{r.websiteDomain ? ` · ${r.websiteDomain}` : ''}</p>
+                    <p className="text-[11px] text-faint mt-1">Requested {timeAgo(r.createdAt)} · tap to review</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+          {!data?.items?.length && !signups.length ? (
             <div className="p-6 text-center text-sm text-faint">Nothing yet — check back after the next analysis.</div>
-          ) : (
+          ) : !data?.items?.length ? null : (
             <div>
               {data.items.map((n) => (
                 <button key={n.id} onClick={() => openNotification(n)}

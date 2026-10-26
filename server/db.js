@@ -71,7 +71,8 @@ export const pool = new Pool({
   // this never raises the connection ceiling, only how long an idle one lives.
   idleTimeoutMillis: Number(process.env.DB_POOL_IDLE_MS || 30_000),
   connectionTimeoutMillis: 10_000,
-  ssl: { rejectUnauthorized: false },
+  // DB_SSL=off is for a throwaway local Postgres, which has no TLS. Anything else keeps TLS on.
+  ssl: process.env.DB_SSL === 'off' ? false : { rejectUnauthorized: false },
 });
 
 export const query = (text, params) => pool.query(text, params);
@@ -168,7 +169,7 @@ export async function updateSiteConnection({ siteId, gscProperty, ga4PropertyId,
 // for the Action Center's "apply approved draft as a PR" flow (see
 // server/scripts/connect-repo.js, migration 028). Same partial-update shape
 // as updateSiteConnection above — only fields actually passed are touched.
-export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, githubAppInstallationId, githubAppId, githubAppPrivateKeyEnvVar, urlFileMap }) {
+export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, prTargetBranch, techStack, githubPatEnvVar, githubAppInstallationId, githubAppId, githubAppPrivateKeyEnvVar, urlFileMap }) {
   const fields = [];
   const values = [];
   let i = 1;
@@ -178,6 +179,8 @@ export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUr
   if (repoName !== undefined) set('repo_name', repoName);
   if (repoUrl !== undefined) set('repo_url', repoUrl);
   if (repoDefaultBranch !== undefined) set('repo_default_branch', repoDefaultBranch);
+  // null = open the batch PR into repo_default_branch (the default behaviour).
+  if (prTargetBranch !== undefined) set('pr_target_branch', prTargetBranch);
   if (techStack !== undefined) set('tech_stack', techStack);
   if (githubPatEnvVar !== undefined) set('github_pat_env_var', githubPatEnvVar);
   // null is meaningful here — it moves a site back off the App onto its PAT.

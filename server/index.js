@@ -19,11 +19,14 @@ import integrationsRouter from './routes/integrations.js';
 import notificationsRouter from './routes/notifications.js';
 import watchlistRouter from './routes/watchlist.js';
 import clientsRouter from './routes/clients.js';
-import dataAnalystRouter from './routes/dataAnalyst.js';
-import keywordsRouter from './routes/keywords.js';
+import dataAnalystRouter, { clientAnalystRouter } from './routes/dataAnalyst.js';
+import clientAnalystExtrasRouter from './routes/client-analyst.js';
+import keywordsRouter, { clientKeywordsRouter } from './routes/keywords.js';
 import growthReportRouter from './routes/growth-report.js';
 import siteAuditRouter from './routes/site-audit.js';
-import commoncrawlBacklinksRouter from './routes/commoncrawl-backlinks.js';
+import freeAuditRouter from './routes/free-audit.js';
+import onboardingRouter from './routes/onboarding.js';
+import commoncrawlBacklinksRouter, { clientBacklinksRouter } from './routes/commoncrawl-backlinks.js';
 import mcpTokensRouter from './routes/mcp-tokens.js';
 import { apiBridgeRouter, rootBridgeRouter } from './routes/mcp-bridge.js';
 import webhooksRouter from './routes/webhooks.js';
@@ -32,6 +35,8 @@ import trialSignupRouter from './routes/trial-signup.js';
 import oauthConsentRouter from './routes/oauth-consent.js';
 import usersRouter from './routes/users.js';
 import workspacesRouter from './routes/workspaces.js';
+import projectsRouter from './routes/projects.js';
+import platformRouter from './routes/platform.js';
 import userInvitationsRouter from './routes/user-invitations.js';
 import mcpAdminRouter from './routes/mcp-admin.js';
 import systemHealthRouter from './routes/system-health.js';
@@ -92,6 +97,11 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 // gate before ever reaching growth-report.js, despite growth-report.js
 // itself being correctly client-scoped).
 app.use('/api', loginRouter);
+// Fully public (no session): the landing page's free website audit. Must precede every
+// blanket-requireAuth router below.
+app.use('/api', freeAuditRouter);
+// Public too: reads a visitor's site to pre-fill the get-started brand profile.
+app.use('/api', onboardingRouter);
 // Fully public (no requireAuth at all, not even per-route) — parallel to
 // loginRouter's own public /signup-requests. Must be mounted before any
 // router with a blanket `router.use(requireAuth)` below (mcpTokensRouter,
@@ -137,6 +147,14 @@ app.use('/api', actionCenterRouter);
 app.use('/api', reportsRouter);
 app.use('/api', commandCenterRouter);
 app.use('/api', growthReportRouter);
+// Client-facing mirrors of three staff-only routers (keywords, the Analyst,
+// backlinks): the same handlers, always against the session's own site. Their
+// requireAuth is path-prefixed (/keywords, /analyst, /backlinks), but they still
+// belong here, ahead of the staff-only block below, like growthReportRouter.
+app.use('/api', clientKeywordsRouter);
+app.use('/api', clientAnalystRouter);
+app.use('/api', clientAnalystExtrasRouter);
+app.use('/api', clientBacklinksRouter);
 app.use('/api', siteAuditRouter);
 app.use('/api', mcpTokensRouter);
 // Every route in usersRouter applies requireAuth per-route, not as a
@@ -148,6 +166,8 @@ app.use('/api', usersRouter);
 // Per-route requireAuth + requireWorkspaceRole (no router-wide blanket), same
 // as usersRouter above, so its position is logical grouping only.
 app.use('/api', workspacesRouter);
+app.use('/api', projectsRouter);
+app.use('/api', platformRouter);
 // requireAuth-gated (session cookie) — backs the OAuth consent screen
 // (web/src/pages/OAuthAuthorize.jsx). Same tier as mcpTokensRouter above;
 // must still precede the internal-only block below.

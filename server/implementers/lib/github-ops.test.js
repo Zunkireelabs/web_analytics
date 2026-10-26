@@ -44,6 +44,7 @@ mock.module(resolve('../../github/client.js'), {
     getPullRequest: async () => ({}),
     getCheckRunsForRef: async () => [],
     defaultBranchName: (site) => site.repo_default_branch || 'main',
+    prTargetBranchName: (site) => site.pr_target_branch || site.repo_default_branch || 'main',
     getFileContent: (...a) => defaults.getFileContent(...a),
     getRepoTree: async () => ({ files: [], truncated: false }),
     putFile: async () => ({}),

@@ -305,7 +305,7 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
         <div className="px-4 pb-4">
           {visibleGaps.length === 0 ? (
             <p className="text-[13px] text-text bg-muted rounded-card px-4 py-3">
-              Nothing waiting for review. Ask the analyst for a keyword you want to grow for and it
+              Nothing waiting for review. Add a keyword you want to grow for below and it
               will show up here, ready to send to Action Center.
             </p>
           ) : (

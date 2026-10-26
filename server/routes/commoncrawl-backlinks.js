@@ -3,6 +3,7 @@ import { requireAuth, requirePlatformRole } from './login.js';
 import { fetchDomainSummary } from '../providers/backlinks/commoncrawl.js';
 import { hasCompletedGraphRelease } from '../store/commoncrawl-backlinks.js';
 import { getLatestAuthoritySnapshot } from '../store/authority.js';
+import { getSiteById } from '../store/read.js';
 
 // Exposes a real referring-domain summary for this site's own domain,
 // preferring the already-paid-for DataForSEO backlink data that
@@ -71,6 +72,28 @@ router.get('/commoncrawl-backlinks/summary', async (req, res, next) => {
         ? `No Common Crawl backlink data found for "${domain}" yet — it may not be a tracked site/competitor domain, or wasn't matched in the latest graph release.`
         : 'The Common Crawl backlink import has not run yet — no data is available for any domain.',
     });
+  } catch (e) { next(e); }
+});
+
+// Client-facing mirror — /backlinks/summary for the logged-in client's OWN
+// site. The staff route above takes ?domain= from the caller (and falls back to
+// a Common Crawl lookup of any domain it is given); here the domain is always
+// the session's own site, so a client can only ever read their own. Same
+// handler otherwise, so the DataForSEO-first / Common Crawl-fallback behaviour
+// is identical.
+const summaryHandler = router.stack.find((l) => l.route?.path === '/commoncrawl-backlinks/summary' && l.route.methods.get).route.stack.at(-1).handle;
+
+export const clientBacklinksRouter = Router();
+clientBacklinksRouter.use('/backlinks', requireAuth);
+clientBacklinksRouter.get('/backlinks/summary', async (req, res, next) => {
+  try {
+    const site = await getSiteById(req.siteId);
+    const domain = String(site?.website_domain || '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '');
+    if (!domain) {
+      return res.json({ status: 'insufficient-data', source: null, domain: null, referringDomains: null, graphRank: null, graphRelease: null, updatedAt: null, message: 'This project has no website domain set yet.' });
+    }
+    req.query.domain = domain;
+    return summaryHandler(req, res, next);
   } catch (e) { next(e); }
 });
 

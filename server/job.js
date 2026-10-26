@@ -42,7 +42,7 @@ import { checkFaqOnboardingCoverage } from './agents/lib/faq-onboarding-check.js
 import { getImplementedFindingIds, countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
 import { countShippedFileEditsTodayAllSites } from './store/shipping-queue.js';
 import { AUTONOMOUS_DRAFT_SOURCES } from './lib/autonomous-quota.js';
-import { isShippable, isShipCatchupOwed, checkShipStall, SHIP_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './lib/ship-window.js';
+import { isShippable, isActiveSite, isShipCatchupOwed, checkShipStall, SHIP_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './lib/ship-window.js';
 import { rateLimitKey } from './github/client.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
 
@@ -1221,7 +1221,7 @@ async function globalRemainingSeed() {
 // site's repo failure must never cost every other site its own run.
 export async function runTemplateCapabilityRepairForAllSites() {
   const { repairTemplateCapabilitiesForSite } = await import('./scripts/repair-template-capability.js');
-  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name && isActiveSite(s));
   const results = [];
   for (const site of sites) {
     try {
@@ -1279,7 +1279,7 @@ export async function runDesignProfileRoleCorrectionForAllSites() {
 // commit, one PR" (the other is learned-repair.js).
 export async function runContentRepairForAllSites() {
   const { repairSiteContentLive } = await import('./scripts/repair-site-content-live.js');
-  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name && isActiveSite(s));
   const results = [];
   for (const site of sites) {
     try {
@@ -1310,7 +1310,7 @@ export async function runContentRepairForAllSites() {
 // Never touches anything already shipped/merged/closed: refreshBlockedRecommendations
 // only ever reads/writes status = 'open' rows.
 export async function refreshBlockedRecommendationsForAllSites() {
-  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name && isActiveSite(s));
   const results = [];
   for (const site of sites) {
     try {
@@ -1337,7 +1337,7 @@ export async function refreshBlockedRecommendationsForAllSites() {
 // content itself is meant to be revisited on, mirroring the existing
 // weekly design-context rescan pattern in cron.js.
 export async function refreshContentGapRecommendationsForAllSites() {
-  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name && isActiveSite(s));
   const results = [];
   for (const site of sites) {
     try {
@@ -1776,7 +1776,7 @@ export async function runPrStatusPollForAllSites() {
   // Repo-connected, not GSC/GA4-connected (listConnectedSites' filter) —
   // whether a site has open GitHub PRs to check depends on repo_owner/
   // repo_name, not analytics integration status.
-  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name && isActiveSite(s));
   let checked = 0;
   for (const site of sites) {
     let openDrafts;

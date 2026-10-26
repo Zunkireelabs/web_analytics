@@ -325,6 +325,15 @@ export function defaultBranchName(site) {
   return site.repo_default_branch || 'main';
 }
 
+// The branch a batch pull request is OPENED INTO. Usually the same as the
+// default branch; a site that promotes content through a stage branch sets
+// pr_target_branch (migration 197). Work is always CUT from defaultBranchName —
+// only where its PR lands changes — so a batch's diff still contains only that
+// batch, however far stage has drifted from main.
+export function prTargetBranchName(site) {
+  return site.pr_target_branch || defaultBranchName(site);
+}
+
 // SHA of the tip of the site's default (production) branch.
 export async function getDefaultBranchSha(site) {
   return getBranchSha(site, defaultBranchName(site));
@@ -589,7 +598,7 @@ export async function commitFilesAtomic(site, branch, files, message) {
 export async function openPullRequest(site, { branch, title, body }) {
   const res = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/pulls`, {
     head: branch,
-    base: defaultBranchName(site),
+    base: prTargetBranchName(site),
     title,
     body,
   });

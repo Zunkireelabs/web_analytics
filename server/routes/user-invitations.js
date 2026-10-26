@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import { acceptInvitation } from '../store/user-invitations.js';
 import { getUserByEmail, createUser } from '../store/users.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
-import { addMember } from '../store/workspaces.js';
+import { addMember, addProjectMember } from '../store/workspaces.js';
 
 // Public — no requireAuth, parallel to the existing public
 // POST /signup-requests (server/routes/login.js). An invitation is never a
@@ -47,7 +47,12 @@ router.post('/invitations/:token/accept', async (req, res, next) => {
     // A workspace invitation also grants the membership it was issued with.
     // Without this row the new account would exist but could not reach any
     // project (requireAuth checks membership on every request).
-    if (invitation.workspace_id) {
+    // A project-level invitation grants access to just those projects instead.
+    if (invitation.project_site_ids?.length) {
+      for (const siteId of invitation.project_site_ids) {
+        await addProjectMember(siteId, user.id, invitation.project_role || 'member', invitation.invited_by ?? null);
+      }
+    } else if (invitation.workspace_id) {
       await addMember(invitation.workspace_id, user.id, invitation.workspace_role || 'member');
     }
 

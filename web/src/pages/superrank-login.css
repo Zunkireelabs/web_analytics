@@ -1,26 +1,40 @@
-/* SuperRank login page. Values lifted from superrank-web (styles.css tokens +
-   login.css) and scoped under .sr-auth so nothing leaks into the dashboard. */
+/* SuperRank sign-in. Values lifted from superrank-web (styles.css tokens + login.css, final
+   cascaded values) and scoped under .sr-auth so nothing leaks into the dashboard. */
 .sr-auth {
-  --sr-fg: #171717; --sr-text: #525252; --sr-faint: #8a8a8a; --sr-border: #f0f0f0; --sr-input: #e3e3e3;
-  --sr-primary: #d54e00; --sr-primary-strong: #bd3d00; --sr-primary-tint: #fff4ed; --sr-radius: 8px;
+  --sr-fg: #171717; --sr-text: #525252; --sr-faint: #8a8a8a; --sr-border: #f0f0f0; --sr-border-2: #e6e6e6; --sr-input: #e3e3e3;
+  --sr-primary: #d54e00; --sr-primary-strong: #bd3d00; --sr-primary-tint: #fff4ed; --sr-primary-ring: #ffe1cc; --sr-radius: 8px;
+  --sr-ring: 0 0 0 1px rgba(0, 0, 0, .06), 0 1px 2px rgba(0, 0, 0, .04);
   min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; background: #fbfaf8; color: var(--sr-fg);
   font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 .sr-auth, .sr-auth *, .sr-auth *::before, .sr-auth *::after { box-sizing: border-box; }
+.sr-auth button { font-family: inherit; cursor: pointer; }
 .sr-auth__main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 24px 32px; text-align: center; }
-.sr-auth__logo { display: inline-flex; align-items: center; gap: 6px; font-size: 19px; font-weight: 500; letter-spacing: -.02em; color: var(--sr-fg); text-decoration: none; }
-.sr-auth__logo img { width: 22px; height: 22px; }
-.sr-auth__logo b { font-weight: 500; color: var(--sr-primary); }
-.sr-auth__view { width: 100%; max-width: 380px; margin-top: 22px;  }
-@keyframes srAuthIn { from { opacity: 0; translate: 0 6px; } }
+.sr-auth__logo { display: inline-flex; align-items: center; gap: 6px; font-size: 19px; line-height: 24px; font-weight: 600; letter-spacing: -.04em; color: var(--sr-fg); text-decoration: none; }
+.sr-auth__logo img { width: 22px; height: 22px; object-fit: contain; margin-top: -2px; }
+.sr-auth__logo b { font-weight: 600; color: var(--sr-primary); }
+.sr-auth__view { width: 100%; max-width: 380px; margin-top: 22px; animation: srAuthIn .3s ease both; }
+@keyframes srAuthIn { from { opacity: 0; transform: translateY(6px); } }
+
 .sr-auth__eyebrow { font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: .1em; text-transform: uppercase; color: var(--sr-primary); margin: 0; }
-.sr-auth h1 { margin: 10px 0 0; font-size: 36px; line-height: 39px; font-weight: 500; letter-spacing: -.035em; color: var(--sr-fg); }
+.sr-auth h1 { margin: 10px -200px 0; font-size: 36px; line-height: 39px; font-weight: 500; letter-spacing: -.035em; color: var(--sr-fg); }
 .sr-auth h1 em { font-style: normal; color: var(--sr-primary); }
 .sr-auth__sub { margin: 10px 0 0; font-size: 14px; line-height: 20px; color: var(--sr-text); }
 
+/* Google + "or email" */
+.sr-auth__google {
+  display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; height: 40px; margin-top: 24px; padding: 0 12px;
+  border: 0; border-radius: var(--sr-radius); background: #fff; box-shadow: var(--sr-ring); font-size: 13px; font-weight: 500; color: var(--sr-fg);
+  transition: background-color .15s;
+}
+.sr-auth__google:hover { background: #fafafa; }
+.sr-auth__or { display: flex; align-items: center; gap: 14px; margin-top: 18px; font-size: 11px; line-height: 16px; letter-spacing: .08em; text-transform: uppercase; color: var(--sr-text); }
+.sr-auth__or::before, .sr-auth__or::after { content: ''; flex: 1; height: 1px; background: var(--sr-border-2); }
+.sr-auth__or + .sr-auth__form { margin-top: 14px; }
+
 .sr-auth__form { margin-top: 26px; display: grid; gap: 14px; text-align: left; }
 .sr-fld { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.sr-fld > span { font-size: 12px; line-height: 16px; font-weight: 500; }
+.sr-fld > span:first-child { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 16px; font-weight: 500; }
 .sr-fld input {
   width: 100%; height: 40px; padding: 0 10px; border: 0; border-radius: var(--sr-radius); background: #fff; font: inherit; font-size: 13px; color: var(--sr-fg);
   box-shadow: 0 0 0 1px var(--sr-input), 0 1px 2px rgba(0, 0, 0, .03); outline: none; transition: box-shadow .15s;
@@ -28,21 +42,71 @@
 .sr-fld input::placeholder { color: var(--sr-faint); }
 .sr-fld input:focus { box-shadow: 0 0 0 1px var(--sr-primary), 0 0 0 4px var(--sr-primary-tint); }
 .sr-fld input.is-bad { box-shadow: 0 0 0 1px #e5484d, 0 0 0 4px #fdecec; }
+.sr-fld__pw { position: relative; display: block; }
+.sr-fld__pw input { padding-right: 44px; }
+.sr-fld__eye { position: absolute; top: 0; right: 0; width: 42px; height: 100%; display: flex; align-items: center; justify-content: center; border: 0; background: none; color: var(--sr-faint); }
+.sr-fld__eye:hover { color: var(--sr-fg); }
+.sr-fld__slash { opacity: 0; }
+.sr-fld__eye.is-on .sr-fld__slash { opacity: 1; }
+.sr-auth__tag { padding: 0 7px; border-radius: 999px; font-style: normal; font-size: 10px; line-height: 16px; font-weight: 500; color: var(--sr-primary); background: var(--sr-primary-tint); box-shadow: inset 0 0 0 1px var(--sr-primary-ring); }
+
 .sr-auth__err { margin: 0; padding: 8px 10px; border-radius: var(--sr-radius); background: #fdecec; color: #b42318; font-size: 12px; line-height: 17px; }
 .sr-auth__submit {
-  width: 100%; height: 40px; border: 0; border-radius: var(--sr-radius); background: var(--sr-primary); color: #fff;
-  font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; transition: background-color .15s;
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px; width: 100%; height: 40px; border: 0; border-radius: var(--sr-radius);
+  background: var(--sr-primary); color: #fff; font-size: 13px; font-weight: 500;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14), 0 1px 2px rgba(150, 45, 0, .2); transition: background-color .15s;
 }
 .sr-auth__submit:hover { background: var(--sr-primary-strong); }
 .sr-auth__submit[aria-busy="true"] { opacity: .7; pointer-events: none; }
+.sr-auth__kbd { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 4px; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .45); }
 .sr-auth__note { margin: 0; text-align: center; font-size: 11px; line-height: 16px; color: var(--sr-faint); }
-.sr-auth__hint { margin: 0; text-align: center; font-size: 12px; line-height: 17px; color: var(--sr-text); }
 .sr-auth__link { padding: 0; border: 0; background: none; font: inherit; font-weight: 500; color: var(--sr-fg); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .sr-auth__link:hover { color: var(--sr-primary); }
 .sr-auth__switch { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--sr-border); font-size: 13px; line-height: 19px; color: var(--sr-text); }
+.sr-auth__legal { margin: 14px 0 0; font-size: 11px; line-height: 18px; color: var(--sr-faint); }
+.sr-auth__legal a { text-decoration: underline; text-underline-offset: 2px; color: inherit; }
 
-@media (max-height: 760px) and (min-width: 761px) { .sr-auth h1 { font-size: 30px; line-height: 34px; } }
+@media (max-height: 860px) and (min-width: 761px) {
+  .sr-auth__main { padding-top: 22px; padding-bottom: 18px; }
+  .sr-auth__view { margin-top: 12px; }
+  .sr-auth h1 { margin-top: 6px; font-size: 36px; line-height: 39px; }
+  .sr-auth__sub { margin-top: 6px; }
+  .sr-auth__google { margin-top: 18px; }
+  .sr-auth__or { margin-top: 12px; }
+  .sr-auth__or + .sr-auth__form { margin-top: 10px; }
+  .sr-auth__form { gap: 10px; }
+  .sr-auth__switch { margin-top: 12px; padding-top: 12px; }
+  .sr-auth__legal { margin-top: 10px; }
+}
+@media (max-height: 760px) and (min-width: 761px) {
+  .sr-auth__main { padding-top: 16px; padding-bottom: 14px; }
+  .sr-auth h1 { font-size: 30px; line-height: 34px; }
+  .sr-auth__google { margin-top: 14px; }
+  .sr-auth__switch { margin-top: 10px; padding-top: 10px; font-size: 14px; }
+}
+@media (max-width: 860px) { .sr-auth h1 { margin-left: 0; margin-right: 0; } }
 @media (max-width: 760px) {
   .sr-auth__main { padding: 48px 16px 40px; }
-  .sr-auth h1 { font-size: 28px; line-height: 33px; }
+  .sr-auth h1 { margin: 10px 0 0; font-size: 28px; line-height: 33px; }
 }
+
+/* Strip under the form: same card layout as the marketing page's social-proof strip. */
+.sr-proof { padding: 30px 24px 32px; border-top: 1px solid var(--sr-border); background: #f6f5f2; text-align: center; }
+.sr-proof__label { margin: 0; font-size: 10px; line-height: 15px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--sr-text); }
+.sr-proof__grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; max-width: 960px; margin: 18px auto 0; text-align: left; }
+.sr-lq { margin: 0; display: flex; flex-direction: column; padding: 16px 20px; background: #fff; border-radius: 12px; box-shadow: 0 0 0 1px var(--sr-border-2); }
+.sr-lq__h { display: flex; align-items: baseline; gap: 8px; }
+.sr-lq__h b { font-size: 15px; font-weight: 400; letter-spacing: .02em; color: var(--sr-primary); }
+.sr-lq__h span { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--sr-text); }
+.sr-lq blockquote { margin: 8px 0 12px; font-size: 13px; line-height: 19px; color: var(--sr-text); }
+.sr-lq figcaption { display: flex; align-items: center; gap: 9px; margin-top: auto; padding-top: 9px; border-top: 1px solid var(--sr-border); }
+.sr-lq figcaption i { width: 26px; height: 26px; flex: none; border-radius: 50%; background: linear-gradient(135deg, #ffd9bf, #d54e00); }
+.sr-lq figcaption div { min-width: 0; }
+.sr-lq figcaption b { display: block; font-size: 12px; font-weight: 500; line-height: 16px; }
+.sr-lq figcaption span { display: block; font-size: 11px; line-height: 14px; color: var(--sr-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-height: 860px) and (min-width: 761px) { .sr-proof { padding: 18px 24px 20px; } .sr-proof__grid { margin-top: 12px; } }
+@media (max-height: 760px) and (min-width: 761px) {
+  .sr-proof { padding: 14px 24px 16px; } .sr-proof__grid { margin-top: 10px; }
+  .sr-lq { padding: 12px 16px; } .sr-lq blockquote { margin-bottom: 8px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+}
+@media (max-width: 760px) { .sr-proof__grid { grid-template-columns: 1fr; } }

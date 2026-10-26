@@ -15,6 +15,7 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 // llm.js -> openai) that fails to instantiate under node:test's module
 // mocking, so real imports of either are never safe in a test file.
 let capturedRecommendationCall;
+const storeSiteIds = {};
 let capturedGenerateDraftCall;
 let gapApprovalResult;
 let opportunityAction;
@@ -57,15 +58,15 @@ let gapRows = [];
 mock.module(resolve('../store/data-analyst.js'), {
   namedExports: {
     getKeywordClusters: async () => [],
-    getKeywordGaps: async () => gapRows,
-    updateKeywordGapStatus: async () => updatedGap,
+    getKeywordGaps: async (siteId) => { storeSiteIds.gaps = siteId; return gapRows; },
+    updateKeywordGapStatus: async (siteId) => { storeSiteIds.update = siteId; return updatedGap; },
     getSiteProfile: async () => null,
     getLatestKeywordNarrative: async () => null,
     getAnomalyAlerts: async () => [],
     getLatestForecastStatuses: async () => [],
     getLatestLayoutSuggestion: async () => null,
     saveLayoutSuggestion: async () => ({ generated_at: null }),
-    createUserKeywordGap: async () => ({}),
+    createUserKeywordGap: async (siteId) => { storeSiteIds.create = siteId; return {}; },
     getProductCapabilities: async () => [],
     createProductCapability: async () => ({}),
     updateProductCapabilityStatus: async () => ({}),
@@ -86,7 +87,7 @@ mock.module(resolve('../store/users.js'), {
   },
 });
 
-const keywordsRouter = (await import('./keywords.js')).default;
+const { default: keywordsRouter, clientKeywordsRouter } = await import('./keywords.js');
 const { requireAuth, requirePlatformRole } = await import('./login.js');
 
 function findRoute(method, path) {
@@ -264,5 +265,48 @@ describe('POST /internal/keywords/:siteId/translate', () => {
     let err;
     await findRoute('post', '/internal/keywords/:siteId/translate')({ params: { siteId: '1' }, body: { terms: 'bedrijf' } }, mockRes(), (e) => { err = e; });
     assert.equal(err.status, 400);
+  });
+});
+
+// The client mirror: the same handlers, but always the session's own site.
+describe('client mirror — /keywords/... (every client, their own site only)', () => {
+  const clientRoute = (method, path) => {
+    const layer = clientKeywordsRouter.stack.find((l) => l.route?.path === path && l.route.methods[method]);
+    if (!layer) throw new Error(`client route ${method.toUpperCase()} ${path} not registered`);
+    return layer.route.stack[layer.route.stack.length - 1].handle;
+  };
+
+  test('requireAuth guards /keywords only — the prefix, so no other router is touched', () => {
+    const authLayer = clientKeywordsRouter.stack.find((l) => !l.route);
+    assert.equal(authLayer.handle, requireAuth);
+    assert.ok(authLayer.regexp.test('/keywords/gaps'));
+    assert.ok(!authLayer.regexp.test('/internal/keywords/1/gaps'));
+    assert.ok(!authLayer.regexp.test('/analyst/dashboard'));
+  });
+
+  test('the staff-only layout-suggestion route (an LLM call) is not exposed to clients', () => {
+    const paths = clientKeywordsRouter.stack.filter((l) => l.route).map((l) => l.route.path);
+    assert.ok(!paths.some((p) => p.includes('layout')));
+    assert.ok(paths.includes('/keywords/gaps') && paths.includes('/keywords/topic-map'));
+  });
+
+  test('reading gaps uses the SESSION site, whatever the URL param says', async () => {
+    gapRows = [{ id: 1, topic: 'crm', coverage_status: 'new' }];
+    const res = mockRes();
+    await clientRoute('get', '/keywords/gaps')({ siteId: 7, params: { siteId: '999' }, query: {} }, res, () => {});
+    assert.equal(storeSiteIds.gaps, '7');
+    assert.equal(res.body.length, 1);
+  });
+
+  test('adding a keyword writes it to the session site', async () => {
+    await clientRoute('post', '/keywords/gaps')({ siteId: 7, params: { siteId: '999' }, body: { topic: 'best crm' } }, mockRes(), () => {});
+    assert.equal(storeSiteIds.create, '7');
+  });
+
+  test('approving a gap acts on the session site and creates the Action Center item there', async () => {
+    const res = mockRes();
+    await clientRoute('put', '/keywords/gaps/:gapId')({ siteId: 7, params: { siteId: '999', gapId: '4' }, body: { status: 'approved' } }, res, () => {});
+    assert.equal(storeSiteIds.update, '7');
+    assert.equal(capturedRecommendationCall.siteId, '7');
   });
 });

@@ -380,4 +380,54 @@ router.get('/internal/keywords/:siteId/layout', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// ---------------------------------------------------------------------------
+// Client-facing mirror — /keywords/... for the logged-in client's OWN site.
+//
+// Every route above is staff-only and takes the site from the URL
+// (:siteId). The Keywords page is for every client, so this mirror re-exposes
+// the same handlers (exactly the same code, nothing re-implemented) under
+// /keywords/..., with two differences that make it safe for a tenant:
+//   - the site is ALWAYS the session's own (req.siteId, set by requireAuth),
+//     never anything the URL says — a client cannot name another site;
+//   - only the routes the Keywords page uses are exposed (no `layout`, which
+//     is a staff-only LLM call).
+// requireAuth already refuses writes from read-only workspace members, so
+// no write route here has to remember that.
+//
+// Mounted in server/index.js BEFORE the staff-only block (see the mount-order
+// note there): the path-prefixed requireAuth below only ever touches
+// /keywords/..., so it cannot interfere with any other router.
+// ---------------------------------------------------------------------------
+const INTERNAL_PREFIX = '/internal/keywords/:siteId';
+const CLIENT_ROUTES = [
+  ['get', '/clusters'],
+  ['get', '/growth-opportunities'],
+  ['post', '/growth-opportunities/generate-draft'],
+  ['get', '/gaps'],
+  ['post', '/gaps'],
+  ['post', '/translate'],
+  ['put', '/gaps/:gapId'],
+  ['post', '/gaps/:gapId/request-blog'],
+  ['get', '/profile'],
+  ['get', '/capabilities'],
+  ['post', '/capabilities'],
+  ['put', '/capabilities/:capabilityId'],
+  ['get', '/topic-map'],
+  ['get', '/narrative'],
+];
+
+export const clientKeywordsRouter = Router();
+clientKeywordsRouter.use('/keywords', requireAuth);
+for (const [method, suffix] of CLIENT_ROUTES) {
+  const layer = router.stack.find((l) => l.route?.path === INTERNAL_PREFIX + suffix && l.route.methods[method]);
+  if (!layer) throw new Error(`keywords client mirror: ${method.toUpperCase()} ${INTERNAL_PREFIX + suffix} is not registered`);
+  const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+  clientKeywordsRouter[method](`/keywords${suffix}`, (req, res, next) => {
+    // The one line that makes this tenant-safe: whatever the URL carried, the
+    // handler runs against the session's own site.
+    req.params.siteId = String(req.siteId);
+    return handler(req, res, next);
+  });
+}
+
 export default router;

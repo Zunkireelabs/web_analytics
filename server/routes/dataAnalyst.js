@@ -305,4 +305,40 @@ router.get('/internal/analyst/clients/:clientId/briefings', async (req, res, nex
   } catch (e) { next(e); }
 });
 
+// ---------------------------------------------------------------------------
+// Client-facing mirror — /analyst/... for the logged-in client's OWN site.
+//
+// The Analyst page is per project: each client sees their own forecasts and
+// "what AI found", and a platform admin sees a client's by switching into that
+// project (the workspace switcher), not through a cross-client picker. Same
+// approach as the keywords mirror in routes/keywords.js: the handlers above
+// are reused as they are, and the only change is that :clientId is ALWAYS the
+// session's own site (req.siteId), whatever the URL says. The Python service
+// also rejects a recommendation that does not belong to the client in the
+// path, so a forged recommendationId cannot reach another client's data.
+//
+// Only what the page uses is exposed — not `ask` (a free-form question to the
+// cross-client analyst), business-values writes, investigations, alerts or the
+// cross-client activity feed.
+// ---------------------------------------------------------------------------
+const CLIENT_ANALYST_ROUTES = [
+  ['get', '/internal/analyst/dashboard/:clientId', '/analyst/dashboard'],
+  ['get', '/internal/analyst/dashboard/:clientId/series/:metricKey', '/analyst/dashboard/series/:metricKey'],
+  ['post', '/internal/analyst/clients/:clientId/recommendations/:recommendationId/resolve', '/analyst/recommendations/:recommendationId/resolve'],
+  ['post', '/internal/analyst/clients/:clientId/recommendations/:recommendationId/dismiss', '/analyst/recommendations/:recommendationId/dismiss'],
+  ['post', '/internal/analyst/clients/:clientId/insights/generate-draft', '/analyst/insights/generate-draft'],
+];
+
+export const clientAnalystRouter = Router();
+clientAnalystRouter.use('/analyst', requireAuth);
+for (const [method, internalPath, clientPath] of CLIENT_ANALYST_ROUTES) {
+  const layer = router.stack.find((l) => l.route?.path === internalPath && l.route.methods[method]);
+  if (!layer) throw new Error(`analyst client mirror: ${method.toUpperCase()} ${internalPath} is not registered`);
+  const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+  clientAnalystRouter[method](clientPath, (req, res, next) => {
+    req.params.clientId = String(req.siteId);
+    return handler(req, res, next);
+  });
+}
+
 export default router;

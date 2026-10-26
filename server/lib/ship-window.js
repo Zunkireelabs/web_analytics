@@ -73,8 +73,15 @@ export const GITHUB_CREDENTIAL_LOCK_JOB_NAME = 'auto-remediation-ship-credential
 // analytics but no repository has nowhere to push a branch. The
 // auto_remediation_enabled flag stays the real per-tenant opt-in on top of
 // this — this is only "could it physically ship", not "should it".
+// Whether a project is live. A suspended or deleted project (sites.status, PLATFORM-ADMIN-DESIGN.md §D)
+// must receive NO background work at all, least of all pull requests against its repo. A row with no
+// status (older fixtures) counts as active, matching the column's default.
+export function isActiveSite(site) {
+  return (site?.status ?? 'active') === 'active';
+}
+
 export function isShippable(site) {
-  return Boolean(site?.repo_owner && site?.repo_name);
+  return Boolean(site?.repo_owner && site?.repo_name) && isActiveSite(site);
 }
 
 // Local hour in an arbitrary IANA timezone, without pulling in a date library.

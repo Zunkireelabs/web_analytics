@@ -7,7 +7,7 @@ import Avatar from './Avatar.jsx';
 import Button from './Button.jsx';
 import SegmentedTabs from './SegmentedTabs.jsx';
 import { ROLE_LABELS } from './RoleBadge.jsx';
-import { visibleGroups, SETTINGS_ITEM, currentSiteOf } from '../lib/nav.js';
+import { visibleGroups, currentSiteOf } from '../lib/nav.js';
 
 const COLLAPSE_STORAGE_KEY = 'sidebar-collapsed-sections';
 
@@ -159,7 +159,6 @@ export default function Sidebar({
           </nav>
 
           <div className="border-t border-border-canvas px-3 pt-2 pb-3">
-            <SidebarLink {...SETTINGS_ITEM} active={isActive(SETTINGS_ITEM.to)} />
             <div className="relative" ref={menuRef}>
               {menuOpen && (
                 <div role="menu" className="absolute left-0 right-0 bottom-full mb-1.5 z-50 bg-white rounded-card overflow-hidden text-sm"

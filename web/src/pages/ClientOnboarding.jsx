@@ -10,7 +10,7 @@ import Field from '../components/Field.jsx';
 import Select from '../components/Select.jsx';
 import Modal from '../components/Modal.jsx';
 import ClientDrawer from '../components/ClientDrawer.jsx';
-import AddProjectModal from '../components/AddProjectModal.jsx';
+import NewProjectModal from '../components/workspace/NewProjectModal.jsx';
 import { Plus, Search, GitBranch, Bot, ChevronRight, FolderPlus, Globe, Package, Check, Eye, EyeOff, Wand2 } from 'lucide-react';
 
 // Universal Product Growth mode: an onboarded property is either a
@@ -243,6 +243,9 @@ export default function ClientOnboarding() {
 
   const [reviewState, setReviewState] = useState({}); // {[requestId]: 'approving'|'rejecting'|'error'}
   const [reviewError, setReviewError] = useState({});
+  const [approvedNote, setApprovedNote] = useState(null); // shown after approving a sign-up: { text, link? }
+  const [awaiting, setAwaiting] = useState([]); // approved, waiting for the person to confirm their email
+  const [resending, setResending] = useState(null);
 
   const [showNewForm, setShowNewForm] = useState(false);
   const [search, setSearch] = useState('');
@@ -254,22 +257,42 @@ export default function ClientOnboarding() {
 
   const load = () => api.clients.list().then(setClients).catch(() => setClients([]));
   const loadRequests = () => api.clients.signupRequests.list().then(setRequests).catch(() => setRequests([]));
+  const loadAwaiting = () => api.clients.signupRequests.awaiting().then(setAwaiting).catch(() => setAwaiting([]));
   const loadUsers = () => api.adminUsers.list().then(setUsers).catch(() => setUsers([]));
   const loadWorkspaces = () => api.workspaces().then((r) => setWorkspaces(r.workspaces || [])).catch(() => setWorkspaces([]));
 
-  useEffect(() => { load(); loadRequests(); loadUsers(); loadWorkspaces(); }, []);
+  useEffect(() => { load(); loadRequests(); loadAwaiting(); loadUsers(); loadWorkspaces(); }, []);
 
   const approveRequest = async (request) => {
     setReviewState((s) => ({ ...s, [request.id]: 'approving' }));
     setReviewError((e) => ({ ...e, [request.id]: null }));
     try {
-      const site = await api.clients.signupRequests.approve(request.id);
+      // Approval creates nothing yet: it emails a one-time link, and the account is created when the
+      // person uses it. Say plainly whether the email went out; if it did not, staff are the only ones
+      // who know they are approved. On a laptop with no mail set up the link comes back so it can be tried.
+      const approved = await api.clients.signupRequests.approve(request.id);
       setRequests((rs) => (rs || []).filter((r) => r.id !== request.id));
-      onCreated(site);
+      window.dispatchEvent(new Event('signups:changed')); // the bell's badge drops straight away
+      setApprovedNote(noteFor(approved));
+      loadAwaiting();
     } catch (err) {
       setReviewError((e) => ({ ...e, [request.id]: err.message || 'Approval failed.' }));
       setReviewState((s) => ({ ...s, [request.id]: 'error' }));
     }
+  };
+
+  // What staff are told after approving or resending: did the email go, and (laptop only) the link.
+  const noteFor = (r) => (r.emailSent
+    ? { text: `${r.email} is approved. We emailed them a link to confirm their address; their account is created when they do.` }
+    : r.devConfirmUrl
+      ? { text: `${r.email} is approved. Mail is not set up on this server, so here is their confirmation link to try it:`, link: r.devConfirmUrl }
+      : { text: `${r.email} is approved, but the email could not be sent. Use Resend below, or tell them to ask for a new link.` });
+
+  const resend = async (r) => {
+    setResending(r.id);
+    try { setApprovedNote(noteFor(await api.clients.signupRequests.resend(r.id))); await loadAwaiting(); }
+    catch (err) { setApprovedNote({ text: err.message || 'Could not resend.' }); }
+    finally { setResending(null); }
   };
 
   const rejectRequest = async (request) => {
@@ -278,6 +301,7 @@ export default function ClientOnboarding() {
     try {
       await api.clients.signupRequests.reject(request.id);
       setRequests((rs) => (rs || []).filter((r) => r.id !== request.id));
+      window.dispatchEvent(new Event('signups:changed'));
     } catch (err) {
       setReviewError((e) => ({ ...e, [request.id]: err.message || 'Reject failed.' }));
       setReviewState((s) => ({ ...s, [request.id]: 'error' }));
@@ -404,6 +428,12 @@ export default function ClientOnboarding() {
       <Tray className="mt-3">
         <TrayCard title="Pending registrations"
           action={requests && requests.length > 0 ? <Badge tone="primary">{requests.length} pending</Badge> : null}>
+          {approvedNote && (
+            <div className="mx-5 mb-3 rounded-control bg-muted px-3 py-2 text-[13px] text-text">
+              <p>{approvedNote.text}</p>
+              {approvedNote.link && <a href={approvedNote.link} className="mt-1 block break-all text-primary underline underline-offset-2">{approvedNote.link}</a>}
+            </div>
+          )}
           {requests === null ? (
             <p className="px-5 pb-4 text-[13px] text-faint">Loading…</p>
           ) : requests.length === 0 ? (
@@ -436,6 +466,22 @@ export default function ClientOnboarding() {
             </div>
           )}
         </TrayCard>
+        {awaiting.length > 0 && (
+          <TrayCard title="Approved, waiting for email confirmation"
+            action={<Badge tone="grey">{awaiting.length}</Badge>}>
+            <div className="border-t border-border">
+              {awaiting.map((r) => (
+                <div key={r.id} className="px-5 py-3 border-b border-border last:border-0 flex flex-wrap items-center justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[13px] font-medium text-fg truncate">{r.companyName}</p>
+                    <p className="text-xs text-faint truncate">{r.contactEmail} · approved {timeAgo(r.approvedAt)}{r.expired ? ' · link expired' : ''}</p>
+                  </div>
+                  <Button variant="light" onClick={() => resend(r)} disabled={resending === r.id}>{resending === r.id ? 'Sending…' : 'Resend email'}</Button>
+                </div>
+              ))}
+            </div>
+          </TrayCard>
+        )}
       </Tray>
 
       {/* One card per workspace */}
@@ -538,8 +584,11 @@ export default function ClientOnboarding() {
       </Modal>
 
       {addFor && (
-        <AddProjectModal workspace={addFor} isOpen onClose={() => setAddFor(null)}
-          onCreated={(project) => { setAddFor(null); load(); loadWorkspaces(); setSelectedClientId(project.id); setDrawerInitialTab('integrations'); }} />
+        // The same flow a client uses — connecting and the baseline are part of
+        // it, so there is no separate staff-only path to keep in step.
+        <NewProjectModal workspace={addFor} isOpen onClose={() => setAddFor(null)}
+          onChanged={() => { load(); loadWorkspaces(); }}
+          onOpenProject={(project) => { if (project) { setSelectedClientId(project.id); setDrawerInitialTab('integrations'); } }} />
       )}
 
       <ClientDrawer

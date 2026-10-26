@@ -536,7 +536,7 @@ function gettingStartedPage({ siteName, dateLabel }) {
       <ul class="starter-list">
         <li><strong>We run a full audit</strong> and freeze this report as your day-0 baseline — the exact numbers every future report is measured against.</li>
         <li><strong>Our system starts its daily checks immediately</strong> — no ramp-up period, no waiting for a "next sprint."</li>
-        <li><strong>You'll see your first fixes within days</strong>, and a Milestones report tracking real progress against this baseline.</li>
+        <li><strong>You'll see your first fixes within days</strong>, and weekly and monthly reports tracking real progress against this baseline.</li>
       </ul>
     </div>
     <div class="commitment">

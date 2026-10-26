@@ -1,11 +1,12 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { getUserByEmail, getUserById, updateUserPassword, getUserStatus } from '../store/users.js';
-import { createSignupRequest } from '../store/signup-requests.js';
+import { appOrigin } from './lib/app-url.js';
+import { createSignupRequest, peekVerificationToken, consumeVerificationToken } from '../store/signup-requests.js';
 import { createContactRequest } from '../store/contact-requests.js';
-import { sendContactLeadEmail, sendPasswordResetEmail } from '../report/email.js';
+import { sendContactLeadEmail, sendPasswordResetEmail, sendSignupReceivedEmail, sendSignupStaffNotice } from '../report/email.js';
 import { getSiteStatus } from '../store/read.js';
-import { getAccessContext, decideSiteAccess, listWorkspacesForUser, pickLoginSite } from '../store/workspaces.js';
+import { getAccessContext, decideSiteAccess, listWorkspacesForUser, listSharedProjectsForUser, pickLoginSite, isBlockedForReadOnly, isAllowedWithoutProject } from '../store/workspaces.js';
 import { createPasswordReset, consumePasswordReset } from '../store/password-resets.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
 
@@ -28,9 +29,14 @@ router.post('/login', async (req, res, next) => {
     // another workspace they belong to; belonging to none is a refusal, not
     // a session every route would then 403.
     const landingSiteId = await pickLoginSite(user, { companySiteId: Number(process.env.COMPANY_SITE_ID) });
-    if (!landingSiteId) return res.status(403).json({ error: 'Your account is not a member of any workspace.' });
+    // An account approved from a sign-up request has a login and no project yet
+    // (users.site_id is NULL, migration 198): it signs in to an empty account and
+    // creates its own workspace. That is the ONLY case let through without a
+    // project — someone who had a home project and lost every route to it is
+    // still refused, since for them it means access was taken away.
+    if (!landingSiteId && user.site_id != null) return res.status(403).json({ error: 'Your account is not a member of any workspace.' });
     req.session.userId = user.id;
-    req.session.siteId = landingSiteId;
+    req.session.siteId = landingSiteId || null;
     // siteId is the ACTIVE project and changes when the user switches
     // projects (POST /workspaces/switch). homeSiteId never does: it is what
     // the internal/platform gates key on, so a platform admin who switches
@@ -68,7 +74,53 @@ router.post('/signup-requests', async (req, res, next) => {
       passwordHash,
       message: message ? String(message).trim() : null,
     });
-    res.status(201).json({ id: request.id, status: request.status });
+    // Two emails, neither able to fail the sign-up (the request is already saved):
+    // one to the person, so they know it is waiting on a human and what happens
+    // next; one to SuperRank staff, so a request is not found by chance days later.
+    // Fire-and-forget on purpose — a slow or broken mail server must not make the
+    // form look like it failed.
+    const origin = appOrigin(req);
+    sendSignupReceivedEmail({ companyName: request.company_name, contactEmail: normalizedEmail })
+      .catch((err) => console.error('[signup] confirmation email failed:', err.message));
+    sendSignupStaffNotice({
+      companyName: request.company_name, websiteDomain: request.website_domain, contactEmail: normalizedEmail,
+      message: request.message, reviewUrl: `${origin}/clients`,
+    }).catch((err) => console.error('[signup] staff notice failed:', err.message));
+
+    // `approvalRequired` + `message` let the sign-up page say plainly that this is
+    // not an open account yet, instead of implying they can sign in now.
+    res.status(201).json({
+      id: request.id, status: request.status, approvalRequired: true,
+      message: 'Thanks, we have your request. A person at SuperRank checks every new account before it opens. When yours is approved we email you a link to confirm your address, and then you can sign in.',
+    });
+  } catch (e) { next(e); }
+});
+
+// The link in the approval email lands on a page that asks "confirm your email?" and only then
+// calls the second route. Looking a token up is a GET with no side effects, so a mail scanner that
+// pre-fetches links cannot use it up; creating the account is a POST someone has to click.
+const verifyFailure = { invalid: 'This link is not valid, or it was already used.', exists: 'An account with this email already exists. Try signing in.' };
+
+router.get('/signup/verify', async (req, res, next) => {
+  try {
+    const info = await peekVerificationToken(String(req.query.token || ''));
+    if (!info) return res.status(404).json({ error: verifyFailure.invalid, code: 'invalid' });
+    if (info.expired) return res.status(410).json({ error: 'This link has expired. Ask SuperRank to send you a new one.', code: 'expired' });
+    res.json({ email: info.email, companyName: info.companyName });
+  } catch (e) { next(e); }
+});
+
+router.post('/signup/verify', async (req, res, next) => {
+  try {
+    const result = await consumeVerificationToken(String(req.body?.token || ''));
+    if (!result.ok) return res.status(result.reason === 'exists' ? 409 : 400).json({ error: verifyFailure[result.reason] || verifyFailure.invalid, code: result.reason });
+    await recordAuditEvent({ userId: result.user.id, siteId: null, ip: req.ip, get: (h) => req.get(h) }, {
+      action: 'signup_request.verified', targetType: 'signup_request', targetId: String(result.requestId),
+      metadata: { signupRequestId: result.requestId, companyName: result.companyName }, success: true,
+    });
+    // No session is created here: they sign in with the password they chose, so confirming an email
+    // never doubles as a way in.
+    res.json({ ok: true, email: result.user.email });
   } catch (e) { next(e); }
 });
 
@@ -242,7 +294,7 @@ router.post('/password-reset/:token', async (req, res, next) => {
 
 router.get('/me', async (req, res, next) => {
   try {
-    const authed = !!(req.session?.userId && req.session?.siteId);
+    const authed = !!req.session?.userId;
     if (!authed) return res.json({ authed: false, isInternal: false });
     const user = await getUserById(req.session.userId);
     res.json({
@@ -250,7 +302,10 @@ router.get('/me', async (req, res, next) => {
       isInternal: isInternalSite(req.session.homeSiteId ?? req.session.siteId),
       role: user?.role || null,
       email: user?.email || null,
-      siteId: req.session.siteId,
+      siteId: req.session.siteId ?? null,
+      // Signed in, but no project yet (a new account): the app shows the
+      // create-a-workspace screen instead of the project views.
+      noProject: !req.session.siteId,
     });
   } catch (e) { next(e); }
 });
@@ -261,8 +316,14 @@ router.get('/me', async (req, res, next) => {
 router.get('/workspaces', requireAuth, async (req, res, next) => {
   try {
     const user = await getUserById(req.userId);
-    const workspaces = await listWorkspacesForUser(user, { companySiteId: Number(process.env.COMPANY_SITE_ID) });
-    res.json({ activeSiteId: req.siteId, workspaces });
+    const companySiteId = Number(process.env.COMPANY_SITE_ID);
+    const [workspaces, shared] = await Promise.all([
+      listWorkspacesForUser(user, { companySiteId }),
+      listSharedProjectsForUser(user, { companySiteId }),
+    ]);
+    // `shared` = projects the person was given access to one by one, outside any
+    // workspace of theirs. It deliberately carries no workspace name.
+    res.json({ activeSiteId: req.siteId, workspaces, shared });
   } catch (e) { next(e); }
 });
 
@@ -311,6 +372,23 @@ function isInternalSite(siteId) {
 // in parallel: independent lookups on independent tables, no reason to
 // serialize them.
 export async function requireAuth(req, res, next) {
+  // Signed in with no project yet (a new account). Let them through ONLY to the
+  // few routes that work without one — see isAllowedWithoutProject. The user
+  // is still checked every request, so disabling an account takes effect
+  // immediately here too; req.siteId stays null, so nothing downstream can
+  // mistake this for a project-scoped request.
+  if (req.session?.userId && !req.session?.siteId) {
+    if (!isAllowedWithoutProject({ method: req.method, path: req.originalUrl })) {
+      return res.status(403).json({ error: 'Create a workspace and a project first.', code: 'NO_PROJECT' });
+    }
+    try {
+      if (await getUserStatus(req.session.userId) !== 'active') return res.status(403).json({ error: 'This user has been disabled.' });
+    } catch (e) { return next(e); }
+    req.userId = req.session.userId;
+    req.siteId = null;
+    req.homeSiteId = req.session.homeSiteId ?? null;
+    return next();
+  }
   if (req.session?.userId && req.session?.siteId) {
     req.userId = req.session.userId;
     req.siteId = req.session.siteId;
@@ -336,6 +414,11 @@ export async function requireAuth(req, res, next) {
       const decision = access && decideSiteAccess({ ...access, companySiteId: Number(process.env.COMPANY_SITE_ID) });
       if (!decision?.allowed) {
         return res.status(403).json({ error: 'You do not have access to this project.' });
+      }
+      // A workspace "member" is read-only: refuse every write except personal
+      // account actions. One chokepoint here, so no write route has to remember.
+      if (isBlockedForReadOnly({ ...decision, method: req.method, path: req.originalUrl })) {
+        return res.status(403).json({ error: 'You have read-only access to this workspace.' });
       }
     } catch (e) { return next(e); }
     return next();

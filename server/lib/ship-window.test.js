@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { isShippable, hourInTimezone, isShipCatchupOwed, checkShipStall, siteDailyTarget, SHIP_STALL_RATIO, SHIP_HOUR_LOCAL, SHIP_CATCHUP_END_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './ship-window.js';
+import { isShippable, isActiveSite, hourInTimezone, isShipCatchupOwed, checkShipStall, siteDailyTarget, SHIP_STALL_RATIO, SHIP_HOUR_LOCAL, SHIP_CATCHUP_END_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './ship-window.js';
 import { rateLimitKey } from '../github/client.js';
 import { jobKeyFor } from './job-lock.js';
 
@@ -217,5 +217,25 @@ describe('GitHub credential shipping lock', () => {
     const siteA = { id: 1, github_pat_env_var: 'GITHUB_PAT' };
     const siteB = { id: 2, github_pat_env_var: 'GITHUB_PAT' };
     assert.equal(rateLimitKey(siteA), rateLimitKey(siteB));
+  });
+});
+
+// A suspended or deleted project must get no background work, least of all pull requests.
+describe('isActiveSite / isShippable and project status', () => {
+  const repo = { repo_owner: 'acme', repo_name: 'site' };
+  test('a site with no status counts as active (older rows and fixtures)', () => {
+    assert.equal(isActiveSite({}), true);
+    assert.equal(isShippable({ ...repo }), true);
+  });
+  test('active ships; suspended and soft-deleted never do, repo or not', () => {
+    assert.equal(isActiveSite({ status: 'active' }), true);
+    assert.equal(isShippable({ ...repo, status: 'active' }), true);
+    for (const status of ['suspended', 'soft_deleted']) {
+      assert.equal(isActiveSite({ status }), false);
+      assert.equal(isShippable({ ...repo, status }), false);
+    }
+  });
+  test('no repo is still not shippable, whatever the status', () => {
+    assert.equal(isShippable({ status: 'active' }), false);
   });
 });

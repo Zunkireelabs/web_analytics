@@ -62,12 +62,24 @@ async function req(path, opts = {}) {
   return res.json();
 }
 
+// The logged-in client's OWN site, for the calls that have a client-facing mirror on the server
+// (keywords, the Analyst, backlinks). Pass it wherever a staff page would pass a client id: the
+// server then takes the site from the session and never from the URL, so a client can only ever
+// reach their own. Staff pages keep passing real ids and keep using the /internal/... routes.
+export const SELF = 'self';
+const kw = (siteId) => (siteId === SELF ? '/keywords' : `/internal/keywords/${siteId}`);
+
 export const api = {
   me: () => req('/me'),
   login: (email, password) => req('/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   // Public — no session required to call this (same as /login). Only ever
   // creates a pending signup_requests row, never a real account.
   submitSignupRequest: (body) => req('/signup-requests', { method: 'POST', body: JSON.stringify(body) }),
+  // The link in the approval email: look the token up (no side effects), then confirm (creates the login).
+  signupVerify: {
+    peek: (token) => req(`/signup/verify?token=${encodeURIComponent(token)}`),
+    confirm: (token) => req('/signup/verify', { method: 'POST', body: JSON.stringify({ token }) }),
+  },
   // Public — no session required to call this (same as /login). Only ever
   // creates a contact_requests row: a lightweight lead, never an account.
   submitContactRequest: (body) => req('/contact-requests', { method: 'POST', body: JSON.stringify(body) }),
@@ -81,11 +93,65 @@ export const api = {
   workspaces: () => req('/workspaces'),
   switchProject: (siteId) => req('/workspaces/switch', { method: 'POST', body: JSON.stringify({ siteId }) }),
   workspace: {
+    // Create a workspace (creator becomes owner; a platform admin may pass ownerEmail to set one up for a client).
+    create: (body) => req('/workspaces', { method: 'POST', body: JSON.stringify(body) }),
+    rename: (id, name) => req(`/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+    // Projects with their goal + plain health checks, and recent activity.
+    overview: (id) => req(`/workspaces/${id}/overview`),
+    setGoal: (id, siteId, goal) => req(`/workspaces/${id}/projects/${siteId}/goal`, { method: 'PUT', body: JSON.stringify(goal) }),
+    handover: (id, body) => req(`/workspaces/${id}/handover`, { method: 'POST', body: JSON.stringify(body) }),
+    tokens: {
+      list: (id) => req(`/workspaces/${id}/tokens`),
+      create: (id, body) => req(`/workspaces/${id}/tokens`, { method: 'POST', body: JSON.stringify(body) }),
+      revoke: (id, tokenId) => req(`/workspaces/${id}/tokens/${tokenId}`, { method: 'DELETE' }),
+    },
     members: (id) => req(`/workspaces/${id}/members`),
     createProject: (id, body) => req(`/workspaces/${id}/projects`, { method: 'POST', body: JSON.stringify(body) }),
     invite: (id, body) => req(`/workspaces/${id}/members`, { method: 'POST', body: JSON.stringify(body) }),
     setRole: (id, userId, role) => req(`/workspaces/${id}/members/${userId}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
     remove: (id, userId) => req(`/workspaces/${id}/members/${userId}`, { method: 'DELETE' }),
+  },
+  // The platform admin's own view across every client workspace (404 for anyone else).
+  platform: {
+    workspaces: () => req('/platform/workspaces'),
+    // Records that support opened a client's project, before the page switches to it.
+    supportView: (siteId) => req('/platform/support-view', { method: 'POST', body: JSON.stringify({ siteId }) }),
+  },
+  // One project, for the people who manage or watch it. A project admin manages
+  // just their project; a workspace admin reaches the same routes for any project
+  // in their workspace.
+  project: {
+    overview: (siteId) => req(`/projects/${siteId}/overview`),
+    setGoal: (siteId, goal) => req(`/projects/${siteId}/goal`, { method: 'PUT', body: JSON.stringify(goal) }),
+    // Delete the project (a soft delete the server can undo). The exact name must be sent back as confirmation.
+    // Named deleteProject, NOT remove: project.remove is already 'remove a person from this project'.
+    deleteProject: (siteId, confirmName) => req(`/projects/${siteId}`, { method: 'DELETE', body: JSON.stringify({ confirmName }) }),
+    // Move the project to another workspace; keepAccess keeps everyone who can open it now.
+    transfer: (siteId, body) => req(`/projects/${siteId}/transfer`, { method: 'POST', body: JSON.stringify(body) }),
+    members: (siteId) => req(`/projects/${siteId}/members`),
+    invite: (siteId, body) => req(`/projects/${siteId}/members`, { method: 'POST', body: JSON.stringify(body) }),
+    setRole: (siteId, userId, role) => req(`/projects/${siteId}/members/${userId}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
+    remove: (siteId, userId) => req(`/projects/${siteId}/members/${userId}`, { method: 'DELETE' }),
+    tokens: {
+      list: (siteId) => req(`/projects/${siteId}/tokens`),
+      create: (siteId, body) => req(`/projects/${siteId}/tokens`, { method: 'POST', body: JSON.stringify(body) }),
+      revoke: (siteId, id) => req(`/projects/${siteId}/tokens/${id}`, { method: 'DELETE' }),
+    },
+    // Connecting a project itself: where it stands, plus the Search Console /
+    // Analytics properties and GitHub repositories there are to choose from.
+    // Nothing here is typed in by hand — every value is picked from these lists.
+    connect: {
+      state: (siteId, { shared = false } = {}) => req(`/projects/${siteId}/connect${shared ? '?shared=1' : ''}`),
+      // Google's own sign-in: returns { url } to send the browser to. The person comes back to /workspace.
+      googleStart: (siteId) => req(`/projects/${siteId}/connect/google/start`),
+      googleDisconnect: (siteId) => req(`/projects/${siteId}/connect/google`, { method: 'DELETE' }),
+      google: (siteId, body) => req(`/projects/${siteId}/connect/google`, { method: 'POST', body: JSON.stringify(body) }),
+      githubRepos: (siteId) => req(`/projects/${siteId}/connect/github`),
+      github: (siteId, body) => req(`/projects/${siteId}/connect/github`, { method: 'POST', body: JSON.stringify(body) }),
+    },
+    // Runs the real baseline (discovery, GSC/GA4 ingestion, first analysis).
+    // Slow by nature — minutes, not seconds.
+    baseline: (siteId) => req(`/projects/${siteId}/baseline`, { method: 'POST' }),
   },
   demand: {
     prospects: () => req('/demand/prospects'),
@@ -146,7 +212,10 @@ export const api = {
   },
 
   commonCrawlBacklinks: {
+    // Staff: any domain. Clients read their OWN site's through the next one, which takes no domain at all
+    // (the server uses the session's own site, see server/routes/commoncrawl-backlinks.js).
     summary: (domain) => req(`/commoncrawl-backlinks/summary?domain=${encodeURIComponent(domain)}`),
+    summaryOwn: () => req('/backlinks/summary'),
   },
 
   commandCenter: {
@@ -205,6 +274,9 @@ export const api = {
     signupRequests: {
       list: () => req('/internal/signup-requests'),
       approve: (id) => req(`/internal/signup-requests/${id}/approve`, { method: 'POST' }),
+      // Approved, waiting for the person to confirm their email; resend replaces the old link.
+      awaiting: () => req('/internal/signup-requests/awaiting'),
+      resend: (id) => req(`/internal/signup-requests/${id}/resend`, { method: 'POST' }),
       reject: (id) => req(`/internal/signup-requests/${id}/reject`, { method: 'POST' }),
     },
     // Tenant lifecycle (PLATFORM-ADMIN-DESIGN.md §D, §K Phase 3/3.5) — status
@@ -219,18 +291,29 @@ export const api = {
   // data-analyst-agent/ Python service via server/routes/dataAnalyst.js
   // (which attaches the service's admin key server-side). Cross-client, same
   // gate as `clients` above.
+  //
+  // Pass clientId 'self' (SELF) for the logged-in client's OWN site: those calls go through the client-facing
+  // /analyst/... mirror, where the server takes the site from the session and never from the URL. Any other id is
+  // the staff-only cross-client route above.
   analyst: {
-    dashboard: (clientId) => req(`/internal/analyst/dashboard/${clientId}`),
-    series: (clientId, metricKey) => req(`/internal/analyst/dashboard/${clientId}/series/${metricKey}`),
+    dashboard: (clientId) => (clientId === SELF ? req('/analyst/dashboard') : req(`/internal/analyst/dashboard/${clientId}`)),
+    series: (clientId, metricKey) => (clientId === SELF
+      ? req(`/analyst/dashboard/series/${metricKey}`)
+      : req(`/internal/analyst/dashboard/${clientId}/series/${metricKey}`)),
+    // Client only: the AI briefing (a fixed question, answered server-side) and whether Search Console is connected.
+    briefing: () => req('/analyst/briefing'),
+    connections: () => req('/analyst/connections'),
     breakdown: (clientId, metricKey, dimensionType) =>
       req(`/internal/analyst/dashboard/${clientId}/breakdown/${metricKey}/${dimensionType}`),
     availableDimensions: (clientId, metricKey) =>
       req(`/internal/analyst/clients/${clientId}/metrics/${metricKey}/dimensions`),
     ask: (clientId, question) => req(`/internal/analyst/ask/${clientId}`, { method: 'POST', body: JSON.stringify({ question }) }),
-    resolveRecommendation: (clientId, recommendationId) =>
-      req(`/internal/analyst/clients/${clientId}/recommendations/${recommendationId}/resolve`, { method: 'POST' }),
-    dismissRecommendation: (clientId, recommendationId) =>
-      req(`/internal/analyst/clients/${clientId}/recommendations/${recommendationId}/dismiss`, { method: 'POST' }),
+    resolveRecommendation: (clientId, recommendationId) => (clientId === SELF
+      ? req(`/analyst/recommendations/${recommendationId}/resolve`, { method: 'POST' })
+      : req(`/internal/analyst/clients/${clientId}/recommendations/${recommendationId}/resolve`, { method: 'POST' })),
+    dismissRecommendation: (clientId, recommendationId) => (clientId === SELF
+      ? req(`/analyst/recommendations/${recommendationId}/dismiss`, { method: 'POST' })
+      : req(`/internal/analyst/clients/${clientId}/recommendations/${recommendationId}/dismiss`, { method: 'POST' })),
     recommendationSummary: (clientId, recommendationId) =>
       req(`/internal/analyst/clients/${clientId}/recommendations/${recommendationId}/summary`, { method: 'POST' }),
     investigationReport: (clientId, title, sections) =>
@@ -238,7 +321,7 @@ export const api = {
         method: 'POST', body: JSON.stringify({ title, sections }),
       }),
     generateSeoDraft: (clientId, insight) =>
-      req(`/internal/analyst/clients/${clientId}/insights/generate-draft`, {
+      req(clientId === SELF ? '/analyst/insights/generate-draft' : `/internal/analyst/clients/${clientId}/insights/generate-draft`, {
         method: 'POST', body: JSON.stringify({ insight }),
       }),
     alerts: () => req('/internal/analyst/alerts'),
@@ -271,53 +354,53 @@ export const api = {
   // matching server/store/data-analyst.js's own public vocabulary exactly.
   keywords: {
     clusters: (siteId, clusterType) =>
-      req(`/internal/keywords/${siteId}/clusters${clusterType ? `?cluster_type=${clusterType}` : ''}`),
+      req(`${kw(siteId)}/clusters${clusterType ? `?cluster_type=${clusterType}` : ''}`),
     gaps: (siteId, status) =>
-      req(`/internal/keywords/${siteId}/gaps${status ? `?status=${status}` : ''}`),
+      req(`${kw(siteId)}/gaps${status ? `?status=${status}` : ''}`),
     // { translations: { [term]: { language, english } } } for the non-English
     // terms only — see server/agents/lib/keyword-translation.js.
     translate: (siteId, terms) =>
-      req(`/internal/keywords/${siteId}/translate`, { method: 'POST', body: JSON.stringify({ terms }) }),
+      req(`${kw(siteId)}/translate`, { method: 'POST', body: JSON.stringify({ terms }) }),
     // A keyword the user typed on the Analyst page as a growth target — queued
     // as a normal pending gap, then approved through updateGapStatus like any
     // machine-found one.
     createGap: (siteId, topic) =>
-      req(`/internal/keywords/${siteId}/gaps`, { method: 'POST', body: JSON.stringify({ topic }) }),
+      req(`${kw(siteId)}/gaps`, { method: 'POST', body: JSON.stringify({ topic }) }),
     updateGapStatus: (siteId, gapId, status) =>
-      req(`/internal/keywords/${siteId}/gaps/${gapId}`, { method: 'PUT', body: JSON.stringify({ status }) }),
+      req(`${kw(siteId)}/gaps/${gapId}`, { method: 'PUT', body: JSON.stringify({ status }) }),
     // "Write a blog on this keyword?" — approves the gap AND queues exactly one
     // blog for the next daily run, rather than drafting on the spot the way
     // updateGapStatus('approved') does. See the route's own comment.
     requestBlogForGap: (siteId, gapId) =>
-      req(`/internal/keywords/${siteId}/gaps/${gapId}/request-blog`, { method: 'POST' }),
+      req(`${kw(siteId)}/gaps/${gapId}/request-blog`, { method: 'POST' }),
     // Website-wide Growth Opportunities (Analyst page) — computed read-time
     // from real GSC query/page data + the keyword_gaps review queue, no
     // separate persistence. See server/agents/lib/growth-opportunities.js.
-    growthOpportunities: (siteId) => req(`/internal/keywords/${siteId}/growth-opportunities`),
+    growthOpportunities: (siteId) => req(`${kw(siteId)}/growth-opportunities`),
     // Quick Win / Page 1 / Declining / Content Expansion "Send to Action
     // Center" — Content Gap opportunities use updateGapStatus above instead.
     generateOpportunityDraft: (siteId, opportunity) =>
-      req(`/internal/keywords/${siteId}/growth-opportunities/generate-draft`, {
+      req(`${kw(siteId)}/growth-opportunities/generate-draft`, {
         method: 'POST', body: JSON.stringify({ opportunity }),
       }),
-    profile: (siteId) => req(`/internal/keywords/${siteId}/profile`),
+    profile: (siteId) => req(`${kw(siteId)}/profile`),
     // Supplementary narrative (server/agents/keyword-narrative.js) — separate
     // from api.analyst.executiveSummary's Python pipeline.
-    narrative: (siteId) => req(`/internal/keywords/${siteId}/narrative`),
+    narrative: (siteId) => req(`${kw(siteId)}/narrative`),
     // Product Understanding Layer (migration 111) — this site's OWN verified
     // capabilities, not topics it merely ranks for.
     // `kind` (migration 176): omitted = capabilities only (what every existing
     // caller has always received); 'all' = every kind of product knowledge.
     capabilities: (siteId, status, kind) => {
       const qs = [status && `status=${status}`, kind && `kind=${kind}`].filter(Boolean).join('&');
-      return req(`/internal/keywords/${siteId}/capabilities${qs ? `?${qs}` : ''}`);
+      return req(`${kw(siteId)}/capabilities${qs ? `?${qs}` : ''}`);
     },
     addCapability: (siteId, capability) =>
-      req(`/internal/keywords/${siteId}/capabilities`, { method: 'POST', body: JSON.stringify(capability) }),
+      req(`${kw(siteId)}/capabilities`, { method: 'POST', body: JSON.stringify(capability) }),
     updateCapabilityStatus: (siteId, capabilityId, status) =>
-      req(`/internal/keywords/${siteId}/capabilities/${capabilityId}`, { method: 'PUT', body: JSON.stringify({ status }) }),
+      req(`${kw(siteId)}/capabilities/${capabilityId}`, { method: 'PUT', body: JSON.stringify({ status }) }),
     // Strategic Product Topic Map — read-time aggregation, not a stored resource.
-    topicMap: (siteId) => req(`/internal/keywords/${siteId}/topic-map`),
+    topicMap: (siteId) => req(`${kw(siteId)}/topic-map`),
     // AI-suggested section order (server/routes/keywords.js's GET .../layout) —
     // consumed by Analyst.jsx's loadAILayout, separate from api.keywords.narrative.
     layout: (siteId) => req(`/internal/keywords/${siteId}/layout`),
@@ -392,7 +475,8 @@ export const api = {
     previewDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}/preview`, siteId)),
     rollback: (id, siteId) => req(withSite(`/action-center/drafts/${id}/rollback`, siteId), { method: 'POST' }),
     executeSafeFixes: (limit, siteId) => req(withSite('/action-center/execute-safe-fixes', siteId), { method: 'POST', body: JSON.stringify({ limit }) }),
-    bulkApproveDrafts: (limit, siteId) => req(withSite('/action-center/drafts/bulk-approve', siteId), { method: 'POST', body: JSON.stringify({ limit }) }),
+    // scope: 'content' | 'fixes' limits it to that page's own drafts; omitted = every pending draft (as before).
+    bulkApproveDrafts: (limit, siteId, scope) => req(withSite('/action-center/drafts/bulk-approve', siteId), { method: 'POST', body: JSON.stringify({ limit, scope }) }),
     latestExecutionJob: (siteId) => req(withSite('/action-center/execution-jobs/latest', siteId)),
     approveAndShip: (recommendationId, siteId) => req(withSite(`/action-center/recommendations/${recommendationId}/approve-and-ship`, siteId), { method: 'POST' }),
     recheckRecommendation: (recommendationId, siteId) => req(withSite(`/action-center/recommendations/${recommendationId}/recheck`, siteId), { method: 'POST' }),

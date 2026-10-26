@@ -241,6 +241,96 @@ export async function sendPasswordResetEmail({ to, resetUrl }) {
   return true;
 }
 
+// ───────── sign-up requests ─────────
+//
+// Three messages around one request. Wording lives in pure builders so what the
+// person actually reads (and that nothing they typed can inject markup) is
+// testable without sending anything.
+//
+// "Approval" is a person at SuperRank checking the request before an account
+// exists, and the sign-up page promises exactly that — so the first email
+// restates it plainly, and the approval email is what ends the wait.
+const MAIL_STYLE = 'font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px';
+const BUTTON_STYLE = 'background:#d54e00;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;display:inline-block';
+
+export function buildSignupReceivedEmail({ companyName, contactEmail }) {
+  const company = escapeHtml(companyName);
+  return {
+    subject: 'We received your SuperRank request',
+    html: `
+  <div style="${MAIL_STYLE}">
+    <h2 style="margin:0 0 4px">Thanks, we have your request</h2>
+    <p style="color:#555;margin:0 0 16px">${company}</p>
+    <p style="line-height:1.55;color:#222">A person at SuperRank checks every new account before it opens, so yours is not active yet. There is nothing you need to do. We will email <b>${escapeHtml(contactEmail)}</b> as soon as it is approved.</p>
+    <p style="line-height:1.55;color:#222">When it is, we send you a link to confirm your email address. Once you have, you sign in with the password you chose.</p>
+    <p style="color:#999;font-size:12px">If you did not ask for this, you can ignore this email. Nothing is created until it is approved.</p>
+  </div>`,
+  };
+}
+
+export function buildSignupApprovedEmail({ companyName, contactEmail, confirmUrl }) {
+  const company = escapeHtml(companyName);
+  return {
+    subject: 'Confirm your email to open your SuperRank account',
+    html: `
+  <div style="${MAIL_STYLE}">
+    <h2 style="margin:0 0 4px">Your request is approved</h2>
+    <p style="color:#555;margin:0 0 16px">${company}</p>
+    <p style="line-height:1.55;color:#222">One last step: confirm that <b>${escapeHtml(contactEmail)}</b> is your email address. Your account is created when you do.</p>
+    <p style="margin:18px 0"><a href="${escapeHtml(confirmUrl)}" style="${BUTTON_STYLE}">Confirm my email</a></p>
+    <p style="line-height:1.55;color:#222">Then sign in with the password you chose when you signed up. The first time, you will be asked to name your workspace and add your first project. It takes a couple of minutes, and a short guide on the page walks you through it.</p>
+    <p style="color:#999;font-size:12px">This link works once and expires in 7 days. If you did not ask for this account, you can ignore this email and nothing will be created.</p>
+  </div>`,
+  };
+}
+
+export function buildSignupStaffNotice({ companyName, websiteDomain, contactEmail, message, reviewUrl }) {
+  const row = (k, v) => (v ? `<tr><td style="padding:4px 12px 4px 0;color:#888">${k}</td><td>${v}</td></tr>` : '');
+  return {
+    subject: `New sign-up request: ${companyName}`,
+    html: `
+  <div style="${MAIL_STYLE}">
+    <h2 style="margin:0 0 4px">New sign-up request</h2>
+    <p style="margin:0 0 16px;color:#555">${escapeHtml(companyName)}</p>
+    <table style="border-collapse:collapse">
+      ${row('Email', `<a href="mailto:${escapeHtml(contactEmail)}">${escapeHtml(contactEmail)}</a>`)}
+      ${row('Website', websiteDomain ? escapeHtml(websiteDomain) : '')}
+    </table>
+    ${message ? `<p style="margin:18px 0;line-height:1.5;color:#222;white-space:pre-wrap">${escapeHtml(message)}</p>` : ''}
+    <p style="margin:18px 0"><a href="${escapeHtml(reviewUrl)}" style="${BUTTON_STYLE}">Review the request</a></p>
+    <p style="color:#999;font-size:12px">Approving creates their login only. They create their own workspace and projects once they sign in. Rejecting sends them nothing.</p>
+  </div>`,
+  };
+}
+
+async function sendBuilt({ to, built, exempt, label }) {
+  const transporter = getTransporter();
+  if (!transporter) {
+    console.log(`[email] SMTP not fully configured — skipping ${label}.`);
+    return false;
+  }
+  await transporter.sendMail({
+    ...(exempt ? { [REDIRECT_EXEMPT]: true } : {}),
+    from: process.env.REPORT_EMAIL_FROM || process.env.SMTP_USER,
+    to,
+    subject: built.subject,
+    html: built.html,
+  });
+  console.log(`[email] ${label} sent to ${to}`);
+  return true;
+}
+
+// To the person who asked: confirms the request and sets the expectation. Exempt
+// from redirect mode because they asked for it (see REDIRECT_EXEMPT).
+export const sendSignupReceivedEmail = (o) => sendBuilt({ to: o.contactEmail, built: buildSignupReceivedEmail(o), exempt: true, label: 'sign-up confirmation' });
+
+// To the person whose request was approved: this is the "you can sign in" message.
+export const sendSignupApprovedEmail = (o) => sendBuilt({ to: o.contactEmail, built: buildSignupApprovedEmail(o), exempt: true, label: 'sign-up approval' });
+
+// To SuperRank staff: a request is waiting. Internal, so it is NOT exempt — redirect
+// mode (a laptop, a staging box) must never send it to the real staff inbox.
+export const sendSignupStaffNotice = (o) => sendBuilt({ to: LEADS_EMAIL_TO, built: buildSignupStaffNotice(o), exempt: false, label: 'sign-up staff notice' });
+
 // server/notifications/channels/email.js — the email delivery channel for
 // NotificationEvents (see server/notifications/types.js), including the
 // Data Analyst Agent's predictive-risk alerts pushed via the
@@ -280,5 +370,22 @@ export async function sendNotificationEmail(site, events) {
     html,
   });
   console.log(`[email] ${events.length} notification event(s) sent to ${recipient}`);
+  return true;
+}
+
+// Free audit: the private report link, sent to the visitor who unlocked it.
+// Returns false (and the page still shows the link) when SMTP is not configured.
+export async function sendFreeAuditReportEmail({ to, host, reportUrl }) {
+  const transporter = getTransporter();
+  if (!transporter) {
+    console.log('[email] SMTP not fully configured — skipping free audit report email.');
+    return false;
+  }
+  await transporter.sendMail({
+    from: process.env.REPORT_EMAIL_FROM || process.env.SMTP_USER,
+    to,
+    subject: `Your SuperRank audit for ${host}`,
+    html: `<p>Your full audit for <b>${escapeHtml(host)}</b> is ready, with the fix for each issue.</p><p><a href="${escapeHtml(reportUrl)}">Open your report</a></p><p>The link is private to you and stays active for 30 days.</p>`,
+  });
   return true;
 }

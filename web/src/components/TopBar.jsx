@@ -38,7 +38,7 @@ export default function TopBar({ isInternal, isPlatformAdmin, isProduct, agentOp
       )}
 
       <div className="ml-auto flex items-center gap-1.5">
-        {isInternal && <NotificationBell />}
+        {isInternal && <NotificationBell isPlatformAdmin={isPlatformAdmin} />}
         {agentAvailable && (
           <Button variant={agentOpen ? 'light' : 'ghost'} onClick={() => onAgent(!agentOpen)} aria-pressed={agentOpen}>
             <MessageSquare size={14} />

@@ -2,9 +2,12 @@ import { useEffect, useState, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { api } from './api.js';
 import SuperRankLogin from './pages/SuperRankLogin.jsx';
+import SuperRankSignup from './pages/SuperRankSignup.jsx';
+import VerifyEmail from './pages/VerifyEmail.jsx';
 import Overview from './pages/Overview.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import TopBar from './components/TopBar.jsx';
+import NoProjectShell from './components/NoProjectShell.jsx';
 import { ShellContext } from './components/shellContext.js';
 import { currentSiteOf } from './lib/nav.js';
 import ClientAssistantPanel from './components/ClientAssistantPanel.jsx';
@@ -16,14 +19,17 @@ import ClientAssistantPanel from './components/ClientAssistantPanel.jsx';
 const Insights = lazy(() => import('./pages/Insights.jsx'));
 const Compare = lazy(() => import('./pages/Compare.jsx'));
 const Reports = lazy(() => import('./pages/Reports.jsx'));
-const GrowthReport = lazy(() => import('./pages/GrowthReport.jsx'));
 const AiGrowth = lazy(() => import('./pages/AiGrowth.jsx'));
 const ActionCenter = lazy(() => import('./pages/ActionCenter.jsx'));
 const Demand = lazy(() => import('./pages/Demand.jsx'));
 const ClientOnboarding = lazy(() => import('./pages/ClientOnboarding.jsx'));
 const DesignReview = lazy(() => import('./pages/DesignReview.jsx'));
 const Analyst = lazy(() => import('./pages/Analyst.jsx'));
-const Settings = lazy(() => import('./pages/Settings.jsx'));
+const Keywords = lazy(() => import('./pages/Keywords.jsx'));
+const Competitors = lazy(() => import('./pages/Competitors.jsx'));
+const AiVisibility = lazy(() => import('./pages/AiVisibility.jsx'));
+const Content = lazy(() => import('./pages/Content.jsx'));
+const Workspace = lazy(() => import('./pages/Workspace.jsx'));
 const OAuthAuthorize = lazy(() => import('./pages/OAuthAuthorize.jsx'));
 const Account = lazy(() => import('./pages/Account.jsx'));
 const UsersAndTokens = lazy(() => import('./pages/admin/UsersAndTokens.jsx'));
@@ -39,12 +45,13 @@ export default function App() {
   const [sites, setSites] = useState([]);
   const [siteId, setSiteId] = useState(null);
   const [sitesLoaded, setSitesLoaded] = useState(false);
+  const [noProject, setNoProject] = useState(false); // signed in, but no project yet (a newly approved account)
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [toolbarEl, setToolbarEl] = useState(null); // PageToolbar portals into this node
 
   const checkSession = () => api.me()
-    .then((r) => { setAuthed(r.authed); setIsInternal(!!r.isInternal); setRole(r.role || null); setEmail(r.email || null); })
+    .then((r) => { setAuthed(r.authed); setIsInternal(!!r.isInternal); setRole(r.role || null); setEmail(r.email || null); setNoProject(!!r.noProject); })
     .catch(() => setAuthed(false));
 
   // Check session on load.
@@ -77,7 +84,7 @@ export default function App() {
   // lets <Login> (rendered unconditionally, regardless of path) hand off to
   // <Routes> at the same /oauth/authorize-consent URL once authed flips true.
   useEffect(() => {
-    if (authed === false && !window.location.pathname.startsWith('/oauth/') && window.location.pathname !== '/login') {
+    if (authed === false && !window.location.pathname.startsWith('/oauth/') && window.location.pathname !== '/login' && window.location.pathname !== '/signup' && window.location.pathname !== '/verify-email') {
       navigate('/', { replace: true });
     }
   }, [authed, navigate]);
@@ -85,11 +92,14 @@ export default function App() {
   // Load sites once authenticated.
   useEffect(() => {
     if (!authed) return;
+    // A project-less account has no sites to load (the server would refuse the
+    // call); it only needs the Workspace page, so there is nothing to wait for.
+    if (noProject) { setSitesLoaded(true); return; }
     api.sites().then((list) => {
       setSites(list);
       if (list.length) setSiteId(list[0].id);
     }).catch(() => {}).finally(() => setSitesLoaded(true));
-  }, [authed]);
+  }, [authed, noProject]);
 
   // Switch the active project. The server verifies the user's workspace
   // membership before changing its session; only then do we reload the site
@@ -100,26 +110,46 @@ export default function App() {
     const list = await api.sites();
     setSites(list);
     setSiteId(list[0]?.id ?? id);
+    setNoProject(false); // they have a project now: the full app takes over
   };
 
   const logout = async () => {
     await api.logout().catch(() => {});
-    // Signing out leaves the app for the marketing site, not the app's own login page.
-    const landing = import.meta.env.VITE_LANDING_URL || 'https://superrank.si';
-    window.location.assign(landing);
+    // Signing out lands on the app's own sign-in (app.superrank.si), not the marketing
+    // site. Clear what belongs to the session; the effect above puts the URL back at '/'.
+    setSites([]); setSiteId(null); setRole(null); setEmail(null); setIsInternal(false); setSitesLoaded(false); setNoProject(false);
+    setAssistantOpen(false); setMobileNavOpen(false);
+    setAuthed(false);
   };
 
   if (authed === null) return <div className="p-8 text-gray-400">Loading…</div>;
   // Signed-out visitors, at /login or the bare app address, get the SuperRank login.
-  if (!authed) return <SuperRankLogin onAuthed={checkSession} />;
+  if (!authed) {
+    if (location.pathname === '/signup') return <SuperRankSignup />;
+    if (location.pathname === '/verify-email') return <VerifyEmail />;
+    return <SuperRankLogin onAuthed={checkSession} />;
+  }
 
   // Standalone account page (Humblytics-style): no sidebar, top bar, toolbar or
-  // agent panel — the person's own settings. The in-app /settings holds the
-  // workspace and project levels.
+  // agent panel — the person's own account settings (profile, sign-in, plan).
+  // Workspace things live on the in-app /workspace page.
   if (location.pathname === '/account') {
     return (
       <Suspense fallback={<div className="p-8 text-faint">Loading…</div>}>
-        <Account email={email} role={role} sites={sites} siteId={siteId} onLogout={logout} />
+        <Account email={email} role={role} sites={sites} siteId={siteId} onLogout={logout} onSwitchProject={switchProject} />
+      </Suspense>
+    );
+  }
+
+  // A newly approved account has a login and no project: show the Workspace page,
+  // where they create their workspace and first project, instead of a sidebar of
+  // views that all need one.
+  if (noProject) {
+    return (
+      <Suspense fallback={<div className="p-8 text-faint">Loading…</div>}>
+        <NoProjectShell email={email} onLogout={logout}>
+          <Workspace siteId={null} onSwitchProject={switchProject} />
+        </NoProjectShell>
       </Suspense>
     );
   }
@@ -130,13 +160,10 @@ export default function App() {
   // guards every route these pages call.
   const isPlatformAdmin = role === 'platform_admin';
 
-  // The Analyst page (/analyst) has its own staff-only Admin Assistant
-  // (AnalystChatDrawer -> AdminAssistantPanel) scoped to whichever client is
-  // selected there — a second floating assistant on top of that would just
-  // be two chat entry points fighting for the same corner of the screen, and
-  // the client-facing Assistant deliberately does not carry the admin
-  // Assistant's cross-client analyst capability anyway.
-  const hideAssistant = location.pathname === '/analyst';
+  // A platform admin on /analyst has the staff Admin Assistant there (AnalystChatDrawer), so the app-wide
+  // Agent panel is hidden on that page for them: two floating assistants would fight for the same corner.
+  // Clients have no admin assistant, so they keep the Agent panel on every page, Analyst included.
+  const hideAssistant = isPlatformAdmin && location.pathname === '/analyst';
   const agentAvailable = !hideAssistant;
   const agentOpen = assistantOpen && agentAvailable;
   const isProduct = currentSiteOf(sites, siteId)?.property_type === 'product';
@@ -156,14 +183,21 @@ export default function App() {
         {siteId ? (
           <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>
             <Routes key={siteId}>
-              {/* No standalone marketing homepage in the authenticated app — land straight on AI Growth (the agent runner console, AiGrowth.jsx). */}
-              <Route path="/" element={<Navigate to="/ai-orchestration" replace />} />
+              {/* No standalone marketing homepage in the authenticated app — signing in lands on Overview, the first item in the sidebar. */}
+              <Route path="/" element={<Navigate to="/overview" replace />} />
               <Route path="/login" element={<Navigate to="/" replace />} />
               <Route path="/overview" element={<Overview siteId={siteId} />} />
               <Route path="/insights" element={<Insights siteId={siteId} />} />
               <Route path="/compare" element={<Compare siteId={siteId} />} />
-              <Route path="/reports" element={<Reports siteId={siteId} />} />
-              <Route path="/milestones" element={<GrowthReport isInternal={isInternal} />} />
+              {/* Reports opens on the Baseline tab (the old Milestones page, folded in), then weekly and monthly. */}
+              <Route path="/reports" element={<Reports siteId={siteId} isInternal={isInternal} />} />
+              <Route path="/milestones" element={<Navigate to="/reports?tab=baseline" replace />} />
+              {/* One page per job, for every client's own project (see lib/nav.js). */}
+              <Route path="/ai-visibility" element={<AiVisibility />} />
+              <Route path="/keywords" element={<Keywords />} />
+              <Route path="/competitors" element={<Competitors />} />
+              <Route path="/content" element={<Content />} />
+              <Route path="/analyst" element={<Analyst siteId={siteId} isPlatformAdmin={isPlatformAdmin} />} />
               {/* /ai-orchestration is Orchestration — the agent runner console
                   and the orchestration diagram showing how the 10 specialist
                   agents actually connect (AiGrowth.jsx), plus (for isInternal
@@ -174,14 +208,17 @@ export default function App() {
                   admin agent taskforce/execution timeline/model status) was
                   migrated into this page instead of duplicating it. */}
               <Route path="/ai-orchestration" element={<AiGrowth isInternal={isInternal} />} />
-              <Route path="/action-center" element={<ActionCenter />} />
+              {/* The fixes side of the drafts board; the writing is on /content. */}
+              <Route path="/action-center" element={<ActionCenter scope="fixes" />} />
               {/* Universal Product Growth mode's one new page — reachable by
                   URL for any session (server-scoped to its own siteId, same
                   as every route above), but Sidebar.jsx only links to it
                   when the session's own site has property_type 'product'. */}
               <Route path="/demand" element={<Demand siteId={siteId} />} />
-              {/* Every account, not internal-only — same session's own password either way. */}
-              <Route path="/settings" element={<Settings sites={sites} siteId={siteId} role={role} onSite={switchProject} />} />
+              {/* Workspace: projects, goals, people, API tokens, monitoring, settings. */}
+              <Route path="/workspace" element={<Workspace siteId={siteId} onSwitchProject={switchProject} />} />
+              {/* The old Settings page is now the Workspace page. */}
+              <Route path="/settings" element={<Navigate to="/workspace" replace />} />
               {/* Staff-only — operates across every client's site, not just this
                   session's own. Gated on isPlatformAdmin, NOT isInternal:
                   both routes' entire API surface is requirePlatformRole
@@ -198,7 +235,6 @@ export default function App() {
                   teammate is added. */}
               {isPlatformAdmin && <Route path="/clients" element={<ClientOnboarding />} />}
               {isPlatformAdmin && <Route path="/clients/:id/design-review" element={<DesignReview />} />}
-              {isPlatformAdmin && <Route path="/analyst" element={<Analyst />} />}
               {/* OAuth "Connect" consent screen — reached via a 302 from
                   mcp-server/oauth-provider.js's authorize(), scoped to this
                   session's own siteId server-side, same as every route above. */}

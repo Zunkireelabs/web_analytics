@@ -1,6 +1,6 @@
 import {
   getBranchSha, createBranch, commitFilesAtomic, createCommitObject, updateRef, getCommitMessage,
-  openPullRequest, listOpenPullRequestsForBranch, defaultBranchName, mergeBranchFromBase, getFileContent,
+  openPullRequest, listOpenPullRequestsForBranch, defaultBranchName, prTargetBranchName, mergeBranchFromBase, getFileContent,
   beginFileOverlay, endFileOverlay, recordFileOverlayWrites, compareCommits,
 } from '../../github/client.js';
 import { safeMessage } from '../../lib/errors.js';
@@ -420,7 +420,7 @@ export async function openRollbackPr(site, draft, branchName) {
       return { ok: true, prNumber: pr.number, prUrl: pr.html_url, reused: true };
     }
 
-    const base = baseBranch(site);
+    const base = prTargetBranchName(site);
     const { number, url } = await openPullRequest(site, {
       branch: branchName,
       title: `Action Center: rollback ${draft.action_type} draft #${draft.id}`,
@@ -433,7 +433,8 @@ export async function openRollbackPr(site, draft, branchName) {
   }
 }
 
-// Opens a real PR from the batch branch into the site's default branch —
+// Opens a real PR from the batch branch into the site's PR target branch (its
+// default branch unless pr_target_branch says otherwise, e.g. stage) —
 // never merges it; a human reviews and merges on GitHub. Since many drafts
 // can now share one branch, this checks for an already-open PR on that
 // branch first and reuses it instead of erroring on GitHub's "a PR already
@@ -447,7 +448,9 @@ export async function openPrForBranch(site, draft, branchName) {
       return { ok: true, prNumber: pr.number, prUrl: pr.html_url, reused: true };
     }
 
-    const base = baseBranch(site);
+    // Wording follows where the PR is actually opened (pr_target_branch, e.g.
+    // stage), not the branch the work was cut from.
+    const base = prTargetBranchName(site);
     const { number, url } = await openPullRequest(site, {
       branch: branchName,
       title: `Action Center: batch for ${branchName}`,

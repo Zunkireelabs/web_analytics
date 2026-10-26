@@ -10,6 +10,7 @@ import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation
 // auto-remediation.js already import each other — see ship-pacing.js.
 import { applyPacing, applyConvergenceCap } from '../agents/lib/ship-pacing.js';
 import { draftShipState, SHIP_STATE } from '../lib/draft-ship-state.js';
+import { inDraftScope } from '../lib/draft-scope.js';
 import { recordOutcome } from '../agents/lib/generator-learning.js';
 import { getProtectedPageSet } from '../store/protected-pages.js';
 import { isProtectedChange } from '../agents/lib/protected-pages.js';
@@ -1809,11 +1810,12 @@ export const DRAFT_BULK_APPROVE_LIMIT = 60;
 // off of (that column is NOT NULL, see migration 078_execution_jobs.sql), so
 // this keeps only the execution_jobs row itself for the audit trail and logs
 // per-draft outcomes via appendJobLog instead of per-item job-rec rows.
-export async function bulkApproveDrafts(siteId, { userId, limit = DRAFT_BULK_APPROVE_LIMIT } = {}) {
-  const [drafts, site] = await Promise.all([
+export async function bulkApproveDrafts(siteId, { userId, limit = DRAFT_BULK_APPROVE_LIMIT, scope } = {}) {
+  const [allPending, site] = await Promise.all([
     listDrafts(siteId, { status: 'submitted_for_approval' }),
     getSiteById(siteId),
   ]);
+  const drafts = allPending.filter((d) => inDraftScope(d.action_type, scope));
   const targeted = drafts.slice(0, limit);
   const job = await createExecutionJob(siteId, { trigger: 'bulk-drafts', requestedBy: userId });
   if (targeted.length === 0) {
@@ -1952,7 +1954,8 @@ router.post('/action-center/execute-safe-fixes', async (req, res, next) => {
 
 router.post('/action-center/drafts/bulk-approve', async (req, res, next) => {
   try {
-    res.json(await bulkApproveDrafts(req.siteId, { userId: req.userId, limit: req.body?.limit }));
+    const scope = ['content', 'fixes'].includes(req.body?.scope) ? req.body.scope : undefined;
+    res.json(await bulkApproveDrafts(req.siteId, { userId: req.userId, limit: req.body?.limit, scope }));
   } catch (e) {
     if (e.status) return respondWithStatusError(res, e, 'Could not approve pending drafts right now — try again shortly.');
     next(e);
