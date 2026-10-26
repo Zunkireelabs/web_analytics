@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
-import { Activity, ArrowLeftRight, Check, ChevronsUpDown, Globe, KeyRound, Settings as SettingsIcon, Target, Users, UserPlus, X } from 'lucide-react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { Activity, ArrowLeftRight, Check, ChevronsUpDown, Globe, KeyRound, Search, Settings as SettingsIcon, Target, Users, UserPlus, X } from 'lucide-react';
 import { api, timeAgo } from '../../api.js';
 import Avatar from '../Avatar.jsx';
 import Badge from '../Badge.jsx';
@@ -34,7 +35,10 @@ export default function ProjectSettings({ projects, project, email, tab, onTab, 
   const [goalOpen, setGoalOpen] = useState(false);
   const [transferOpen, setTransferOpen] = useState(false);
   const [pickOpen, setPickOpen] = useState(false);
-  const pickRef = useRef(null);
+  const [pickQuery, setPickQuery] = useState('');
+  const [menuPos, setMenuPos] = useState(null);
+  const pickRef = useRef(null);   // the button
+  const menuRef = useRef(null);   // the menu itself, which lives outside the card (see the portal below)
   const manage = project.role === 'admin' || project.role === 'owner';
   const tabs = PROJECT_TABS.filter((t) => manage || !t.manage);
   const active = tabs.some((t) => t.key === tab) ? tab : 'general';
@@ -43,10 +47,43 @@ export default function ProjectSettings({ projects, project, email, tab, onTab, 
   useEffect(() => { setOverview(null); refresh(); }, [project.id]);
   useEffect(() => {
     if (!pickOpen) return;
-    const onDown = (e) => { if (!pickRef.current?.contains(e.target)) setPickOpen(false); };
+    const onDown = (e) => { if (!pickRef.current?.contains(e.target) && !menuRef.current?.contains(e.target)) setPickOpen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setPickOpen(false); };
     document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey); };
   }, [pickOpen]);
+
+  // The menu sits in <body>, under the button: inside the card it was clipped by the card's edge and showed
+  // two projects of nine. Placed from the button's position, clamped to stay on screen.
+  useLayoutEffect(() => {
+    if (!pickOpen) { setMenuPos(null); setPickQuery(''); return; }
+    const place = () => {
+      const r = pickRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const w = Math.min(340, window.innerWidth - 24);
+      setMenuPos({ top: r.bottom + 6, left: Math.max(12, Math.min(r.right - w, window.innerWidth - w - 12)), width: w });
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
+  }, [pickOpen]);
+
+  // Every project you can open, grouped by the workspace it is in. The workspace of the project you are looking
+  // at comes first, then the rest alphabetically, then projects shared with you one by one.
+  const groups = useMemo(() => {
+    const q = pickQuery.trim().toLowerCase();
+    const map = new Map();
+    for (const x of projects) {
+      if (q && !(x.name.toLowerCase().includes(q) || (x.domain || '').toLowerCase().includes(q) || (x.workspaceName || '').toLowerCase().includes(q))) continue;
+      const key = x.shared ? '__shared__' : (x.workspaceName || 'Projects');
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(x);
+    }
+    const current = project.shared ? '__shared__' : (project.workspaceName || 'Projects');
+    return [...map.entries()].sort(([a], [b]) => (a === current ? -1 : b === current ? 1 : a === '__shared__' ? 1 : b === '__shared__' ? -1 : a.localeCompare(b)))
+      .map(([key, items]) => ({ key, label: key === '__shared__' ? 'Shared with you' : key, items: items.sort((a, b) => a.name.localeCompare(b.name)) }));
+  }, [projects, pickQuery, project.id]);
 
   const p = overview?.projects?.[0];
   const health = !overview ? '–' : overview.needsAttention ? '1 issue' : 'All healthy';
@@ -62,21 +99,49 @@ export default function ProjectSettings({ projects, project, email, tab, onTab, 
               <div className="text-[17px] font-medium tracking-[-0.02em] text-fg truncate">{project.name}</div>
               <div className="mt-0.5 flex items-center gap-1.5 flex-wrap"><Badge tone="primary">{ROLE_LABELS[project.role]}</Badge>{project.shared && <Badge tone="grey">Shared with you</Badge>}</div>
             </div>
-            {projects.length > 1 && (
-              <div className="relative" ref={pickRef}>
-                <Button variant="light" onClick={() => setPickOpen((o) => !o)} aria-haspopup="menu" aria-expanded={pickOpen}><ChevronsUpDown size={14} /><span className="hidden sm:inline">Switch project</span></Button>
-                {pickOpen && (
-                  <div role="menu" className="absolute right-0 top-full mt-1.5 z-30 w-64 max-h-[50vh] overflow-y-auto bg-white rounded-card p-1" style={{ boxShadow: '0 0 0 1px rgba(0,0,0,.06), 0 20px 40px -12px rgba(0,0,0,.18)' }}>
-                    {projects.map((x) => (
-                      <button key={x.id} type="button" role="menuitem" onClick={() => { setPickOpen(false); onPickProject(x.id); }} className="w-full flex items-center gap-2 h-9 px-2 rounded-control hover:bg-muted text-left">
-                        <span className="w-5 h-5 bg-primary text-white text-[9px] font-medium grid place-items-center shrink-0" style={{ borderRadius: 6 }}>{siteInitials(x.name)}</span>
-                        <span className="min-w-0 flex-1"><span className="block text-[13px] font-medium text-fg truncate leading-4">{x.name}</span>{x.workspaceName && <span className="block text-[11px] text-faint truncate">{x.workspaceName}</span>}</span>
+            {/* Both header actions side by side. Transfer is here, not in a card at the bottom of the page, so it is
+                reachable the moment a project is open; it appears whenever the person may transfer this project. */}
+            <div className="flex items-center gap-2 shrink-0">
+              {project.canTransfer && (
+                <Button variant="light" onClick={() => setTransferOpen(true)} title="Move this project, with its goal, tokens and history, to another workspace you manage">
+                  <ArrowLeftRight size={14} /><span className="hidden sm:inline">Transfer</span><span className="sm:hidden sr-only">Transfer project</span>
+                </Button>
+              )}
+              {projects.length > 1 && (
+                <div className="relative" ref={pickRef}>
+                  <Button variant="light" onClick={() => setPickOpen((o) => !o)} aria-haspopup="menu" aria-expanded={pickOpen}><ChevronsUpDown size={14} /><span className="hidden sm:inline">Switch project</span></Button>
+                </div>
+              )}
+            </div>
+            {pickOpen && menuPos && createPortal(
+              <div ref={menuRef} role="menu" aria-label="Switch project" className="fixed z-50 max-h-[60vh] overflow-y-auto bg-white rounded-card p-1"
+                style={{ top: menuPos.top, left: menuPos.left, width: menuPos.width, boxShadow: '0 0 0 1px rgba(0,0,0,.06), 0 20px 40px -12px rgba(0,0,0,.18)' }}>
+                {projects.length > 8 && (
+                  <div className="relative p-1">
+                    <Search size={13} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-faint" />
+                    <input type="text" autoFocus value={pickQuery} onChange={(e) => setPickQuery(e.target.value)} placeholder="Search projects" aria-label="Search projects"
+                      className="h-8 w-full pl-8 pr-3 rounded-control bg-white text-[13px] text-fg outline-none" style={{ boxShadow: '0 0 0 1px var(--input)' }} />
+                  </div>
+                )}
+                {groups.length === 0 && <div className="px-3 py-4 text-center text-[13px] text-faint">No project matches.</div>}
+                {groups.map((g) => (
+                  <div key={g.key}>
+                    <div className="px-2 pt-2 pb-1 text-[11px] font-medium uppercase tracking-[.08em] text-faint truncate">{g.label}</div>
+                    {g.items.map((x) => (
+                      <button key={x.id} type="button" role="menuitem" onClick={() => { setPickOpen(false); onPickProject(x.id); }}
+                        className="w-full flex items-center gap-2.5 min-h-[40px] px-2 py-1 rounded-control hover:bg-muted text-left">
+                        <span className="w-6 h-6 bg-primary text-white text-[10px] font-medium grid place-items-center shrink-0" style={{ borderRadius: 7 }}>{siteInitials(x.name)}</span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-[13px] font-medium text-fg truncate leading-4">{x.name}</span>
+                          <span className="block text-[11px] text-faint truncate">{siteDomain({ website_domain: x.domain }) || 'No website set'}</span>
+                        </span>
                         {x.id === project.id && <Check size={14} className="text-faint shrink-0" />}
                       </button>
                     ))}
                   </div>
-                )}
-              </div>
+                ))}
+              </div>,
+              document.body
             )}
           </div>
           <div className="grid grid-cols-3 border-t border-border">
@@ -109,12 +174,6 @@ export default function ProjectSettings({ projects, project, email, tab, onTab, 
                 ))}
               </dl>
             </SettingsCard>
-            {project.canTransfer && (
-              <SettingsCard icon={ArrowLeftRight} title="Transfer project" description="Move this project, with its goal, tokens and history, to another workspace you manage."
-                action={<Button variant="light" onClick={() => setTransferOpen(true)}><ArrowLeftRight size={14} />Transfer project</Button>}>
-                <div className="px-5 py-3 text-[13px] text-text">People who can open it now can keep access to this project only.</div>
-              </SettingsCard>
-            )}
           </div>
         )}
         {active === 'people' && <ProjectPeople project={project} email={email} manage={manage} />}

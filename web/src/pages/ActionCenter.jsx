@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import { api, daysAgo, timeAgo } from '../api.js';
 import DraftModal from '../components/DraftModal.jsx';
@@ -23,6 +24,11 @@ import {
   RefreshCw,
   Lock,
   Check,
+  ShieldAlert,
+  ShieldCheck,
+  Wrench,
+  Sparkles,
+  X,
 } from 'lucide-react';
 import { STATUS } from '../lib/palette.js';
 import { inDraftScope } from '../lib/draft-scope.js';
@@ -198,6 +204,27 @@ const draftStatusText = (st) => { const l = DRAFT_STATUS_LABEL[st] || st; return
 
 const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 
+// The Action Center is the page for what is wrong or missing on the site, in three groups, security first:
+//   Security issues  headers and the like — things that expose the site or its visitors
+//   Fixes            on-page and technical problems: titles, tags, links, structured data, crawling
+//   Other            AI-answer and growth opportunities, and the legal pages
+// (The Content page keeps grouping by category, as before.) Decided from what each recommendation
+// already carries: its generator, bucket and category (server/agents/lib/recommendation-taxonomy.js).
+const KINDS = {
+  security: { label: 'Security issues', blurb: 'Fix these first', icon: ShieldAlert, danger: true },
+  fixes: { label: 'Fixes', blurb: 'On-page and technical problems', icon: Wrench },
+  other: { label: 'Other', blurb: 'AI answers, growth and legal pages', icon: Sparkles },
+};
+const KIND_ORDER = ['security', 'fixes', 'other'];
+const LEGAL_GENERATORS = new Set(['cookie-policy', 'privacy-policy', 'terms-of-service']);
+const GROWTH_CATEGORIES = new Set(['CTR Opportunities', 'Traffic Anomalies', 'Growth Opportunities']);
+function kindOf(item) {
+  const category = item.category || 'Technical Fixes';
+  if (item.generatorId === 'security-headers' || /security|ssl|https|header/i.test(category)) return 'security';
+  if (item.bucket === 'aeo' || item.bucket === 'geo' || GROWTH_CATEGORIES.has(category) || LEGAL_GENERATORS.has(item.generatorId)) return 'other';
+  return 'fixes';
+}
+
 // Human labels for the stepper (DRAFT_STATUS_LABEL is lower-case, for prose).
 const STEP_LABEL = {
   draft: 'Draft', edited: 'Edited', submitted_for_approval: 'Submitted for approval', approved: 'Approved',
@@ -295,17 +322,37 @@ export default function ActionCenter({ scope }) {
   // Selected item inside lists for split-screen preview
   const [selectedRecommendation, setSelectedRecommendation] = useState(null);
   const [selectedDraftItem, setSelectedDraftItem] = useState(null);
+  // Action Center layout only (the Content page keeps the permanent details column): the details of the
+  // clicked issue or draft open in a side drawer; each group card can show all of its issues; the date
+  // range is tucked behind a button.
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [expandedKinds, setExpandedKinds] = useState({});
+  const [showRange, setShowRange] = useState(false);
+  useEffect(() => {
+    if (!drawerOpen) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') setDrawerOpen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [drawerOpen]);
 
   useEffect(() => {
     setShowAllRecommendations(false);
     setSelectedRecommendation(null);
   }, [activeCategory, tab]);
 
+  // The group a recommendation sits in on THIS page: security / fixes / other on the Action Center,
+  // its category on the Content page.
+  const groupKey = (item) => (isContent ? (item.category || 'Technical Fixes') : kindOf(item));
+  const firstGroup = (items) => {
+    const keys = new Set((items || []).map(groupKey));
+    return isContent ? [...keys][0] : KIND_ORDER.find((k) => keys.has(k));
+  };
+
   const loadRecs = () => api.actionCenter.recommendations(siteId).then((all) => {
     const data = all && { ...all, items: (all.items || []).filter((item) => inDraftScope(item.generatorId, scope)) };
     setRecs(data);
-    const categories = [...new Set((data?.items || []).map((item) => item.category || 'Technical Fixes'))];
-    if (categories.length > 0) setActiveCategory(categories[0]);
+    const first = firstGroup(data?.items);
+    if (first) setActiveCategory(first);
   }).catch(() => setRecs({ items: [], lastAnalyzedAt: {} }));
 
   const loadDrafts = () => api.actionCenter.drafts({}, siteId).then((all) => {
@@ -369,8 +416,8 @@ export default function ActionCenter({ scope }) {
     try {
       const fresh = await api.actionCenter.refresh(range.start, range.end, siteId);
       setRecs(fresh);
-      const categories = [...new Set((fresh?.items || []).map((item) => item.category || 'Technical Fixes'))];
-      if (categories.length > 0) setActiveCategory(categories[0]);
+      const first = firstGroup(fresh?.items);
+      if (first) setActiveCategory(first);
     } catch (e) {
       setError(e.message || 'Refresh failed');
     } finally {
@@ -571,6 +618,7 @@ export default function ActionCenter({ scope }) {
       const draft = await api.actionCenter.approveAndShip(item.id, siteId);
       setExecutionResult({ shipped: 1, failed: 0, job: { pr_url: draft.pr_url, pr_number: draft.pr_number } });
       setSelectedRecommendation(null);
+      setDrawerOpen(false);
       loadRecs();
       loadDrafts();
       loadDraftCounts();
@@ -594,6 +642,7 @@ export default function ActionCenter({ scope }) {
       setRecheckResult({ id: item.id, ...result });
       if (result.changed) {
         setSelectedRecommendation(null);
+        setDrawerOpen(false);
         loadRecs();
       }
     } catch (e) {
@@ -605,16 +654,20 @@ export default function ActionCenter({ scope }) {
 
   const bucketFiltered = (recs?.items || []).filter((item) => sourceFilter === 'all' || item.bucket === sourceFilter);
   const grouped = bucketFiltered.reduce((acc, item) => {
-    (acc[item.category || 'Technical Fixes'] ||= []).push(item);
+    (acc[groupKey(item)] ||= []).push(item);
     return acc;
   }, {});
+  // Security first, then fixes, then the rest; Content keeps the order the categories arrive in.
+  const groupEntries = isContent ? Object.entries(grouped) : KIND_ORDER.filter((k) => grouped[k]).map((k) => [k, grouped[k]]);
+  const kindCount = (k) => (recs?.items || []).filter((i) => kindOf(i) === k).length;
+  const kindCritical = (k) => (recs?.items || []).filter((i) => kindOf(i) === k && i.priority === 'high').length;
 
   // Switching the source filter can only add/remove whole categories (every
   // category maps to exactly one bucket in recommendation-taxonomy.js), so
   // a category still present after filtering never loses/gains items — only
   // reset the selection when the currently-active one drops out of view.
   useEffect(() => {
-    const categories = Object.keys(grouped);
+    const categories = groupEntries.map(([key]) => key);
     if (categories.length && !categories.includes(activeCategory)) setActiveCategory(categories[0]);
     else if (!categories.length) setActiveCategory(null);
   }, [sourceFilter, recs]);
@@ -674,7 +727,10 @@ export default function ActionCenter({ scope }) {
   const plural = (n, one, many) => (n === 1 ? one : many);
   const introTitle = tab === 'recommendations'
     ? (recs === null ? (isContent ? 'Loading content ideas…' : 'Loading recommendations…')
-      : highPriorityCount > 0 ? `${highPriorityCount} high-priority ${isContent ? 'content ideas are' : 'fixes are'} waiting` : `No high-priority ${isContent ? 'content ideas' : 'fixes'} right now`)
+      : isContent
+        ? (highPriorityCount > 0 ? `${highPriorityCount} high-priority content ideas are waiting` : 'No high-priority content ideas right now')
+        : (kindCount('security') > 0 ? `${kindCount('security')} security ${plural(kindCount('security'), 'issue needs', 'issues need')} attention`
+          : highPriorityCount > 0 ? `${highPriorityCount} critical ${plural(highPriorityCount, 'issue needs', 'issues need')} attention` : 'No critical issues right now'))
     : tab === 'drafts'
       ? (pendingApprovalCount > 0
         ? `${pendingApprovalCount} draft${pendingApprovalCount === 1 ? '' : 's'} ${plural(pendingApprovalCount, 'is', 'are')} waiting for approval`
@@ -688,11 +744,16 @@ export default function ActionCenter({ scope }) {
       ? 'Review each draft, then approve it to push a branch and open a pull request.'
       : (isContent ? 'Content your agents drafted and you approved, newest first.' : 'Changes your agents shipped to your site, newest first.');
 
-  const kpis = [
+  const kpis = isContent ? [
     { label: 'Recommendations', value: recs?.items.length ?? 0, sub: `across ${Object.keys(grouped).length} categories` },
     { label: 'High priority', value: highPriorityCount, sub: 'fix these first' },
     { label: 'Needs review', value: pendingApprovalCount, sub: 'drafts waiting on a person' },
     { label: 'Auto-eligible', value: safeEligibleCount, sub: 'safe to ship automatically' },
+  ] : [
+    { label: 'Security issues', value: kindCount('security'), sub: kindCritical('security') ? `${kindCritical('security')} critical` : 'none critical' },
+    { label: 'Fixes', value: kindCount('fixes'), sub: kindCritical('fixes') ? `${kindCritical('fixes')} critical` : 'on-page and technical' },
+    { label: 'Other', value: kindCount('other'), sub: 'AI answers, growth, legal' },
+    { label: 'Auto-fixable', value: safeEligibleCount, sub: 'safe to ship automatically' },
   ];
 
   const dateInput = 'h-8 px-2.5 rounded-control bg-white text-[13px] font-medium text-fg min-w-0 flex-1 md:flex-none';
@@ -740,56 +801,10 @@ export default function ActionCenter({ scope }) {
   const selBlue = selMeta?.className === 'blue';
   const alignment = sel ? GOAL_ALIGNMENT_META[sel.goalAlignment?.level] : null;
 
-  return (
-    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12">
-      <PageToolbar>
-        <SegmentedTabs options={tabOptions} value={tab} onChange={setTab} />
-        {tab === 'recommendations' && recs && (
-          // Source filter — purely a display filter over the same
-          // recommendations feed; Generate Draft/Drafts/Approval/PR logic
-          // below is untouched.
-          <SegmentedTabs options={SOURCE_FILTERS} value={sourceFilter} onChange={setSourceFilter} />
-        )}
-        <div className="flex items-center gap-2 w-full md:w-auto">
-          <input type="date" value={range.start} onChange={(e) => setRange((r) => ({ ...r, start: e.target.value }))}
-            className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="Start date" />
-          <span className="text-faint shrink-0">→</span>
-          <input type="date" value={range.end} onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))}
-            className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="End date" />
-        </div>
-        <div className="ml-auto flex flex-wrap items-center gap-2">
-          {/* Live "today" counters — distinct from the Run button's live
-              eligible-count: that's "how many could ship right now," this is
-              "how many actually did today," pulled from
-              execution_job_recommendations (server/store/execution-jobs.js). */}
-          {tab === 'recommendations' && recs && todayStats && (todayStats.shipped > 0 || todayStats.failed > 0) && (
-            <span className="text-[13px] text-faint" title="Shipped / failed today, across all Execute Safe Fixes and Approve & Ship runs">
-              {todayStats.shipped} shipped today
-              {todayStats.failed > 0 && <span style={{ color: STATUS.critical.text }}> · {todayStats.failed} failed</span>}
-            </span>
-          )}
-          <Button variant="light" onClick={refresh} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</Button>
-          {tab === 'recommendations' && recs && !isContent && (
-            <Button variant="primary" onClick={executeSafeFixes} disabled={executingSafeFixes || safeEligibleCount === 0}
-              title={safeEligibleCount === 0
-                ? 'No safe-tier recommendations open right now'
-                : `Ship up to ${safeFixBatchLimit ?? safeEligibleCount} of ${safeEligibleCount} safe recommendations — one branch, one PR, no per-item clicks`}>
-              <Zap size={14} />
-              {executingSafeFixes ? 'Running…' : `Run ${Math.min(safeFixBatchLimit ?? safeEligibleCount, safeEligibleCount)} safe fixes`}
-            </Button>
-          )}
-          {tab === 'drafts' && pendingApprovalCount > 0 && (
-            <Button variant="primary" onClick={bulkApproveAllPending} disabled={executingBulkApprove}
-              title={`Approve all ${pendingApprovalCount} pending draft(s) as one batch push/PR instead of one at a time`}>
-              <Zap size={14} />
-              {executingBulkApprove ? '…' : `Approve all pending (${pendingApprovalCount})`}
-            </Button>
-          )}
-        </div>
-      </PageToolbar>
-
-      <PageIntro title={introTitle} subtitle={(tab === 'recommendations' ? recs !== null : drafts !== null) ? introSubtitle : null} />
-
+  // Pieces both layouts use, defined once so the Action Center's own layout and the Content page's board show
+  // exactly the same banners, the same details panel and the same draft editor.
+  const banners = (
+    <>
       {error && (
         <div className="rounded-card bg-[#fdecec] text-[#b42318] text-sm px-4 py-3 mb-6 flex items-start gap-2">
           <AlertTriangle size={14} className="shrink-0 mt-0.5" />
@@ -877,154 +892,9 @@ export default function ActionCenter({ scope }) {
         </div>
       )}
 
-      <KpiStrip items={kpis} loading={recs === null} />
-
-      <div className="grid gap-3 lg:grid-cols-[1.3fr_1fr] items-start mt-3">
-        {/* ============ LEFT: lists ============ */}
-        {tab === 'recommendations' && (
-          <Section tray className="min-w-0" title="Recommendations" subtitle="Grouped by category · open a group to see its fixes">
-            <div className="border-t border-border">
-              {recs === null ? (
-                Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="px-4 py-3 border-b border-border last:border-0"><div className="h-4 bg-muted rounded-control animate-pulse" /></div>
-                ))
-              ) : Object.keys(grouped).length === 0 ? (
-                <div className="text-sm text-faint text-center py-12">No recommendations in this range.</div>
-              ) : (
-                Object.entries(grouped).map(([category, items]) => {
-                  const open = activeCategory === category;
-                  return (
-                    <div key={category}>
-                      <button type="button" aria-expanded={open} onClick={() => setActiveCategory(category)}
-                        className="w-full flex items-center gap-2.5 px-4 py-3 border-b border-border text-sm text-left">
-                        <ChevronRight size={12} className={`text-faint shrink-0 transition-transform ${open ? 'rotate-90' : ''}`} />
-                        <span className={open ? 'font-medium text-fg' : 'text-text'}>{category}</span>
-                        <span className="text-xs text-text px-[7px] py-px rounded-full" style={{ boxShadow: 'inset 0 0 0 1px var(--border-2)' }}>{items.length}</span>
-                        {open && <span className="ml-auto text-xs text-faint">Priority</span>}
-                      </button>
-                      {open && (
-                        <>
-                          {/* Unlike the Drafts/Done lists below (which already cap at
-                              max-h-[360px] overflow-y-auto), this one had no scroll
-                              bound — "Show all" expanding to a dozen-plus entries just
-                              grew the whole card (and page) instead of scrolling
-                              internally, burying the details panel far below the fold
-                              on mobile. */}
-                          <div className="overflow-y-auto max-h-[360px]">
-                            {(showAllRecommendations ? sortedItems : sortedItems.slice(0, 4)).map((item) => {
-                              const selected = selectedRecommendation?.id === item.id;
-                              const level = item.priority === 'high' ? 3 : item.priority === 'medium' ? 2 : 1;
-                              const itemUrl = item.url || item.params?.page;
-                              const path = itemUrl ? pagePathFor(itemUrl) : null;
-                              return (
-                                <button key={item.id} type="button" onClick={() => pickRecommendation(item)}
-                                  aria-current={selected ? 'true' : undefined}
-                                  className={`${rowCls(selected)} pl-10 pr-4 py-2.5`} style={rowRing(selected)}>
-                                  <span className="flex items-end gap-[2px] shrink-0" aria-label={`${item.priority || 'low'} priority`} role="img">
-                                    {[5, 8, 12].map((h, k) => (
-                                      <i key={k} className="block w-[3px] rounded-[1px]" style={{ height: h, background: k < level ? 'var(--fg)' : '#d4d4d4' }} />
-                                    ))}
-                                  </span>
-                                  <span className="min-w-0 flex-1">
-                                    <span className="block text-sm font-medium text-fg truncate">{titleFor(item)}</span>
-                                    <span className="block text-xs text-faint truncate mt-px">{item.reason}</span>
-                                  </span>
-                                  {stateBadge(item, false)}
-                                  {BUCKET_META[item.bucket] && <Badge tone="outline" className="shrink-0">{BUCKET_META[item.bucket].label}</Badge>}
-                                  {path && (
-                                    <span className="hidden md:inline text-xs text-text px-2 py-0.5 rounded-[6px] max-w-[180px] truncate"
-                                      style={{ boxShadow: 'inset 0 0 0 1px var(--border-2)' }}>{path}</span>
-                                  )}
-                                </button>
-                              );
-                            })}
-                          </div>
-                          {sortedItems.length > 4 && (
-                            <div className="pl-10 py-1.5 border-b border-border">
-                              <Button variant="ghost" size="sm" onClick={() => setShowAllRecommendations(!showAllRecommendations)}>
-                                {showAllRecommendations ? 'Show fewer' : `Show all ${sortedItems.length}`}
-                              </Button>
-                            </div>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </Section>
-        )}
-
-        {tab === 'drafts' && (
-          <Section tray className="min-w-0" title="Drafts" subtitle="Generated fixes moving towards your site">
-            <div className="border-t border-border">
-              {nonImplementedDrafts && nonImplementedDrafts.length > 0 && (
-                <div className="px-4 py-2.5 border-b border-border overflow-x-auto no-scrollbar">
-                  <SegmentedTabs value={statusFilter} onChange={setStatusFilter}
-                    options={STATUS_FILTERS.map((f) => ({
-                      value: f.value,
-                      label: <>{f.label}<span className="text-faint ml-1">{f.value ? nonImplementedDrafts.filter((d) => d.status === f.value).length : nonImplementedDrafts.length}</span></>,
-                    }))} />
-                </div>
-              )}
-              {drafts === null ? (
-                <div className="py-10 text-center text-sm text-faint">Loading list…</div>
-              ) : visibleDrafts.length === 0 ? (
-                <div className="py-10 text-center text-sm text-faint">No drafts matching status.</div>
-              ) : (
-                <div className="overflow-y-auto max-h-[360px]">
-                  {visibleDrafts.map((d) => {
-                    const meta = GENERATOR_META[d.action_type] || { label: d.action_type };
-                    const selected = selectedDraftItem?.id === d.id;
-                    return (
-                      <button key={d.id} type="button" onClick={() => pickDraft(d)} aria-current={selected ? 'true' : undefined}
-                        className={`${rowCls(selected)} px-4 py-3`} style={rowRing(selected)}>
-                        <span className="min-w-0 flex-1">
-                          <span className="block text-sm font-medium text-fg">{meta.label}</span>
-                          <span className="block font-mono text-xs text-faint truncate">{draftTarget(d)}</span>
-                        </span>
-                        <Badge tone={DRAFT_TONE[d.status] || 'grey'} className="shrink-0">{draftStatusText(d.status)}</Badge>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </Section>
-        )}
-
-        {tab === 'implemented' && (
-          <Section tray className="min-w-0" title="Shipped" subtitle="Newest first">
-            <div className="border-t border-border">
-              {drafts === null ? (
-                <div className="py-10 text-center text-sm text-faint">Loading history…</div>
-              ) : implementedDrafts.length === 0 ? (
-                <div className="py-10 text-center text-sm text-faint">Nothing shipped in this range yet.</div>
-              ) : (
-                <div className="overflow-y-auto max-h-[360px]">
-                  {implementedDrafts.map((d) => {
-                    const meta = GENERATOR_META[d.action_type] || { label: d.action_type };
-                    const selected = selectedDraftItem?.id === d.id;
-                    return (
-                      <button key={d.id} type="button" onClick={() => pickDraft(d)} aria-current={selected ? 'true' : undefined}
-                        className={`${rowCls(selected)} px-4 py-3`} style={rowRing(selected)}>
-                        <span className="min-w-0 flex-1">
-                          <span className="block text-sm font-medium text-fg">{meta.label}</span>
-                          <span className="block font-mono text-xs text-faint truncate">{draftTarget(d)}</span>
-                        </span>
-                        <Badge tone="green" className="shrink-0">Implemented</Badge>
-                        {d.implemented_at && <span className="text-xs text-faint shrink-0">{timeAgo(d.implemented_at)}</span>}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </Section>
-        )}
-
-        {/* ============ RIGHT: details ============ */}
+    </>
+  );
+  const detailsPanel = (
         <div ref={detailsRef} className="min-w-0 lg:sticky lg:top-[72px] scroll-mt-20">
           {tab === 'recommendations' && (
             <Section tray title="Details" subtitle="The selected recommendation">
@@ -1225,9 +1095,9 @@ export default function ActionCenter({ scope }) {
             </Section>
           )}
         </div>
-      </div>
-
-      {activeDraft && (
+  );
+  const draftModalEl = (
+    activeDraft && (
         <DraftModal
           key={activeDraft.id}
           draft={activeDraft}
@@ -1236,7 +1106,453 @@ export default function ActionCenter({ scope }) {
           onSaved={(updated) => { setActiveDraft(updated); loadDrafts(); loadDraftCounts(); if (updated.rolled_back_at) loadRecs(); }}
           onDeleted={() => { setActiveDraft(null); loadDrafts(); loadDraftCounts(); loadRecs(); }}
         />
-      )}
+      )
+  );
+
+  // ───────────── The Action Center's own layout ─────────────
+  // What is wrong with the site, not a board of things to approve: a page header, underline tabs, three
+  // group cards (security first), and the details of whichever issue you click in a side drawer. The
+  // Content page keeps the toolbar, summary strip and permanent details column below.
+  if (!isContent) {
+    const openIssue = (item) => { pickRecommendation(item); setDrawerOpen(true); };
+    const openDraftRow = (d) => { pickDraft(d); setDrawerOpen(true); };
+    const SEV = { high: STATUS.critical.color, medium: STATUS.warning.color, low: '#c9c9c9' };
+    const SEV_LABEL = { high: 'Critical', medium: 'Important', low: 'Minor' };
+    // Open issues exclude anything already being worked on: that issue is shown under "Being fixed" (as its
+    // draft or pull request), so it is never listed twice.
+    const openIssues = (recs?.items || []).filter((i) => i.lifecycle !== 'in_progress');
+    const openCount = (p) => openIssues.filter((i) => i.priority === p).length;
+    const fixedThisWeek = implementedDrafts.filter((d) => d.implemented_at && d.implemented_at >= daysAgo(7)).length;
+    const STAGES = [
+      { value: 'recommendations', label: 'Open', count: openIssues.length,
+        note: openIssues.length ? `${openCount('high')} critical · waiting for the agent's next run` : 'Nothing waiting' },
+      { value: 'drafts', label: 'Being fixed', count: nonImplementedDrafts?.length ?? 0,
+        note: pendingApprovalCount > 0 ? `${pendingApprovalCount} waiting for your approval` : 'A fix is drafted or a pull request is open' },
+      { value: 'implemented', label: 'Fixed', count: implementedDrafts.length,
+        note: `${fixedThisWeek} in the last 7 days` },
+    ];
+    const chip = (on) => `h-7 px-2.5 rounded-full text-xs font-medium ${on ? 'bg-fg text-white' : 'bg-white text-text'}`;
+
+    const groupCard = (k) => {
+      const kind = KINDS[k];
+      const Icon = kind.icon;
+      const items = (grouped[k] || []).filter((i) => i.lifecycle !== 'in_progress').sort((a, b) => (PRIORITY_RANK[a.priority] ?? 1) - (PRIORITY_RANK[b.priority] ?? 1));
+      const count = (p) => items.filter((i) => i.priority === p).length;
+      const crit = count('high'), imp = count('medium'), minor = items.length - crit - imp;
+      const danger = Boolean(kind.danger) && items.length > 0;
+      const expanded = Boolean(expandedKinds[k]);
+      const shown = expanded ? items : items.slice(0, 4);
+      const seg = (n, color) => (n > 0 ? <span style={{ width: `${(n / items.length) * 100}%`, background: color }} /> : null);
+      return (
+        <section key={k} className="min-w-0">
+          <div className="tray"><div className="tray-card overflow-hidden" style={danger ? { boxShadow: `inset 0 3px 0 ${STATUS.critical.color}, var(--ring)` } : undefined}>
+            <div className="px-4 pt-4 pb-3 flex items-start gap-3">
+              <span className="w-9 h-9 rounded-control grid place-items-center shrink-0"
+                style={danger ? { background: '#fdecec', color: STATUS.critical.text } : { background: 'var(--muted)', color: 'var(--text)' }}><Icon size={17} /></span>
+              <div className="min-w-0 flex-1">
+                <h2 className="text-[15px] font-semibold text-fg">{kind.label}</h2>
+                <p className="text-xs text-faint">{kind.blurb}</p>
+              </div>
+              <span className="text-[28px] leading-8 font-medium tracking-[-0.03em] text-fg tnum">{items.length}</span>
+            </div>
+            {items.length > 0 && (
+              <div className="px-4 pb-3">
+                <div className="flex h-1.5 rounded-full overflow-hidden bg-muted">
+                  {seg(crit, SEV.high)}{seg(imp, SEV.medium)}{seg(minor, SEV.low)}
+                </div>
+                <p className="mt-1.5 text-xs text-faint">
+                  {[crit && `${crit} critical`, imp && `${imp} important`, minor && `${minor} minor`].filter(Boolean).join(' · ')}
+                </p>
+              </div>
+            )}
+            {items.length === 0 ? (
+              <div className="px-4 py-8 text-center border-t border-border">
+                <span className="w-9 h-9 rounded-full grid place-items-center mx-auto" style={{ background: 'var(--green-tint)', color: 'var(--green)' }}><ShieldCheck size={17} /></span>
+                <p className="mt-2 text-[13px] text-text">{k === 'security' ? 'No security issues found' : 'Nothing here right now'}</p>
+              </div>
+            ) : (
+              <div className={expanded ? 'max-h-[460px] overflow-y-auto' : ''}>
+                {shown.map((item) => {
+                  const on = drawerOpen && selectedRecommendation?.id === item.id;
+                  const itemUrl = item.url || item.params?.page;
+                  const path = itemUrl ? pagePathFor(itemUrl) : null;
+                  return (
+                    <button key={item.id} type="button" onClick={() => openIssue(item)} aria-current={on ? 'true' : undefined}
+                      className={`w-full text-left px-4 py-3 border-t border-border flex gap-2.5 hover:bg-[#fafafa] ${on ? 'bg-primary-tint' : ''}`}>
+                      <span className="w-2 h-2 rounded-full mt-1.5 shrink-0" style={{ background: SEV[item.priority] || SEV.low }} title={SEV_LABEL[item.priority] || 'Minor'} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-[13px] font-medium text-fg leading-[18px]">{titleFor(item)}</span>
+                        <span className="block text-xs text-text mt-0.5 line-clamp-2">{item.reason}</span>
+                        {path && <span className="block text-[11px] text-faint mt-1 truncate">{path}</span>}
+                      </span>
+                      {stateBadge(item, false)}
+                    </button>
+                  );
+                })}
+                {items.length > 4 && (
+                  <div className="px-3 py-2 border-t border-border">
+                    <Button variant="ghost" size="sm" onClick={() => setExpandedKinds((e) => ({ ...e, [k]: !e[k] }))}>
+                      {expanded ? 'Show fewer' : `Show all ${items.length}`}
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div></div>
+        </section>
+      );
+    };
+
+    const draftRows = (list, done) => (
+      <div className="tray"><div className="tray-card">
+        {!done && nonImplementedDrafts && nonImplementedDrafts.length > 0 && (
+          <div className="px-4 py-2.5 border-b border-border overflow-x-auto no-scrollbar">
+            <SegmentedTabs value={statusFilter} onChange={setStatusFilter}
+              options={STATUS_FILTERS.map((f) => ({
+                value: f.value,
+                label: <>{f.label}<span className="text-faint ml-1">{f.value ? nonImplementedDrafts.filter((d) => d.status === f.value).length : nonImplementedDrafts.length}</span></>,
+              }))} />
+          </div>
+        )}
+        {drafts === null ? (
+          <div className="py-10 text-center text-sm text-faint">Loading…</div>
+        ) : list.length === 0 ? (
+          <div className="py-12 text-center text-sm text-faint">{done ? 'Nothing fixed in this range yet.' : 'Nothing is being fixed right now.'}</div>
+        ) : list.map((d) => {
+          const meta = GENERATOR_META[d.action_type] || { label: d.action_type };
+          return (
+            <button key={d.id} type="button" onClick={() => openDraftRow(d)}
+              className="w-full flex items-center gap-3 px-4 py-3 border-b border-border last:border-0 text-left hover:bg-[#fafafa]">
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13px] font-medium text-fg">{meta.label}</span>
+                <span className="block font-mono text-xs text-faint truncate">{draftTarget(d)}</span>
+              </span>
+              <Badge tone={done ? 'green' : (DRAFT_TONE[d.status] || 'grey')} className="shrink-0">{done ? 'Fixed' : draftStatusText(d.status)}</Badge>
+              {done && d.implemented_at && <span className="hidden sm:inline text-xs text-faint shrink-0">{timeAgo(d.implemented_at)}</span>}
+            </button>
+          );
+        })}
+      </div></div>
+    );
+
+    return (
+      <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12">
+        <header className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="text-[22px] leading-7 md:text-[26px] md:leading-8 font-semibold tracking-[-0.03em] text-fg">{introTitle}</h1>
+            <p className="mt-1 text-sm text-text max-w-[640px]">
+              {recs === null ? 'Looking at your site…' : 'Everything the agent has found on your site, where each issue stands, and what needs to change.'}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="light" onClick={refresh} disabled={refreshing}><RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />{refreshing ? 'Refreshing…' : 'Refresh'}</Button>
+            {tab === 'recommendations' && recs && safeEligibleCount > 0 && (
+              <Button variant="light" onClick={executeSafeFixes} disabled={executingSafeFixes}
+                title={`Fix up to ${safeFixBatchLimit ?? safeEligibleCount} of ${safeEligibleCount} issues the agent can safely fix by itself, as one branch and one pull request`}>
+                <Zap size={14} />{executingSafeFixes ? 'Fixing…' : `Fix ${Math.min(safeFixBatchLimit ?? safeEligibleCount, safeEligibleCount)} automatically`}
+              </Button>
+            )}
+            {tab === 'drafts' && pendingApprovalCount > 0 && (
+              <Button variant="light" onClick={bulkApproveAllPending} disabled={executingBulkApprove}>
+                <Zap size={14} />{executingBulkApprove ? '…' : `Approve all ${pendingApprovalCount} waiting`}
+              </Button>
+            )}
+          </div>
+        </header>
+
+        <div className="mt-5">{banners}</div>
+
+        <nav className="mt-2 grid gap-2 md:grid-cols-[1fr_auto_1fr_auto_1fr] items-stretch" role="tablist" aria-label="Where each issue is">
+          {STAGES.map((st, idx) => {
+            const on = tab === st.value;
+            return (
+              <Fragment key={st.value}>
+                {idx > 0 && <ChevronRight size={18} className="hidden md:block self-center text-faint" aria-hidden="true" />}
+                <button type="button" role="tab" aria-selected={on} onClick={() => { setTab(st.value); setDrawerOpen(false); }}
+                  className={`text-left rounded-card px-4 py-3 ${on ? 'bg-white' : 'bg-muted hover:bg-white'}`}
+                  style={on ? { boxShadow: '0 0 0 1.5px var(--fg)' } : { boxShadow: 'inset 0 0 0 1px var(--border-2)' }}>
+                  <span className="flex items-baseline justify-between gap-3">
+                    <span className={`text-[13px] ${on ? 'font-semibold text-fg' : 'font-medium text-text'}`}>{st.label}</span>
+                    <span className="text-[26px] leading-7 font-medium tracking-[-0.03em] text-fg tnum">{st.count}</span>
+                  </span>
+                  <span className="block mt-0.5 text-xs text-faint">{st.note}</span>
+                </button>
+              </Fragment>
+            );
+          })}
+        </nav>
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+          <p className="text-xs text-faint max-w-[620px]">
+            The agent finds issues and works through them in its daily run. Safe fixes ship by themselves; anything that needs a person waits under Being fixed.
+          </p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {tab === 'recommendations' && SOURCE_FILTERS.map((f) => (
+              <button key={f.value} type="button" aria-pressed={sourceFilter === f.value} onClick={() => setSourceFilter(f.value)} className={chip(sourceFilter === f.value)}
+                style={sourceFilter === f.value ? undefined : { boxShadow: 'inset 0 0 0 1px var(--input)' }}>{f.label}</button>
+            ))}
+            <button type="button" aria-expanded={showRange} onClick={() => setShowRange((v) => !v)} className={chip(showRange)}
+              style={showRange ? undefined : { boxShadow: 'inset 0 0 0 1px var(--input)' }}>Date range</button>
+          </div>
+        </div>
+        {showRange && (
+          <div className="mt-3 flex items-center gap-2">
+            <input type="date" value={range.start} onChange={(e) => setRange((r) => ({ ...r, start: e.target.value }))} className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="Start date" />
+            <span className="text-faint shrink-0">→</span>
+            <input type="date" value={range.end} onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))} className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="End date" />
+          </div>
+        )}
+
+        <div className="mt-5">
+          {tab === 'recommendations' && (
+            recs === null ? (
+              <div className="grid gap-3 lg:grid-cols-3">{[0, 1, 2].map((i) => <div key={i} className="h-56 rounded-card bg-muted animate-pulse" />)}</div>
+            ) : (
+              <div className="grid gap-3 lg:grid-cols-3 items-start">{KIND_ORDER.map(groupCard)}</div>
+            )
+          )}
+          {tab === 'drafts' && draftRows(visibleDrafts || [], false)}
+          {tab === 'implemented' && draftRows(implementedDrafts, true)}
+        </div>
+
+        {drawerOpen && createPortal(
+          <div className="fixed inset-0 z-50">
+            <button type="button" aria-label="Close details" className="absolute inset-0 bg-black/30" onClick={() => setDrawerOpen(false)} />
+            <aside className="absolute inset-y-0 right-0 w-full sm:w-[520px] bg-canvas overflow-y-auto" style={{ boxShadow: '-24px 0 60px -24px rgba(0,0,0,.28)' }}>
+              <div className="sticky top-0 z-10 flex items-center justify-between px-4 py-3 bg-canvas border-b border-border">
+                <span className="text-sm font-medium text-fg">{tab === 'recommendations' ? 'About this issue' : 'About this fix'}</span>
+                <Button variant="ghost" size="sm" icon aria-label="Close" onClick={() => setDrawerOpen(false)}><X size={14} /></Button>
+              </div>
+              <div className="p-3">{detailsPanel}</div>
+            </aside>
+          </div>,
+          document.body
+        )}
+
+        {draftModalEl}
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12">
+      <PageToolbar>
+        <SegmentedTabs options={tabOptions} value={tab} onChange={setTab} />
+        {tab === 'recommendations' && recs && (
+          // Source filter — purely a display filter over the same
+          // recommendations feed; Generate Draft/Drafts/Approval/PR logic
+          // below is untouched.
+          <SegmentedTabs options={SOURCE_FILTERS} value={sourceFilter} onChange={setSourceFilter} />
+        )}
+        <div className="flex items-center gap-2 w-full md:w-auto">
+          <input type="date" value={range.start} onChange={(e) => setRange((r) => ({ ...r, start: e.target.value }))}
+            className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="Start date" />
+          <span className="text-faint shrink-0">→</span>
+          <input type="date" value={range.end} onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))}
+            className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="End date" />
+        </div>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {/* Live "today" counters — distinct from the Run button's live
+              eligible-count: that's "how many could ship right now," this is
+              "how many actually did today," pulled from
+              execution_job_recommendations (server/store/execution-jobs.js). */}
+          {tab === 'recommendations' && recs && todayStats && (todayStats.shipped > 0 || todayStats.failed > 0) && (
+            <span className="text-[13px] text-faint" title="Shipped / failed today, across all Execute Safe Fixes and Approve & Ship runs">
+              {todayStats.shipped} shipped today
+              {todayStats.failed > 0 && <span style={{ color: STATUS.critical.text }}> · {todayStats.failed} failed</span>}
+            </span>
+          )}
+          <Button variant="light" onClick={refresh} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</Button>
+          {tab === 'recommendations' && recs && !isContent && (
+            <Button variant="primary" onClick={executeSafeFixes} disabled={executingSafeFixes || safeEligibleCount === 0}
+              title={safeEligibleCount === 0
+                ? 'No safe-tier recommendations open right now'
+                : `Ship up to ${safeFixBatchLimit ?? safeEligibleCount} of ${safeEligibleCount} safe recommendations — one branch, one PR, no per-item clicks`}>
+              <Zap size={14} />
+              {executingSafeFixes ? 'Running…' : `Run ${Math.min(safeFixBatchLimit ?? safeEligibleCount, safeEligibleCount)} safe fixes`}
+            </Button>
+          )}
+          {tab === 'drafts' && pendingApprovalCount > 0 && (
+            <Button variant="primary" onClick={bulkApproveAllPending} disabled={executingBulkApprove}
+              title={`Approve all ${pendingApprovalCount} pending draft(s) as one batch push/PR instead of one at a time`}>
+              <Zap size={14} />
+              {executingBulkApprove ? '…' : `Approve all pending (${pendingApprovalCount})`}
+            </Button>
+          )}
+        </div>
+      </PageToolbar>
+
+      <PageIntro title={introTitle} subtitle={(tab === 'recommendations' ? recs !== null : drafts !== null) ? introSubtitle : null} />
+
+      {banners}
+
+      <KpiStrip items={kpis} loading={recs === null} />
+
+      <div className="grid gap-3 lg:grid-cols-[1.3fr_1fr] items-start mt-3">
+        {/* ============ LEFT: lists ============ */}
+        {tab === 'recommendations' && (
+          <Section tray className="min-w-0" title={isContent ? 'Recommendations' : 'Issues and fixes'}
+            subtitle={isContent ? 'Grouped by category · open a group to see its fixes' : 'Security issues first · open a group to see what is in it'}>
+            <div className="border-t border-border">
+              {recs === null ? (
+                Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="px-4 py-3 border-b border-border last:border-0"><div className="h-4 bg-muted rounded-control animate-pulse" /></div>
+                ))
+              ) : Object.keys(grouped).length === 0 ? (
+                <div className="text-sm text-faint text-center py-12">No recommendations in this range.</div>
+              ) : (
+                groupEntries.map(([category, items]) => {
+                  const open = activeCategory === category;
+                  // On the Action Center a group is Security issues / Fixes / Other, with an icon, and the
+                  // critical ones counted in the header so the serious group is visible while it is closed.
+                  const kind = isContent ? null : KINDS[category];
+                  const KindIcon = kind?.icon;
+                  const critical = items.filter((i) => i.priority === 'high').length;
+                  return (
+                    <div key={category}>
+                      <button type="button" aria-expanded={open} onClick={() => setActiveCategory(category)}
+                        className="w-full flex items-center gap-2.5 px-4 py-3 border-b border-border text-sm text-left"
+                        style={kind?.danger && items.length ? { boxShadow: `inset 3px 0 0 ${STATUS.critical.color}` } : undefined}>
+                        <ChevronRight size={12} className={`text-faint shrink-0 transition-transform ${open ? 'rotate-90' : ''}`} />
+                        {KindIcon && (
+                          <span className="w-6 h-6 rounded-control grid place-items-center shrink-0"
+                            style={kind.danger && items.length ? { background: '#fdecec', color: STATUS.critical.text } : { background: 'var(--muted)', color: 'var(--text)' }}>
+                            <KindIcon size={13} />
+                          </span>
+                        )}
+                        <span className="min-w-0 flex-1">
+                          <span className={`block ${open ? 'font-medium text-fg' : 'text-text'}`}>{kind ? kind.label : category}</span>
+                          {kind && <span className="block text-xs text-faint">{kind.blurb}</span>}
+                        </span>
+                        <span className="text-xs text-text px-[7px] py-px rounded-full shrink-0" style={{ boxShadow: 'inset 0 0 0 1px var(--border-2)' }}>{items.length}</span>
+                        {!isContent && critical > 0 && <span className="text-xs font-medium whitespace-nowrap shrink-0" style={{ color: STATUS.critical.text }}>{critical} critical</span>}
+                        {open && isContent && <span className="ml-auto text-xs text-faint">Priority</span>}
+                      </button>
+                      {open && (
+                        <>
+                          {/* Unlike the Drafts/Done lists below (which already cap at
+                              max-h-[360px] overflow-y-auto), this one had no scroll
+                              bound — "Show all" expanding to a dozen-plus entries just
+                              grew the whole card (and page) instead of scrolling
+                              internally, burying the details panel far below the fold
+                              on mobile. */}
+                          <div className="overflow-y-auto max-h-[360px]">
+                            {(showAllRecommendations ? sortedItems : sortedItems.slice(0, 4)).map((item) => {
+                              const selected = selectedRecommendation?.id === item.id;
+                              const level = item.priority === 'high' ? 3 : item.priority === 'medium' ? 2 : 1;
+                              const itemUrl = item.url || item.params?.page;
+                              const path = itemUrl ? pagePathFor(itemUrl) : null;
+                              return (
+                                <button key={item.id} type="button" onClick={() => pickRecommendation(item)}
+                                  aria-current={selected ? 'true' : undefined}
+                                  className={`${rowCls(selected)} pl-10 pr-4 py-2.5`} style={rowRing(selected)}>
+                                  <span className="flex items-end gap-[2px] shrink-0" aria-label={`${item.priority || 'low'} priority`} role="img">
+                                    {[5, 8, 12].map((h, k) => (
+                                      <i key={k} className="block w-[3px] rounded-[1px]" style={{ height: h, background: k < level ? 'var(--fg)' : '#d4d4d4' }} />
+                                    ))}
+                                  </span>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block text-sm font-medium text-fg truncate">{titleFor(item)}</span>
+                                    <span className="block text-xs text-faint truncate mt-px">{item.reason}</span>
+                                  </span>
+                                  {stateBadge(item, false)}
+                                  {BUCKET_META[item.bucket] && <Badge tone="outline" className="shrink-0">{BUCKET_META[item.bucket].label}</Badge>}
+                                  {path && (
+                                    <span className="hidden md:inline text-xs text-text px-2 py-0.5 rounded-[6px] max-w-[180px] truncate"
+                                      style={{ boxShadow: 'inset 0 0 0 1px var(--border-2)' }}>{path}</span>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {sortedItems.length > 4 && (
+                            <div className="pl-10 py-1.5 border-b border-border">
+                              <Button variant="ghost" size="sm" onClick={() => setShowAllRecommendations(!showAllRecommendations)}>
+                                {showAllRecommendations ? 'Show fewer' : `Show all ${sortedItems.length}`}
+                              </Button>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </Section>
+        )}
+
+        {tab === 'drafts' && (
+          <Section tray className="min-w-0" title="Drafts" subtitle="Generated fixes moving towards your site">
+            <div className="border-t border-border">
+              {nonImplementedDrafts && nonImplementedDrafts.length > 0 && (
+                <div className="px-4 py-2.5 border-b border-border overflow-x-auto no-scrollbar">
+                  <SegmentedTabs value={statusFilter} onChange={setStatusFilter}
+                    options={STATUS_FILTERS.map((f) => ({
+                      value: f.value,
+                      label: <>{f.label}<span className="text-faint ml-1">{f.value ? nonImplementedDrafts.filter((d) => d.status === f.value).length : nonImplementedDrafts.length}</span></>,
+                    }))} />
+                </div>
+              )}
+              {drafts === null ? (
+                <div className="py-10 text-center text-sm text-faint">Loading list…</div>
+              ) : visibleDrafts.length === 0 ? (
+                <div className="py-10 text-center text-sm text-faint">No drafts matching status.</div>
+              ) : (
+                <div className="overflow-y-auto max-h-[360px]">
+                  {visibleDrafts.map((d) => {
+                    const meta = GENERATOR_META[d.action_type] || { label: d.action_type };
+                    const selected = selectedDraftItem?.id === d.id;
+                    return (
+                      <button key={d.id} type="button" onClick={() => pickDraft(d)} aria-current={selected ? 'true' : undefined}
+                        className={`${rowCls(selected)} px-4 py-3`} style={rowRing(selected)}>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-medium text-fg">{meta.label}</span>
+                          <span className="block font-mono text-xs text-faint truncate">{draftTarget(d)}</span>
+                        </span>
+                        <Badge tone={DRAFT_TONE[d.status] || 'grey'} className="shrink-0">{draftStatusText(d.status)}</Badge>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </Section>
+        )}
+
+        {tab === 'implemented' && (
+          <Section tray className="min-w-0" title="Shipped" subtitle="Newest first">
+            <div className="border-t border-border">
+              {drafts === null ? (
+                <div className="py-10 text-center text-sm text-faint">Loading history…</div>
+              ) : implementedDrafts.length === 0 ? (
+                <div className="py-10 text-center text-sm text-faint">Nothing shipped in this range yet.</div>
+              ) : (
+                <div className="overflow-y-auto max-h-[360px]">
+                  {implementedDrafts.map((d) => {
+                    const meta = GENERATOR_META[d.action_type] || { label: d.action_type };
+                    const selected = selectedDraftItem?.id === d.id;
+                    return (
+                      <button key={d.id} type="button" onClick={() => pickDraft(d)} aria-current={selected ? 'true' : undefined}
+                        className={`${rowCls(selected)} px-4 py-3`} style={rowRing(selected)}>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-medium text-fg">{meta.label}</span>
+                          <span className="block font-mono text-xs text-faint truncate">{draftTarget(d)}</span>
+                        </span>
+                        <Badge tone="green" className="shrink-0">Implemented</Badge>
+                        {d.implemented_at && <span className="text-xs text-faint shrink-0">{timeAgo(d.implemented_at)}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </Section>
+        )}
+
+        {detailsPanel}
+      </div>
+
+      {draftModalEl}
     </div>
   );
 }

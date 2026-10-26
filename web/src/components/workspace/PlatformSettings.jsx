@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertTriangle, Building2, ChevronRight, Search } from 'lucide-react';
+import { AlertTriangle, ArrowLeftRight, Building2, ChevronRight, Search } from 'lucide-react';
 import { api } from '../../api.js';
 import Badge from '../Badge.jsx';
 import Button from '../Button.jsx';
+import TransferProjectModal from './TransferProjectModal.jsx';
 import SettingsCard from '../settings/SettingsCard.jsx';
 import { plural } from '../../lib/workspace.js';
 import { siteDomain, siteInitials } from '../../lib/nav.js';
@@ -21,6 +22,8 @@ export default function PlatformSettings({ onSwitchProject }) {
   const [query, setQuery] = useState('');
   const [onlySetup, setOnlySetup] = useState(false);
   const [opening, setOpening] = useState(null);
+  const [transferFor, setTransferFor] = useState(null); // the project whose transfer dialog is open
+  const loadAll = () => api.platform.workspaces().then(setData).catch((e) => setError(e.message || 'Could not load the workspaces.'));
 
   useEffect(() => {
     api.platform.workspaces().then(setData).catch((e) => setError(e.message || 'Could not load the workspaces.'));
@@ -91,6 +94,9 @@ export default function PlatformSettings({ onSwitchProject }) {
                     {p.missing.length > 0
                       ? <span className="hidden sm:block text-xs text-right max-w-[280px]" style={{ color: '#8a5300' }} title={`Missing: ${p.missing.join(', ')}`}>Missing: {p.missing.join(', ')}</span>
                       : <Badge tone="green">Set up</Badge>}
+                    <Button variant="light" size="sm" onClick={() => setTransferFor({ id: p.id, name: p.name, domain: p.domain, workspaceId: w.id, workspaceName: w.name })}>
+                      <ArrowLeftRight size={13} />Transfer
+                    </Button>
                     <Button variant="light" size="sm" onClick={() => open(p)} disabled={opening === p.id}>
                       {opening === p.id ? 'Opening…' : <>Open as support<ChevronRight size={13} /></>}
                     </Button>
@@ -101,6 +107,8 @@ export default function PlatformSettings({ onSwitchProject }) {
           </div>
         ))}
       </SettingsCard>
+      <TransferProjectModal project={transferFor} isOpen={!!transferFor} onClose={() => setTransferFor(null)}
+        onDone={async () => { setTransferFor(null); await loadAll(); }} />
     </div>
   );
 }
