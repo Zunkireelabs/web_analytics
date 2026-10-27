@@ -65,6 +65,7 @@ therefore already answered in the affirmative on staging — revisit it there
 deliberately rather than assuming these paths are still dormant.
 """
 import logging
+from datetime import date
 
 from app.activity.log import track
 from app.forecast.accuracy import run_forecast_accuracy_evaluation
@@ -84,10 +85,17 @@ from app.investigations.outcome import run_investigation_outcome_evaluation
 from app.investigations.reasoning import run_investigation_reasoning
 from app.ml.feature_importance import run_feature_importance
 from app.opportunities.rollup import run_opportunity_rollup
+from app.predict.run import has_pooled_model, run_pooled_training, run_predictions
 from app.stats.anomalies import run_anomaly_detection
 from app.stats.deltas import run_stats
 
 logger = logging.getLogger(__name__)
+
+
+def is_training_day(today: date) -> bool:
+    """The pooled prediction model is retrained on Mondays (and once on the very first night, so the
+    platform-admin view has a real record from day one instead of waiting up to a week)."""
+    return today.weekday() == 0
 
 
 async def run_analysis_pass() -> None:
@@ -104,6 +112,15 @@ async def run_analysis_pass() -> None:
     async with track("investigating"):
         await run_feature_importance()
         await run_insight_engine()
+        # Next-week predictions (app/predict/). After the insight engine on purpose: the page-decline
+        # forecast_risk insights it writes must exist before the recommendation engine reads them.
+        # The pooled model is retrained on Mondays only; every other night reuses the stored one.
+        if is_training_day(date.today()) or not await has_pooled_model():
+            try:
+                await run_pooled_training()
+            except Exception:
+                logger.exception("pooled prediction model training failed; predictions use the stored model")
+        await run_predictions()
         await run_target_keyword_evidence()
         await run_cannibalization_detection()
         await run_root_cause_analysis()

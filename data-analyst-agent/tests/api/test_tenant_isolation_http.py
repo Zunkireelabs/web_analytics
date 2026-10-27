@@ -45,6 +45,12 @@ INTENTIONALLY_CROSS_CLIENT = {
     # only server/lib/data-analyst-client.js's provisionAnalystClient calls
     # it, itself reached from onboarding, never from a tenant-facing route.
     "/admin/clients/by-site/{site_id}",
+    # What the shared prediction model has learned (app/predict/): which model wins, how many rows and
+    # projects it trained on, the platform-wide forecast error. Aggregate numbers only; it returns no
+    # client id, page, query or domain. Admin-key gated, and the only Node caller is the
+    # platform-admin-only /platform/analyst-learning route. The model itself is trained on anonymous
+    # feature rows (app/predict/features.py), so there is nothing per-client to leak here.
+    "/admin/learning",
 }
 
 

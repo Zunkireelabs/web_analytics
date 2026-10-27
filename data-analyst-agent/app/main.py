@@ -5,7 +5,7 @@ from fastapi import FastAPI
 
 from app.api.routes import (
     activity, admin_clients, alerts, ask, benchmarks, breakdown, briefings, business_values, dashboard, health,
-    intelligence, investigations, opportunities, recommendations,
+    intelligence, investigations, opportunities, outlook, recommendations,
 )
 from app.config import settings
 from app.ingestion.scheduler import start_scheduler, stop_scheduler
@@ -51,3 +51,4 @@ app.include_router(activity.router)
 app.include_router(briefings.router)
 app.include_router(business_values.router)
 app.include_router(admin_clients.router)
+app.include_router(outlook.router)

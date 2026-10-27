@@ -963,3 +963,69 @@ class ExecutiveBriefing(Base):
         CheckConstraint("cadence IN ('morning','weekly','monthly')", name="executive_briefings_cadence_check"),
         Index("idx_executive_briefings_lookup", "client_id", "cadence", "generated_at"),
     )
+
+
+# ── Next-week prediction layer (migration 0041, see app/predict/) ─────────────
+
+class PredictionLog(Base):
+    __tablename__ = "prediction_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    metric_key: Mapped[str] = mapped_column(Text, nullable=False)
+    target_week: Mapped[date] = mapped_column(Date, nullable=False)
+    horizon: Mapped[int] = mapped_column(nullable=False)
+    predicted: Mapped[float] = mapped_column(Numeric, nullable=False)
+    low: Mapped[float | None] = mapped_column(Numeric)
+    high: Mapped[float | None] = mapped_column(Numeric)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    made_on: Mapped[date] = mapped_column(Date, nullable=False)
+    actual: Mapped[float | None] = mapped_column(Numeric)
+    abs_pct_error: Mapped[float | None] = mapped_column(Numeric)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PredictedIssue(Base):
+    __tablename__ = "predicted_issues"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    page: Mapped[str] = mapped_column(Text, nullable=False)
+    target_week: Mapped[date] = mapped_column(Date, nullable=False)
+    likelihood: Mapped[float] = mapped_column(Numeric, nullable=False)
+    expected_loss_clicks: Mapped[float | None] = mapped_column(Numeric)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[dict | None] = mapped_column(JSONB)
+    insight_id: Mapped[int | None] = mapped_column(ForeignKey("insights.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    outcome: Mapped[str | None] = mapped_column(Text)
+
+
+class KeywordPrediction(Base):
+    __tablename__ = "keyword_predictions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    keyword: Mapped[str] = mapped_column(Text, nullable=False)
+    target_week: Mapped[date] = mapped_column(Date, nullable=False)
+    position: Mapped[float] = mapped_column(Numeric, nullable=False)
+    gain_clicks: Mapped[int] = mapped_column(nullable=False)
+    likelihood: Mapped[float] = mapped_column(Numeric, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PredictionModel(Base):
+    __tablename__ = "prediction_models"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    task: Mapped[str] = mapped_column(Text, nullable=False)
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    champion: Mapped[str] = mapped_column(Text, nullable=False)
+    metrics: Mapped[dict | None] = mapped_column(JSONB)
+    artifact: Mapped[bytes | None] = mapped_column(LargeBinary)
+    samples: Mapped[int] = mapped_column(nullable=False)
+    projects: Mapped[int] = mapped_column(nullable=False)
+    trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    active: Mapped[bool] = mapped_column(nullable=False, default=True)
