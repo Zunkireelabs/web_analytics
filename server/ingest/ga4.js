@@ -7,10 +7,17 @@ import { getGa4ClientOptionsAsync } from '../auth/google.js';
 const clients = new Map();
 // A project that connects (or disconnects) its own Google account changes which credential
 // this must use, so the cached client is dropped by forgetGa4Client below.
+const GA4_TIMEOUT_MS = Number(process.env.GOOGLE_API_TIMEOUT_MS) || 60_000;
 async function ga4(site) {
   const key = site?.id ?? '__shared__';
   if (!clients.has(key)) {
-    clients.set(key, new BetaAnalyticsDataClient(await getGa4ClientOptionsAsync(site)));
+    const client = new BetaAnalyticsDataClient(await getGa4ClientOptionsAsync(site));
+    // Analytics Data calls go through gRPC, not googleapis, so they need their own time limit.
+    const run = client.runReport.bind(client);
+    client.runReport = (request, options, callback) => (typeof options === 'function'
+      ? run(request, { timeout: GA4_TIMEOUT_MS }, options)
+      : run(request, { timeout: GA4_TIMEOUT_MS, ...(options || {}) }, callback));
+    clients.set(key, client);
   }
   return clients.get(key);
 }

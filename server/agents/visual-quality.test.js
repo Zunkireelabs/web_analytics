@@ -13,6 +13,8 @@ mock.module(resolve('../store/recommendations.js'), {
   namedExports: {
     findOpenRecommendation: async (siteId, page, type) => existingRecs.find((r) => r.page === page && r.recommendation_type === type) || null,
     insertRecommendation: async (siteId, params) => { inserted.push(params); return { id: inserted.length, ...params }; },
+    // imported by lib/candidate-pages.js since the staleness re-check was added; none are open in these tests
+    getOpenRecommendationPages: async () => [],
   },
 });
 mock.module(resolve('../llm.js'), {

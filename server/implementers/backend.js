@@ -1388,6 +1388,13 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
       pageUrl: page, marker, newContentHtml: built.values[componentField],
     }).catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
 
+    // The live page could not be reached to render it: the layout check did
+    // NOT pass, it did not run. Hold this item (transient, retried — see
+    // attempt-classification) rather than ship unchecked; the run moves on to
+    // other clients and comes back to this one at the end.
+    if (!responsivePreview.ok && (responsivePreview.reason === 'unreachable' || responsivePreview.reason === 'browser-unavailable') && process.env.RESPONSIVE_GATE_ENFORCE !== 'false') {
+      return { ok: false, reason: 'unreachable', error: 'The layout check could not run (the live page was unreachable, or no browser was available), so this was held, not shipped.' };
+    }
     if (responsivePreview.ok && responsivePreview.broken && process.env.RESPONSIVE_GATE_ENFORCE !== 'false') {
       return {
         ok: false, reason: 'responsive-regression',

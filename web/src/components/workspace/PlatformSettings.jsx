@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertTriangle, ArrowLeftRight, Building2, ChevronRight, Search } from 'lucide-react';
+import { AlertTriangle, ArrowLeftRight, Building2, ChevronRight, Search, SlidersHorizontal } from 'lucide-react';
 import { api } from '../../api.js';
 import Badge from '../Badge.jsx';
 import Button from '../Button.jsx';
 import TransferProjectModal from './TransferProjectModal.jsx';
+import StaffProjectControls from './StaffProjectControls.jsx';
+import ApprovalRequests from './ApprovalRequests.jsx';
 import SettingsCard from '../settings/SettingsCard.jsx';
 import { plural } from '../../lib/workspace.js';
 import { siteDomain, siteInitials } from '../../lib/nav.js';
@@ -22,6 +24,7 @@ export default function PlatformSettings({ onSwitchProject }) {
   const [query, setQuery] = useState('');
   const [onlySetup, setOnlySetup] = useState(false);
   const [opening, setOpening] = useState(null);
+  const [controlsFor, setControlsFor] = useState(null); // the project whose staff controls are open
   const [transferFor, setTransferFor] = useState(null); // the project whose transfer dialog is open
   const loadAll = () => api.platform.workspaces().then(setData).catch((e) => setError(e.message || 'Could not load the workspaces.'));
 
@@ -54,6 +57,7 @@ export default function PlatformSettings({ onSwitchProject }) {
 
   return (
     <div className="mt-5 space-y-3">
+      <ApprovalRequests />
       <SettingsCard icon={Building2} title="All workspaces"
         description={data ? `${plural(data.totals.workspaces, 'workspace', 'workspaces')} · ${plural(data.totals.projects, 'project', 'projects')}${data.totals.needsSetup ? ` · ${data.totals.needsSetup} still to set up` : ''}` : 'Every workspace on the platform.'}>
         <div className="px-4 sm:px-5 py-3 border-b border-border flex flex-wrap items-center gap-2">
@@ -94,6 +98,9 @@ export default function PlatformSettings({ onSwitchProject }) {
                     {p.missing.length > 0
                       ? <span className="hidden sm:block text-xs text-right max-w-[280px]" style={{ color: '#8a5300' }} title={`Missing: ${p.missing.join(', ')}`}>Missing: {p.missing.join(', ')}</span>
                       : <Badge tone="green">Set up</Badge>}
+                    <Button variant="light" size="sm" onClick={() => setControlsFor({ id: p.id, name: p.name })}>
+                      <SlidersHorizontal size={13} />Controls
+                    </Button>
                     <Button variant="light" size="sm" onClick={() => setTransferFor({ id: p.id, name: p.name, domain: p.domain, workspaceId: w.id, workspaceName: w.name })}>
                       <ArrowLeftRight size={13} />Transfer
                     </Button>
@@ -107,6 +114,7 @@ export default function PlatformSettings({ onSwitchProject }) {
           </div>
         ))}
       </SettingsCard>
+      <StaffProjectControls project={controlsFor} isOpen={!!controlsFor} onClose={() => setControlsFor(null)} onChanged={loadAll} />
       <TransferProjectModal project={transferFor} isOpen={!!transferFor} onClose={() => setTransferFor(null)}
         onDone={async () => { setTransferFor(null); await loadAll(); }} />
     </div>

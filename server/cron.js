@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites, runTrendRadarIfDueForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, runAiVisibilityShipForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, checkDesignChangesForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites, runTrendRadarIfDueForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -7,6 +7,20 @@ import { reapStaleAuditRuns } from './store/audit-runs.js';
 import { reconcileAllSites } from './lib/action-center-reconciler.js';
 import { withJobLock, jobKeyFor } from './lib/job-lock.js';
 import { expireStaleClaims } from './agents/lib/work-claims.js';
+
+// Every scheduled lane runs under a database-backed lease keyed by its name, so two app instances (staging
+// and production sharing a database, a second worker, a laptop left running) can never run the same lane at
+// the same time. The loser logs and skips; a crashed holder's lease expires on its own (lib/job-lock.js).
+// A failure inside the lane is the lane's own to handle; a failure of the lock itself is logged here and
+// must never escape a cron callback.
+async function locked(name, fn) {
+  try {
+    const { ran } = await withJobLock(jobKeyFor(name, 'all-sites'), fn);
+    if (!ran) console.log(`[cron] ${name} skipped — another process already holds its lock`);
+  } catch (err) {
+    console.error(`[cron] ${name} could not run:`, err.message);
+  }
+}
 
 // Schedule the daily job. The container's TZ env var makes "07:00" local to the
 // site timezone, so it runs after GSC/GA4 have settled for the target dates.
@@ -28,8 +42,15 @@ export function startCron() {
       // (e.g. a laptop dev server left running alongside the VPS's own cron,
       // the actual 2026-09-08 incident) finds the lock held and skips the
       // entire pass rather than racing one step of it.
-      const { ran } = await withJobLock(jobKeyFor('daily-job', 'all-sites'), () => runDailyJobBody());
-      if (!ran) console.log('[cron] daily job skipped — another process already holds the lock');
+      // A failure here (a database blip while taking the lock, say) used to
+      // reject out of the cron callback with nothing to catch it, which Node
+      // treats as fatal for the whole server.
+      try {
+        const { ran } = await withJobLock(jobKeyFor('daily-job', 'all-sites'), () => runDailyJobBody());
+        if (!ran) console.log('[cron] daily job skipped — another process already holds the lock');
+      } catch (err) {
+        console.error('[cron] daily job could not run:', err.message);
+      }
     },
     { timezone: tz }
   );
@@ -124,6 +145,15 @@ export function startCron() {
         console.error('[cron] blocked-recommendation refresh error:', err.message);
       }
 
+      // Prompts ticked on the AI visibility page and left for this run become drafts now, so the
+      // shipping pass below sees them. A failure here never blocks the shipping pass.
+      try {
+        const t = await runAiVisibilityShipForAllSites();
+        if (t.drafted || t.failed) console.log(`[cron] ai-visibility ship: ${t.drafted} draft(s) made, ${t.failed} failed across ${t.sites} site(s)`);
+      } catch (err) {
+        console.error('[cron] ai-visibility ship error:', err.message);
+      }
+
       // Shipping runs in the SAME morning pass, immediately after detection,
       // unless SHIP_CRON_SCHEDULE explicitly asks for a separate hour (see
       // below). Sequential rather than a second cron entry at the same hour on
@@ -161,7 +191,7 @@ export function startCron() {
   } else {
     cron.schedule(
       weekly,
-      async () => {
+      () => locked('weekly-doc-report', async () => {
         // Site-wide page discovery runs first, before anything else on this
         // trigger — independent of the other three, and cheaper, so the
         // page inventory is fresh before the week's daily agent runs pick
@@ -327,7 +357,7 @@ export function startCron() {
         } catch (err) {
           console.error('[cron] monthly doc report error:', err.message);
         }
-      },
+      }),
       { timezone: tz }
     );
     console.log(`[cron] weekly doc report scheduled "${weekly}" (${tz})`);
@@ -368,7 +398,7 @@ export function startCron() {
   } else if (!cron.validate(shipSchedule)) {
     console.error(`[cron] invalid SHIP_CRON_SCHEDULE "${shipSchedule}" — autonomous shipping NOT scheduled.`);
   } else {
-    cron.schedule(shipSchedule, async () => {
+    cron.schedule(shipSchedule, () => locked('autonomous-shipping-run', async () => {
       // Per-site locking lives in runAutoRemediationForAllSites — see the
       // chained call above for why there is no platform-wide key here.
       console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
@@ -379,7 +409,7 @@ export function startCron() {
       } catch (err) {
         console.error('[cron] autonomous shipping run error:', err.message);
       }
-    }, { timezone: tz });
+    }), { timezone: tz });
     console.log(`[cron] autonomous shipping scheduled "${shipSchedule}" (${tz})`);
   }
 
@@ -408,13 +438,13 @@ export function startCron() {
   // "is this fix_verifications check due" check). Fires every hour, every
   // hour, regardless of time of day — a fix can be marked implemented at
   // any time, so its 48h-later re-check shouldn't wait for a 7am gate.
-  cron.schedule('10 * * * *', async () => {
+  cron.schedule('10 * * * *', () => locked('fix-verification', async () => {
     try {
       await runFixVerificationsForAllSites();
     } catch (err) {
       console.error('[cron] fix verification error:', err.message);
     }
-  }, { timezone: tz });
+  }), { timezone: tz });
   console.log('[cron] fix verification scheduled (fires at :10 each hour)');
 
   // Impact measurement — the same per-row due check as fix verification above,
@@ -424,7 +454,7 @@ export function startCron() {
   // this sweep is almost always a no-op and is cheap when it isn't. Hourly
   // rather than daily for the same reason as the verification sweep: a merge
   // can land at any hour, so nothing should wait for a fixed morning gate.
-  cron.schedule('40 * * * *', async () => {
+  cron.schedule('40 * * * *', () => locked('fix-impact-sweep', async () => {
     try {
       await runFixImpactMeasurementsForAllSites();
     } catch (err) {
@@ -439,20 +469,20 @@ export function startCron() {
     } catch (err) {
       console.error('[cron] analyst outcome sweep error:', err.message);
     }
-  }, { timezone: tz });
+  }), { timezone: tz });
   console.log('[cron] fix impact measurement + analyst outcome sweep scheduled (fires at :40 each hour)');
 
   // PR-status polling fallback — independent safety net alongside the
   // GitHub webhook (routes/webhooks.js) for sites where the webhook was
   // never registered or a delivery was missed, so a merged PR's drafts
   // don't stay stranded at 'pr_opened' forever with no automated recovery.
-  cron.schedule('20 * * * *', async () => {
+  cron.schedule('20 * * * *', () => locked('pr-status-poll', async () => {
     try {
       await runPrStatusPollForAllSites();
     } catch (err) {
       console.error('[cron] pr-status poll error:', err.message);
     }
-  }, { timezone: tz });
+  }), { timezone: tz });
   console.log('[cron] pr-status poll scheduled (fires at :20 each hour)');
 
   // Action Center reconciliation — returns recommendations whose attempt
@@ -602,14 +632,14 @@ export function startCron() {
   if (!cron.validate(designAgentQueue)) {
     console.error(`[cron] invalid DESIGN_AGENT_QUEUE_CRON_SCHEDULE "${designAgentQueue}" — proactive design-agent queue NOT scheduled.`);
   } else {
-    cron.schedule(designAgentQueue, async () => {
+    cron.schedule(designAgentQueue, () => locked('design-agent-queue', async () => {
       try {
         const { queued } = await queueDesignAgentDerivationsForAllSites();
         console.log(`[cron] proactive design-agent queue finished — ${queued} site(s) queued`);
       } catch (err) {
         console.error('[cron] proactive design-agent queue error:', err.message);
       }
-    }, { timezone: tz });
+    }), { timezone: tz });
     console.log(`[cron] proactive design-agent queue scheduled "${designAgentQueue}" (${tz})`);
   }
 
@@ -625,18 +655,20 @@ export function startCron() {
   if (!cron.validate(trendRadarSchedule)) {
     console.error(`[cron] invalid TREND_RADAR_CRON_SCHEDULE "${trendRadarSchedule}" — trend radar NOT scheduled.`);
   } else {
-    cron.schedule(trendRadarSchedule, async () => {
+    cron.schedule(trendRadarSchedule, () => locked('trend-radar', async () => {
       try {
         const results = (await runTrendRadarIfDueForAllSites()).filter(Boolean);
         console.log(`[cron] trend radar finished — ${results.length} site(s) analyzed`);
       } catch (err) {
         console.error('[cron] trend radar error:', err.message);
       }
-    }, { timezone: tz });
+    }), { timezone: tz });
     console.log(`[cron] trend radar scheduled "${trendRadarSchedule}" (${tz})`);
   }
 
-  // Weekly Design Context refresh — a live-site analysis is a durable asset
+  // MONTHLY (was weekly): the design captured when a project first connects is
+  // the source of truth; a monthly look is enough to catch a real redesign.
+  // Design Context refresh — a live-site analysis is a durable asset
   // (see live-analysis-handler.js), not something re-derived per draft, so
   // this is the one place a real site redesign gets picked up: once a week,
   // every site whose profile is older than 7 days gets a fresh analysis
@@ -651,19 +683,37 @@ export function startCron() {
   // (no Docker/OpenHands container), so it comfortably finishes in that
   // window. Weekly, not daily: a site's design doesn't change often enough
   // to justify a live crawl of it every single morning.
-  const designProfileRescan = process.env.DESIGN_AGENT_RESCAN_CRON_SCHEDULE || '30 5 * * 1'; // 05:30 every Monday
+  const designProfileRescan = process.env.DESIGN_AGENT_RESCAN_CRON_SCHEDULE || '30 5 1 * *'; // 05:30 on the 1st of each month
   if (!cron.validate(designProfileRescan)) {
-    console.error(`[cron] invalid DESIGN_AGENT_RESCAN_CRON_SCHEDULE "${designProfileRescan}" — weekly design-context rescan NOT scheduled.`);
+    console.error(`[cron] invalid DESIGN_AGENT_RESCAN_CRON_SCHEDULE "${designProfileRescan}" — monthly design-context rescan NOT scheduled.`);
   } else {
-    cron.schedule(designProfileRescan, async () => {
+    cron.schedule(designProfileRescan, () => locked('design-profile-rescan', async () => {
       try {
         const { queued } = await queueDesignProfileRescanForAllSites();
         console.log(`[cron] weekly design-context rescan finished — ${queued} site(s) queued`);
       } catch (err) {
         console.error('[cron] weekly design-context rescan error:', err.message);
       }
-    }, { timezone: tz });
+    }), { timezone: tz });
     console.log(`[cron] weekly design-context rescan scheduled "${designProfileRescan}" (${tz})`);
+  }
+
+  // Weekly CHEAP change check (stylesheet hash) — the full capture above is
+  // monthly, so this is what catches a redesign in between. Monday, an hour
+  // ahead of the other design jobs.
+  const designChangeCheck = process.env.DESIGN_CHANGE_CHECK_CRON_SCHEDULE || '30 4 * * 1';
+  if (!cron.validate(designChangeCheck)) {
+    console.error(`[cron] invalid DESIGN_CHANGE_CHECK_CRON_SCHEDULE "${designChangeCheck}" — weekly design-change check NOT scheduled.`);
+  } else {
+    cron.schedule(designChangeCheck, () => locked('design-change-check', async () => {
+      try {
+        const { checked, changed } = await checkDesignChangesForAllSites();
+        console.log(`[cron] design-change check finished — ${checked} site(s) checked, ${changed} re-capture(s) queued`);
+      } catch (err) {
+        console.error('[cron] design-change check error:', err.message);
+      }
+    }), { timezone: tz });
+    console.log(`[cron] design-change check scheduled "${designChangeCheck}" (${tz})`);
   }
 
   // Weekly whole-site design-consistency scan — one day AFTER the profile
@@ -674,18 +724,18 @@ export function startCron() {
   // legacy section, a legal page's own body content. Genuinely expensive
   // (a real headless-browser capture per page type), hence weekly, hence
   // its own cron entry rather than folded into anything daily.
-  const consistencyScan = process.env.DESIGN_AGENT_CONSISTENCY_SCAN_CRON_SCHEDULE || '30 5 * * 2'; // 05:30 every Tuesday
+  const consistencyScan = process.env.DESIGN_AGENT_CONSISTENCY_SCAN_CRON_SCHEDULE || '30 5 2 * *'; // 05:30 on the 2nd of each month
   if (!cron.validate(consistencyScan)) {
-    console.error(`[cron] invalid DESIGN_AGENT_CONSISTENCY_SCAN_CRON_SCHEDULE "${consistencyScan}" — weekly consistency scan NOT scheduled.`);
+    console.error(`[cron] invalid DESIGN_AGENT_CONSISTENCY_SCAN_CRON_SCHEDULE "${consistencyScan}" — monthly consistency scan NOT scheduled.`);
   } else {
-    cron.schedule(consistencyScan, async () => {
+    cron.schedule(consistencyScan, () => locked('design-consistency-scan', async () => {
       try {
         const { queued } = await queueConsistencyScanForAllSites();
         console.log(`[cron] weekly design-consistency scan finished — ${queued} site(s) queued`);
       } catch (err) {
         console.error('[cron] weekly design-consistency scan error:', err.message);
       }
-    }, { timezone: tz });
+    }), { timezone: tz });
     console.log(`[cron] weekly design-consistency scan scheduled "${consistencyScan}" (${tz})`);
   }
 
@@ -710,7 +760,7 @@ export function startCron() {
   if (!cron.validate(contentGapRefresh)) {
     console.error(`[cron] invalid CONTENT_GAP_REFRESH_CRON_SCHEDULE "${contentGapRefresh}" — content-gap refresh NOT scheduled.`);
   } else {
-    cron.schedule(contentGapRefresh, async () => {
+    cron.schedule(contentGapRefresh, () => locked('content-gap-refresh', async () => {
       try {
         const results = await refreshContentGapRecommendationsForAllSites();
         const updated = results.reduce((n, r) => n + (r.updated || 0), 0);
@@ -718,7 +768,7 @@ export function startCron() {
       } catch (err) {
         console.error('[cron] content-gap refresh error:', err.message);
       }
-    }, { timezone: tz });
+    }), { timezone: tz });
     console.log(`[cron] content-gap refresh scheduled "${contentGapRefresh}" (${tz})`);
   }
 
@@ -731,14 +781,14 @@ export function startCron() {
   // real incident, 2026-08-10: Run #17 sat 'running' with
   // cancel_requested=true for over an hour with no live process left to
   // notice the flag, fixed manually in the DB.
-  cron.schedule('30 * * * *', async () => {
+  cron.schedule('30 * * * *', () => locked('audit-run-reap', async () => {
     try {
       const reaped = await reapStaleAuditRuns();
       if (reaped.length) console.log(`[cron] reaped ${reaped.length} stale audit run(s):`, reaped.map((r) => r.id).join(', '));
     } catch (err) {
       console.error('[cron] stale audit-run reap error:', err.message);
     }
-  }, { timezone: tz });
+  }), { timezone: tz });
   console.log('[cron] stale audit-run reap scheduled (fires at :30 each hour)');
 
   // Keyword Narrative — server/agents/keyword-narrative.js, a supplementary
@@ -758,7 +808,7 @@ export function startCron() {
   } else {
     cron.schedule(
       keywordNarrative,
-      async () => {
+      () => locked('keyword-narrative', async () => {
         console.log(`[cron] keyword narrative started ${new Date().toISOString()}`);
         try {
           const results = await runKeywordNarrativeForAllSites();
@@ -766,7 +816,7 @@ export function startCron() {
         } catch (err) {
           console.error('[cron] keyword narrative error:', err.message);
         }
-      },
+      }),
       { timezone: tz }
     );
     console.log(`[cron] keyword narrative scheduled "${keywordNarrative}" (${tz})`);
@@ -785,7 +835,7 @@ export function startCron() {
   } else {
     cron.schedule(
       capabilitySnapshot,
-      async () => {
+      () => locked('capability-snapshot', async () => {
         console.log(`[cron] capability visibility snapshot started ${new Date().toISOString()}`);
         try {
           const results = await snapshotCapabilityVisibilityForAllSites();
@@ -793,7 +843,7 @@ export function startCron() {
         } catch (err) {
           console.error('[cron] capability visibility snapshot error:', err.message);
         }
-      },
+      }),
       { timezone: tz }
     );
     console.log(`[cron] capability visibility snapshot scheduled "${capabilitySnapshot}" (${tz})`);

@@ -1,29 +1,30 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { api } from './api.js';
+import { api, setReadOnlyAccess } from './api.js';
+import { AccessProvider } from './lib/access.jsx';
 import SuperRankLogin from './pages/SuperRankLogin.jsx';
 import SuperRankSignup from './pages/SuperRankSignup.jsx';
 import VerifyEmail from './pages/VerifyEmail.jsx';
-import Overview from './pages/Overview.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import TopBar from './components/TopBar.jsx';
-import NoProjectShell from './components/NoProjectShell.jsx';
+import NameWorkspace from './components/workspace/NameWorkspace.jsx';
+import NoProjectGate from './components/workspace/NoProjectGate.jsx';
+import SetupBanner, { setupGap } from './components/workspace/SetupBanner.jsx';
 import { ShellContext } from './components/shellContext.js';
 import { currentSiteOf } from './lib/nav.js';
 import ClientAssistantPanel from './components/ClientAssistantPanel.jsx';
 
 // Lazy-loaded: none of these are needed for first paint. The internal-only
-// ones (AiGrowth/ActionCenter/ClientOnboarding) also pull in heavy libraries
+// ones (AiGrowth/ActionCenter) also pull in heavy libraries
 // (@xyflow/react, react-simple-maps) that would otherwise ship to every
 // visitor, including pre-login.
+const Overview = lazy(() => import('./pages/Overview.jsx'));
 const Insights = lazy(() => import('./pages/Insights.jsx'));
 const Compare = lazy(() => import('./pages/Compare.jsx'));
 const Reports = lazy(() => import('./pages/Reports.jsx'));
 const AiGrowth = lazy(() => import('./pages/AiGrowth.jsx'));
 const ActionCenter = lazy(() => import('./pages/ActionCenter.jsx'));
 const Demand = lazy(() => import('./pages/Demand.jsx'));
-const ClientOnboarding = lazy(() => import('./pages/ClientOnboarding.jsx'));
-const DesignReview = lazy(() => import('./pages/DesignReview.jsx'));
 const Analyst = lazy(() => import('./pages/Analyst.jsx'));
 const Keywords = lazy(() => import('./pages/Keywords.jsx'));
 const Competitors = lazy(() => import('./pages/Competitors.jsx'));
@@ -42,16 +43,20 @@ export default function App() {
   const [isInternal, setIsInternal] = useState(false);
   const [role, setRole] = useState(null);
   const [email, setEmail] = useState(null);
+  const [suggestedName, setSuggestedName] = useState(null); // the company they signed up with, offered as the workspace name
   const [sites, setSites] = useState([]);
   const [siteId, setSiteId] = useState(null);
+  const [sitesError, setSitesError] = useState(null); // why the project could not be loaded (suspended, removed, no access)
   const [sitesLoaded, setSitesLoaded] = useState(false);
+  const [readOnly, setReadOnly] = useState(false); // read-only member of the active project
   const [noProject, setNoProject] = useState(false); // signed in, but no project yet (a newly approved account)
+  const [hasWorkspace, setHasWorkspace] = useState(null); // for a project-less account: null = still checking
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [toolbarEl, setToolbarEl] = useState(null); // PageToolbar portals into this node
 
   const checkSession = () => api.me()
-    .then((r) => { setAuthed(r.authed); setIsInternal(!!r.isInternal); setRole(r.role || null); setEmail(r.email || null); setNoProject(!!r.noProject); })
+    .then((r) => { setReadOnly(!!r.readOnly); setReadOnlyAccess(!!r.readOnly); setAuthed(r.authed); setIsInternal(!!r.isInternal); setRole(r.role || null); setEmail(r.email || null); setNoProject(!!r.noProject); setSuggestedName(r.suggestedWorkspaceName || null); })
     .catch(() => setAuthed(false));
 
   // Check session on load.
@@ -61,7 +66,7 @@ export default function App() {
   // treat it the same as an explicit logout instead of leaving it to whatever
   // page happened to make the failing call.
   useEffect(() => {
-    const onUnauthorized = () => setAuthed(false);
+    const onUnauthorized = () => { setReadOnlyAccess(false); setAuthed(false); };
     window.addEventListener('api:unauthorized', onUnauthorized);
     return () => window.removeEventListener('api:unauthorized', onUnauthorized);
   }, []);
@@ -84,7 +89,7 @@ export default function App() {
   // lets <Login> (rendered unconditionally, regardless of path) hand off to
   // <Routes> at the same /oauth/authorize-consent URL once authed flips true.
   useEffect(() => {
-    if (authed === false && !window.location.pathname.startsWith('/oauth/') && window.location.pathname !== '/login' && window.location.pathname !== '/signup' && window.location.pathname !== '/verify-email') {
+    if (authed === false && !window.location.pathname.startsWith('/oauth/') && window.location.pathname !== '/login' && window.location.pathname !== '/signup' && window.location.pathname !== '/verify-email' && window.location.pathname !== '/reset-password') {
       navigate('/', { replace: true });
     }
   }, [authed, navigate]);
@@ -97,8 +102,27 @@ export default function App() {
     if (noProject) { setSitesLoaded(true); return; }
     api.sites().then((list) => {
       setSites(list);
+      setSitesError(null);
       if (list.length) setSiteId(list[0].id);
-    }).catch(() => {}).finally(() => setSitesLoaded(true));
+    }).catch((e) => setSitesError({ status: e.status || null, message: e.message || '' })).finally(() => setSitesLoaded(true));
+  }, [authed, noProject]);
+
+  // The setup banner reads the project's own connection columns, which change in the Add project
+  // popup (on the Workspace page) without this list knowing. While a project is unfinished, look
+  // again whenever the person moves to another page, so the banner goes the moment it is done.
+  useEffect(() => {
+    if (!authed || noProject || !siteId || !setupGap(currentSiteOf(sites, siteId))) return;
+    api.sites().then(setSites).catch(() => {});
+  }, [location.pathname]);
+
+  // A project-less account only gets the full app (sidebar and all) once it has a workspace;
+  // before that it sees the guided first screen. The Workspace page announces a new workspace.
+  useEffect(() => {
+    if (!authed || !noProject) return undefined;
+    const check = () => api.workspaces().then((r) => setHasWorkspace((r.workspaces || []).length > 0)).catch(() => setHasWorkspace(false));
+    check();
+    window.addEventListener('workspaces:changed', check);
+    return () => window.removeEventListener('workspaces:changed', check);
   }, [authed, noProject]);
 
   // Switch the active project. The server verifies the user's workspace
@@ -117,12 +141,18 @@ export default function App() {
     await api.logout().catch(() => {});
     // Signing out lands on the app's own sign-in (app.superrank.si), not the marketing
     // site. Clear what belongs to the session; the effect above puts the URL back at '/'.
-    setSites([]); setSiteId(null); setRole(null); setEmail(null); setIsInternal(false); setSitesLoaded(false); setNoProject(false);
+    setSites([]); setSiteId(null); setRole(null); setEmail(null); setIsInternal(false); setSitesLoaded(false); setNoProject(false); setHasWorkspace(null);
     setAssistantOpen(false); setMobileNavOpen(false);
     setAuthed(false);
   };
 
   if (authed === null) return <div className="p-8 text-gray-400">Loading…</div>;
+  // The approval email's Sign in button (/login?token=…) wins over a session that is already open: someone
+  // still signed in as another account must reach their own "Your account is approved" page, not be sent
+  // into the old account's dashboard with the link left unused.
+  if (authed && location.pathname === '/login' && new URLSearchParams(location.search).get('token')) {
+    return <SuperRankLogin onAuthed={checkSession} />;
+  }
   // Signed-out visitors, at /login or the bare app address, get the SuperRank login.
   if (!authed) {
     if (location.pathname === '/signup') return <SuperRankSignup />;
@@ -141,18 +171,11 @@ export default function App() {
     );
   }
 
-  // A newly approved account has a login and no project: show the Workspace page,
-  // where they create their workspace and first project, instead of a sidebar of
-  // views that all need one.
-  if (noProject) {
-    return (
-      <Suspense fallback={<div className="p-8 text-faint">Loading…</div>}>
-        <NoProjectShell email={email} onLogout={logout}>
-          <Workspace siteId={null} onSwitchProject={switchProject} />
-        </NoProjectShell>
-      </Suspense>
-    );
-  }
+  // A newly approved account has a login and nothing else: ask for the workspace name first,
+  // on a screen of its own, instead of a sidebar of views that all need a project. Once there is a workspace they get the full app below, whose project pages
+  // ask them to add their first project (NoProjectGate).
+  if (noProject && hasWorkspace === null) return <div className="p-8 text-gray-400">Loading…</div>;
+  if (noProject && !hasWorkspace) return <NameWorkspace suggested={suggestedName} email={email} onLogout={logout} />;
 
   // Platform Administration nav/routes (PLATFORM-ADMIN-DESIGN.md §H, §K
   // Phase 7) — gated on the role dimension directly, not isInternal, since
@@ -163,12 +186,13 @@ export default function App() {
   // A platform admin on /analyst has the staff Admin Assistant there (AnalystChatDrawer), so the app-wide
   // Agent panel is hidden on that page for them: two floating assistants would fight for the same corner.
   // Clients have no admin assistant, so they keep the Agent panel on every page, Analyst included.
-  const hideAssistant = isPlatformAdmin && location.pathname === '/analyst';
+  const hideAssistant = (isPlatformAdmin && location.pathname === '/analyst') || noProject; // no project, nothing to ask the Agent about
   const agentAvailable = !hideAssistant;
   const agentOpen = assistantOpen && agentAvailable;
   const isProduct = currentSiteOf(sites, siteId)?.property_type === 'product';
 
   return (
+    <AccessProvider value={{ readOnly }}>
     <div className="min-h-screen flex text-sm">
       <Sidebar sites={sites} siteId={siteId} isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} onSwitchProject={switchProject} onLogout={logout}
         mobileOpen={mobileNavOpen} onCloseMobile={() => setMobileNavOpen(false)}
@@ -180,6 +204,12 @@ export default function App() {
         <ShellContext.Provider value={toolbarEl}>
           <div ref={setToolbarEl} className="page-toolbar flex flex-wrap items-center gap-2 px-4 md:px-6 py-2 bg-white border-b border-border-canvas" />
           <main className="flex-1 min-w-0">
+        {readOnly && siteId && (
+          <div className="mx-4 md:mx-6 mt-4 rounded-card bg-muted px-4 py-2 text-xs text-text" role="status">
+            You have read-only access to this project. You can look around, but not change anything.
+          </div>
+        )}
+        {siteId && !readOnly && location.pathname !== '/workspace' && <SetupBanner site={currentSiteOf(sites, siteId)} />}
         {siteId ? (
           <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>
             <Routes key={siteId}>
@@ -194,7 +224,7 @@ export default function App() {
               <Route path="/milestones" element={<Navigate to="/reports?tab=baseline" replace />} />
               {/* One page per job, for every client's own project (see lib/nav.js). */}
               <Route path="/ai-visibility" element={<AiVisibility />} />
-              <Route path="/keywords" element={<Keywords />} />
+              <Route path="/keywords" element={<Keywords isProduct={isProduct} />} />
               <Route path="/competitors" element={<Competitors />} />
               <Route path="/content" element={<Content />} />
               <Route path="/analyst" element={<Analyst siteId={siteId} isPlatformAdmin={isPlatformAdmin} />} />
@@ -233,8 +263,6 @@ export default function App() {
                   are platform_admin), which is exactly why this went
                   unnoticed; it stops coinciding the moment a non-admin
                   teammate is added. */}
-              {isPlatformAdmin && <Route path="/clients" element={<ClientOnboarding />} />}
-              {isPlatformAdmin && <Route path="/clients/:id/design-review" element={<DesignReview />} />}
               {/* OAuth "Connect" consent screen — reached via a 302 from
                   mcp-server/oauth-provider.js's authorize(), scoped to this
                   session's own siteId server-side, same as every route above. */}
@@ -249,6 +277,13 @@ export default function App() {
               {isPlatformAdmin && <Route path="/admin/audit-log" element={<Navigate to="/admin/system-health" replace />} />}
             </Routes>
           </Suspense>
+        ) : noProject ? (
+          <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>
+            <Routes>
+              <Route path="/workspace" element={<Workspace siteId={null} onSwitchProject={switchProject} />} />
+              <Route path="*" element={<NoProjectGate onOpenProject={async (p) => { await switchProject(p.id); navigate('/overview'); }} />} />
+            </Routes>
+          </Suspense>
         ) : !sitesLoaded ? (
           // Distinct from the genuinely-no-site state below — on a fresh
           // page load (hard refresh, deep link, bookmark) this app-level
@@ -258,8 +293,14 @@ export default function App() {
           // load, not just a real no-site account.
           <div className="p-8 text-gray-400">Loading…</div>
         ) : (
-          <div className="max-w-7xl mx-auto px-4 py-10 text-gray-500">
-            No site configured yet. Run the migration to seed your site, then ingest some data.
+          <div className="max-w-7xl mx-auto px-4 py-10 text-gray-500" role="status">
+            {sitesError?.status === 403 || sitesError?.status === 404
+              ? (/suspend/i.test(sitesError.message)
+                ? 'This project is suspended, so it is not available right now. Pick another project from the switcher, or contact SuperRank.'
+                : 'This project is no longer available to you: it may have been removed, or your access to it was taken away. Pick another project from the switcher.')
+              : sitesError
+                ? 'We could not load this project just now. Check your connection and refresh the page.'
+                : 'This account has no project yet. Create one from the Workspace page.'}
           </div>
         )}
           </main>
@@ -275,5 +316,6 @@ export default function App() {
           staff-only Admin Assistant on /analyst has. */}
       <ClientAssistantPanel open={agentOpen} onClose={() => setAssistantOpen(false)} />
     </div>
+    </AccessProvider>
   );
 }

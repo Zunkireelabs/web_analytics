@@ -6,11 +6,12 @@ import { randomBytes } from 'node:crypto';
 // Analytics. Google sends them back with a one-time code, which this exchanges for a
 // refresh token that the project then keeps (server/auth/project-google.js).
 //
-// Uses the app's existing Google OAuth client (GOOGLE_OAUTH_CLIENT_ID / _SECRET — the
-// same one that minted the shared platform token). The callback address must be
-// registered on that client in Google Cloud ("Authorised redirect URIs"); Google
-// refuses any address that is not, which is also what stops a crafted link from
-// sending the code anywhere else.
+// Uses a Google "Web application" OAuth client: GOOGLE_CONNECT_CLIENT_ID / _SECRET, or the app's
+// GOOGLE_OAUTH_* pair when that one is itself a web client. It is kept separate because the shared platform
+// token was minted by a Desktop client (get-oauth-token.js), and a Desktop client cannot have a web
+// callback; swapping the shared pair would also invalidate that platform token. The callback address must
+// be registered on this client in Google Cloud ("Authorised redirect URIs"); Google refuses any address
+// that is not, which is also what stops a crafted link from sending the code anywhere else.
 
 // Search Console is the same scope the app already asks for (the technical agent
 // resubmits sitemaps, which needs write); Analytics is read-only. `openid email` only
@@ -32,7 +33,14 @@ export class GoogleConnectError extends Error {
   constructor(code, message) { super(message); this.code = code; }
 }
 
-export const googleConnectConfigured = () => Boolean(process.env.GOOGLE_OAUTH_CLIENT_ID && process.env.GOOGLE_OAUTH_CLIENT_SECRET);
+// The client the connect flow (and every refresh of a token it minted) must use: a refresh token only works
+// with the client that issued it.
+export const connectClientCreds = (env = process.env) => ({
+  id: env.GOOGLE_CONNECT_CLIENT_ID || env.GOOGLE_OAUTH_CLIENT_ID,
+  secret: env.GOOGLE_CONNECT_CLIENT_SECRET || env.GOOGLE_OAUTH_CLIENT_SECRET,
+});
+
+export const googleConnectConfigured = () => { const c = connectClientCreds(); return Boolean(c.id && c.secret); };
 
 // The address Google sends the person back to. An explicit setting wins (needed when the
 // app sits behind a proxy that hides its public address); otherwise it is built from the
@@ -40,7 +48,7 @@ export const googleConnectConfigured = () => Boolean(process.env.GOOGLE_OAUTH_CL
 export const redirectUriFor = (origin) => process.env.GOOGLE_OAUTH_REDIRECT_URI || `${origin}/api/google/callback`;
 
 const clientFor = (redirectUri) => new google.auth.OAuth2(
-  process.env.GOOGLE_OAUTH_CLIENT_ID, process.env.GOOGLE_OAUTH_CLIENT_SECRET, redirectUri);
+  connectClientCreds().id, connectClientCreds().secret, redirectUri);
 
 export const newConnectNonce = () => randomBytes(24).toString('base64url');
 
@@ -72,7 +80,7 @@ export async function exchangeCode({ code, redirectUri }) {
 
   let email = null;
   try {
-    const ticket = await client.verifyIdToken({ idToken: tokens.id_token, audience: process.env.GOOGLE_OAUTH_CLIENT_ID });
+    const ticket = await client.verifyIdToken({ idToken: tokens.id_token, audience: connectClientCreds().id });
     email = ticket.getPayload()?.email || null;
   } catch { /* the email is for display only; the connection is valid without it */ }
 

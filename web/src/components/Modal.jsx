@@ -5,7 +5,7 @@ import Button from './Button.jsx';
 
 // Generic centered modal shell, factored out of AnalystKeyboardShortcutsModal's
 // pattern so Settings (and future callers) don't each hand-roll the overlay.
-export default function Modal({ isOpen, onClose, title, subtitle, icon: Icon, children, maxWidth = 'max-w-md', footer }) {
+export default function Modal({ isOpen, onClose, title, subtitle, icon: Icon, children, maxWidth = 'max-w-md', footer, anchor = 'center' }) {
   useEffect(() => {
     if (!isOpen) return;
     const onKeyDown = (e) => { if (e.key === 'Escape') onClose(); };
@@ -31,7 +31,10 @@ export default function Modal({ isOpen, onClose, title, subtitle, icon: Icon, ch
 
   // Portal to <body> so a transformed/filtered ancestor (fade-up, backdrop-blur) can't become the fixed overlay's containing block.
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-900/40 animate-fade-in" onClick={onClose}>
+    // anchor="top" fixes the top edge where the first step's height (about 580px) is exactly centred, so it looks centred
+    // yet does not move when its content grows or shrinks between steps (a list loading in): it only extends downward.
+    <div className={`fixed inset-0 z-50 flex justify-center p-4 bg-neutral-900/40 animate-fade-in ${anchor === 'top' ? 'items-start overflow-y-auto' : 'items-center'}`}
+      style={anchor === 'top' ? { paddingTop: 'max(16px, calc((100vh - 580px) / 2))' } : undefined} onClick={onClose}>
       {footer ? (
         // Sectioned layout: header / scrolling body / pinned footer.
         <div className={`w-full ${maxWidth} rounded-card bg-white text-sm text-fg overflow-hidden flex flex-col max-h-[calc(100vh-2rem)]`}

@@ -447,6 +447,15 @@ async function resolveDeploymentState(row) {
   return { known: true, deployment, graceElapsed: deploymentGraceElapsed(deployment) };
 }
 
+const STAGE_PROMOTION_WAIT_DAYS = Number(process.env.STAGE_PROMOTION_WAIT_DAYS) || 14;
+export function siteStagesBeforeLive(site) {
+  return !!site?.pr_target_branch && site.pr_target_branch !== (site.repo_default_branch || 'main');
+}
+function withinStagePromotionWait(row, now = Date.now()) {
+  const created = row?.created_at ? Date.parse(row.created_at) : NaN;
+  return !Number.isFinite(created) || now - created < STAGE_PROMOTION_WAIT_DAYS * 24 * 3600 * 1000;
+}
+
 const AWAIT_RECHECK_HOURS = Number(process.env.FIX_VERIFY_REDEPLOY_HOURS) || 3;
 
 async function verifyByMethod(row, site) {
@@ -469,6 +478,15 @@ async function verifyByMethod(row, site) {
     const rec = await findOpenRecommendation(row.site_id, row.page_url, row.generator_id);
     if (rec) await closeRecommendation(rec.id);
     return { id: row.id, outcome: 'verified-fixed' };
+  }
+
+  // Absent. A site that merges into a stage branch only goes live when a
+  // person promotes stage to the default branch, which can take days. Absence
+  // before then is not a failed fix, so it must not reopen the finding (and
+  // get it re-drafted): look again daily, for up to STAGE_PROMOTION_WAIT_DAYS.
+  if (siteStagesBeforeLive(site) && withinStagePromotionWait(row)) {
+    await rescheduleVerification(row.id, { delayHours: 24, evidence: { ...evidence, awaitingDeployment: true, awaitingPromotion: true } });
+    return { id: row.id, outcome: 'awaiting-deployment' };
   }
 
   // Absent. Still deploying, or genuinely not shipped?

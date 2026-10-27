@@ -1,8 +1,24 @@
+import { isValidTimezone } from './timezone.js';
 // Timezone-aware date helpers. "Today" must be computed in the site's timezone
 // so that "yesterday" lines up with how GSC/GA4 bucket days for the property.
 
 // Returns YYYY-MM-DD for `now` in the given IANA timezone.
+export const DEFAULT_TIMEZONE = 'Asia/Kolkata';
+
+export { isValidTimezone };
+
+// A zone safe to hand to Intl: the value itself when valid, else the default. A legacy row with a bad
+// value (saved before it was checked) would otherwise throw inside every per-site loop and keep that
+// project from ever being ingested; falling back keeps it running on the default zone.
+const warned = new Set();
+export function safeTimezone(tz) {
+  if (isValidTimezone(tz)) return tz;
+  if (tz != null && !warned.has(tz)) { warned.add(tz); console.warn(`[dates] invalid timezone ${JSON.stringify(tz)} — using ${DEFAULT_TIMEZONE}.`); }
+  return DEFAULT_TIMEZONE;
+}
+
 export function todayInTz(timezone, now = new Date()) {
+  timezone = safeTimezone(timezone);
   // en-CA formats as YYYY-MM-DD.
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,

@@ -17,7 +17,7 @@ let users; // id -> user row
 let roles; // `${userId}:${workspaceId}` -> membership role
 let owners;
 let calls;
-const resetCalls = () => { calls = { homeClaims: [], addMember: [], updateRole: [], remove: [], invitations: [], projects: [], workspaces: [], renamed: [], goals: [], tokens: [], revoked: [], audit: [], projectMembers: [] }; };
+const resetCalls = () => { calls = { homeClaims: [], addMember: [], updateRole: [], remove: [], invitations: [], projects: [], workspaces: [], renamed: [], goals: [], tokens: [], revoked: [], audit: [], projectMembers: [], discarded: [] }; };
 let siteWorkspace; // siteId -> workspaceId (which project belongs to which workspace)
 let tokenRows; // rows returned for the workspace token list
 
@@ -44,7 +44,7 @@ mock.module(resolve('../report/email.js'), {
     // login.js (imported for requireAuth) pulls these in; not exercised here.
     sendContactLeadEmail: async () => true,
     sendPasswordResetEmail: async () => true,
-    sendSignupReceivedEmail: async () => true,
+    sendSignupReceivedEmail: async () => true, sendLoginCodeEmail: async () => true,
     sendSignupStaffNotice: async () => true,
   },
 });
@@ -73,13 +73,15 @@ mock.module(resolve('../store/workspaces.js'), {
     updateMemberRole: async (w, u, r) => { calls.updateRole.push([w, u, r]); return { role: r }; },
     removeMember: async (w, u) => { calls.remove.push([w, u]); return true; },
     inviteHomeSiteId: async () => 5,
-    createProject: async (o) => { calls.projects.push(o); return { id: 77, name: o.name, website_domain: o.websiteDomain }; },
+    createProject: async (o) => { if (globalThis.__dupDomain) throw Object.assign(new Error('dup'), { code: '23505', constraint: 'sites_workspace_domain_unique' }); calls.projects.push(o); return { id: 77, name: o.name, website_domain: o.websiteDomain }; },
     createWorkspace: async ({ name }) => { calls.workspaces.push(name); return { id: 100, name }; },
+    discardNewWorkspace: async (o) => { calls.discarded.push(o); },
+    workspaceHasDomain: async () => Boolean(globalThis.__hasDomain),
     // A new account's first project becomes its home site (migration 198); recorded so the test can see it.
     claimHomeSiteIfNone: async (userId, siteId) => { calls.homeClaims.push([userId, siteId]); return true; },
     renameWorkspace: async (id, name) => { calls.renamed.push([id, name]); return { id, name }; },
     siteInWorkspace: async (siteId, workspaceId) => siteWorkspace[siteId] === workspaceId,
-    setProjectGoal: async (o) => { calls.goals.push(o); return { site_id: o.siteId, goal: o.goal, growth: o.growth, months: o.months }; },
+    setProjectGoal: async (o) => { if (globalThis.__failGoal) throw new Error('goal write failed'); calls.goals.push(o); return { site_id: o.siteId, goal: o.goal, growth: o.growth, months: o.months }; },
     listGoalsForSites: async () => ({ 5: { goal: 'google_visitors', growth: 'fast', months: 6 } }),
     listProjectMembersForWorkspace: async () => [{ id: 14, email: 'client@admizz.test', status: 'active', role: 'admin', project: { id: 6, name: 'Acme Shop' } }],
     addProjectMember: async (siteId, userId, role, by) => { calls.projectMembers.push([siteId, userId, role, by]); return true; },
@@ -264,6 +266,70 @@ describe('role changes and removal', () => {
   test('PATCH rejects an unknown role', async () => {
     assert.equal((await call('patch', '/workspaces/:id/members/:userId', { userId: OWNER, params: { id: '7', userId: String(MEMBER) }, body: { role: 'root' } })).statusCode, 400);
     assert.equal((await call('patch', '/workspaces/:id/members/:userId', { userId: OWNER, params: { id: '7', userId: String(MEMBER) }, body: {} })).statusCode, 400);
+  });
+});
+
+describe('POST /workspaces (create) is all-or-nothing', () => {
+  const body = { name: 'Brightpath', projectName: 'Site', websiteDomain: 'b.test', goal: { goal: 'google_visitors', growth: 'fast', months: 6 } };
+  test('a failure after the workspace exists takes the workspace and project back and never claims a home project', async () => {
+    globalThis.__failGoal = true;
+    try {
+      await assert.rejects(() => call('post', '/workspaces', { userId: MEMBER, body }), /goal write failed/);
+    } finally { globalThis.__failGoal = false; }
+    assert.deepEqual(calls.discarded, [{ workspaceId: 100, siteId: 77 }]);
+    assert.deepEqual(calls.homeClaims, [], 'a home project is only claimed once everything succeeded');
+    assert.equal(calls.audit.filter((a) => a === 'workspace.created').length, 0, 'nothing is audited as created');
+  });
+  test('success claims the home project and discards nothing', async () => {
+    const res = await call('post', '/workspaces', { userId: MEMBER, body });
+    assert.equal(res.statusCode, 201);
+    assert.deepEqual(calls.discarded, []);
+    assert.deepEqual(calls.homeClaims, [[MEMBER, 77]]);
+  });
+});
+
+describe('website address is validated and unique', () => {
+  test('something that is not a website address is a 400 and creates nothing', async () => {
+    for (const websiteDomain of ['asdf', 'a b.com', 'exa_mple.com']) {
+      const res = await call('post', '/workspaces/:id/projects', { userId: ADMIN, params: { id: '7' }, body: { name: 'P', websiteDomain } });
+      assert.equal(res.statusCode, 400, websiteDomain);
+    }
+    assert.equal(calls.projects.length, 0);
+  });
+  test('www, scheme, port and path are stripped so the same site is always stored the same way', async () => {
+    await call('post', '/workspaces/:id/projects', { userId: ADMIN, params: { id: '7' }, body: { name: 'P', websiteDomain: 'https://WWW.Acme.com:8080/x?y=1' } });
+    assert.equal(calls.projects[0].websiteDomain, 'acme.com');
+  });
+  test('the route checks first, so a duplicate is refused even where the database index is absent', async () => {
+    globalThis.__hasDomain = true;
+    try {
+      const res = await call('post', '/workspaces/:id/projects', { userId: ADMIN, params: { id: '7' }, body: { name: 'P', websiteDomain: 'acme.com' } });
+      assert.equal(res.statusCode, 409);
+      assert.equal(calls.projects.length, 0);
+    } finally { globalThis.__hasDomain = false; }
+  });
+  test('adding a website that is already a project there is a clear 409, not a 500', async () => {
+    globalThis.__dupDomain = true;
+    try {
+      const res = await call('post', '/workspaces/:id/projects', { userId: ADMIN, params: { id: '7' }, body: { name: 'P', websiteDomain: 'acme.com' } });
+      assert.equal(res.statusCode, 409);
+      assert.equal(res.body.code, 'DOMAIN_EXISTS');
+    } finally { globalThis.__dupDomain = false; }
+  });
+});
+
+describe('time zone is validated when a project is saved', () => {
+  test('a made-up zone is a 400 on both create routes and creates nothing', async () => {
+    const a = await call('post', '/workspaces', { userId: MEMBER, body: { name: 'W', projectName: 'P', timezone: 'Mars/Olympus' } });
+    assert.equal(a.statusCode, 400);
+    const b = await call('post', '/workspaces/:id/projects', { userId: ADMIN, params: { id: '7' }, body: { name: 'P', timezone: 'Not/AZone' } });
+    assert.equal(b.statusCode, 400);
+    assert.equal(calls.projects.length, 0);
+    assert.equal(calls.workspaces.length, 0);
+  });
+  test('a real zone, or none at all, is accepted', async () => {
+    assert.equal((await call('post', '/workspaces/:id/projects', { userId: ADMIN, params: { id: '7' }, body: { name: 'P', timezone: 'Europe/London' } })).statusCode, 201);
+    assert.equal((await call('post', '/workspaces/:id/projects', { userId: ADMIN, params: { id: '7' }, body: { name: 'Q' } })).statusCode, 201);
   });
 });
 

@@ -70,7 +70,16 @@ jobs:
             # ── Google credentials (OAuth method) ────────────────────────────
             GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
             GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+            # Web-application client for "Connect with Google" inside the app (separate from the Desktop client above).
+            GOOGLE_CONNECT_CLIENT_ID=${{ secrets.GOOGLE_CONNECT_CLIENT_ID }}
+            GOOGLE_CONNECT_CLIENT_SECRET=${{ secrets.GOOGLE_CONNECT_CLIENT_SECRET }}
             GOOGLE_OAUTH_REFRESH_TOKEN=${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+
+            # Seals each project's own Google sign-in (the "Connect with Google" step of Add
+            # project) before it is stored: 32 random bytes, base64. Without it that step answers
+            # "not set up on this server yet". Create it ONCE and never change it: a new key makes
+            # every stored Google connection unreadable. (openssl rand -base64 32)
+            SECRETS_ENCRYPTION_KEY=${{ secrets.SECRETS_ENCRYPTION_KEY }}
             GSC_PROPERTY=${{ vars.GSC_PROPERTY }}
             GA4_PROPERTY_ID=${{ vars.GA4_PROPERTY_ID }}
 
@@ -99,6 +108,14 @@ jobs:
             # (no fallback to the shared App/PAT) if this isn't set, per
             # credentials.js's no-cross-tenant-leakage design.
             GITHUB_APP_PRIVATE_KEY_B64_CHAYCE=${{ secrets.GH_APP_PRIVATE_KEY_B64_CHAYCE }}
+            # "Connect with GitHub" (migration-free): a SEPARATE App from the shared default above. Projects connected
+            # through a person's own GitHub sign-in are stamped with this App (sites.github_app_id), so the agent signs in
+            # as it for them; every other project keeps the credentials above. Unset = the Connect button stays off.
+            GITHUB_CONNECT_APP_ID=${{ secrets.GH_CONNECT_APP_ID }}
+            GITHUB_CONNECT_APP_PRIVATE_KEY_B64=${{ secrets.GH_CONNECT_APP_PRIVATE_KEY_B64 }}
+            GITHUB_APP_CLIENT_ID=${{ secrets.GH_CONNECT_CLIENT_ID }}
+            GITHUB_APP_CLIENT_SECRET=${{ secrets.GH_CONNECT_CLIENT_SECRET }}
+            GITHUB_APP_SLUG=${{ secrets.GH_CONNECT_APP_SLUG }}
 
             # ── Sanity CMS write credentials (per-site, opt-in) ──────────────
             # Named per-site (SANITY_WRITE_TOKEN_<SITE>), never shared — see
@@ -115,6 +132,19 @@ jobs:
             SMTP_PASS=${{ secrets.SMTP_PASS }}
             REPORT_EMAIL_FROM=${{ vars.REPORT_EMAIL_FROM }}
             REPORT_EMAIL_TO=${{ vars.REPORT_EMAIL_TO }}
+            # The app's public address (no trailing slash). Emailed links (Sign in, staff review) and the
+            # logo in emails are built from it; without it they fall back to whatever address the request hit.
+            APP_BASE_URL=https://${{ vars.PROD_DOMAIN }}
+
+            # Design gates. 'enforce' holds a draft when the captured design
+            # does not cover what it renders (and queues a fuller capture);
+            # set 'log' to record what WOULD be held while shipping continues
+            # (design_gate_decisions). The .env
+            # is rewritten on every deploy, so a value set by hand on the
+            # server would be lost — it has to live here.
+            DESIGN_GATE_MODE=enforce
+            # New pages (blog, landing) are rendered and compared with the site's real pages before they ship.
+            NEWPAGE_RENDER_GATE_ENABLED=true
 
             # ── Dashboard auth (production) ─────────────────────────────────
             SESSION_SECRET=${{ secrets.PROD_SESSION_SECRET }}

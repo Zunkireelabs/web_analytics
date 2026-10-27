@@ -2,6 +2,12 @@ import { Router } from 'express';
 import { requireAuth } from './login.js';
 import { getIntegrationHealth } from '../store/read.js';
 import { callDataAnalystAgent } from '../lib/data-analyst-client.js';
+import { getLatestAgentRuns } from '../store/agent-runs.js';
+import { listRecentDraftsWithPage, listOpenRecommendationPages, listMeasuredDraftIds, listRisingQueries } from '../store/analyst-outlook.js';
+import { listMeasuredImpact } from '../store/fix-impact.js';
+import { draftForPredictedKeyword } from '../agents/lib/analyst-keyword-draft.js';
+import { findDraftByTopic } from '../store/ai-recommendation.js';
+import { buildOutlook, buildFixes, buildProblems, buildShifts, pathKey } from '../agents/lib/analyst-outlook.js';
 
 // Two client-only endpoints for the Analyst page that have no staff
 // equivalent to mirror (see the mirror in routes/dataAnalyst.js for the rest).
@@ -40,6 +46,80 @@ router.get('/analyst/connections', async (req, res, next) => {
     const rows = await getIntegrationHealth(req.siteId);
     const gsc = rows.find((r) => r.integration_id === 'google-oauth');
     res.json({ gscConnected: gsc ? gsc.status === 'ok' : null });
+  } catch (e) { next(e); }
+});
+
+
+// ── Outlook and Fixes subpages ───────────────────────────────────────────────
+// Both read only what the nightly passes already persisted (the Python service's predictions, this
+// app's recommendations, drafts and measured fixes). Neither triggers a run, and both take the site
+// from the session, never from the request.
+
+async function pythonOrNull(path) {
+  try { return await callDataAnalystAgent(path); } catch { return null; }
+}
+
+async function problemContext(siteId, issues) {
+  const [drafts, recPages, measuredIds] = await Promise.all([
+    listRecentDraftsWithPage(siteId),
+    listOpenRecommendationPages(siteId),
+    listMeasuredDraftIds(siteId),
+  ]);
+  const ctx = { drafts, openRecommendationPages: new Set(recPages.map(pathKey)), measuredDraftIds: new Set(measuredIds) };
+  return { drafts, problems: buildProblems(issues, ctx) };
+}
+
+router.get('/analyst/outlook', async (req, res, next) => {
+  try {
+    const [py, issuesRes, runs, rising] = await Promise.all([
+      pythonOrNull(`/clients/${req.siteId}/outlook`),
+      pythonOrNull(`/clients/${req.siteId}/predicted-issues?weeks=1`),
+      getLatestAgentRuns(req.siteId, ['trend-radar']).catch(() => []),
+      listRisingQueries(req.siteId).catch(() => []),
+    ]);
+    const { problems } = await problemContext(req.siteId, issuesRes?.issues || []);
+    const radar = runs.find((r) => r.agent_id === 'trend-radar' && r.status === 'ok');
+    const shifts = buildShifts({ radarTopics: radar?.facts?.topics || [], risingQueries: rising, industry: py?.industry || null });
+    const body = buildOutlook({ py: py || { status: 'not-ready', message: 'The Analyst service is not reachable right now. Try again in a minute.' }, problems, shifts });
+    res.json(body);
+  } catch (e) { next(e); }
+});
+
+router.get('/analyst/fixes', async (req, res, next) => {
+  try {
+    const issuesRes = await pythonOrNull(`/clients/${req.siteId}/predicted-issues?weeks=3`);
+    const { problems, drafts } = await problemContext(req.siteId, issuesRes?.issues || []);
+    const measured = await listMeasuredImpact(req.siteId, 30);
+    res.json(buildFixes({ problems, measured, drafts }));
+  } catch (e) { next(e); }
+});
+
+// Approving a problem that is waiting for a person: the id is the predicted issue, and the draft
+// is looked up server-side so a client can never name some other draft to approve.
+router.post('/analyst/fixes/:id/approve', async (req, res, next) => {
+  try {
+    const issuesRes = await pythonOrNull(`/clients/${req.siteId}/predicted-issues?weeks=3`);
+    const issue = (issuesRes?.issues || []).find((i) => String(i.id) === String(req.params.id));
+    if (!issue) return res.status(404).json({ error: 'That problem was not found.' });
+    const { problems } = await problemContext(req.siteId, [issue]);
+    const p = problems[0];
+    if (p.stage !== 'needs-ok' || !p.draftId) return res.status(409).json({ error: 'There is nothing waiting for your OK on this problem.' });
+    // Loaded here, not at the top: action-center.js drags in most of the app, which this router's
+    // tests (and every request that never approves anything) should not have to pay for.
+    const { approveAndPublishDraft } = await import('./action-center.js');
+    res.json(await approveAndPublishDraft(req.siteId, p.draftId, { userId: req.userId }));
+  } catch (e) { next(e); }
+});
+
+// "Write for it": drafts a post for one of the keywords the Analyst predicts can grow. The keyword is
+// checked against the Analyst's own current list, never taken on trust from the request.
+router.post('/analyst/keywords/write', async (req, res, next) => {
+  try {
+    const py = await pythonOrNull(`/clients/${req.siteId}/outlook`);
+    const { generateDraft } = await import('./action-center.js'); // lazy, same reason as the approve route
+    res.json(await draftForPredictedKeyword(req.siteId, req.body?.keyword, {
+      predicted: py?.keywords || [], findDraftByTopic, generate: generateDraft,
+    }));
   } catch (e) { next(e); }
 });
 

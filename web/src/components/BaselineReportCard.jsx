@@ -32,7 +32,7 @@ export default function BaselineReportCard({ report, siteId, isInternal, onGener
         <div className="px-4 py-8 text-center space-y-3 border-t border-border">
           <p className="text-sm text-text">{report.message}</p>
           {isInternal && siteId && (
-            <Button variant="light" size="sm" onClick={() => api.generateBaselineReport(siteId).then(onGenerated).catch(() => {})}>
+            <Button write variant="light" size="sm" onClick={() => api.generateBaselineReport(siteId).then(onGenerated).catch(() => {})}>
               <Sparkles size={14} /> Generate Now
             </Button>
           )}

@@ -55,6 +55,13 @@ describe('autonomous-quota', () => {
     assert.equal(b.remaining, 5, 'a catch-up/retry/restart resumes the same day, it does not get a fresh one');
   });
 
+  test('few candidates left after a big morning still ship (site cap 60)', () => {
+    const b = laneBudgets({ analyticsCandidates: 25, analystCandidates: 0, siteLimitOverride: 60, spentToday: 30 });
+    assert.equal(b.remaining, 25);
+    const full = laneBudgets({ analyticsCandidates: 500, analystCandidates: 20, siteLimitOverride: 60, spentToday: 30 });
+    assert.equal(full.remaining, 30, 'the cap, not the candidate count, bounds the rest of the day');
+  });
+
   test('the ceiling can never be exceeded by a re-run after a full day', () => {
     const b = laneBudgets({ analyticsCandidates: 500, analystCandidates: 20, spentToday: 100 });
     assert.equal(b.remaining, 0);

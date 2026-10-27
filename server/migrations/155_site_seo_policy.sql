@@ -21,11 +21,13 @@ CREATE TABLE IF NOT EXISTS site_seo_policy (
 -- 2026-09-10 SEO growth rule. Guarded so a future manual edit to this row
 -- isn't clobbered by re-running this migration.
 INSERT INTO site_seo_policy (site_id, target_industries_json, cannibalization_policy, destination_link_policy, no_invented_data)
-VALUES (
+SELECT
   1,
   '["Education", "Healthcare", "Real Estate", "Hospitality", "Agencies"]'::jsonb,
   'Keyword overlap between a blog and the homepage is never treated as cannibalization automatically. Keep valuable ranking content unless there is real evidence it is hurting performance.',
   'Only link to current, live pages on the site. Never link to a removed or obsolete product page.',
   true
-)
+-- Only where the company site exists: a brand-new empty database has no site 1 yet, and the foreign key would
+-- otherwise stop every later migration.
+WHERE EXISTS (SELECT 1 FROM sites WHERE id = 1)
 ON CONFLICT (site_id) DO NOTHING;

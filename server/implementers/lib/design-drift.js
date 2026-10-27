@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { ownPageGuidance } from '../../generators/lib/design-aware-composer.js';
 import { safeMessage } from '../../lib/errors.js';
 import { updateSiteRepoConfig } from '../../db.js';
 import { recordAuditEvent } from '../../store/admin/audit-log.js';
@@ -1795,7 +1796,7 @@ export const NO_MARKUP_GENERATOR_IDS = new Set([
 // any lookup failure) returns `system` completely unchanged, so a
 // generator's output is byte-for-byte the same as before this existed until
 // a real Design Context has been derived.
-export async function withDesignContext(system, generatorId, siteId, { fetchSite = getSiteById } = {}) {
+export async function withDesignContext(system, generatorId, siteId, { fetchSite = getSiteById, pageUrl = null } = {}) {
   if (!generatorId || !siteId || !DESIGN_CONTEXT_GENERATOR_IDS.has(generatorId)) return system;
 
   let site;
@@ -1813,8 +1814,13 @@ export async function withDesignContext(system, generatorId, siteId, { fetchSite
     .map(([type, p]) => `- ${type}: sections in order ${JSON.stringify(p.sectionOrder || [])}${p.notes ? ` — ${p.notes}` : ''}`)
     .join('\n');
 
+  // The page being written for, when the capture recorded it on its own: a site whose pages do not share a
+  // template is not described by its page-type averages.
+  const own = pageUrl ? ownPageGuidance(site, pageUrl) : null;
+
   return `${system}\n\nThis site's real design and voice, derived from its own live pages — write to match it, not a generic style:\n`
     + `- Styling: ${profile.styling || 'unknown'}${profile.framework ? ` (${profile.framework})` : ''}\n`
+    + (own ? `- ${own}\n` : '')
     + (patternNotes ? `- Observed page-type patterns:\n${patternNotes}\n` : '')
     + (profile.evidence?.notes ? `- ${profile.evidence.notes}\n` : '');
 }

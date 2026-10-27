@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from './login.js';
+import { isValidTimezone } from '../util/timezone.js';
+import { normalizeDomain } from '../util/domain.js';
 import { getUserById, getUserByEmail } from '../store/users.js';
 import { createInvitation } from '../store/user-invitations.js';
 import { sendInvitationEmail } from '../report/email.js';
@@ -13,7 +15,7 @@ import {
   WORKSPACE_ROLE_RANK, tenantRoleForWorkspaceRole, effectiveWorkspaceRole, roleAtLeast, decideMemberChange, isPlatformAdmin,
   getWorkspaceById, getMembershipRole, countOwners, listMembers, listPendingInvitations,
   addMember, updateMemberRole, removeMember, inviteHomeSiteId, createProject,
-  createWorkspace, renameWorkspace, siteInWorkspace, validateGoal, setProjectGoal, listGoalsForSites, claimHomeSiteIfNone,
+  createWorkspace, discardNewWorkspace, workspaceHasDomain, renameWorkspace, siteInWorkspace, validateGoal, setProjectGoal, listGoalsForSites, claimHomeSiteIfNone,
   summarizeProjectHealth, listWorkspaceSites, listWorkspaceActivity, describeActivity, listProjectMembersForWorkspace,
 } from '../store/workspaces.js';
 
@@ -50,7 +52,6 @@ function requireWorkspaceRole(minRole) {
 }
 
 const originOf = (req) => `${req.protocol}://${req.get('host')}`;
-const cleanDomain = (d) => (d ? String(d).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '') : null);
 
 // Give one person access to a workspace. A person with an account is added
 // straight away; anyone else is emailed an invitation (which needs a project to
@@ -113,6 +114,9 @@ router.post('/workspaces', requireAuth, async (req, res, next) => {
     const cleanName = String(name || '').trim();
     if (!cleanName) return res.status(400).json({ error: 'name is required.' });
     if (cleanName.length > 120) return res.status(400).json({ error: 'name is too long.' });
+    if (timezone != null && timezone !== '' && !isValidTimezone(timezone)) return res.status(400).json({ error: 'timezone must be a real time zone name such as Asia/Kolkata.' });
+    const domain = normalizeDomain(websiteDomain);
+    if (!domain.ok) return res.status(400).json({ error: domain.error });
     const project = String(projectName || '').trim();
     if (project.length > 120) return res.status(400).json({ error: 'projectName is too long.' });
     const goalCheck = goal ? validateGoal(goal) : null;
@@ -125,27 +129,39 @@ router.post('/workspaces', requireAuth, async (req, res, next) => {
     const platform = isPlatformAdmin(user, companySiteId());
     if (ownerEmail && !platform) return res.status(403).json({ error: 'Only a platform admin can create a workspace for someone else.' });
 
+    // Everything that must exist together is made first; if any step fails the workspace and project made
+    // here are taken back, so a failure never leaves an orphan workspace and a retry never makes a second.
+    // The person's home project is claimed only AFTER this block succeeds, because discarding a project
+    // that is someone's home project would delete the person.
     const workspace = await createWorkspace({ name: cleanName });
-    // The creator owns what they create. A platform admin setting one up for a
-    // client keeps their own support access without a membership row.
-    if (!ownerEmail) await addMember(workspace.id, req.userId, 'owner');
+    let site = null;
+    try {
+      // The creator owns what they create. A platform admin setting one up for a
+      // client keeps their own support access without a membership row.
+      if (!ownerEmail) await addMember(workspace.id, req.userId, 'owner');
+      if (project) {
+        site = await createProject({ workspaceId: workspace.id, name: project, websiteDomain: domain.domain, timezone });
+        if (goalCheck) await setProjectGoal({ siteId: site.id, ...goalCheck.goal, userId: req.userId });
+      }
+    } catch (err) {
+      await discardNewWorkspace({ workspaceId: workspace.id, siteId: site?.id ?? null })
+        .catch((cleanupErr) => console.error(`[workspaces] could not discard workspace ${workspace.id} after a failed create:`, cleanupErr.message));
+      throw err;
+    }
+
     req.workspaceId = workspace.id;
     req.workspaceRole = 'owner';
     await recordAuditEvent(req, {
       action: 'workspace.created', targetType: 'workspace', targetId: String(workspace.id),
       metadata: { workspaceId: workspace.id, name: workspace.name }, success: true,
     });
-
-    let site = null;
-    if (project) {
-      site = await createProject({ workspaceId: workspace.id, name: project, websiteDomain: cleanDomain(websiteDomain), timezone });
+    if (site) {
       await claimHomeSiteIfNone(req.userId, site.id);
       await recordAuditEvent(req, {
         action: 'project.created', targetType: 'site', targetId: String(site.id), tenantSiteId: site.id, tenantName: site.name,
         metadata: { workspaceId: workspace.id, name: site.name, websiteDomain: site.website_domain }, success: true,
       });
       if (goalCheck) {
-        await setProjectGoal({ siteId: site.id, ...goalCheck.goal, userId: req.userId });
         await recordAuditEvent(req, {
           action: 'project.goal_set', targetType: 'site', targetId: String(site.id), tenantSiteId: site.id, tenantName: site.name,
           metadata: { workspaceId: workspace.id, goal: goalCheck.goal.goal }, success: true,
@@ -230,12 +246,25 @@ router.post('/workspaces/:id/projects', requireAuth, requireWorkspaceRole('admin
     const cleanName = String(name || '').trim();
     if (!cleanName) return res.status(400).json({ error: 'name is required.' });
     if (cleanName.length > 120) return res.status(400).json({ error: 'name is too long.' });
+    if (timezone != null && timezone !== '' && !isValidTimezone(timezone)) return res.status(400).json({ error: 'timezone must be a real time zone name such as Asia/Kolkata.' });
+    const domain = normalizeDomain(websiteDomain);
+    if (!domain.ok) return res.status(400).json({ error: domain.error });
     const goalCheck = goal ? validateGoal(goal) : null;
     if (goalCheck && !goalCheck.ok) return res.status(400).json({ error: goalCheck.reason });
 
-    const site = await createProject({
-      workspaceId: req.workspaceId, name: cleanName, websiteDomain: cleanDomain(websiteDomain), timezone,
-    });
+    if (await workspaceHasDomain(req.workspaceId, domain.domain)) {
+      return res.status(409).json({ error: 'This website is already a project in this workspace.', code: 'DOMAIN_EXISTS' });
+    }
+    let site;
+    try {
+      site = await createProject({ workspaceId: req.workspaceId, name: cleanName, websiteDomain: domain.domain, timezone });
+    } catch (err) {
+      // The unique index (migration 210): this website is already a project here.
+      if (err?.code === '23505' && err?.constraint === 'sites_workspace_domain_unique') {
+        return res.status(409).json({ error: 'This website is already a project in this workspace.', code: 'DOMAIN_EXISTS' });
+      }
+      throw err;
+    }
     // A new account has no home site yet (migration 198); its first project becomes it.
     await claimHomeSiteIfNone(req.userId, site.id);
     await recordAuditEvent(req, {

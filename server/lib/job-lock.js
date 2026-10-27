@@ -85,3 +85,11 @@ export async function withJobLock(jobKey, fn, { leaseMs = LEASE_MS, heartbeatMs 
     });
   }
 }
+
+// Is this job running right now (a lease that has not expired)? For screens that
+// want to show "already running" instead of starting a second copy. Read-only.
+export async function jobLockInfo(jobKey) {
+  const { rows } = await query(
+    'SELECT acquired_at, heartbeat_at FROM job_locks WHERE job_key = $1 AND expires_at > now()', [jobKey]);
+  return rows[0] || null;
+}

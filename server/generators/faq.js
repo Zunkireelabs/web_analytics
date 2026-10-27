@@ -141,7 +141,7 @@ export async function generate({ siteId, params }) {
   // page uses) informs the generated Q&A set. The actual accordion/list
   // MARKUP still comes from componentTemplates' projectFaq at render time —
   // this only shapes the CONTENT decision, not the styling.
-  const structureGuidance = pageStructureGuidance(site, 'faq');
+  const structureGuidance = pageStructureGuidance(site, 'faq', { pageUrl: page });
   // 'product' only. An FAQ answer is the one place a verified feature,
   // pricing or flow fact is directly useful; the goals and ICP sections
   // would be prompt weight this generator cannot spend on anything.

@@ -6,6 +6,10 @@ import { fileURLToPath } from 'node:url';
 import 'dotenv/config';
 import { getProjectGoogleAuth } from './project-google.js';
 
+// Every googleapis request (Search Console, Docs, Drive) gets a time limit: with none, one
+// stuck connection could hold a site's run, and the all-sites lock behind it, indefinitely.
+google.options({ timeout: Number(process.env.GOOGLE_API_TIMEOUT_MS) || 60_000 });
+
 // Scopes: read-only for GA4, full read/write for Search Console (sitemap
 // resubmission needs write — see submitSitemap in server/ingest/gsc-technical.js),
 // plus Docs write for the weekly report doc.

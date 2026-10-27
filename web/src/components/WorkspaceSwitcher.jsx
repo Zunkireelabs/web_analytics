@@ -37,6 +37,9 @@ export default function WorkspaceSwitcher({ currentSite, siteId, onSwitch }) {
   // Load on first open and again on every later open, so a project added or a
   // membership removed since the last look is reflected.
   useEffect(() => { if (open) load(); else setQuery(''); }, [open]);
+  // Before the first project there is no active project to show, so the card shows the workspace.
+  useEffect(() => { if (!currentSite) load(); }, [currentSite]);
+  const emptyWorkspace = !currentSite ? workspaces?.[0] : null;
 
   useEffect(() => {
     if (!open) return;
@@ -91,14 +94,16 @@ export default function WorkspaceSwitcher({ currentSite, siteId, onSwitch }) {
         style={{ boxShadow: 'var(--ring)' }}>
         {currentSite?.logo_data_url ? (
           <img src={currentSite.logo_data_url} alt="" className="w-6 h-6 rounded-[7px] object-contain shrink-0" />
+        ) : emptyWorkspace ? (
+          <span className="w-6 h-6 rounded-[7px] bg-fg text-white grid place-items-center shrink-0"><Building2 size={13} /></span>
         ) : (
           <span className="w-6 h-6 rounded-[7px] bg-primary text-white text-[10px] font-medium grid place-items-center shrink-0">
             {siteInitials(currentSite?.name)}
           </span>
         )}
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-fg truncate">{currentSite?.name || 'No site'}</div>
-          <div className="text-xs text-faint truncate">{siteDomain(currentSite)}</div>
+          <div className="text-sm font-medium text-fg truncate">{currentSite?.name || emptyWorkspace?.name || 'No site'}</div>
+          <div className="text-xs text-faint truncate">{emptyWorkspace ? 'No project yet' : siteDomain(currentSite)}</div>
         </div>
         <ChevronsUpDown size={14} className="text-faint shrink-0" aria-hidden />
       </button>

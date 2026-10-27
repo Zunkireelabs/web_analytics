@@ -161,7 +161,7 @@ export default function NotificationBell({ isPlatformAdmin = false }) {
             <div>
               <p className="px-4 pt-3 pb-1 text-[11px] font-medium uppercase tracking-[.08em] text-faint">Needs your approval</p>
               {signups.map((r) => (
-                <button key={`signup-${r.id}`} type="button" onClick={() => { setOpen(false); navigate('/clients'); }}
+                <button key={`signup-${r.id}`} type="button" onClick={() => { setOpen(false); navigate('/account?scope=platform'); }}
                   className="w-full text-left px-4 py-3 border-b border-border flex gap-2.5 hover:bg-[#fafafa] bg-primary-tint/40">
                   <span className="w-6 h-6 rounded-control bg-primary-tint text-primary grid place-items-center shrink-0 mt-0.5"
                     style={{ boxShadow: 'inset 0 0 0 1px var(--primary-ring)' }}><UserPlus size={13} /></span>

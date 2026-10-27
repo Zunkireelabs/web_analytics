@@ -1,9 +1,8 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { api, daysAgo, timeAgo } from '../api.js';
 import DraftModal from '../components/DraftModal.jsx';
-import PageToolbar from '../components/PageToolbar.jsx';
 import PageIntro from '../components/layout/PageIntro.jsx';
 import KpiStrip from '../components/layout/KpiStrip.jsx';
 import Section from '../components/layout/Section.jsx';
@@ -91,10 +90,11 @@ function pagePathFor(url) {
 // every content-gap finding used to read as the same "Cover this topic")
 // — built entirely from fields the recommendations feed already returns
 // (item.params.query/.topic/.page), no backend change needed.
-function titleFor(item) {
+function titleFor(item, { bare = false } = {}) {
   const topic = item.params?.query || item.params?.topic;
   if (topic && (item.generatorId === 'blog-outline' || item.generatorId === 'direct-answer')) {
-    return `${topic} — ${item.tag}`;
+    // bare: just the topic, for the Content page, where the group header already names the kind of idea.
+    return bare ? topic : `${topic} — ${item.tag}`;
   }
   if (item.params?.page) {
     const path = pagePathFor(item.params.page);
@@ -273,6 +273,7 @@ function DraftStepper({ status }) {
 export default function ActionCenter({ scope }) {
   const isContent = scope === 'content';
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   // Set only when a platform_admin arrived here via a cross-client deep link
   // (e.g. the Analyst's "Send to Action Center" — see AnalystGrowthOpportunities.jsx
   // / AnalystMetricIntelligence.jsx). Undefined for every normal session, in
@@ -392,15 +393,30 @@ export default function ActionCenter({ scope }) {
   // doesn't re-trigger it.
   useEffect(() => {
     const openId = searchParams.get('openDraft');
-    if (!openId || drafts === null) return;
-    const target = drafts.find((d) => String(d.id) === openId);
-    if (target) {
-      setTab(target.status === 'implemented' ? 'implemented' : 'drafts');
-      setSelectedDraftItem(target);
-      setActiveDraft(target);
-    }
-    setSearchParams((p) => { p.delete('openDraft'); return p; }, { replace: true });
-  }, [drafts, searchParams]);
+    if (!openId) return undefined;
+    let cancelled = false;
+    // Looked up on its own rather than waiting for the board's list: the board is filtered to this page's own
+    // kind of draft (fixes here, writing on Content), and a link can point at either. The link is stripped
+    // once handled so refreshing or switching tabs does not re-trigger it.
+    api.actionCenter.drafts({}, siteId)
+      .then((all) => {
+        if (cancelled) return;
+        const target = (all || []).find((d) => String(d.id) === openId);
+        if (target && !inDraftScope(target.action_type, scope)) {
+          // A writing draft opened from the Action Center (or the reverse): send it to the page that shows it.
+          navigate(`${scope === 'content' ? '/action-center' : '/content'}?openDraft=${openId}`, { replace: true });
+          return;
+        }
+        if (target) {
+          setTab(target.status === 'implemented' ? 'implemented' : 'drafts');
+          setSelectedDraftItem(target);
+          setActiveDraft(target);
+        }
+        setSearchParams((p) => { p.delete('openDraft'); return p; }, { replace: true });
+      })
+      .catch(() => { if (!cancelled) setSearchParams((p) => { p.delete('openDraft'); return p; }, { replace: true }); });
+    return () => { cancelled = true; };
+  }, [searchParams, siteId, scope]);
 
   // Implemented drafts belong on the Implemented tab only, and abandoned
   // ones (a PR closed without merging, or a leftover superseded by another
@@ -728,7 +744,7 @@ export default function ActionCenter({ scope }) {
   const introTitle = tab === 'recommendations'
     ? (recs === null ? (isContent ? 'Loading content ideas…' : 'Loading recommendations…')
       : isContent
-        ? (highPriorityCount > 0 ? `${highPriorityCount} high-priority content ideas are waiting` : 'No high-priority content ideas right now')
+        ? (highPriorityCount > 0 ? `${highPriorityCount} high-priority content ${plural(highPriorityCount, 'idea is', 'ideas are')} waiting` : 'No high-priority content ideas right now')
         : (kindCount('security') > 0 ? `${kindCount('security')} security ${plural(kindCount('security'), 'issue needs', 'issues need')} attention`
           : highPriorityCount > 0 ? `${highPriorityCount} critical ${plural(highPriorityCount, 'issue needs', 'issues need')} attention` : 'No critical issues right now'))
     : tab === 'drafts'
@@ -738,7 +754,7 @@ export default function ActionCenter({ scope }) {
       : `${implementedThisWeekCount} ${isContent ? 'piece' : 'change'}${implementedThisWeekCount === 1 ? '' : 's'} shipped this week`;
   const introSubtitle = tab === 'recommendations'
     ? (isContent
-      ? `${recs?.items.length ?? 0} content ideas from your agents. Content is always reviewed by a person: generate a draft, read it, then approve it.`
+      ? `${recs?.items.length ?? 0} content ${plural(recs?.items.length ?? 0, 'idea', 'ideas')} from your agents. Pick one to have it written, read the draft, then approve it. Nothing goes live without you.`
       : `${recs?.items.length ?? 0} recommendations from your agents. ${safeEligibleCount} are safe to ship automatically; review the rest before they go to staging.`)
     : tab === 'drafts'
       ? 'Review each draft, then approve it to push a branch and open a pull request.'
@@ -746,9 +762,9 @@ export default function ActionCenter({ scope }) {
 
   const kpis = isContent ? [
     { label: 'Recommendations', value: recs?.items.length ?? 0, sub: `across ${Object.keys(grouped).length} categories` },
-    { label: 'High priority', value: highPriorityCount, sub: 'fix these first' },
-    { label: 'Needs review', value: pendingApprovalCount, sub: 'drafts waiting on a person' },
-    { label: 'Auto-eligible', value: safeEligibleCount, sub: 'safe to ship automatically' },
+    { label: 'High priority', value: highPriorityCount, sub: 'write these first' },
+    { label: 'Needs review', value: pendingApprovalCount, sub: 'drafts waiting on you' },
+    { label: 'Published this week', value: implementedThisWeekCount, sub: 'approved and live' },
   ] : [
     { label: 'Security issues', value: kindCount('security'), sub: kindCritical('security') ? `${kindCritical('security')} critical` : 'none critical' },
     { label: 'Fixes', value: kindCount('fixes'), sub: kindCritical('fixes') ? `${kindCritical('fixes')} critical` : 'on-page and technical' },
@@ -779,7 +795,7 @@ export default function ActionCenter({ scope }) {
       return <Badge tone={blue ? 'outline' : 'amber'} className="shrink-0">{detailed ? meta.badge : blue ? 'In progress' : 'Blocked'}</Badge>;
     }
     if (item.riskTier === 'safe') return <Badge tone="green" className="shrink-0">{detailed ? 'Safe · auto-eligible' : 'Safe'}</Badge>;
-    return detailed ? <Badge tone="amber" className="shrink-0">Manual review required</Badge> : null;
+    return detailed && !isContent ? <Badge tone="amber" className="shrink-0">Manual review required</Badge> : null;
   };
 
   const priorityTone = { high: 'red', medium: 'amber', low: 'grey' };
@@ -895,14 +911,14 @@ export default function ActionCenter({ scope }) {
     </>
   );
   const detailsPanel = (
-        <div ref={detailsRef} className="min-w-0 lg:sticky lg:top-[72px] scroll-mt-20">
+        <div ref={detailsRef} className="min-w-0 lg:sticky lg:top-[72px] scroll-mt-20 h-full [&>section]:h-full [&>section>.tray]:h-full [&>section>.tray>.tray-card]:h-full">
           {tab === 'recommendations' && (
             <Section tray title="Details" subtitle="The selected recommendation">
               <div className="border-t border-border">
                 {sel ? (
                   <>
                     <div className="px-4 py-3 border-b border-border">
-                      <h3 className="text-[15px] font-medium tracking-[-0.01em] text-fg break-words">{titleFor(sel)}</h3>
+                      <h3 className="text-[15px] font-medium tracking-[-0.01em] text-fg break-words">{titleFor(sel, { bare: isContent })}</h3>
                       <div className="flex flex-wrap gap-1.5 mt-2.5">
                         {stateBadge(sel, true)}
                         {BUCKET_META[sel.bucket] && <Badge tone="outline">{BUCKET_META[sel.bucket].label}</Badge>}
@@ -911,16 +927,18 @@ export default function ActionCenter({ scope }) {
                     </div>
 
                     <dl>
-                      <Fact label="Goal">
-                        {alignment ? (
-                          <>
-                            <span className="font-medium">{alignment.label}</span>
-                            <span className="block text-text mt-0.5">{sel.goalAlignment.rationale}</span>
-                          </>
-                        ) : (
-                          <span className="text-faint">Not tied to an active business goal</span>
-                        )}
-                      </Fact>
+                      {(alignment || !isContent) && (
+                        <Fact label="Goal">
+                          {alignment ? (
+                            <>
+                              <span className="font-medium">{alignment.label}</span>
+                              <span className="block text-text mt-0.5">{sel.goalAlignment.rationale}</span>
+                            </>
+                          ) : (
+                            <span className="text-faint">Not tied to an active business goal</span>
+                          )}
+                        </Fact>
+                      )}
                       <Fact label="Found by">{sel.agentName || activeMeta?.label || 'Website Check'}</Fact>
                       <Fact label="Reason">{sel.reason}</Fact>
                       {sel.params.page && <Fact label="Page"><span className="font-mono text-[13px] break-all">{sel.params.page}</span></Fact>}
@@ -1036,7 +1054,7 @@ export default function ActionCenter({ scope }) {
                           {sel.riskTier === 'safe' ? (
                             <><Zap size={14} /> {shippingId === sel.id ? 'Shipping…' : 'Approve & ship'}</>
                           ) : (
-                            generatingId === sel.id ? 'Drafting fix…' : 'Generate solution draft'
+                            generatingId === sel.id ? (isContent ? 'Writing…' : 'Drafting fix…') : (isContent ? 'Write this draft' : 'Generate solution draft')
                           )}
                         </Button>
                       )}
@@ -1335,7 +1353,15 @@ export default function ActionCenter({ scope }) {
 
   return (
     <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12">
-      <PageToolbar>
+
+      <PageIntro title={introTitle} subtitle={(tab === 'recommendations' ? recs !== null : drafts !== null) ? introSubtitle : null} />
+
+      {banners}
+
+      <KpiStrip items={kpis} loading={recs === null} />
+
+      {/* The controls sit right above the list they filter, not in a strip at the top of the page. */}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         <SegmentedTabs options={tabOptions} value={tab} onChange={setTab} />
         {tab === 'recommendations' && recs && (
           // Source filter — purely a display filter over the same
@@ -1343,13 +1369,17 @@ export default function ActionCenter({ scope }) {
           // below is untouched.
           <SegmentedTabs options={SOURCE_FILTERS} value={sourceFilter} onChange={setSourceFilter} />
         )}
-        <div className="flex items-center gap-2 w-full md:w-auto">
-          <input type="date" value={range.start} onChange={(e) => setRange((r) => ({ ...r, start: e.target.value }))}
-            className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="Start date" />
-          <span className="text-faint shrink-0">→</span>
-          <input type="date" value={range.end} onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))}
-            className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="End date" />
-        </div>
+        {/* The date range is tucked behind a button, as on the Action Center, so the toolbar is not a wall of controls. */}
+        <Button variant="light" aria-expanded={showRange} onClick={() => setShowRange((v) => !v)}>Date range</Button>
+        {showRange && (
+          <div className="flex items-center gap-2 w-full md:w-auto">
+            <input type="date" value={range.start} onChange={(e) => setRange((r) => ({ ...r, start: e.target.value }))}
+              className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="Start date" />
+            <span className="text-faint shrink-0">→</span>
+            <input type="date" value={range.end} onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))}
+              className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="End date" />
+          </div>
+        )}
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {/* Live "today" counters — distinct from the Run button's live
               eligible-count: that's "how many could ship right now," this is
@@ -1379,20 +1409,14 @@ export default function ActionCenter({ scope }) {
             </Button>
           )}
         </div>
-      </PageToolbar>
+      </div>
 
-      <PageIntro title={introTitle} subtitle={(tab === 'recommendations' ? recs !== null : drafts !== null) ? introSubtitle : null} />
-
-      {banners}
-
-      <KpiStrip items={kpis} loading={recs === null} />
-
-      <div className="grid gap-3 lg:grid-cols-[1.3fr_1fr] items-start mt-3">
+      <div className="grid gap-3 lg:grid-cols-[1.3fr_1fr] items-stretch mt-3">
         {/* ============ LEFT: lists ============ */}
         {tab === 'recommendations' && (
-          <Section tray className="min-w-0" title={isContent ? 'Recommendations' : 'Issues and fixes'}
-            subtitle={isContent ? 'Grouped by category · open a group to see its fixes' : 'Security issues first · open a group to see what is in it'}>
-            <div className="border-t border-border">
+          <Section tray className="min-w-0 h-full [&>.tray]:h-full [&>.tray>.tray-card]:h-full" title={isContent ? 'Recommendations' : 'Issues and fixes'}
+            subtitle={isContent ? 'Grouped by kind · open a group to see its ideas' : 'Security issues first · open a group to see what is in it'}>
+            <div className="border-t border-border lg:max-h-[600px] lg:overflow-y-auto">
               {recs === null ? (
                 Array.from({ length: 6 }).map((_, i) => (
                   <div key={i} className="px-4 py-3 border-b border-border last:border-0"><div className="h-4 bg-muted rounded-control animate-pulse" /></div>
@@ -1410,7 +1434,7 @@ export default function ActionCenter({ scope }) {
                   return (
                     <div key={category}>
                       <button type="button" aria-expanded={open} onClick={() => setActiveCategory(category)}
-                        className="w-full flex items-center gap-2.5 px-4 py-3 border-b border-border text-sm text-left"
+                        className="w-full flex items-center gap-2.5 px-4 py-2 border-b border-border text-[13px] text-left"
                         style={kind?.danger && items.length ? { boxShadow: `inset 3px 0 0 ${STATUS.critical.color}` } : undefined}>
                         <ChevronRight size={12} className={`text-faint shrink-0 transition-transform ${open ? 'rotate-90' : ''}`} />
                         {KindIcon && (
@@ -1444,18 +1468,18 @@ export default function ActionCenter({ scope }) {
                               return (
                                 <button key={item.id} type="button" onClick={() => pickRecommendation(item)}
                                   aria-current={selected ? 'true' : undefined}
-                                  className={`${rowCls(selected)} pl-10 pr-4 py-2.5`} style={rowRing(selected)}>
+                                  className={`${rowCls(selected)} pl-10 pr-3 py-1.5`} style={rowRing(selected)}>
                                   <span className="flex items-end gap-[2px] shrink-0" aria-label={`${item.priority || 'low'} priority`} role="img">
                                     {[5, 8, 12].map((h, k) => (
                                       <i key={k} className="block w-[3px] rounded-[1px]" style={{ height: h, background: k < level ? 'var(--fg)' : '#d4d4d4' }} />
                                     ))}
                                   </span>
                                   <span className="min-w-0 flex-1">
-                                    <span className="block text-sm font-medium text-fg truncate">{titleFor(item)}</span>
-                                    <span className="block text-xs text-faint truncate mt-px">{item.reason}</span>
+                                    <span className="block text-[13px] leading-[18px] font-medium text-fg truncate">{titleFor(item, { bare: isContent })}</span>
+                                    <span className="block text-[11px] leading-[15px] text-faint truncate">{item.reason}</span>
                                   </span>
                                   {stateBadge(item, false)}
-                                  {BUCKET_META[item.bucket] && <Badge tone="outline" className="shrink-0">{BUCKET_META[item.bucket].label}</Badge>}
+                                  {BUCKET_META[item.bucket] && <Badge tone="outline" className="shrink-0 !text-[11px] !h-5 !px-1.5">{BUCKET_META[item.bucket].label}</Badge>}
                                   {path && (
                                     <span className="hidden md:inline text-xs text-text px-2 py-0.5 rounded-[6px] max-w-[180px] truncate"
                                       style={{ boxShadow: 'inset 0 0 0 1px var(--border-2)' }}>{path}</span>
@@ -1482,7 +1506,7 @@ export default function ActionCenter({ scope }) {
         )}
 
         {tab === 'drafts' && (
-          <Section tray className="min-w-0" title="Drafts" subtitle="Generated fixes moving towards your site">
+          <Section tray className="min-w-0 h-full [&>.tray]:h-full [&>.tray>.tray-card]:h-full" title="Drafts" subtitle="Generated fixes moving towards your site">
             <div className="border-t border-border">
               {nonImplementedDrafts && nonImplementedDrafts.length > 0 && (
                 <div className="px-4 py-2.5 border-b border-border overflow-x-auto no-scrollbar">
@@ -1520,7 +1544,7 @@ export default function ActionCenter({ scope }) {
         )}
 
         {tab === 'implemented' && (
-          <Section tray className="min-w-0" title="Shipped" subtitle="Newest first">
+          <Section tray className="min-w-0 h-full [&>.tray]:h-full [&>.tray>.tray-card]:h-full" title="Shipped" subtitle="Newest first">
             <div className="border-t border-border">
               {drafts === null ? (
                 <div className="py-10 text-center text-sm text-faint">Loading history…</div>

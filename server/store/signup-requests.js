@@ -5,11 +5,11 @@ import { query, pool } from '../db.js';
 // that only becomes a real sites/users row once staff approves it (see
 // server/routes/clients.js's approve/reject routes).
 
-export async function createSignupRequest({ companyName, websiteDomain, contactEmail, passwordHash, message }) {
+export async function createSignupRequest({ companyName, websiteDomain, contactEmail, passwordHash, message, fullName, role, heardFrom, termsAccepted }) {
   const { rows } = await query(
-    `INSERT INTO signup_requests (company_name, website_domain, contact_email, password_hash, message)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-    [companyName, websiteDomain || null, contactEmail, passwordHash, message || null]
+    `INSERT INTO signup_requests (company_name, website_domain, contact_email, password_hash, message, full_name, role, heard_from, terms_accepted_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CASE WHEN $9::boolean THEN now() END) RETURNING *`,
+    [companyName, websiteDomain || null, contactEmail, passwordHash, message || null, fullName || null, role || null, heardFrom || null, !!termsAccepted]
   );
   return rows[0];
 }
@@ -97,11 +97,45 @@ export async function peekVerificationToken(token) {
   return { id: r.id, companyName: r.company_name, email: r.contact_email, expired: new Date(r.verify_expires_at) <= new Date() };
 }
 
+// What the "Sign in" button in the approval email needs: the address and the password hash that was
+// stored at sign-up, so the sign-in page can check the typed password BEFORE the link is used up
+// (a mistyped password must not burn the link). Never returned to a browser.
+export async function getActivationRequest(token) {
+  if (!token) return null;
+  const { rows } = await query(
+    `SELECT id, company_name, contact_email, password_hash, verify_expires_at
+       FROM signup_requests
+      WHERE verify_token_hash = $1 AND status = 'approved' AND verified_at IS NULL`,
+    [hashVerifyToken(token)]);
+  const r = rows[0];
+  if (!r || new Date(r.verify_expires_at) <= new Date()) return null;
+  return { passwordHash: r.password_hash, email: r.contact_email, companyName: r.company_name };
+}
+
+// Is there already a request for this address that has not been finished (waiting for review, or
+// approved but the link not used)? Used to answer a repeat sign-up the same as a first one without
+// creating a second row or mailing staff again. The address is compared lower-cased and trimmed.
+export async function hasOpenSignupRequest(email) {
+  const { rows } = await query(
+    `SELECT 1 FROM signup_requests
+      WHERE lower(contact_email) = $1 AND (status = 'pending' OR (status = 'approved' AND verified_at IS NULL)) LIMIT 1`,
+    [String(email || '').trim().toLowerCase()]);
+  return rows.length > 0;
+}
+
+// The company a person named when they asked for an account, so their workspace name can start as
+// that. Most recent request for the address; null when there is none.
+export async function getCompanyNameForEmail(email) {
+  const { rows } = await query(
+    `SELECT company_name FROM signup_requests WHERE contact_email = $1 ORDER BY created_at DESC LIMIT 1`, [String(email || '').toLowerCase()]);
+  return rows[0]?.company_name || null;
+}
+
 // Uses the token: in ONE transaction, claim the request (single use: verified_at is set only if
 // it was still null and the link has not expired) and create the login from the password hash
 // stored at sign-up. Either both happen or neither, so a failure cannot leave a used link with
 // no account behind. Returns { ok:true, user } or { ok:false, reason }.
-export async function consumeVerificationToken(token) {
+export async function consumeVerificationToken(token, { passwordHash = null } = {}) {
   if (!token) return { ok: false, reason: 'invalid' };
   const client = await pool.connect();
   try {
@@ -109,7 +143,7 @@ export async function consumeVerificationToken(token) {
     const { rows } = await client.query(
       `UPDATE signup_requests SET verified_at = now(), verify_token_hash = NULL
         WHERE verify_token_hash = $1 AND status = 'approved' AND verified_at IS NULL AND verify_expires_at > now()
-        RETURNING id, company_name, contact_email, password_hash`,
+        RETURNING id, company_name, contact_email, password_hash, full_name`,
       [hashVerifyToken(token)]);
     const req = rows[0];
     if (!req) { await client.query('ROLLBACK'); return { ok: false, reason: 'invalid' }; }
@@ -119,8 +153,8 @@ export async function consumeVerificationToken(token) {
 
     // site_id NULL: a login with no project yet (migration 198). They create their own.
     const created = await client.query(
-      `INSERT INTO users (site_id, email, password_hash, role) VALUES (NULL, $1, $2, 'tenant_admin') RETURNING id, email`,
-      [req.contact_email, req.password_hash]);
+      `INSERT INTO users (site_id, email, password_hash, role, display_name) VALUES (NULL, $1, $2, 'tenant_admin', $3) RETURNING id, email`,
+      [req.contact_email, passwordHash || req.password_hash, req.full_name || null]);
     await client.query('UPDATE signup_requests SET user_id = $2 WHERE id = $1', [req.id, created.rows[0].id]);
     await client.query('COMMIT');
     return { ok: true, user: created.rows[0], companyName: req.company_name, requestId: req.id };

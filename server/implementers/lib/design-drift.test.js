@@ -1866,6 +1866,15 @@ describe('withDesignContext — the shared design-intelligence layer\'s system-p
   };
   const siteWith = (profile) => ({ id: 1, url_file_map: { siteRoot: { designProfile: profile } } });
 
+  test('a page the capture recorded on its own is described by its own sections', async () => {
+    const profile = { ...USABLE_PROFILE, pages: [{ url: 'https://x.test/packages/', pageType: 'other', sections: [{ role: 'hero', width: 'wide', spacing: { after: 56 } }, { role: 'cards', components: [{ type: 'card' }] }] }] };
+    const out = await withDesignContext('SYSTEM', 'faq', 1, { fetchSite: async () => siteWith(profile), pageUrl: 'https://x.test/packages' });
+    assert.match(out, /This exact page \(\/packages\)/);
+    assert.match(out, /hero wide 56px below -> cards with card/);
+    const other = await withDesignContext('SYSTEM', 'faq', 1, { fetchSite: async () => siteWith(profile), pageUrl: 'https://x.test/elsewhere' });
+    assert.doesNotMatch(other, /This exact page/);
+  });
+
   test('a generatorId outside the website-facing set is left completely untouched — never even fetches the site', async () => {
     let touched = false;
     const out = await withDesignContext('SYSTEM', 'meta-title', 1, { fetchSite: async () => { touched = true; return siteWith(USABLE_PROFILE); } });

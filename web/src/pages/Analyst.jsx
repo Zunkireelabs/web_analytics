@@ -1,69 +1,79 @@
-import { useEffect, useRef, useState } from 'react';
-import { AlertTriangle } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, SELF } from '../api.js';
-import AnalystBriefing from '../components/AnalystBriefing.jsx';
-import AnalystGrowthOutlook from '../components/AnalystGrowthOutlook.jsx';
-import AnalystMetricIntelligence from '../components/AnalystMetricIntelligence.jsx';
-import AnalystSkeletonLoader from '../components/AnalystSkeletonLoader.jsx';
-import AnalystChatDrawer from '../components/AnalystChatDrawer.jsx';
 import PageIntro from '../components/layout/PageIntro.jsx';
-import Button from '../components/Button.jsx';
-import { STATUS } from '../lib/palette.js';
+import UnderlineTabs from '../components/settings/UnderlineTabs.jsx';
+import AnalystChatDrawer from '../components/AnalystChatDrawer.jsx';
+import OutlookTab from '../components/analyst/OutlookTab.jsx';
+import FixesTab from '../components/analyst/FixesTab.jsx';
+import Badge from '../components/Badge.jsx';
+import { fixesBadge } from '../lib/analyst-view.js';
 
-// Analyst: what is growing, what is about to change, and what the AI found, for THIS project. Every
-// client has their own (the workspace switcher changes the project; a platform admin switched into a
-// client's project sees that client's). It used to be a staff-only page with a client picker, and its
-// keyword sections now live on the Keywords page.
-//
-// The page reads top to bottom as one decision flow, future first:
-//   1. Briefing: one AI-written paragraph orienting the reader.
-//   2. Growth outlook: what is happening, and what is predicted next, per forecastable metric.
-//   3. What AI found: one card per declining metric: the problem, why, how sure, and the fix, with
-//      "Send to Action Center" right on the card.
-//
-// A platform admin also keeps the staff Admin Assistant here (the cross-client analyst chat), pointed at the
-// project they are switched into. Clients use the app-wide Agent panel like on every other page.
+// Analyst: what the AI expects next week, and what it is already fixing, for THIS project. Two subpages:
+//   Outlook: next week's clicks and impressions as a range, keywords that can grow, what is shifting.
+//   Fixes:   problems from predicted to fixed, and what each fix really did once it was measured.
+// Every client has their own (the workspace switcher changes the project). A platform admin also keeps the staff
+// Admin Assistant here, pointed at the project they are switched into, and sees what the shared model has learned.
 export default function Analyst({ siteId, isPlatformAdmin = false }) {
-  const [dashboard, setDashboard] = useState(null);
-  const [error, setError] = useState(null);
-  // Only the newest request may commit its result, so a slow earlier response can never overwrite a newer one.
-  const requestRef = useRef(0);
+  const [params, setParams] = useSearchParams();
+  const tab = params.get('tab') === 'fixes' ? 'fixes' : 'outlook';
+  const setTab = (t) => setParams(t === 'fixes' ? { tab: 'fixes' } : {}, { replace: true });
 
-  const load = () => {
-    const requestId = ++requestRef.current;
-    api.analyst.dashboard(SELF)
-      .then((d) => { if (requestRef.current === requestId) setDashboard(d); })
-      .catch((e) => { if (requestRef.current === requestId) setError(e.message || 'Failed to load the analyst dashboard'); });
-  };
-  useEffect(() => { load(); }, []);
+  const [outlook, setOutlook] = useState(null);      // null = loading
+  const [fixes, setFixes] = useState(null);
+  const [outlookError, setOutlookError] = useState(null);
+  const [fixesError, setFixesError] = useState(null);
+  const [approving, setApproving] = useState(false);
+  const [dashboard, setDashboard] = useState(null);  // only the staff chat drawer needs it
+  // Only the newest request may commit, so a slow earlier response never overwrites a newer one.
+  const outlookReq = useRef(0), fixesReq = useRef(0);
+
+  const loadOutlook = useCallback(() => {
+    const id = ++outlookReq.current;
+    setOutlookError(null);
+    api.analyst.outlook()
+      .then((d) => { if (outlookReq.current === id) setOutlook(d); })
+      .catch((e) => { if (outlookReq.current === id) setOutlookError(e.message || 'Could not load the outlook'); });
+  }, []);
+  // keepError: the refresh that follows a FAILED approval must not wipe the message that explains the failure.
+  const loadFixes = useCallback(({ keepError = false } = {}) => {
+    const id = ++fixesReq.current;
+    if (!keepError) setFixesError(null);
+    api.analyst.fixes()
+      .then((d) => { if (fixesReq.current === id) setFixes(d); })
+      .catch((e) => { if (fixesReq.current === id) setFixesError(e.message || 'Could not load the fixes'); });
+  }, []);
+
+  // Both load up front so the Fixes tab badge is right before it is opened.
+  useEffect(() => { loadOutlook(); loadFixes(); }, [loadOutlook, loadFixes]);
+  useEffect(() => {
+    if (!(isPlatformAdmin && siteId)) return;
+    api.analyst.dashboard(SELF).then(setDashboard).catch(() => {});
+  }, [isPlatformAdmin, siteId]);
+
+  async function approve(id) {
+    setApproving(true);
+    let failed = false;
+    try { await api.analyst.approveFix(id); } catch (e) { failed = true; setFixesError(e.message || 'Could not approve that fix'); }
+    finally { setApproving(false); loadFixes({ keepError: failed }); loadOutlook(); }
+  }
+
+  const badge = fixesBadge(fixes?.counts);
+  const tabs = [
+    { key: 'outlook', label: 'Outlook' },
+    { key: 'fixes', label: badge ? <>Fixes <Badge tone="red">{badge}</Badge></> : 'Fixes' },
+  ];
 
   return (
     <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12 fade-up">
-      <PageIntro title="Analyst" subtitle="What's growing, what's about to change, and what the AI found" />
+      <PageIntro title="Analyst" subtitle="What the AI expects next week, and what it is already fixing" />
+      <div className="-mt-2 mb-4"><UnderlineTabs tabs={tabs} value={tab} onChange={setTab} /></div>
 
-      {error ? (
-        <div className="rounded-card px-4 py-3 text-[13px] flex items-center justify-between gap-3"
-          style={{ background: STATUS.critical.tint, color: STATUS.critical.text }}>
-          <div className="flex items-center gap-2 min-w-0">
-            <AlertTriangle size={16} className="shrink-0" />
-            <span>{error}</span>
-          </div>
-          <Button variant="light" size="sm" className="shrink-0" onClick={() => { setError(null); load(); }}>Retry</Button>
-        </div>
+      {tab === 'outlook' ? (
+        <OutlookTab outlook={outlook} loading={outlook === null && !outlookError} error={outlookError} onRetry={loadOutlook}
+          onSeeFixes={() => setTab('fixes')} isPlatformAdmin={isPlatformAdmin} />
       ) : (
-        <div className="space-y-3">
-          <AnalystBriefing clientId={SELF} />
-          {dashboard === null ? (
-            <AnalystSkeletonLoader variant="card" />
-          ) : (
-            <AnalystGrowthOutlook clientId={SELF} dashboard={dashboard} />
-          )}
-          {dashboard === null ? (
-            <AnalystSkeletonLoader variant="card" />
-          ) : (
-            <AnalystMetricIntelligence clientId={SELF} dashboard={dashboard} onChanged={load} />
-          )}
-        </div>
+        <FixesTab fixes={fixes} loading={fixes === null && !fixesError} error={fixesError} onRetry={() => loadFixes()} onApprove={approve} approving={approving} />
       )}
 
       {isPlatformAdmin && siteId && <AnalystChatDrawer clientId={siteId} dashboard={dashboard} />}

@@ -3,6 +3,7 @@ import { Target, Users, HandCoins, TrendingUp, CheckCircle2, Eye, ShieldAlert } 
 import { api, timeAgo } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
 import KpiCard from '../components/KpiCard.jsx';
+import { useReadOnly, READ_ONLY_HINT } from '../lib/access.jsx';
 
 // Universal Product Growth mode's one new nav page (Sidebar.jsx's
 // DEMAND_NAV_ITEM, shown only for a 'product' property). Deliberately
@@ -29,6 +30,7 @@ const CLASSIFICATION_PILLS = {
 };
 
 export default function Demand({ siteId }) {
+  const readOnly = useReadOnly();
   const [prospects, setProspects] = useState(null); // null = loading
   const [approving, setApproving] = useState({}); // {[id]: true}
   const [trialSignups, setTrialSignups] = useState(null); // null = loading
@@ -119,7 +121,7 @@ export default function Demand({ siteId }) {
                           {p.crmSyncedAt ? 'Sent to CRM' : 'Approved'}
                         </span>
                       ) : (
-                        <button type="button" onClick={() => approve(p.id)} disabled={approving[p.id]}
+                        <button type="button" onClick={() => approve(p.id)} disabled={approving[p.id] || readOnly} title={readOnly ? READ_ONLY_HINT : undefined}
                           className="text-[9.5px] font-black uppercase tracking-wider px-3 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-600 transition disabled:opacity-60">
                           {approving[p.id] ? 'Approving…' : 'Approve for CRM'}
                         </button>

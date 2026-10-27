@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bareDomain, suggestGoogleProperties, connectionState, GSC_PROPERTY_RE } from './project-connect.js';
+import { attachStreamDomains, bareDomain, suggestGoogleProperties, connectionState, GSC_PROPERTY_RE } from './project-connect.js';
 import { validateGoal, GOAL_CUSTOM_MAX } from '../../store/workspaces.js';
 
 describe('bareDomain', () => {
@@ -95,4 +95,29 @@ describe('validateGoal with several goals', () => {
   test('the old single `goal` still works, as a list of one', () => {
     assert.deepEqual(validateGoal({ goal: 'key_rankings', growth: 'steady', months: 3 }).goal.goals, ['key_rankings']);
   });
+});
+
+test('a GA4 property gets its real website address from its web data stream', async () => {
+  const asked = [];
+  const admin = { properties: { dataStreams: { list: async ({ parent }) => {
+    asked.push(parent);
+    if (parent === 'properties/2') throw new Error('boom');
+    return { data: { dataStreams: parent === 'properties/3' ? [] : [{ webStreamData: { defaultUri: 'https://www.zunkireelabs.com/' } }] } };
+  } } } };
+  const rows = [{ propertyId: '1', name: 'Zunkiree Website' }, { propertyId: '2', name: 'Broken' }, { propertyId: '3', name: 'No stream' }];
+  await attachStreamDomains(admin, rows);
+  assert.deepEqual(rows.map((r) => r.domain), ['zunkireelabs.com', null, null]);
+  // the good answer is kept; the failed one is asked again next time
+  asked.length = 0;
+  await attachStreamDomains(admin, [{ propertyId: '1', name: 'Zunkiree Website' }, { propertyId: '2', name: 'Broken' }]);
+  assert.deepEqual(asked, ['properties/2']);
+});
+
+test('the slow part has a time limit: out of budget, remaining properties are left without a domain', async () => {
+  let t = 0;
+  const admin = { properties: { dataStreams: { list: async () => { t += 3000; return { data: { dataStreams: [{ webStreamData: { defaultUri: 'https://a.com' } }] } }; } } } };
+  const rows = Array.from({ length: 20 }, (_, i) => ({ propertyId: String(100 + i), name: `P${i}` }));
+  await attachStreamDomains(admin, rows, { now: () => t, budgetMs: 4000 });
+  assert.ok(rows.some((r) => r.domain === null), 'some are skipped once the budget is spent');
+  assert.ok(rows.every((r) => r.domain !== undefined));
 });

@@ -1,6 +1,6 @@
 import {
   BarChart3, Search, TrendingUp, FileText, Zap, Network, Target,
-  LineChart, Building2, Sparkles, Hash, Users, PenLine, UserPlus,
+  LineChart, Building2, Sparkles, Hash, Users, PenLine,
 } from 'lucide-react';
 
 // Single source for the Sidebar and the TopBar breadcrumbs.
@@ -40,10 +40,6 @@ export const NAV_GROUPS = [
     id: 'workspace', label: 'Workspace',
     items: [
       { to: '/workspace', label: 'Workspace', icon: Building2 },
-      // SuperRank staff only: new sign-up requests to approve, and the people who have been approved and
-      // not yet confirmed their email. (The Admin group that used to hold this was removed; without this
-      // link the page is unreachable, and so are the requests waiting on it.)
-      { to: '/clients', label: 'Sign-ups & clients', icon: UserPlus, visible: (ctx) => !!ctx.isPlatformAdmin },
     ],
     visible: () => true,
   },

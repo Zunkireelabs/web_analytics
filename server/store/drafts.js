@@ -349,7 +349,8 @@ export async function markDraftPrOpened(siteId, id, { prNumber, prUrl, rollbackS
   const { rows } = await query(
     `UPDATE drafts SET status = 'pr_opened', pr_number = $3, pr_url = $4, pr_state = 'open',
        apply_error = NULL, render_mode_confirm = NULL, updated_at = now(),
-       rollback_snapshot = COALESCE($5, rollback_snapshot)
+       rollback_snapshot = COALESCE($5, rollback_snapshot),
+       pr_base_branch = (SELECT COALESCE(NULLIF(pr_target_branch, ''), NULLIF(repo_default_branch, ''), 'main') FROM sites WHERE id = $1)
      WHERE site_id = $1 AND id = $2 AND status = 'branch_pushed'
      RETURNING *`,
     [siteId, id, prNumber, prUrl, rollbackSnapshot ? JSON.stringify(rollbackSnapshot) : null]
@@ -1075,7 +1076,19 @@ export async function countFailedAttemptsByFinding(siteId) {
 // with no separate cleanup needed.
 export async function getPendingDraftFilePaths(siteId) {
   const { rows } = await query(
-    "SELECT DISTINCT target_file_path FROM drafts WHERE site_id = $1 AND target_file_path IS NOT NULL AND status = 'pr_opened' AND pr_state = 'open' AND rolled_back_at IS NULL",
+    // Second arm: a site that opens PRs into a stage branch (sites.pr_target_branch)
+    // merges them there first. Until the change reaches the live site (its
+    // verification has not seen it land) the file is still spoken for — new work
+    // is cut from the default branch, which does not have it yet, so a fresh
+    // edit to the same file would collide when it is merged into stage.
+    `SELECT DISTINCT d.target_file_path FROM drafts d
+      WHERE d.site_id = $1 AND d.target_file_path IS NOT NULL AND d.rolled_back_at IS NULL
+        AND ( (d.status = 'pr_opened' AND d.pr_state = 'open')
+           OR (d.status = 'implemented' AND d.pr_state = 'merged'
+               AND d.updated_at > now() - interval '14 days'
+               AND EXISTS (SELECT 1 FROM sites s WHERE s.id = d.site_id AND s.pr_target_branch IS NOT NULL
+                             AND s.pr_target_branch IS DISTINCT FROM COALESCE(NULLIF(s.repo_default_branch, ''), 'main'))
+               AND NOT EXISTS (SELECT 1 FROM fix_verifications v WHERE v.site_id = d.site_id AND v.draft_id = d.id AND v.outcome = 'verified-fixed')) )`,
     [siteId]
   );
   return new Set(rows.map((r) => r.target_file_path));

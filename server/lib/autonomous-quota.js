@@ -122,7 +122,12 @@ export function laneBudgets({
   // duplicate workers and restarts unable to bypass the ceiling: each of
   // them re-derives it from the same persisted count rather than being
   // granted a fresh day.
-  const remaining = Math.max(0, Math.min(dailyLimit - spentToday, ceiling - spentToday, globalRemaining));
+  // `dailyLimit` is sized from candidates that are STILL unshipped (drafted
+  // findings are excluded upstream), so it is already net of today's spend.
+  // Subtracting spentToday from it again undercounted: 25 candidates left
+  // after 30 shipped read as 0 remaining though 30 slots were free. Only the
+  // ceiling is measured against spentToday.
+  const remaining = Math.max(0, Math.min(dailyLimit, ceiling - spentToday, globalRemaining));
 
   return {
     analyticsBudget,

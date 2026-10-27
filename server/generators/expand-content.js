@@ -372,7 +372,7 @@ export async function generate({ siteId, params }) {
     }
   } else try {
     sections = await callLLMForJson(system, user, {
-      maxTokens: 1200, generatorId: meta.id, siteId, validate: Array.isArray,
+      maxTokens: 1200, generatorId: meta.id, siteId, pageUrl: page, validate: Array.isArray,
     });
   } catch {
     throw Object.assign(new Error('Content expansion failed: model did not return valid JSON'), { status: 400, userFacing: true });

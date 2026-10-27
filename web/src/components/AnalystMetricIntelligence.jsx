@@ -132,7 +132,7 @@ function CardActions({ clientId, primary, canDraft, draftedId, busy, sendToActio
         </span>
       )}
       <Button variant="light" size={size} onClick={() => act('resolve')} disabled={busy}>Fixed</Button>
-      <Button variant="ghost" size={size} onClick={() => act('dismiss')} disabled={busy}>Dismiss</Button>
+      <Button write variant="ghost" size={size} onClick={() => act('dismiss')} disabled={busy}>Dismiss</Button>
     </div>
   );
 }

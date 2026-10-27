@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { isValidTimezone } from './util/timezone.js';
 import 'dotenv/config';
 import { findSiteIdentityConflict, siteIdentityConflictMessage } from './lib/site-identity.js';
 
@@ -134,7 +135,7 @@ export async function createClientSite({ name, websiteDomain, timezone, property
   const inserted = await query(
     `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain, client_number, property_type, workspace_id)
      VALUES ($1, NULL, NULL, $2, $3, nextval('sites_client_number_seq'), $4, $5) RETURNING *`,
-    [name, timezone || 'Asia/Kolkata', websiteDomain || null, propertyType === 'product' ? 'product' : 'website', workspaceId ?? null]
+    [name, isValidTimezone(timezone) ? timezone : 'Asia/Kolkata', websiteDomain || null, propertyType === 'product' ? 'product' : 'website', workspaceId ?? null]
   );
   return inserted.rows[0];
 }

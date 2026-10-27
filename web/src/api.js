@@ -17,6 +17,13 @@ function withSite(path, siteId) {
 
 // Thin fetch wrapper. Sends cookies (session) and throws on non-2xx.
 //
+// Set by App.jsx from /me. When the person has read-only access, a write is refused here with a plain
+// message instead of a 403 from the server; the server still enforces it either way. Mirrors the server's
+// short list of personal actions that stay allowed (server/store/workspaces.js READ_ONLY_ALLOWED_WRITES).
+let readOnlyAccess = false;
+export function setReadOnlyAccess(v) { readOnlyAccess = Boolean(v); }
+const READ_ONLY_OK = /^\/(logout|login.*|signup.*|workspaces\/switch|workspaces|workspaces\/\d+.*|projects\/\d+.*|change-password|verify-password|notifications.*)\/?(\?.*)?$/;
+
 // Every thrown Error's `.message` here is passed through safeErrorMessage
 // (lib/errors.js) — the one place in the whole frontend this needs to
 // happen, since ~90 components across this app just do
@@ -26,6 +33,9 @@ function withSite(path, siteId) {
 // failure (a fetch() TypeError, a devtools-visible connection error) that
 // never went through the server's sanitizer at all.
 async function req(path, opts = {}) {
+  if (readOnlyAccess && String(opts.method || 'GET').toUpperCase() !== 'GET' && !READ_ONLY_OK.test(path)) {
+    throw Object.assign(new Error('You have read-only access to this project, so you can look but not change anything.'), { status: 403, code: 'READ_ONLY' });
+  }
   let res;
   try {
     res = await fetch(`${import.meta.env.BASE_URL}api${path}`, {
@@ -78,7 +88,17 @@ export const api = {
   // The link in the approval email: look the token up (no side effects), then confirm (creates the login).
   signupVerify: {
     peek: (token) => req(`/signup/verify?token=${encodeURIComponent(token)}`),
-    confirm: (token) => req('/signup/verify', { method: 'POST', body: JSON.stringify({ token }) }),
+  },
+  // The approval email's Sign in button: the sign-in page sends the link's token with the password they
+  // chose at sign-up; the server checks it, uses the link, creates the login and signs them in.
+  passwordReset: (token, newPassword) => req(`/password-reset/${encodeURIComponent(token)}`, { method: 'POST', body: JSON.stringify({ newPassword }) }),
+  // "Continue" on the approval page: the emailed link alone is the way in, no password.
+  signupContinue: (token) => req('/signup/activate', { method: 'POST', body: JSON.stringify({ token, oneClick: true }) }),
+  signupActivate: (token, password, newPassword) => req('/signup/activate', { method: 'POST', body: JSON.stringify({ token, password, newPassword }) }),
+  // Sign in with an emailed 6-digit code.
+  loginCode: {
+    send: (email) => req('/login/code/send', { method: 'POST', body: JSON.stringify({ email }) }),
+    verify: (email, code) => req('/login/code/verify', { method: 'POST', body: JSON.stringify({ email, code }) }),
   },
   // Public — no session required to call this (same as /login). Only ever
   // creates a contact_requests row: a lightweight lead, never an account.
@@ -144,14 +164,18 @@ export const api = {
       state: (siteId, { shared = false } = {}) => req(`/projects/${siteId}/connect${shared ? '?shared=1' : ''}`),
       // Google's own sign-in: returns { url } to send the browser to. The person comes back to /workspace.
       googleStart: (siteId) => req(`/projects/${siteId}/connect/google/start`),
+      githubMine: (siteId) => req(`/projects/${siteId}/connect/github/mine`),
+      githubBranches: (siteId, owner, name) => req(`/projects/${siteId}/connect/github/branches?owner=${encodeURIComponent(owner)}&name=${encodeURIComponent(name)}`),
+      githubStart: (siteId) => req(`/projects/${siteId}/connect/github/start`),
       googleDisconnect: (siteId) => req(`/projects/${siteId}/connect/google`, { method: 'DELETE' }),
       google: (siteId, body) => req(`/projects/${siteId}/connect/google`, { method: 'POST', body: JSON.stringify(body) }),
-      githubRepos: (siteId) => req(`/projects/${siteId}/connect/github`),
+      githubRepos: (siteId, { fresh = false } = {}) => req(`/projects/${siteId}/connect/github${fresh ? '?fresh=1' : ''}`),
       github: (siteId, body) => req(`/projects/${siteId}/connect/github`, { method: 'POST', body: JSON.stringify(body) }),
     },
     // Runs the real baseline (discovery, GSC/GA4 ingestion, first analysis).
     // Slow by nature — minutes, not seconds.
     baseline: (siteId) => req(`/projects/${siteId}/baseline`, { method: 'POST' }),
+    baselineStatus: (siteId) => req(`/projects/${siteId}/baseline`),
   },
   demand: {
     prospects: () => req('/demand/prospects'),
@@ -224,6 +248,12 @@ export const api = {
     agenticStats: () => req('/command-center/agentic-stats'),
   },
 
+  aiVisibility: {
+    board: () => req('/ai-visibility'),
+    addPrompt: (text) => req('/ai-visibility/prompts', { method: 'POST', body: JSON.stringify({ text }) }),
+    ship: (promptIds, now) => req('/ai-visibility/ship', { method: 'POST', body: JSON.stringify({ promptIds, now }) }),
+  },
+
   notifications: {
     list: () => req('/notifications'),
     markRead: (id) => req(`/notifications/${id}/read`, { method: 'POST' }),
@@ -237,40 +267,12 @@ export const api = {
 
   clients: {
     list: () => req('/internal/clients'),
-    create: (body) => req('/internal/clients', { method: 'POST', body: JSON.stringify(body) }),
-    connect: (id, body) => req(`/internal/clients/${id}/connect`, { method: 'POST', body: JSON.stringify(body) }),
-    connectRepo: (id, body) => req(`/internal/clients/${id}/connect-repo`, { method: 'POST', body: JSON.stringify(body) }),
-    retryBaseline: (id) => req(`/internal/clients/${id}/retry-baseline`, { method: 'POST' }),
-    setOauthPolicy: (id, oauthMaxPermissionLevel) => req(`/internal/clients/${id}/oauth-policy`, { method: 'POST', body: JSON.stringify({ oauthMaxPermissionLevel }) }),
-    setVisibleFaqCap: (id, visibleFaqCap) => req(`/internal/clients/${id}/visible-faq-cap`, { method: 'POST', body: JSON.stringify({ visibleFaqCap }) }),
+    // Staff controls for one project (Account settings -> Platform). All platform_admin on the server.
     setAutoRemediation: (id, enabled, dailyLimit) => req(`/internal/clients/${id}/auto-remediation`, { method: 'POST', body: JSON.stringify({ enabled, dailyLimit }) }),
     setAnalyticsIds: (id, ga4MeasurementId, facebookPixelId) => req(`/internal/clients/${id}/analytics-ids`, { method: 'POST', body: JSON.stringify({ ga4MeasurementId, facebookPixelId }) }),
-    productGrowthConfig: {
-      get: (id) => req(`/internal/clients/${id}/product-growth-config`),
-      save: (id, body) => req(`/internal/clients/${id}/product-growth-config`, { method: 'POST', body: JSON.stringify(body) }),
-      setProspectDiscovery: (id, enabled) => req(`/internal/clients/${id}/prospect-discovery`, { method: 'POST', body: JSON.stringify({ enabled }) }),
-      issueCrmWebhookToken: (id) => req(`/internal/clients/${id}/crm-webhook-token`, { method: 'POST' }),
-    },
-    // Business Goals — Stage 2 UI for server/agents/lib/goal-alignment.js.
-    goals: {
-      list: (id) => req(`/internal/clients/${id}/goals`),
-      create: (id, body) => req(`/internal/clients/${id}/goals`, { method: 'POST', body: JSON.stringify(body) }),
-      update: (id, goalId, body) => req(`/internal/clients/${id}/goals/${goalId}`, { method: 'PATCH', body: JSON.stringify(body) }),
-      setStatus: (id, goalId, status) => req(`/internal/clients/${id}/goals/${goalId}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
-      // Structures a free-text custom goal via LLM — never saves. The
-      // returned proposal is shown for the user to review/edit and explicitly
-      // confirm before the real create() above fires.
-      // Product sites only (404 for a website tenant): funnel counts read from prospects / trial_signups.
-      progress: (id, days) => req(`/internal/clients/${id}/goals/progress${days ? `?days=${days}` : ''}`),
-      structurePreview: (id, description) => req(`/internal/clients/${id}/goals/structure-preview`, { method: 'POST', body: JSON.stringify({ description }) }),
-    },
-    // Design-integrity gate: what the design agent found on this site's real
-    // pages and what it would write, plus the current sign-off state
-    // (server/agents/lib/design-review.js's buildDesignReviewReport).
-    designReview: (id) => req(`/internal/clients/${id}/design-review`),
-    approveDesignReview: (id) => req(`/internal/clients/${id}/design-review/approve`, { method: 'POST' }),
-    recalculateFaqBaseline: (id) => req(`/internal/clients/${id}/recalculate-faq-baseline`, { method: 'POST' }),
-    growthSummary: () => req('/internal/clients/growth-summary'),
+    suspend: (id) => req(`/internal/tenants/${id}/suspend`, { method: 'POST' }),
+    reactivate: (id) => req(`/internal/tenants/${id}/reactivate`, { method: 'POST' }),
+    softDelete: (id) => req(`/internal/tenants/${id}/soft-delete`, { method: 'POST' }),
     signupRequests: {
       list: () => req('/internal/signup-requests'),
       approve: (id) => req(`/internal/signup-requests/${id}/approve`, { method: 'POST' }),
@@ -279,12 +281,6 @@ export const api = {
       resend: (id) => req(`/internal/signup-requests/${id}/resend`, { method: 'POST' }),
       reject: (id) => req(`/internal/signup-requests/${id}/reject`, { method: 'POST' }),
     },
-    // Tenant lifecycle (PLATFORM-ADMIN-DESIGN.md §D, §K Phase 3/3.5) — status
-    // transitions only; hardDelete additionally requires typed-name confirmation.
-    suspend: (id) => req(`/internal/tenants/${id}/suspend`, { method: 'POST' }),
-    reactivate: (id) => req(`/internal/tenants/${id}/reactivate`, { method: 'POST' }),
-    softDelete: (id) => req(`/internal/tenants/${id}/soft-delete`, { method: 'POST' }),
-    hardDelete: (id, confirmName) => req(`/internal/tenants/${id}/hard-delete`, { method: 'POST', body: JSON.stringify({ confirmName }) }),
   },
 
   // Staff-only "Analyst" dashboard — thin passthrough to the standalone
@@ -303,6 +299,13 @@ export const api = {
     // Client only: the AI briefing (a fixed question, answered server-side) and whether Search Console is connected.
     briefing: () => req('/analyst/briefing'),
     connections: () => req('/analyst/connections'),
+    // Outlook / Fixes subpages: what is predicted for next week, and what the agent is fixing (own site, from the session).
+    outlook: () => req('/analyst/outlook'),
+    fixes: () => req('/analyst/fixes'),
+    approveFix: (id) => req('/analyst/fixes/' + id + '/approve', { method: 'POST' }),
+    // Platform admin only: what the shared model has learned across projects.
+    learning: () => req('/platform/analyst-learning'),
+    writeForKeyword: (keyword) => req('/analyst/keywords/write', { method: 'POST', body: JSON.stringify({ keyword }) }),
     breakdown: (clientId, metricKey, dimensionType) =>
       req(`/internal/analyst/dashboard/${clientId}/breakdown/${metricKey}/${dimensionType}`),
     availableDimensions: (clientId, metricKey) =>
@@ -364,8 +367,17 @@ export const api = {
     // A keyword the user typed on the Analyst page as a growth target — queued
     // as a normal pending gap, then approved through updateGapStatus like any
     // machine-found one.
-    createGap: (siteId, topic) =>
-      req(`${kw(siteId)}/gaps`, { method: 'POST', body: JSON.stringify({ topic }) }),
+    createGap: (siteId, topic, plan) =>
+      req(`${kw(siteId)}/gaps`, { method: 'POST', body: JSON.stringify(plan ? { topic, plan } : { topic }) }),
+    // The Keywords page: what the site ranks for and what it lacks, which pages rank for what, what to
+    // create for a typed keyword (writes nothing), and carrying out the person's choice for a keyword
+    // ('blog' | 'landing' | 'track'). See server/agents/lib/keyword-plan.js.
+    overview: (siteId) => req(`${kw(siteId)}/overview`),
+    pages: (siteId) => req(`${kw(siteId)}/pages`),
+    recommend: (siteId, topic) =>
+      req(`${kw(siteId)}/recommend`, { method: 'POST', body: JSON.stringify({ topic }) }),
+    setGapPlan: (siteId, gapId, plan) =>
+      req(`${kw(siteId)}/gaps/${gapId}/plan`, { method: 'POST', body: JSON.stringify({ plan }) }),
     updateGapStatus: (siteId, gapId, status) =>
       req(`${kw(siteId)}/gaps/${gapId}`, { method: 'PUT', body: JSON.stringify({ status }) }),
     // "Write a blog on this keyword?" — approves the gap AND queues exactly one

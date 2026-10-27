@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { withJobLock, jobKeyFor } from '../lib/job-lock.js';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requirePlatformRole } from './login.js';
 
@@ -217,6 +218,7 @@ router.get('/internal/signup-requests', async (req, res, next) => {
     res.json(requests.map((r) => ({
       id: r.id, companyName: r.company_name, websiteDomain: r.website_domain,
       contactEmail: r.contact_email, message: r.message, createdAt: r.created_at,
+      fullName: r.full_name, role: r.role, heardFrom: r.heard_from,
     })));
   } catch (e) { next(e); }
 });
@@ -273,14 +275,14 @@ router.post('/internal/signup-requests/:id/approve', async (req, res, next) => {
 async function sendConfirmation(req, request) {
   const token = await issueVerificationToken(request.id);
   if (!token) return { emailSent: false };
-  const confirmUrl = `${appOrigin(req)}/verify-email?token=${encodeURIComponent(token)}`;
+  const signInUrl = `${appOrigin(req)}/login?token=${encodeURIComponent(token)}`;
   let emailSent = false;
   try {
-    emailSent = await sendSignupApprovedEmail({ companyName: request.company_name, contactEmail: request.contact_email, confirmUrl });
+    emailSent = await sendSignupApprovedEmail({ companyName: request.company_name, contactEmail: request.contact_email, signInUrl });
   } catch (err) {
     console.error(`[clients] confirmation email for signup request ${request.id} failed:`, err.message);
   }
-  return { emailSent, ...(!emailSent && process.env.NODE_ENV !== 'production' ? { devConfirmUrl: confirmUrl } : {}) };
+  return { emailSent, ...(!emailSent && process.env.NODE_ENV !== 'production' ? { devConfirmUrl: signInUrl } : {}) };
 }
 
 // Approved, but the person has not confirmed their email yet. Lets staff resend the link (a new
@@ -341,6 +343,17 @@ router.post('/internal/signup-requests/:id/reject', async (req, res, next) => {
 // SAME sequence rather than a second copy of it — a divergence here would mean a
 // client-run baseline quietly doing less than a staff-run one.
 export async function runBaselineSequence(siteId, site) {
+  // One baseline per project at a time, across processes and browsers: it re-runs every
+  // analysis agent and costs real money, and a reopened popup or a refresh used to start a
+  // second copy while the first was still going. A second caller gets { running: true }.
+  const locked = await withJobLock(baselineLockKey(siteId), () => runBaselineSequenceUnlocked(siteId, site));
+  if (!locked.ran) return { running: true, error: 'A baseline is already running for this project.' };
+  return locked.result;
+}
+
+export const baselineLockKey = (siteId) => jobKeyFor('baseline', siteId);
+
+async function runBaselineSequenceUnlocked(siteId, site) {
   // Design-integrity-gate proposal, change 01: the design read LEADS
   // onboarding, queued before anything else, so the browser capture runs
   // while discovery/ingestion/the site audit below are still working — by

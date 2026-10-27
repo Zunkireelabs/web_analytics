@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { seoDraftEligibility, opportunityDraftEligibility, gapDraftEligibility, requestedBlogEligibility, recommendedActionForGap, groundingNote } from './analyst-seo-mapping.js';
+import { seoDraftEligibility, opportunityDraftEligibility, gapDraftEligibility, requestedBlogEligibility, requestedLandingEligibility, recommendedActionForGap, groundingNote } from './analyst-seo-mapping.js';
 
 // Regression coverage for the audit finding this module had NO test file at
 // all — the one place a Node/Python drift in generator selection would
@@ -258,6 +258,29 @@ describe('requestedBlogEligibility', () => {
 
   test('the question shapeHint survives the override — it is good guidance for the article either way', () => {
     assert.match(requestedBlogEligibility(gap({ topic: 'how does crm software work' })).shapeHint, /QUESTION-phrased/);
+  });
+});
+
+// The Keywords page's "Landing page" choice: whatever the person picked is what gets created.
+describe('requestedLandingEligibility', () => {
+  const gap = (overrides = {}) => ({ id: 1, topic: 'salon booking software', priority: 'medium', ...overrides });
+
+  test('a malformed gap is not eligible', () => {
+    assert.equal(requestedLandingEligibility({ topic: 'x' }), null);
+    assert.equal(requestedLandingEligibility({ id: 1 }), null);
+  });
+  test('an informational topic the classifier would make a blog is still a landing page when chosen', () => {
+    const g = gap({ search_intent: 'informational', product_relevance: 'supporting' });
+    assert.equal(gapDraftEligibility(g).generatorId, 'blog-outline');
+    assert.equal(requestedLandingEligibility(g).generatorId, 'landing-page');
+  });
+  test('its finding id differs from the blog one, so a blog and a landing page for one keyword cannot collide', () => {
+    assert.notEqual(requestedLandingEligibility(gap()).findingId, requestedBlogEligibility(gap()).findingId);
+  });
+  test('a topic gapDraftEligibility would decline entirely still gets its page, the person already decided', () => {
+    const declined = { product_relevance: 'unrelated', search_intent: 'informational', priority: 'low' };
+    assert.equal(gapDraftEligibility(gap(declined)), null);
+    assert.equal(requestedLandingEligibility(gap(declined)).generatorId, 'landing-page');
   });
 });
 

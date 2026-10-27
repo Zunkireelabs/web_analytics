@@ -11,13 +11,15 @@ import {
   GSC_PROPERTY_RE, listGoogleProperties, suggestGoogleProperties, listGithubRepos, connectionState,
 } from './lib/project-connect.js';
 import { getSiteById } from '../store/read.js';
-import { getGoogleConnection, saveGoogleConnection, deleteGoogleConnection } from '../store/project-google.js';
+import { jobLockInfo, jobKeyFor } from '../lib/job-lock.js';
+import { getGoogleConnection, saveGoogleConnection, deleteGoogleConnection, clearSiteGoogleProperties } from '../store/project-google.js';
 import {
   googleConnectConfigured, redirectUriFor, newConnectNonce, buildConsentUrl, exchangeCode, GoogleConnectError,
 } from '../integrations/google-connect.js';
 import { encryptSecret, secretBoxConfigured } from '../lib/secret-box.js';
 import { getProjectGoogleAuth, forgetProjectGoogleAuth } from '../auth/project-google.js';
-import { updateSiteConnection, updateSiteRepoConfig } from '../db.js';
+import { githubConnectConfigured, newGithubNonce, redirectUriFor as githubRedirectUriFor, buildAuthorizeUrl as buildGithubAuthorizeUrl, exchangeCode as exchangeGithubCode, listUserRepos, GithubConnectError, listRepoBranches, connectAppCredentials, CONNECT_KEY_ENV } from '../github/user-auth.js';
+import { updateSiteConnection, updateSiteRepoConfig, updateSiteAutoRemediation } from '../db.js';
 
 // Repo discovery, the config audit and the baseline sequence are loaded only
 // when a connect or baseline request actually runs. They pull in the whole
@@ -28,6 +30,7 @@ import { updateSiteConnection, updateSiteRepoConfig } from '../db.js';
 // import costs nothing next to the minutes of real network work that follows.
 const heavy = {
   baseline: () => import('./clients.js').then((m) => m.runBaselineSequence),
+  autoEnable: () => import('./clients.js').then((m) => m.shouldAutoEnableOnConnect),
   discovery: () => import('../discovery/run-discovery.js').then((m) => m.runDiscovery),
   audit: () => import('../scripts/audit-url-file-map.js').then((m) => m.auditSite),
   contentConfig: () => import('../lib/derive-repo-content-config.js').then((m) => m.persistDerivedContentConfig),
@@ -148,6 +151,16 @@ const GOOGLE_ERRORS = {
   not_configured: 'Google sign-in is not set up on this server yet.',
 };
 
+// The person's own GitHub sign-in, kept in THEIR server-side session (never the database) for an hour:
+// long enough to pick a repository, short enough that a forgotten tab holds nothing. Tied to one
+// project, so a sign-in made for one project cannot be used to pick a repository for another.
+const GITHUB_SESSION_MS = 60 * 60 * 1000;
+function githubSessionFor(req) {
+  const g = req.session?.githubUser;
+  if (!g || g.siteId !== req.projectId || g.userId !== req.userId || Date.now() - g.at > GITHUB_SESSION_MS) return null;
+  return g;
+}
+
 const googleLists = (auth) => listGoogleProperties({ auth }).catch((err) => {
   console.error('[projects] Google property list failed:', err.message);
   return { searchConsole: { error: 'Google could not be read right now.' }, analytics: { error: 'Google could not be read right now.' } };
@@ -189,6 +202,7 @@ router.get('/projects/:siteId/connect', requireAuth, requireProjectRole('admin')
       project: { id: req.project.id, name: req.project.name, domain: req.project.website_domain },
       state: connectionState(req.project),
       githubRestricted: !staff,
+      github: { canConnect: githubConnectConfigured(), connected: Boolean(githubSessionFor(req)), account: githubSessionFor(req)?.login || null },
       google: {
         ...google,
         connected: Boolean(own),
@@ -209,10 +223,110 @@ router.get('/projects/:siteId/connect', requireAuth, requireProjectRole('admin')
 router.get('/projects/:siteId/connect/github', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
   try {
     if (!(await canPickFromSharedAccounts(req))) return res.json({ restricted: true, repos: [], installations: [] });
-    res.json(await listGithubRepos().catch((err) => {
+    res.json(await listGithubRepos({ fresh: req.query.fresh === '1' }).catch((err) => {
       console.error(`[projects] GitHub repo list failed for site ${req.projectId}:`, err.message);
       return { error: 'GitHub could not be read right now.', repos: [], installations: [] };
     }));
+  } catch (e) { next(e); }
+});
+
+// "Connect with GitHub" (the person's own account). Same shape as Google's: mint a one-time nonce
+// bound to this session, user and project, hand back GitHub's address, and only trust the answer
+// that comes back with the same nonce.
+router.get('/projects/:siteId/connect/github/start', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    if (!githubConnectConfigured()) return res.status(503).json({ error: 'GitHub sign-in is not set up on this server yet.', code: 'NOT_CONFIGURED' });
+    const nonce = newGithubNonce();
+    // GITHUB_OAUTH_REDIRECT_URI pins the return address when the browser is not on the API's own port (local dev behind Vite).
+    const redirectUri = process.env.GITHUB_OAUTH_REDIRECT_URI || githubRedirectUriFor(`${req.protocol}://${req.get('host')}`);
+    req.session.githubConnect = { nonce, siteId: req.projectId, userId: req.userId, redirectUri, at: Date.now() };
+    res.json({ url: buildGithubAuthorizeUrl({ redirectUri, state: nonce }) });
+  } catch (e) { next(e); }
+});
+
+// These callbacks are plain browser redirects with no requireAuth, so the actor lives on the session, not on
+// req. Set it on the REAL request (spreading would drop ip/get, which live on the prototype) so the audit row
+// keeps the caller's address and user agent.
+function asSessionActor(req) {
+  req.userId = req.session.userId;
+  req.siteId = req.session.siteId ?? null;
+  return req;
+}
+
+router.get('/github/callback', async (req, res) => {
+  const back = (params) => res.redirect(`/workspace?${new URLSearchParams(params)}`);
+  const pending = req.session?.githubConnect;
+  if (req.session) delete req.session.githubConnect; // single use, whatever happens next
+  try {
+    if (!req.session?.userId) return res.redirect('/');
+    if (req.query.error) return back({ finish: pending?.siteId ?? '', gherror: 'cancelled' });
+    // Coming back from INSTALLING the app (the "Add it on GitHub" link): GitHub sends no state then, only
+    // the installation. The person is still signed in to GitHub here from a minute ago, and the list is read
+    // with their own token, so the new installation simply appears; nothing from this request is trusted.
+    const signedIn = req.session.githubUser;
+    if (!req.query.state && req.query.installation_id && signedIn && signedIn.userId === req.session.userId && Date.now() - signedIn.at < GITHUB_SESSION_MS) {
+      return back({ finish: signedIn.siteId, github: 'connected' });
+    }
+    const fresh = pending && Date.now() - pending.at < 10 * 60 * 1000;
+    if (!fresh || !req.query.state || req.query.state !== pending.nonce || pending.userId !== req.session.userId) {
+      return back({ gherror: 'expired' });
+    }
+    if ((await getUserStatus(req.session.userId)) !== 'active') return back({ gherror: 'denied' });
+    const ctx = await getAccessContext(req.session.userId, pending.siteId);
+    const role = ctx && siteRoleFromDecision(decideSiteAccess({ ...ctx, companySiteId: companySiteId() }));
+    if (!role || !roleAtLeast(role, 'admin')) return back({ gherror: 'denied' });
+    const project = await getProject(pending.siteId);
+    if (!project) return back({ gherror: 'denied' });
+
+    const { token } = await exchangeGithubCode({ code: String(req.query.code || ''), redirectUri: pending.redirectUri });
+    const { login } = await listUserRepos(token); // proves the token works before it is kept
+    req.session.githubUser = { siteId: project.id, userId: req.session.userId, token, login, at: Date.now() };
+    await recordAuditEvent(asSessionActor(req), {
+      action: 'project.github_signed_in', targetType: 'site', targetId: String(project.id), tenantSiteId: project.id, tenantName: project.name,
+      metadata: { workspaceId: project.workspace_id, githubAccount: login }, success: true,
+    });
+    return back({ ws: project.workspace_id ?? '', finish: project.id, github: 'connected' });
+  } catch (err) {
+    const code = err instanceof GithubConnectError ? err.code : 'exchange_failed';
+    if (!(err instanceof GithubConnectError)) console.error('[projects] GitHub callback failed:', err.message);
+    return back({ finish: pending?.siteId ?? '', gherror: code });
+  }
+});
+
+// What THIS person may connect: the repositories on their own GitHub account that the SuperRank app is
+// installed on, read with their own token. Nothing here depends on the shared app's installations, so a
+// client sees only what they allowed and staff see their own account, never another client's.
+router.get('/projects/:siteId/connect/github/mine', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const g = githubSessionFor(req);
+    if (!g) return res.json({ signedIn: false, repos: [] });
+    try {
+      const { login, repos } = await listUserRepos(g.token);
+      res.json({ signedIn: true, login, repos, installUrl: process.env.GITHUB_APP_SLUG ? `https://github.com/apps/${process.env.GITHUB_APP_SLUG}/installations/new` : null });
+    } catch (err) {
+      delete req.session.githubUser; // an expired or revoked token: ask them to sign in again
+      res.json({ signedIn: false, repos: [], error: 'Your GitHub sign-in has expired. Connect again.' });
+    }
+  } catch (e) { next(e); }
+});
+
+// The branches of one repository the person picked, for the "which branch" choice. Read with their own token.
+router.get('/projects/:siteId/connect/github/branches', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const g = githubSessionFor(req);
+    if (!g) return res.status(403).json({ error: 'Connect your GitHub account first.', code: 'GITHUB_NOT_CONNECTED' });
+    const owner = String(req.query.owner || '').trim();
+    const name = String(req.query.name || '').trim();
+    if (!/^[\w.-]+$/.test(owner) || !/^[\w.-]+$/.test(name)) return res.status(400).json({ error: 'Choose a repository from the list.' });
+    try {
+      const { repos } = await listUserRepos(g.token);
+      const repo = repos.find((r) => r.owner.toLowerCase() === owner.toLowerCase() && r.name.toLowerCase() === name.toLowerCase());
+      if (!repo) return res.status(404).json({ error: 'That repository is not one you allowed SuperRank on.' });
+      res.json({ defaultBranch: repo.defaultBranch, branches: await listRepoBranches(g.token, { owner: repo.owner, name: repo.name, defaultBranch: repo.defaultBranch }) });
+    } catch (err) {
+      console.error(`[projects] branch list failed for site ${req.projectId}:`, err.message);
+      res.json({ defaultBranch: null, branches: [], error: 'The branches could not be read from GitHub right now.' });
+    }
   } catch (e) { next(e); }
 });
 
@@ -256,13 +370,19 @@ router.get('/google/callback', async (req, res) => {
     if (!project) return back({ gerror: 'denied' });
 
     const { refreshToken, email, scopes } = await exchangeCode({ code: String(req.query.code || ''), redirectUri: pending.redirectUri });
+    // A different Google account sees different properties: the ones saved for the old
+    // account are not known to be readable by this one, so they are cleared and chosen again.
+    const before = await getGoogleConnection(project.id).catch(() => null);
+    if (before && before.google_email && email && before.google_email.toLowerCase() !== email.toLowerCase()) {
+      await clearSiteGoogleProperties(project.id);
+    }
     await saveGoogleConnection({
       siteId: project.id, email, refreshTokenEnc: encryptSecret(refreshToken), scopes, connectedBy: req.session.userId,
     });
     forgetProjectGoogleAuth(project.id);
     import('../ingest/ga4.js').then((m) => m.forgetGa4Client(project.id)).catch(() => {});
 
-    const audit = (action, metadata) => recordAuditEvent({ ...req, userId: req.session.userId, siteId: req.session.siteId ?? null }, {
+    const audit = (action, metadata) => recordAuditEvent(asSessionActor(req), {
       action, targetType: 'site', targetId: String(project.id), tenantSiteId: project.id, tenantName: project.name,
       metadata: { workspaceId: project.workspace_id, ...metadata }, success: true,
     });
@@ -291,11 +411,14 @@ router.get('/google/callback', async (req, res) => {
   }
 });
 
-// Stop reading with this person's Google account. The property ids stay on the project
-// (they are not secret and the project is still the same site); only the access goes.
+// Stop reading with this person's Google account. The property ids go too: they belonged
+// to that account's view of Google, and keeping them would let the daily jobs quietly carry
+// on through the shared platform account. The project reads nothing until Google is
+// connected again.
 router.delete('/projects/:siteId/connect/google', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
   try {
     const removed = await deleteGoogleConnection(req.projectId);
+    if (removed) await clearSiteGoogleProperties(req.projectId);
     forgetProjectGoogleAuth(req.projectId);
     import('../ingest/ga4.js').then((m) => m.forgetGa4Client(req.projectId)).catch(() => {});
     if (removed) {
@@ -357,7 +480,11 @@ router.post('/projects/:siteId/connect/google', requireAuth, requireProjectRole(
 // audit's own result is what Integration Health reads back.
 router.post('/projects/:siteId/connect/github', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
   try {
-    if (!(await canPickFromSharedAccounts(req))) return sharedAccountsOnlyForStaff(res);
+    // Two ways to pick: staff from the shared SuperRank app's list, or anyone from THEIR OWN GitHub sign-in.
+    const mine = req.body?.source === 'mine';
+    if (!mine && !(await canPickFromSharedAccounts(req))) return sharedAccountsOnlyForStaff(res);
+    const userSession = mine ? githubSessionFor(req) : null;
+    if (mine && !userSession) return res.status(403).json({ error: 'Connect your GitHub account first.', code: 'GITHUB_NOT_CONNECTED' });
     const owner = String(req.body?.repoOwner || '').trim();
     const name = String(req.body?.repoName || '').trim();
     if (!/^[\w.-]+$/.test(owner) || !/^[\w.-]+$/.test(name)) {
@@ -368,7 +495,7 @@ router.post('/projects/:siteId/connect/github', requireAuth, requireProjectRole(
     // request: a caller-supplied id would let one project mint a token for an
     // installation it was never granted (github/credentials.js treats a stored
     // installation id as authoritative).
-    const listing = await listGithubRepos();
+    const listing = mine ? { repos: (await listUserRepos(userSession.token)).repos } : await listGithubRepos();
     const match = (listing.repos || []).find((r) => r.owner.toLowerCase() === owner.toLowerCase() && r.name.toLowerCase() === name.toLowerCase());
     if (!match) {
       return res.status(400).json({
@@ -378,6 +505,22 @@ router.post('/projects/:siteId/connect/github', requireAuth, requireProjectRole(
     }
 
     const branch = String(req.body?.repoDefaultBranch || match.defaultBranch || 'main').trim();
+    if (!/^[\w./-]+$/.test(branch)) return res.status(400).json({ error: 'That branch name has characters a branch cannot have.' });
+
+    // A production branch other than the repository's own default: it must exist, or every day's work
+    // would be cut from nothing.
+    if (branch !== match.defaultBranch) {
+      try {
+        const { getBranchSha } = await import('../github/client.js');
+        await getBranchSha({
+          repo_owner: match.owner, repo_name: match.name, repo_default_branch: match.defaultBranch,
+          github_app_installation_id: Number(match.installationId),
+          ...(mine ? { github_app_id: Number(process.env.GITHUB_CONNECT_APP_ID), github_app_private_key_env_var: CONNECT_KEY_ENV } : {}),
+        }, branch);
+      } catch {
+        return res.status(400).json({ error: `There is no "${branch}" branch in ${match.fullName}. Choose one from the list.` });
+      }
+    }
 
     // Optional stage branch: work is still cut from `branch` (production), but
     // the day's PR is opened into this one. Verified to exist BEFORE anything is
@@ -392,9 +535,22 @@ router.post('/projects/:siteId/connect/github', requireAuth, requireProjectRole(
         await getBranchSha({
           repo_owner: match.owner, repo_name: match.name, repo_default_branch: branch,
           github_app_installation_id: Number(match.installationId),
+          ...(mine ? { github_app_id: Number(process.env.GITHUB_CONNECT_APP_ID), github_app_private_key_env_var: CONNECT_KEY_ENV } : {}),
         }, prTargetBranch);
       } catch {
         return res.status(400).json({ error: `There is no "${prTargetBranch}" branch in ${match.fullName}. Create it on GitHub first, or leave this empty to open pull requests into ${branch}.` });
+      }
+    }
+
+    // Prove the connect App can really act on this installation BEFORE the project is pointed at it: a wrong
+    // key or App id would otherwise save fine and fail every pull request days later at 07:00.
+    if (mine) {
+      try {
+        const { getInstallationToken } = await import('../github/app-auth.js');
+        await getInstallationToken(String(match.installationId), { credentials: connectAppCredentials() });
+      } catch (err) {
+        console.error(`[projects] connect App could not act on installation ${match.installationId}:`, err.message);
+        return res.status(400).json({ error: 'SuperRank could not get access to that repository through GitHub. Check that the app is still installed on it, then try again.' });
       }
     }
 
@@ -406,12 +562,35 @@ router.post('/projects/:siteId/connect/github', requireAuth, requireProjectRole(
       repoDefaultBranch: branch,
       prTargetBranch,
       githubAppInstallationId: Number(match.installationId),
+      // Connected through the person's own GitHub sign-in = through the SuperRank connect App: record that, so
+      // the agent signs in as THAT App for this project. The shared-list path leaves this alone (Admizz,
+      // Chayce and every older project keep exactly the App they have).
+      ...(mine ? { githubAppId: Number(process.env.GITHUB_CONNECT_APP_ID), githubAppPrivateKeyEnvVar: CONNECT_KEY_ENV } : {}),
     });
+    if (mine) delete req.session.githubUser; // the sign-in did its job; nothing of it stays
 
     await recordAuditEvent(req, {
       action: 'tenant.repo_connected', targetType: 'site', targetId: String(req.projectId), tenantSiteId: req.projectId, tenantName: site.name,
       metadata: { workspaceId: req.project.workspace_id, repo: match.fullName, repoDefaultBranch: branch, prTargetBranch, installationId: match.installationId, selfServe: true }, success: true,
     });
+
+    // A genuinely first repo connection grants the same autonomy consent the staff route
+    // grants (routes/clients.js): the agent then ships up to the daily limit as pull
+    // requests, never merged by it, from the next 07:00 run. Without this a project
+    // connected here would sit in the pipeline doing nothing. `req.project` is the row
+    // from BEFORE this connect, which is what "first connection" is judged against.
+    try {
+      const shouldAutoEnable = await heavy.autoEnable();
+      if (shouldAutoEnable({ existing: req.project, site })) {
+        site = await updateSiteAutoRemediation({ siteId: req.projectId, enabled: true, dailyLimit: site.auto_remediation_daily_limit });
+        await recordAuditEvent(req, {
+          action: 'tenant.auto_remediation_enabled', targetType: 'site', targetId: String(req.projectId), tenantSiteId: req.projectId, tenantName: site.name,
+          metadata: { workspaceId: req.project.workspace_id, enabled: true, dailyLimit: site.auto_remediation_daily_limit, autoEnabledAtOnboarding: true, selfServe: true }, success: true,
+        });
+      }
+    } catch (err) {
+      console.error(`[projects] could not switch on autonomous fixes for site ${req.projectId}:`, err.message);
+    }
 
     heavy.designProfile()
       .then((queue) => queue(site))
@@ -476,6 +655,10 @@ router.post('/projects/:siteId/baseline', requireAuth, requireProjectRole('admin
     if (!state.google.connected) {
       return res.status(409).json({ error: 'Connect Google Search Console and Analytics first — the baseline is built from their real data.' });
     }
+    // Already going (another tab, a reopened popup, a refresh)? Say so; the screen then
+    // follows that run instead of starting a second one.
+    const running = await jobLockInfo(jobKeyFor('baseline', req.projectId));
+    if (running) return res.status(202).json({ running: true, startedAt: running.acquired_at, state: connectionState(site) });
     await recordAuditEvent(req, {
       action: 'tenant.baseline_started', targetType: 'site', targetId: String(req.projectId), tenantSiteId: req.projectId, tenantName: site.name,
       metadata: { workspaceId: req.project.workspace_id, selfServe: true }, success: true,
@@ -483,8 +666,22 @@ router.post('/projects/:siteId/baseline', requireAuth, requireProjectRole('admin
     const runBaselineSequence = await heavy.baseline();
     const result = await runBaselineSequence(req.projectId, site);
     const after = (await getSiteById(req.projectId)) || site;
+    if (result.running) return res.status(202).json({ running: true, state: connectionState(after) });
     if (result.error) return res.status(422).json({ ...result, state: connectionState(after) });
     res.json({ ...result, state: connectionState(after) });
+  } catch (e) { next(e); }
+});
+
+// Where the baseline stands, for a screen that was closed or refreshed while it ran.
+router.get('/projects/:siteId/baseline', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const running = await jobLockInfo(jobKeyFor('baseline', req.projectId));
+    const site = (await getSiteById(req.projectId)) || req.project;
+    res.json({
+      status: running ? 'running' : site.onboarded_at ? 'done' : 'idle',
+      startedAt: running?.acquired_at || null,
+      state: connectionState(site),
+    });
   } catch (e) { next(e); }
 });
 

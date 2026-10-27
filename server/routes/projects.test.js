@@ -41,7 +41,7 @@ mock.module(resolve('../report/email.js'), {
     sendInvitationEmail: async (o) => { calls.emails.push(o); return true; },
     sendContactLeadEmail: async () => true,
     sendPasswordResetEmail: async () => true,
-    sendSignupReceivedEmail: async () => true,
+    sendSignupReceivedEmail: async () => true, sendLoginCodeEmail: async () => true,
     sendSignupStaffNotice: async () => true,
   },
 });
@@ -116,7 +116,13 @@ mock.module(resolve('../store/project-google.js'), {
     getGoogleConnection: async () => ownGoogle,
     saveGoogleConnection: async (o) => { savedConnections.push(o); },
     deleteGoogleConnection: async () => true,
+    clearSiteGoogleProperties: async (id) => { clearedProperties.push(id); },
   },
+});
+const clearedProperties = [];
+let baselineLock = null;
+mock.module(resolve('../lib/job-lock.js'), {
+  namedExports: { jobLockInfo: async () => baselineLock, jobKeyFor: (a, b) => `${a}:${b}`, withJobLock: async (_k, fn) => ({ ran: true, result: await fn() }) },
 });
 const OWN_AUTH = { __own: true };
 mock.module(resolve('../auth/project-google.js'), {
@@ -371,7 +377,7 @@ describe('connecting a project', () => {
   });
 });
 
-beforeEach(() => { ownGoogle = null; savedConnections = []; });
+beforeEach(() => { ownGoogle = null; savedConnections = []; baselineLock = null; });
 
 describe('which Google properties a person can see or attach', () => {
   test('a client with NO Google connection of their own sees none of the shared account\'s properties', async () => {
@@ -429,6 +435,16 @@ describe('which Google properties a person can see or attach', () => {
       assert.match(res.body.error, /not one your Google account can access/);
     }
   });
+  test('a baseline that is already running is followed, never started a second time', async () => {
+    baselineLock = { acquired_at: '2026-10-27T05:00:00Z' };
+    const before = calls.audit.length;
+    const res = await call('post', '/projects/:siteId/baseline', { userId: PADMIN, params: P(ADMIZZ) });
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.running, true);
+    assert.equal(calls.audit.length, before, 'no second start is recorded');
+    const status = await call('get', '/projects/:siteId/baseline', { userId: PADMIN, params: P(ADMIZZ) });
+    assert.equal(status.body.status, 'running');
+  });
   test('a client cannot connect GitHub from the shared app, and cannot re-run a finished baseline', async () => {
     const h = await call('post', '/projects/:siteId/connect/github', { userId: PADMIN, params: P(ADMIZZ), body: { repoOwner: 'Zunkireelabs', repoName: 'admizz-web-dev' } });
     assert.equal(h.statusCode, 403);
@@ -460,13 +476,14 @@ describe('autoPickProperties — saved without asking only when there is nothing
 });
 
 describe('the Google connect link and its callback', () => {
-  const was = { id: process.env.GOOGLE_OAUTH_CLIENT_ID, secret: process.env.GOOGLE_OAUTH_CLIENT_SECRET, key: process.env.SECRETS_ENCRYPTION_KEY };
+  const was = { id: process.env.GOOGLE_OAUTH_CLIENT_ID, secret: process.env.GOOGLE_OAUTH_CLIENT_SECRET, key: process.env.SECRETS_ENCRYPTION_KEY, cid: process.env.GOOGLE_CONNECT_CLIENT_ID, csecret: process.env.GOOGLE_CONNECT_CLIENT_SECRET };
   beforeEach(() => {
+    delete process.env.GOOGLE_CONNECT_CLIENT_ID; delete process.env.GOOGLE_CONNECT_CLIENT_SECRET; // a developer's .env must not leak in
     process.env.GOOGLE_OAUTH_CLIENT_ID = 'test-client.apps.googleusercontent.com';
     process.env.GOOGLE_OAUTH_CLIENT_SECRET = 'test-secret';
     process.env.SECRETS_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64');
   });
-  const restore = () => { for (const [k, v] of [['GOOGLE_OAUTH_CLIENT_ID', was.id], ['GOOGLE_OAUTH_CLIENT_SECRET', was.secret], ['SECRETS_ENCRYPTION_KEY', was.key]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } };
+  const restore = () => { for (const [k, v] of [['GOOGLE_OAUTH_CLIENT_ID', was.id], ['GOOGLE_OAUTH_CLIENT_SECRET', was.secret], ['SECRETS_ENCRYPTION_KEY', was.key], ['GOOGLE_CONNECT_CLIENT_ID', was.cid], ['GOOGLE_CONNECT_CLIENT_SECRET', was.csecret]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } };
 
   async function callback(query, session) {
     const layer = router.stack.find((l) => l.route?.path === '/google/callback' && l.route.methods.get);
@@ -491,9 +508,11 @@ describe('the Google connect link and its callback', () => {
   });
   test('start says so plainly when Google sign-in or the storage key is not set up', async () => {
     try {
+      // Neither the connect client nor the shared fallback may be set, whatever the developer's .env holds.
+      delete process.env.GOOGLE_CONNECT_CLIENT_ID; delete process.env.GOOGLE_CONNECT_CLIENT_SECRET;
       delete process.env.GOOGLE_OAUTH_CLIENT_ID;
       assert.equal((await call('get', '/projects/:siteId/connect/google/start', { userId: PADMIN, params: P(ADMIZZ) })).body.code, 'NOT_CONFIGURED');
-      process.env.GOOGLE_OAUTH_CLIENT_ID = 'x';
+      process.env.GOOGLE_OAUTH_CLIENT_ID = 'x'; process.env.GOOGLE_OAUTH_CLIENT_SECRET = 'y';
       delete process.env.SECRETS_ENCRYPTION_KEY;
       assert.equal((await call('get', '/projects/:siteId/connect/google/start', { userId: PADMIN, params: P(ADMIZZ) })).body.code, 'NO_ENCRYPTION_KEY');
     } finally { restore(); }

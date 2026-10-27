@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSignupReceivedEmail, buildSignupApprovedEmail, buildSignupStaffNotice } from './email.js';
+import { buildSignupReceivedEmail, buildSignupApprovedEmail, buildSignupStaffNotice, buildLoginCodeEmail } from './email.js';
 
 // What a person reads when they sign up, and what staff read when a request
 // arrives. The company name, website and message are typed by a stranger on a
@@ -27,30 +27,50 @@ describe('sign-up received (to the person)', () => {
 });
 
 describe('sign-up approved (to the person)', () => {
-  const url = 'https://app.superrank.si/verify-email?token=abc123';
-  const m = buildSignupApprovedEmail({ companyName: 'Acme Co', contactEmail: 'owner@acme.test', confirmUrl: url });
-  test('says the request is approved, asks them to confirm that address, and links to the confirm page', () => {
-    assert.equal(m.subject, 'Confirm your email to open your SuperRank account');
-    assert.match(m.html, /Your request is approved/);
-    assert.match(m.html, /confirm that <b>owner@acme\.test<\/b> is your email address/);
-    assert.match(m.html, /Your account is created when you do/);
-    assert.match(m.html, /href="https:\/\/app\.superrank\.si\/verify-email\?token=abc123"/);
+  const url = 'https://app.superrank.si/login?token=abc123';
+  const m = buildSignupApprovedEmail({ companyName: 'Acme Co', contactEmail: 'owner@acme.test', signInUrl: url });
+  test('says the account is approved and has one Sign in button that opens the app sign-in', () => {
+    assert.equal(m.subject, 'Your SuperRank account is approved');
+    assert.match(m.html, /Your account is approved\./);
+    assert.match(m.html, /href="https:\/\/app\.superrank\.si\/login\?token=abc123"[^>]*>Sign in<\/a>/);
+    assert.equal(/Confirm my email/.test(m.html), false);
   });
-  test('tells them what follows: sign in with the password they chose, then name a workspace and add a project', () => {
+  test('says which address and which password to use, and what follows', () => {
+    assert.match(m.html, /owner@acme\.test/);
     assert.match(m.html, /password you chose/);
-    assert.match(m.html, /name your workspace and add your first project/);
+    assert.match(m.html, /Name your workspace/);
+    assert.match(m.html, /Add your first project/);
   });
-  test('says the link works once, expires, and does nothing if they did not ask', () => {
-    assert.match(m.html, /works once and expires in 7 days/);
-    assert.match(m.html, /nothing will be created/);
+  test('says the link expires and does nothing if they did not ask', () => {
+    assert.match(m.html, /expires in 7 days/);
+    assert.match(m.html, /nothing is created/);
   });
   test('never contains their password', () => {
     assert.equal(/password[^<]{0,40}:\s*\S+/i.test(m.html), false);
   });
   test('escapes the company name, the address and the link', () => {
-    const x = buildSignupApprovedEmail({ companyName: evil, contactEmail: evil, confirmUrl: 'https://x.test/"><script>alert(1)</script>' });
+    const x = buildSignupApprovedEmail({ companyName: evil, contactEmail: evil, signInUrl: 'https://x.test/"><script>alert(1)</script>' });
     assert.equal(x.html.includes('<img'), false);
     assert.equal(x.html.includes('<script>'), false);
+  });
+});
+
+describe('sign-in code (to the person)', () => {
+  const m = buildLoginCodeEmail({ email: 'owner@acme.test', code: '482913' });
+  test('puts the code in the subject and in the message, spaced for reading', () => {
+    assert.equal(m.subject, 'Your SuperRank sign-in code: 482 913');
+    assert.match(m.html, />482913</);
+  });
+  test('says it works once, when it expires, and who asked', () => {
+    assert.match(m.html, /works once and expires in <b>10 minutes<\/b>/);
+    assert.match(m.html, /owner@acme\.test/);
+    assert.match(m.html, /Never share it/);
+  });
+  test('has no link, so it cannot be copied by a phishing message', () => {
+    assert.equal(/<a /.test(m.html), false);
+  });
+  test('escapes the address', () => {
+    assert.equal(buildLoginCodeEmail({ email: evil, code: '123456' }).html.includes('<img'), false);
   });
 });
 

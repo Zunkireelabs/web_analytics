@@ -10,15 +10,16 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 let peeked; let consumed; let audit; let consumeCalls;
 mock.module(resolve('../store/signup-requests.js'), {
   namedExports: {
-    createSignupRequest: async () => { throw new Error('not exercised'); },
-    peekVerificationToken: async (t) => peeked(t),
+    hasOpenSignupRequest: async () => (globalThis.__openSignup ?? false),
+  createSignupRequest: async () => { throw new Error('not exercised'); },
+    getActivationRequest: async () => null, getCompanyNameForEmail: async () => null, peekVerificationToken: async (t) => peeked(t),
     consumeVerificationToken: async (t) => { consumeCalls.push(t); return consumed(t); },
   },
 });
 mock.module(resolve('../store/users.js'), { namedExports: { getUserByEmail: async () => null, getUserById: async () => null, updateUserPassword: async () => {}, getUserStatus: async () => 'active' } });
 mock.module(resolve('../store/read.js'), { namedExports: { getSiteStatus: async () => 'active', getSiteById: async () => null } });
 mock.module(resolve('../store/admin/audit-log.js'), { namedExports: { recordAuditEvent: async (req, e) => { audit.push({ actor: req.userId, ...e }); } } });
-mock.module(resolve('../report/email.js'), { namedExports: { sendContactLeadEmail: async () => true, sendPasswordResetEmail: async () => true, sendSignupReceivedEmail: async () => true, sendSignupStaffNotice: async () => true } });
+mock.module(resolve('../report/email.js'), { namedExports: { sendContactLeadEmail: async () => true, sendPasswordResetEmail: async () => true, sendSignupReceivedEmail: async () => true, sendLoginCodeEmail: async () => true, sendSignupStaffNotice: async () => true } });
 mock.module(resolve('../store/workspaces.js'), { namedExports: { getAccessContext: async () => null, decideSiteAccess: () => ({}), listWorkspacesForUser: async () => [], listSharedProjectsForUser: async () => [], pickLoginSite: async () => null, isBlockedForReadOnly: () => false, isAllowedWithoutProject: () => false } });
 
 const router = (await import('./login.js')).default;

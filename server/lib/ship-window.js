@@ -1,3 +1,4 @@
+import { safeTimezone } from '../util/dates.js';
 // The two decisions the autonomous shipping run and its catch-up guard make
 // about a site, kept here rather than inline in job.js so they can be tested
 // without dragging in job.js's whole dependency graph (GSC/GA4 clients, Google
@@ -86,7 +87,7 @@ export function isShippable(site) {
 
 // Local hour in an arbitrary IANA timezone, without pulling in a date library.
 export function hourInTimezone(timezone, now = new Date()) {
-  return new Date(now.toLocaleString('en-US', { timeZone: timezone })).getHours();
+  return new Date(now.toLocaleString('en-US', { timeZone: safeTimezone(timezone) })).getHours();
 }
 
 // The catch-up guard's whole decision. Work is owed when this site's own ship

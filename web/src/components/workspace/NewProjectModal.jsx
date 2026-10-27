@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Check, FolderPlus, GitBranch, Globe, Loader2, Search, BarChart3, Target, AlertTriangle, ExternalLink } from 'lucide-react';
+import { Download, Check, FolderPlus, GitBranch, Globe, Loader2, Search, BarChart3, Target, AlertTriangle, ExternalLink, Info, Link2 } from 'lucide-react';
 import { api } from '../../api.js';
 import Modal from '../Modal.jsx';
 import Field from '../Field.jsx';
@@ -32,22 +32,42 @@ const STEPS = ['Details', 'Goal', 'Google', 'GitHub', 'Baseline'];
 const CARD = { boxShadow: '0 0 0 1px var(--input), 0 1px 2px rgba(0,0,0,.03)' };
 const CARD_ON = { boxShadow: '0 0 0 1px var(--primary), 0 0 0 4px var(--primary-tint)' };
 
+// A name to suggest from the address they typed: acme.com becomes Acme, www.blog.acme.com becomes Acme.
+// Only a starting point, they can change it.
+function nameFromDomain(raw) {
+  const host = String(raw || '').trim().toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/^www\./, '').split(/[/?#:]/)[0];
+  const parts = host.split('.').filter(Boolean);
+  if (!parts.length || (parts.length === 1 && host.length < 2)) return '';
+  const label = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
+  return label ? label.charAt(0).toUpperCase() + label.slice(1) : '';
+}
+
 function Stepper({ step }) {
   return (
-    <div className="flex items-center gap-2 mb-5">
-      {STEPS.map((label, i) => {
-        const n = i + 1, on = n === step, done = n < step;
-        return (
-          <div key={label} className="flex items-center gap-2 min-w-0">
-            {i > 0 && <span className="w-4 h-px shrink-0" style={{ background: 'var(--border-2)' }} />}
-            <span className={`w-5 h-5 rounded-full grid place-items-center text-[11px] font-medium shrink-0 ${done ? 'bg-primary-tint text-primary' : on ? 'bg-fg text-white' : 'bg-muted text-faint'}`}>
-              {done ? <Check size={11} strokeWidth={3} /> : n}
-            </span>
-            {/* On a phone only the current step keeps its name; the numbers carry the rest. */}
-            <span className={`text-xs truncate ${on ? 'font-medium text-fg' : 'hidden sm:inline text-faint'}`}>{label}</span>
-          </div>
-        );
-      })}
+    <div className="mb-6" role="list" aria-label={`Step ${step} of ${STEPS.length}`}>
+      <div className="flex items-center">
+        {STEPS.map((label, i) => {
+          const n = i + 1, on = n === step, done = n < step;
+          return (
+            <div key={label} role="listitem" aria-current={on ? 'step' : undefined} className={`flex items-center min-w-0 ${i > 0 ? 'flex-1' : ''}`}>
+              {/* The line leading into a step fills in once the step before it is done. */}
+              {i > 0 && <span className="h-0.5 flex-1 mx-2 rounded-full" style={{ background: done || on ? 'var(--primary)' : 'var(--border-2)', opacity: done ? 1 : on ? 0.35 : 1 }} />}
+              <span className={`w-7 h-7 rounded-full grid place-items-center text-xs font-semibold shrink-0 transition-colors ${done ? 'bg-primary text-white' : on ? 'bg-fg text-white ring-4 ring-[var(--muted)]' : 'bg-muted text-faint'}`}>
+                {done ? <Check size={13} strokeWidth={3} /> : n}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {/* Names sit under their circles; on a phone only the current one is named. */}
+      <div className="flex mt-2">
+        {STEPS.map((label, i) => {
+          const n = i + 1, on = n === step, done = n < step;
+          return (
+            <span key={label} className={`flex-1 text-xs ${i === 0 ? 'text-left' : i === STEPS.length - 1 ? 'text-right' : 'text-center'} ${on ? 'font-medium text-fg' : done ? 'hidden sm:block text-text' : 'hidden sm:block text-faint'}`}>{label}</span>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -64,6 +84,79 @@ function PickRow({ on, title, detail, badge, onClick }) {
       {badge && <Badge tone="grey">{badge}</Badge>}
       {on && <Check size={15} className="text-primary shrink-0" />}
     </button>
+  );
+}
+
+// The site's own favicon when the name is a real address; a plain icon when it is not, or when the image cannot load.
+function SiteIcon({ host, Fallback = Globe }) {
+  const [failed, setFailed] = useState(false);
+  const real = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(host || '');
+  if (!real || failed) return <span className="w-5 h-5 rounded grid place-items-center bg-muted text-faint shrink-0"><Fallback size={12} /></span>;
+  return <img src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=32`} alt="" width={20} height={20} onError={() => setFailed(true)} className="w-5 h-5 rounded shrink-0" />;
+}
+
+// A long list of Google properties to choose one from: radio rows, the site that matches the
+// project's address floated to the top and marked, and a filter once the list is long.
+const hostOf = (v) => String(v || '').toLowerCase().replace(/^sc-domain:/, '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '');
+function PropertyList({ items, value, onPick, siteHost, noun = 'properties', grid = false }) {
+  const [q, setQ] = useState('');
+  const host = hostOf(siteHost);
+  const rows = items
+    .map((r) => ({ ...r, best: r.best ?? (Boolean(host) && hostOf(r.domain || r.title) === host) }))
+    .filter((r) => !q.trim() || `${r.title} ${r.detail}`.toLowerCase().includes(q.trim().toLowerCase()))
+    .sort((a, b) => Number(b.best) - Number(a.best));
+  return (
+    <div>
+      {items.length > 5 && (
+        <div className="relative mb-2">
+          <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"><Search size={13} /></span>
+          <input type="text" value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Filter ${items.length} ${noun}`} style={{ paddingLeft: 30, height: 32, fontSize: 13 }} />
+        </div>
+      )}
+      {grid ? (
+        <div className="max-h-[232px] overflow-y-auto -m-1 p-1">
+          {rows.length === 0 && <div className="px-3 py-3 text-xs text-faint">Nothing matches “{q}”.</div>}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {rows.map((r) => {
+              const on = value === r.id;
+              const twin = rows.some((o) => o !== r && o.title === r.title);
+              return (
+                <button key={r.id} type="button" onClick={() => onPick(r.id)} aria-pressed={on} title={r.hint || r.title}
+                  className="min-w-0 flex items-center gap-2 px-2.5 py-2 min-h-[40px] rounded-card bg-white text-left transition-colors hover:bg-muted" style={on ? CARD_ON : CARD}>
+                  <SiteIcon host={r.domain || r.title} Fallback={r.icon} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[13px] font-medium text-fg truncate leading-4">{r.title}</span>
+                    {twin && r.detail && <span className="block text-[11px] text-faint truncate leading-4">{r.detail}</span>}
+                  </span>
+                  {on && <Check size={14} strokeWidth={3} className="text-primary shrink-0" />}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : (
+      <div className="rounded-card bg-white overflow-hidden" style={CARD}>
+        <div className="max-h-[188px] overflow-y-auto divide-y" style={{ '--tw-divide-opacity': 1 }}>
+          {rows.length === 0 && <div className="px-3 py-3 text-xs text-faint">Nothing matches “{q}”.</div>}
+          {rows.map((r) => {
+            const on = value === r.id;
+            return (
+              <button key={r.id} type="button" onClick={() => onPick(r.id)} aria-pressed={on}
+                className={`w-full flex items-center gap-3 px-3 py-2 text-left ${on ? 'bg-primary-tint' : 'hover:bg-muted'}`} style={{ borderColor: 'var(--border)' }}>
+                <span className="w-4 h-4 rounded-full shrink-0 grid place-items-center" style={{ boxShadow: `inset 0 0 0 ${on ? 5 : 1.5}px ${on ? 'var(--primary)' : 'var(--border-2)'}`, background: on ? '#fff' : 'transparent' }} />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[13px] font-medium text-fg truncate">{r.title}</span>
+                  {r.detail && <span className="block text-xs text-faint truncate">{r.detail}</span>}
+                </span>
+                {r.best && <Badge tone="green">{r.bestLabel || 'Matches your site'}</Badge>}
+                {!r.best && r.badge && <Badge tone="grey">{r.badge}</Badge>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      )}
+    </div>
   );
 }
 
@@ -85,10 +178,11 @@ function Note({ tone = 'muted', icon: Icon, children }) {
 // `startStep` / `notice` are for coming BACK from Google's own screen, which leaves the app and returns
 // to the Workspace page: the popup reopens on the Google step, with what happened
 // ({ google: 'saved' | 'connected', error }) shown at the top of it.
-export default function NewProjectModal({ workspace, project: existing = null, isOpen, onClose, onChanged, onOpenProject, startStep = null, notice = null }) {
+export default function NewProjectModal({ workspace, first = false, project: existing = null, isOpen, onClose, onChanged, onOpenProject, startStep = null, notice = null }) {
   const [step, setStep] = useState(1);
   const [name, setName] = useState('');
   const [domain, setDomain] = useState('');
+  const [nameTouched, setNameTouched] = useState(false); // once they type a name themselves, the address stops suggesting one
   const [goal, setGoal] = useState(DEFAULT_GOAL);
   const [project, setProject] = useState(existing);
   const [busy, setBusy] = useState(false);
@@ -113,10 +207,29 @@ export default function NewProjectModal({ workspace, project: existing = null, i
     setDomain(existing.domain || '');
     if (existing.goal) setGoal(existing.goal);
     setStep(startStep || (!existing.goal ? 2 : 3));
+    // Coming back from Google/GitHub the project arrives without its goal. Look it up before asking
+    // again, or "Save goal" on step 2 would overwrite the goal the person already chose.
+    if (existing.goal === undefined) {
+      let cancelled = false;
+      api.project.overview(existing.id)
+        .then((r) => {
+          const saved = r?.projects?.[0]?.goal;
+          if (cancelled || !saved) return;
+          setGoal(saved);
+          setStep((cur) => (startStep ? cur : cur === 2 ? 3 : cur));
+        })
+        .catch(() => {});
+      return () => { cancelled = true; };
+    }
+    return undefined;
   }, [isOpen, existing?.id]);
 
   // The two listings are fetched once the project exists, so steps 3 and 4 are
   // already populated when they are reached.
+  const [branches, setBranches] = useState(null); // { names, defaultBranch, error } for the repository picked; null = not loaded
+  const [branch, setBranch] = useState('');         // the production branch: work is cut from it
+  const [mine, setMine] = useState(null); // the signed-in person's own GitHub repositories; null = not loaded
+ // staff: 'app' = every repo the SuperRank app reaches, 'mine' = the signed-in GitHub account's own
   const [useShared, setUseShared] = useState(false); // staff only: list SuperRank's shared account instead of a connected one
   const loadConnect = async (siteId, { shared = false } = {}) => {
     setConnect(null);
@@ -132,17 +245,36 @@ export default function NewProjectModal({ workspace, project: existing = null, i
     }
   };
   useEffect(() => { if (isOpen && project?.id && step >= 3 && !connect) loadConnect(project.id); }, [isOpen, project?.id, step]);
-  // GitHub's list is slow (one call per installation), so it loads only once that step is reached.
+  // GitHub's list is slow (one call per installation): it starts loading while the person is still on the
+  // Google step, so it is usually ready by the time they get to GitHub. Clients never get it (staff only).
   useEffect(() => {
-    if (!isOpen || !project?.id || step !== 4 || github) return;
+    if (!isOpen || !project?.id || step < 3 || connect === null || connect.githubRestricted || github) return;
     api.project.connect.githubRepos(project.id).then(setGithub).catch((err) => setGithub({ error: err.message || 'GitHub could not be read right now.', repos: [], installations: [] }));
-  }, [isOpen, project?.id, step]);
+  }, [isOpen, project?.id, step, connect]);
+
+  // Their own GitHub repositories, once they have signed in to GitHub (clients always use this; staff on its tab).
+  useEffect(() => {
+    if (!isOpen || !project?.id || step !== 4 || connect === null || !connect.github?.connected || mine) return;
+    api.project.connect.githubMine(project.id).then(setMine).catch((err) => setMine({ signedIn: false, repos: [], error: err.message }));
+  }, [isOpen, project?.id, step, connect]);
+
+  // Once a repository is picked, read its branches so the person chooses instead of typing.
+  useEffect(() => {
+    if (!project?.id || !repo || effSource !== 'mine' || !connect?.github?.connected) { setBranches(null); return; }
+    const [owner, name] = String(repo).split('/');
+    let live = true;
+    setBranches(null);
+    api.project.connect.githubBranches(project.id, owner, name)
+      .then((r) => { if (!live) return; setBranches({ names: r.branches.map((b) => b.name), defaultBranch: r.defaultBranch, error: r.error || null }); setBranch(r.defaultBranch || ''); })
+      .catch((err) => { if (live) setBranches({ names: [], defaultBranch: null, error: err.message }); });
+    return () => { live = false; };
+  }, [repo, project?.id, connect?.github?.connected]);
 
   const close = () => {
     const created = project;
-    setStep(1); setName(''); setDomain(''); setGoal(DEFAULT_GOAL); setProject(null);
+    setStep(1); setName(''); setDomain(''); setNameTouched(false); setGoal(DEFAULT_GOAL); setProject(null);
     setConnect(null); setGithub(null); setGsc(null); setGa4(null); setRepo(null); setGithubChecks(null); setUseStage(false); setStage('stage'); setUseShared(false);
-    setBaseline('idle'); setError(null); setBusy(false);
+    setBaseline('idle'); setError(null); setBusy(false); setMine(null); setBranches(null); setBranch('');
     onClose(created);
   };
 
@@ -152,6 +284,8 @@ export default function NewProjectModal({ workspace, project: existing = null, i
   };
 
   const createProject = () => run(async () => {
+    // Coming back to this step after the project exists: nothing to create again.
+    if (project?.id) { setStep(2); return; }
     const created = await api.workspace.createProject(workspace.id, { name: name.trim(), websiteDomain: domain.trim() || undefined });
     setProject(created);
     await onChanged?.();
@@ -170,6 +304,11 @@ export default function NewProjectModal({ workspace, project: existing = null, i
     const { url } = await api.project.connect.googleStart(project.id);
     window.location.assign(url);
   });
+  // "Connect with GitHub": GitHub's own screen, where the person chooses which repositories SuperRank may see.
+  const startGithub = () => run(async () => {
+    const { url } = await api.project.connect.githubStart(project.id);
+    window.location.assign(url);
+  });
   const disconnectGoogle = () => run(async () => {
     await api.project.connect.googleDisconnect(project.id);
     setGsc(null); setGa4(null);
@@ -183,18 +322,40 @@ export default function NewProjectModal({ workspace, project: existing = null, i
     setStep(4);
   });
 
+  const restrictedNow = Boolean(connect?.githubRestricted);
+  // Everyone connects the same way: signing in to GitHub as themselves. Only while that sign-in is not set up on the
+  // server do staff fall back to the shared SuperRank app list, so a project can still be linked.
+  const effSource = connect?.github?.canConnect || notice?.github ? 'mine' : 'app';
   const saveGithub = () => run(async () => {
     const [owner, repoName] = String(repo).split('/');
-    const r = await api.project.connect.github(project.id, { repoOwner: owner, repoName, ...(useStage && stage.trim() ? { prTargetBranch: stage.trim() } : {}) });
+    const usingMine = restrictedNow || effSource === 'mine';
+    const r = await api.project.connect.github(project.id, { repoOwner: owner, repoName, ...(usingMine ? { source: 'mine' } : {}), ...(usingMine && branch ? { repoDefaultBranch: branch } : {}), ...(useStage && stage.trim() ? { prTargetBranch: stage.trim() } : {}) });
     setConnect((c) => ({ ...c, state: r.state }));
     setGithubChecks({ ...r.checks, techStack: r.techStack });
     setStep(5);
   });
 
+  // A run that is already going (this popup was closed and reopened, the page was refreshed, a
+  // second tab) is followed, never started again: the server holds a lock per project.
+  const followRunningBaseline = async () => {
+    const deadline = Date.now() + 20 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 4000));
+      const st = await api.project.baselineStatus(project.id);
+      if (st.status !== 'running') return st.status;
+    }
+    return 'running';
+  };
   const runBaseline = async () => {
     setBaseline('running'); setError(null);
     try {
-      await api.project.baseline(project.id);
+      let outcome = (await api.project.baselineStatus(project.id)).status;
+      if (outcome === 'idle') {
+        const r = await api.project.baseline(project.id);
+        outcome = r?.running ? 'running' : 'done';
+      }
+      if (outcome === 'running') outcome = await followRunningBaseline();
+      if (outcome !== 'done') throw new Error(outcome === 'running' ? 'The baseline is still running. It keeps going on its own; check back in a few minutes.' : 'The baseline did not finish. SuperRank can run it again.');
       setBaseline('done');
       await onChanged?.();
     } catch (err) {
@@ -220,18 +381,33 @@ export default function NewProjectModal({ workspace, project: existing = null, i
   let body = null, footer = null, title = 'Add project', subtitle = null, icon = FolderPlus;
 
   if (step === 1) {
-    subtitle = <>To <span className="text-fg font-medium">{workspace?.name}</span></>;
+    if (first) { title = 'Add your first project'; subtitle = <>A project is one website you want to grow, in <span className="text-fg font-medium">{workspace?.name}</span></>; }
+    else subtitle = <>To <span className="text-fg font-medium">{workspace?.name}</span></>;
+    const shownName = name.trim();
     body = (
       <form id="new-project-form" onSubmit={(e) => { e.preventDefault(); createProject(); }} className="space-y-4">
-        <Field label="Project name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme Blog" required autoFocus />
         <label className="fld">
           <span className="fld__label">Website address</span>
           <div className="relative">
             <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"><Globe size={14} /></span>
-            <input type="text" value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="blog.acme.com" style={{ paddingLeft: 32 }} />
+            <input type="text" value={domain} autoFocus onChange={(e) => { setDomain(e.target.value); if (!nameTouched) setName(nameFromDomain(e.target.value)); }} placeholder="blog.acme.com" style={{ paddingLeft: 32 }} disabled={!!project?.id} />
           </div>
           <span className="fld__hint">Just the address, like acme.com. We use it to find the right Google property for you.</span>
         </label>
+        <Field label="Project name" value={name} onChange={(e) => { setName(e.target.value); setNameTouched(true); }} placeholder="Acme Blog" required disabled={!!project?.id}
+          hint={nameTouched || !name ? undefined : 'Filled in from your address. Change it if you like.'} />
+        {shownName && (
+          <div className="flex items-center gap-2.5 rounded-control bg-primary-tint px-3 py-2.5 text-xs text-text" style={{ boxShadow: 'inset 0 0 0 1px var(--primary-ring)' }}>
+            <span className="w-7 h-7 rounded-control bg-white text-primary grid place-items-center font-semibold shrink-0" style={{ boxShadow: '0 0 0 1px var(--primary-ring)' }}>{shownName.charAt(0).toUpperCase()}</span>
+            <div className="min-w-0"><div className="text-[13px] font-medium text-fg truncate">{shownName}</div><div className="truncate">{domain.trim() ? `${domain.trim()} · ` : ''}will be added to {workspace?.name}</div></div>
+          </div>
+        )}
+        {first && (
+          <div className="flex gap-2.5 rounded-control bg-muted px-3 py-2.5 text-xs leading-[17px] text-text" style={{ boxShadow: 'inset 0 0 0 1px var(--border)' }}>
+            <Info size={14} className="text-primary shrink-0 mt-px" />
+            <span><span className="text-fg font-medium">Next, about 3 minutes:</span> say what you want to grow, connect Google and your repository, then SuperRank builds your baseline.</span>
+          </div>
+        )}
         {errorBox}
       </form>
     );
@@ -250,6 +426,7 @@ export default function NewProjectModal({ workspace, project: existing = null, i
     body = <div className="space-y-4"><GoalFields value={goal} onChange={setGoal} />{errorBox}</div>;
     footer = (
       <>
+        <Button variant="light" onClick={() => setStep(1)} disabled={busy}>Back</Button>
         <Button variant="light" onClick={() => setStep(3)} disabled={busy}>Skip for now</Button>
         <Button variant="primary" onClick={saveGoal} disabled={busy || !goalComplete(goal)}>{busy ? 'Saving…' : 'Save goal'}</Button>
       </>
@@ -272,23 +449,28 @@ export default function NewProjectModal({ workspace, project: existing = null, i
 
     // A function, called only once the lists exist: building this up front read `.length` of a list that
     // had not loaded yet and crashed the whole page to white.
+    const siteHost = project?.websiteDomain || project?.website_domain || domain;
     const propertyPickers = () => (
       <div className="space-y-5">
         <div>
-          <div className="flex items-center gap-2 text-[13px] font-medium text-fg mb-2"><Search size={14} className="text-faint" />Search Console property</div>
+          <div className="flex items-center gap-2.5 mb-2.5">
+            <span className="w-7 h-7 rounded-control bg-primary-tint text-primary grid place-items-center shrink-0"><Search size={15} /></span>
+            <div className="min-w-0"><div className="text-sm font-semibold text-fg leading-4">Search Console</div><div className="text-xs text-faint mt-0.5">Where your site shows up in Google search</div></div>
+          </div>
           {listError(scList) ? <Note tone="amber" icon={AlertTriangle}>{listError(scList)}</Note>
             : scList.length === 0 ? <Note tone="amber" icon={AlertTriangle}>This Google account has no Search Console sites. Use a different account, or add your site in Search Console first.</Note>
-            : <div className="grid gap-2 max-h-[180px] overflow-y-auto pr-0.5">
-                {scList.map((r) => <PickRow key={r.property} on={gsc === r.property} title={r.property} detail={r.domain} badge={r.permission === 'siteOwner' ? 'Owner' : null} onClick={() => setGsc(r.property)} />)}
-              </div>}
+            : <PropertyList grid value={gsc} onPick={setGsc} siteHost={siteHost}
+                items={scList.map((r) => { const dom = r.property.startsWith('sc-domain:'); return { id: r.property, title: hostOf(r.property), detail: dom ? 'Domain' : 'URL prefix', hint: r.property.replace(/^sc-domain:/, 'Domain: '), icon: dom ? Globe : Link2, domain: r.domain }; })} />}
         </div>
         <div>
-          <div className="flex items-center gap-2 text-[13px] font-medium text-fg mb-2"><BarChart3 size={14} className="text-faint" />Analytics property</div>
+          <div className="flex items-center gap-2.5 mb-2.5">
+            <span className="w-7 h-7 rounded-control bg-primary-tint text-primary grid place-items-center shrink-0"><BarChart3 size={15} /></span>
+            <div className="min-w-0"><div className="text-sm font-semibold text-fg leading-4">Google Analytics</div><div className="text-xs text-faint mt-0.5">Visits and what people do on your site</div></div>
+          </div>
           {listError(gaList) ? <Note tone="amber" icon={AlertTriangle}>{listError(gaList)}</Note>
             : gaList.length === 0 ? <Note tone="amber" icon={AlertTriangle}>This Google account has no Analytics properties. Use a different account, or set up Analytics first.</Note>
-            : <div className="grid gap-2 max-h-[180px] overflow-y-auto pr-0.5">
-                {gaList.map((r) => <PickRow key={r.propertyId} on={ga4 === r.propertyId} title={r.name} detail={`Property ${r.propertyId}${r.account ? ` · ${r.account}` : ''}`} onClick={() => setGa4(r.propertyId)} />)}
-              </div>}
+            : <PropertyList grid value={ga4} onPick={setGa4} siteHost={siteHost}
+                items={gaList.map((r) => ({ id: r.propertyId, title: r.name, detail: `ID ${r.propertyId}`, hint: `${r.name} · Property ${r.propertyId}${r.account ? ` · ${r.account}` : ''}`, icon: BarChart3, domain: r.domain || r.name }))} />}
         </div>
       </div>
     );
@@ -331,14 +513,21 @@ export default function NewProjectModal({ workspace, project: existing = null, i
                 <div className="text-[13px] text-text">Analytics property {connect.state.google.ga4PropertyId}</div>
               </div>
             )}
+            {useShared && !connected && (
+              <div className="flex items-center gap-2 rounded-control bg-muted px-3 py-2 text-xs text-text" style={{ boxShadow: 'inset 0 0 0 1px var(--border)' }}>
+                <Info size={14} className="text-primary shrink-0" />
+                <span className="flex-1 min-w-0"><span className="text-fg font-medium">Shared SuperRank Google account</span> · visible to SuperRank staff only</span>
+                <button type="button" className="text-fg underline underline-offset-2 hover:text-primary shrink-0" onClick={() => { setUseShared(false); setGsc(null); setGa4(null); }}>Close</button>
+              </div>
+            )}
             {picking && !saved && propertyPickers()}
             {picking && saved && (
               <button type="button" className="text-[13px] text-fg underline underline-offset-2 hover:text-primary" onClick={() => { setGsc(null); setGa4(null); setConnect((c) => ({ ...c, state: { ...c.state, google: { ...c.state.google, connected: false } } })); }}>Choose a different site</button>
             )}
 
             {!picking && g?.sharedAvailable && (
-              <p className="text-xs text-faint">
-                SuperRank staff: <button type="button" className="underline underline-offset-2 hover:text-fg" onClick={showShared}>use the shared SuperRank Google account instead</button>
+              <p className="text-xs text-faint border-t pt-3" style={{ borderColor: 'var(--border)' }}>
+                SuperRank staff only: <button type="button" className="underline underline-offset-2 hover:text-fg" onClick={showShared}>use the shared SuperRank Google account instead</button>
               </p>
             )}
           </>
@@ -350,7 +539,7 @@ export default function NewProjectModal({ workspace, project: existing = null, i
       <>
         {picking && saved
           ? <Button variant="light" onClick={() => setStep(2)} disabled={busy}>Back</Button>
-          : <Button variant="light" onClick={() => setStep(4)} disabled={busy}>Skip for now</Button>}
+          : <><Button variant="light" onClick={() => setStep(2)} disabled={busy}>Back</Button><Button variant="light" onClick={() => setStep(4)} disabled={busy}>Skip for now</Button></>}
         {picking && saved
           ? <Button variant="primary" onClick={() => setStep(4)}>Continue</Button>
           : <Button variant="primary" onClick={saveGoogle} disabled={busy || !picking || !gsc || !ga4}>{busy ? 'Saving…' : 'Use this site'}</Button>}
@@ -366,11 +555,147 @@ export default function NewProjectModal({ workspace, project: existing = null, i
     const ghError = github?.error;
     const installUrl = github?.installUrl;
     const restricted = Boolean(connect?.githubRestricted);
+    const siteLabel = hostOf(project?.websiteDomain || project?.website_domain || domain).split('.')[0] || '';
+    const clientSteps = [
+      { n: 1, t: 'SuperRank links your repository', d: 'Our team connects the code behind your website. You do not install or paste anything.', state: 'Waiting on us', tone: 'amber' },
+      { n: 2, t: 'The agent prepares fixes', d: 'It finds the right file, makes the change and opens a pull request.', state: 'After step 1', tone: 'grey' },
+      { n: 3, t: 'You approve every change', d: 'Nothing is merged or published on your site without your approval.', state: 'Always', tone: 'green' },
+    ];
+    const ghCanConnect = Boolean(connect?.github?.canConnect);
+    const connectCard = (who) => (
+      <div className="rounded-card bg-white p-4" style={CARD}>
+        <div className="flex items-start gap-3">
+          <span className="w-9 h-9 rounded-control bg-fg text-white grid place-items-center shrink-0"><GitBranch size={17} /></span>
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-semibold text-fg">{who === 'staff' ? 'Sign in with your own GitHub account' : 'Connect the repository behind your website'}</div>
+            <p className="mt-1 text-xs text-faint leading-[18px]">
+              {who === 'staff'
+                ? 'You see the repositories your account can reach, choose the one for this project, and the agent works from it.'
+                : 'GitHub opens in a new screen. You choose which repositories SuperRank may use, then come straight back and pick the one for this site. SuperRank only ever sees the ones you allow.'}
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <Button variant="primary" onClick={startGithub} disabled={busy || !ghCanConnect}>
+                <ExternalLink size={14} />{busy ? 'Opening GitHub…' : 'Connect with GitHub'}
+              </Button>
+              {!ghCanConnect && <span className="text-xs" style={{ color: '#8a5300' }}>GitHub sign-in is not set up on this server yet.</span>}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+    // Where the person is in the GitHub step, so a new user can see what is coming and what is left.
+    const stageNow = !connect?.github?.connected || !mine?.signedIn ? 1 : mine.repos.length === 0 ? 2 : !repo ? 3 : 4;
+    const stageChips = (
+      <ol className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs" aria-label="GitHub steps">
+        {['Connect GitHub', 'Install the app', 'Choose repository', 'Choose branch'].map((label, i) => {
+          const n = i + 1, done = n < stageNow, on = n === stageNow;
+          return (
+            <li key={label} className="inline-flex items-center gap-1.5">
+              {i > 0 && <span className="text-faint">›</span>}
+              <span className={`w-4 h-4 rounded-full grid place-items-center text-[10px] font-semibold ${done ? 'bg-primary text-white' : on ? 'bg-fg text-white' : 'bg-muted text-faint'}`}>{done ? <Check size={9} strokeWidth={3} /> : n}</span>
+              <span className={on ? 'font-medium text-fg' : done ? 'text-text' : 'text-faint'}>{label}</span>
+            </li>
+          );
+        })}
+      </ol>
+    );
+    const mineLoaded = mine && mine.signedIn;
+    const mineBlock = () => {
+      if (!connect?.github?.connected) return connectCard(restricted ? 'client' : 'staff');
+      if (mine === null) return <div className="flex items-center gap-2 text-[13px] text-faint py-6 justify-center"><Loader2 size={15} className="animate-spin" />Reading your repositories…</div>;
+      if (!mine.signedIn) return <>{mine.error && <Note tone="amber" icon={AlertTriangle}>{mine.error}</Note>}{connectCard(restricted ? 'client' : 'staff')}</>;
+      return (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-text">
+            <span className="inline-flex items-center gap-1.5"><Check size={14} style={{ color: 'var(--green)' }} />Signed in to GitHub{mine.login ? <> as <b className="font-medium text-fg">{mine.login}</b></> : null}</span>
+            <button type="button" className="text-fg underline underline-offset-2 hover:text-primary" onClick={startGithub} disabled={busy}>Use a different account</button>
+          </div>
+          {mine.repos.length === 0 ? (
+            <div className="rounded-card bg-white p-4" style={CARD}>
+              <div className="flex items-start gap-3">
+                <span className="w-9 h-9 rounded-control bg-primary-tint text-primary grid place-items-center shrink-0"><Download size={17} /></span>
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-semibold text-fg">Next: install the SuperRank app</div>
+                  <p className="mt-1 text-xs text-faint leading-[18px]">
+                    You are signed in, but SuperRank cannot see any repository yet. GitHub asks you to install the app and tick the repositories it may use. It opens in this tab and brings you back here, where your repositories will be waiting.
+                  </p>
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    {mine.installUrl
+                      ? <a href={mine.installUrl} className="btn btn--primary"><ExternalLink size={14} />Install SuperRank on GitHub</a>
+                      : <span className="text-xs" style={{ color: '#8a5300' }}>The SuperRank app address is not set up on this server yet.</span>}
+                    <button type="button" className="text-[13px] text-faint underline underline-offset-2 hover:text-fg" onClick={() => { setMine(null); }}>I have installed it, check again</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <PropertyList value={repo} onPick={setRepo} noun="repositories"
+              items={mine.repos.map((r) => ({
+                id: r.fullName, title: r.name, detail: `${r.owner} · branch ${r.defaultBranch}`, badge: r.private ? 'Private' : 'Public',
+                best: Boolean(siteLabel) && r.name.toLowerCase().includes(siteLabel.toLowerCase()), bestLabel: 'Looks like this site',
+              }))} />
+          )}
+          {repo && (
+            <div className="rounded-card bg-white p-3 space-y-3" style={CARD}>
+              <div className="text-xs font-medium text-fg">Branches for <span className="font-semibold">{repo}</span></div>
+              {branches === null ? (
+                <div className="flex items-center gap-2 text-xs text-faint"><Loader2 size={13} className="animate-spin" />Reading branches…</div>
+              ) : (
+                <>
+                  {branches.error && <Note tone="amber" icon={AlertTriangle}>{branches.error}</Note>}
+                  <label className="fld">
+                    <span className="fld__label">Production branch</span>
+                    {branches.names.length > 0
+                      ? <select value={branch} onChange={(e) => setBranch(e.target.value)}>{branches.names.map((n) => <option key={n} value={n}>{n}{n === branches.defaultBranch ? ' (default)' : ''}</option>)}</select>
+                      : <input type="text" value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="main" />}
+                    <span className="fld__hint">The live branch. Each day's work is prepared from it.</span>
+                  </label>
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-[13px] font-medium text-fg">Review on a stage branch first</span>
+                      <span className="block text-xs text-faint">Pull requests open into the stage branch; you promote it to main yourself.</span>
+                    </span>
+                    <input type="checkbox" role="switch" checked={useStage} onChange={(e) => setUseStage(e.target.checked)} className="shrink-0 w-4 h-4" />
+                  </label>
+                  {useStage && (
+                    <label className="fld">
+                      <span className="fld__label">Stage branch</span>
+                      {branches.names.filter((n) => n !== branch).length > 0
+                        ? <select value={branches.names.includes(stage) ? stage : ''} onChange={(e) => setStage(e.target.value)}>{!branches.names.includes(stage) && <option value="">Choose a branch</option>}{branches.names.filter((n) => n !== branch).map((n) => <option key={n} value={n}>{n}</option>)}</select>
+                        : <input type="text" value={stage} onChange={(e) => setStage(e.target.value)} placeholder="stage" />}
+                      <span className="fld__hint">It must already exist in the repository.</span>
+                    </label>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+          {mine.installUrl && mine.repos.length > 0 && (
+            <a href={mine.installUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-[13px] font-medium text-fg hover:text-primary"><ExternalLink size={13} />A repository missing? Add it on GitHub</a>
+          )}
+        </div>
+      );
+    };
+    // The short guide under the GitHub connection, the same for staff and clients.
+    const whatNext = (
+      <div className="rounded-card bg-muted px-4 py-3" style={{ boxShadow: 'inset 0 0 0 1px var(--border)' }}>
+        <div className="text-xs font-medium text-fg mb-2">What happens next</div>
+        <ol className="space-y-1.5">
+          {[['Connect GitHub', 'Sign in to GitHub and allow SuperRank on the repositories you choose.'], ['Choose the repository and branch', 'Only the ones you allow are visible to SuperRank.'], ['The agent prepares fixes', 'Every day it finds the right file, makes the change and opens a pull request.'], ['You approve every change', 'Nothing is merged or published without your approval.']].map(([t, d], i) => (
+            <li key={t} className="flex items-start gap-2.5 text-xs leading-[17px]">
+              <span className="w-4 h-4 mt-px rounded-full bg-white text-text grid place-items-center text-[10px] font-semibold shrink-0" style={{ boxShadow: 'inset 0 0 0 1px var(--border-2)' }}>{i + 1}</span>
+              <span className="min-w-0"><span className="text-fg font-medium">{t}.</span> <span className="text-faint">{d}</span></span>
+            </li>
+          ))}
+        </ol>
+      </div>
+    );
     body = restricted ? (
       <div className="space-y-4">
-        <Note icon={GitBranch}>
-          The agent needs your site's code to make fixes, and SuperRank links your repository for you for now. It is on our setup list, and nothing is changed on your site until it is linked and you approve each pull request.
-        </Note>
+        {notice?.error && notice?.fromGithub && <Note tone="red" icon={AlertTriangle}>{notice.error}</Note>}
+        {stageChips}
+        {mineBlock()}
+        {whatNext}
       </div>
     ) : (
       <div className="space-y-4">
@@ -378,9 +703,12 @@ export default function NewProjectModal({ workspace, project: existing = null, i
           <div className="flex items-center gap-2 text-[13px] text-faint py-6 justify-center"><Loader2 size={15} className="animate-spin" />Reading your repositories…</div>
         ) : (
           <>
-            <Note icon={GitBranch}>
-              The agent needs the site's own code: it finds the page's file, makes the change there and opens a pull request. Nothing merges without your approval.
-            </Note>
+            {effSource === 'mine' && <>{stageChips}{mineBlock()}{whatNext}</>}
+            {effSource === 'app' && (<>
+            <div className="flex items-center gap-2 rounded-control bg-muted px-3 py-2 text-xs text-text" style={{ boxShadow: 'inset 0 0 0 1px var(--border)' }}>
+              <Info size={14} className="text-primary shrink-0" />
+              <span className="flex-1 min-w-0"><span className="text-fg font-medium">SuperRank GitHub app</span> · every repository it can reach · visible to SuperRank staff only</span>
+            </div>
             {ghError && <Note tone="amber" icon={AlertTriangle}>{ghError}</Note>}
             {repos.length === 0 ? (
               <Note tone="amber" icon={AlertTriangle}>
@@ -388,23 +716,23 @@ export default function NewProjectModal({ workspace, project: existing = null, i
                 {installUrl ? <>Install the SuperRank app on the repository, then reopen this step.</> : <>The SuperRank GitHub app is not set up on this server yet.</>}
               </Note>
             ) : (
-              <div className="grid gap-2 max-h-[240px] overflow-y-auto pr-0.5">
-                {repos.map((r) => (
-                  <PickRow key={r.fullName} on={repo === r.fullName} title={r.fullName} detail={`Default branch ${r.defaultBranch}`} badge={r.private ? 'Private' : null} onClick={() => setRepo(r.fullName)} />
-                ))}
-              </div>
+              <PropertyList value={repo} onPick={setRepo} noun="repositories"
+                items={repos.map((r) => ({
+                  id: r.fullName, title: r.name, detail: `${r.owner} · branch ${r.defaultBranch}`, badge: r.private ? 'Private' : 'Public',
+                  best: Boolean(siteLabel) && r.name.toLowerCase().includes(siteLabel.toLowerCase()), bestLabel: 'Looks like this site',
+                }))} />
             )}
             {repos.length > 0 && (
-              <div className="rounded-card bg-white p-3" style={CARD}>
-                <label className="flex items-start gap-2.5 cursor-pointer">
-                  <input type="checkbox" checked={useStage} onChange={(e) => setUseStage(e.target.checked)} className="mt-0.5" />
-                  <span className="min-w-0">
-                    <span className="block text-[13px] font-medium text-fg">We review changes on a stage branch first</span>
-                    <span className="block text-xs text-faint mt-0.5">Fixes are prepared from your main branch, and the pull request opens into the stage branch. You promote it to main yourself.</span>
+              <div className="rounded-card bg-white px-3 py-2.5" style={CARD}>
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[13px] font-medium text-fg">Review on a stage branch first</span>
+                    <span className="block text-xs text-faint">Pull requests open into the stage branch; you promote it to main yourself.</span>
                   </span>
+                  <input type="checkbox" role="switch" checked={useStage} onChange={(e) => setUseStage(e.target.checked)} className="shrink-0 w-4 h-4" />
                 </label>
                 {useStage && (
-                  <div className="mt-2.5 sm:pl-6"><Field label="Stage branch" value={stage} onChange={(e) => setStage(e.target.value)} placeholder="stage" hint="It must already exist in the repository." /></div>
+                  <div className="mt-2.5"><Field label="Stage branch" value={stage} onChange={(e) => setStage(e.target.value)} placeholder="stage" hint="It must already exist in the repository." /></div>
                 )}
               </div>
             )}
@@ -413,6 +741,10 @@ export default function NewProjectModal({ workspace, project: existing = null, i
                 <ExternalLink size={13} />{repos.length === 0 ? 'Install the SuperRank app on GitHub' : 'A repository missing? Add it on GitHub'}
               </a>
             )}
+            {repos.length > 0 && installUrl && (
+              <button type="button" className="ml-3 text-[13px] text-faint underline underline-offset-2 hover:text-fg" onClick={() => { setGithub(null); api.project.connect.githubRepos(project.id, { fresh: true }).then(setGithub).catch((err) => setGithub({ error: err.message, repos: [], installations: [] })); }}>Refresh list</button>
+            )}
+            </>)}
           </>
         )}
         {errorBox}
@@ -422,9 +754,12 @@ export default function NewProjectModal({ workspace, project: existing = null, i
       <>
         <Button variant="light" onClick={() => setStep(3)} disabled={busy}>Back</Button>
         {restricted ? (
-          <Button variant="primary" onClick={() => setStep(5)}>Continue</Button>
+          <>
+            <Button variant="light" onClick={() => setStep(5)} disabled={busy}>Skip for now</Button>
+            {mineLoaded && mine.repos.length > 0 && <Button variant="primary" onClick={saveGithub} disabled={busy || !repo || (useStage && !stage.trim())}>{busy ? 'Connecting…' : 'Connect repository'}</Button>}
+          </>
         ) : (
-          <Button variant="primary" onClick={saveGithub} disabled={busy || !repo || (useStage && !stage.trim())}>{busy ? 'Connecting…' : 'Connect repository'}</Button>
+          <Button variant="primary" onClick={saveGithub} disabled={busy || !repo || (useStage && !stage.trim()) || (effSource === 'mine' && !mineLoaded)}>{busy ? 'Connecting…' : 'Connect repository'}</Button>
         )}
       </>
     );
@@ -479,9 +814,10 @@ export default function NewProjectModal({ workspace, project: existing = null, i
   }
 
   return (
-    <Modal isOpen={isOpen} onClose={close} icon={icon} title={title} subtitle={subtitle} maxWidth="max-w-[560px]" footer={footer}>
+    <Modal isOpen={isOpen} onClose={close} icon={icon} title={title} subtitle={subtitle} maxWidth="max-w-[560px]" footer={footer} anchor="top">
       <Stepper step={step} />
-      {body}
+      {/* A floor under every step's height, so a list loading in does not make the popup jump. */}
+      <div className="min-h-[340px]">{body}</div>
     </Modal>
   );
 }

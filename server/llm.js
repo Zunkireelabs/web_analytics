@@ -71,14 +71,14 @@ export const MODEL_DEFAULTS = {
 // calling generator's own meta.id. This is the automatic RETRIEVE step of
 // the platform-wide learning loop: every generator gets it for free just by
 // passing its own id, with no separate opt-in per generator.
-export async function callLLM(system, user, { model, maxTokens = 500, tier = 'daily', generatorId, siteId } = {}) {
+export async function callLLM(system, user, { model, maxTokens = 500, tier = 'daily', generatorId, siteId, pageUrl } = {}) {
   system = await withAgentMemory(system, generatorId, siteId);
   // Shared design-intelligence layer (server/implementers/lib/design-drift.js) —
   // real site design/voice grounding for every website-facing generator, the
   // same automatic-by-generatorId shape as withAgentMemory just above. A
   // no-op for generatorIds outside DESIGN_CONTEXT_GENERATOR_IDS (purely
   // technical output) and for any site without a usable Design Context yet.
-  system = await withDesignContext(system, generatorId, siteId);
+  system = await withDesignContext(system, generatorId, siteId, { pageUrl });
   // Tenant-scoped competitor-domain policy — same automatic-by-generatorId
   // shape as the two above, a no-op outside COMPETITOR_CONTEXT_GENERATOR_IDS
   // or when this site has no active competitor data. See

@@ -1,3 +1,4 @@
+import { getGoogleConnection } from '../store/project-google.js';
 import { Router } from 'express';
 import {
   getSiteById, getDailySeries,
@@ -32,7 +33,10 @@ router.use(requireAuth);
 router.get('/sites', async (req, res, next) => {
   try {
     const site = await getSiteById(req.siteId);
-    res.json(site ? [site] : []);
+    if (!site) return res.json([]);
+    // Health of the project's OWN Google sign-in, for the "Reconnect Google" strip. No token.
+    const conn = await getGoogleConnection(site.id).catch(() => null);
+    res.json([{ ...site, google_connection: conn ? { status: conn.status, email: conn.google_email, error: conn.status === 'ok' ? null : conn.status_error } : null }]);
   } catch (e) { next(e); }
 });
 

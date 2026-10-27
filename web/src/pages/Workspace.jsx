@@ -15,6 +15,15 @@ import { ROLE_LABELS, canManageWorkspace, isWorkspaceOwner, goalLine } from '../
 
 const VIEW_KEY = 'workspace-projects-view';
 
+// The same, for GitHub's screen.
+const GITHUB_ERRORS = {
+  cancelled: 'You closed the GitHub screen before finishing, so nothing was connected.',
+  expired: 'That GitHub sign-in took too long or did not start here. Please try again.',
+  denied: 'Your account cannot connect GitHub for this project.',
+  exchange_failed: 'GitHub did not accept that sign-in. Please try again.',
+  github_failed: 'GitHub could not be reached just now. Please try again.',
+};
+
 // What to tell someone who comes back from Google's own screen without a connection.
 const GOOGLE_ERRORS = {
   cancelled: 'You closed the Google screen before finishing, so nothing was connected.',
@@ -29,8 +38,8 @@ const inputRing = { boxShadow: '0 0 0 1px var(--input)' };
 const readView = () => { try { return localStorage.getItem(VIEW_KEY) === 'list' ? 'list' : 'grid'; } catch { return 'grid'; } };
 
 // Sidebar → Workspace: a clean Projects page. The workspace's projects as cards (or a
-// list), a search, a status filter and a sort, and New project. The workspace name is
-// at the top with Switch and New workspace. Everything else about the workspace and
+// list), a search, a status filter and a sort, and New workspace. The workspace name is
+// at the top with Switch and New project. Everything else about the workspace and
 // its projects (people, API tokens, goals, transfer, health) lives in Account settings.
 // Someone who was given access to a single project sees it under "Shared with you".
 export default function Workspace({ siteId, onSwitchProject }) {
@@ -82,17 +91,19 @@ export default function Workspace({ siteId, onSwitchProject }) {
   useEffect(() => {
     const finish = Number(params.get('finish')) || null;
     const google = params.get('google');
-    const gerror = params.get('gerror');
+    const gerror = params.get('gerror') || params.get('gherror');
+    const github = params.get('github');
     if (!finish && !gerror) return;
     if (workspaces === null) return; // wait until the projects are known
     const project = finish ? workspaces.flatMap((w) => w.projects).find((p) => p.id === finish) : null;
-    const error = gerror ? (GOOGLE_ERRORS[gerror] || 'Google could not be connected.') : null;
+    const fromGithub = Boolean(github || params.get('gherror'));
+    const error = gerror ? (fromGithub ? (GITHUB_ERRORS[gerror] || 'GitHub could not be connected.') : (GOOGLE_ERRORS[gerror] || 'Google could not be connected.')) : null;
     if (project) {
-      setReturning({ google, error });
+      setReturning({ google, github, error, fromGithub });
       setResume({ id: project.id, name: project.name, domain: project.domain });
       setAddOpen(true);
     } else if (error) setPageError(error);
-    setParams((prev) => { const next = new URLSearchParams(prev); ['finish', 'google', 'gerror'].forEach((k) => next.delete(k)); return next; }, { replace: true });
+    setParams((prev) => { const next = new URLSearchParams(prev); ['finish', 'google', 'gerror', 'github', 'gherror'].forEach((k) => next.delete(k)); return next; }, { replace: true });
   }, [workspaces, params]);
 
   const open = async (project) => { await onSwitchProject(project.id); navigate('/overview'); };
@@ -174,7 +185,7 @@ export default function Workspace({ siteId, onSwitchProject }) {
           <button type="button" role="tab" aria-selected={view === 'grid'} aria-label="Grid view" className={view === 'grid' ? 'is-on' : undefined} onClick={() => chooseView('grid')} style={{ display: 'grid', placeItems: 'center' }}><LayoutGrid size={15} /></button>
           <button type="button" role="tab" aria-selected={view === 'list'} aria-label="List view" className={view === 'list' ? 'is-on' : undefined} onClick={() => chooseView('list')} style={{ display: 'grid', placeItems: 'center' }}><List size={15} /></button>
         </div>
-        {canManage && <Button variant="primary" onClick={() => { setResume(null); setAddOpen(true); }}><Plus size={14} />New project</Button>}
+        <Button variant="primary" onClick={() => setNewWsOpen(true)}><Plus size={14} />New workspace</Button>
       </PageToolbar>
 
       <div className="flex flex-wrap items-end justify-between gap-3 mb-5">
@@ -210,7 +221,7 @@ export default function Workspace({ siteId, onSwitchProject }) {
             </div>
           ) : null}
         </div>
-        <Button variant="light" onClick={() => setNewWsOpen(true)}><Plus size={14} />New workspace</Button>
+        {canManage && <Button variant="light" onClick={() => { setResume(null); setAddOpen(true); }}><Plus size={14} />New project</Button>}
       </div>
 
       {workspaces === null ? (
@@ -242,7 +253,7 @@ export default function Workspace({ siteId, onSwitchProject }) {
       )}
       {addOpen && workspace && (
         <NewProjectModal workspace={workspace} project={resume} isOpen
-          startStep={returning ? 3 : null} notice={returning}
+          startStep={returning ? (returning.fromGithub ? 4 : 3) : null} notice={returning}
           onClose={() => { setAddOpen(false); setResume(null); setReturning(null); }}
           onChanged={async () => { await Promise.all([load(), loadOverview()]); }}
           onOpenProject={(p) => p && open(p)} />
@@ -257,7 +268,11 @@ export default function Workspace({ siteId, onSwitchProject }) {
         }} />
       {newWsOpen && (
         <NewWorkspaceModal isOpen onClose={() => setNewWsOpen(false)}
-          onCreated={async (ws) => { await load(); if (ws?.id) setParams({ ws: String(ws.id) }, { replace: true }); }} />
+          onCreated={async (ws) => {
+            await load();
+            window.dispatchEvent(new Event('workspaces:changed')); // a project-less account becomes a full one (App.jsx)
+            if (ws?.id) setParams({ ws: String(ws.id) }, { replace: true });
+          }} />
       )}
     </div>
   );

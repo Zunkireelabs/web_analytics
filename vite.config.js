@@ -28,5 +28,17 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // Libraries change rarely, the app changes every deploy: keeping them in their own files means a
+        // deploy re-downloads only the app, and the browser fetches them in parallel with it.
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (/node_modules\/(react|react-dom|react-router|react-router-dom|scheduler)\//.test(id)) return 'vendor-react';
+          if (/node_modules\/(recharts|d3-[^/]+|victory-vendor|recharts-scale)\//.test(id)) return 'vendor-charts';
+          return undefined;
+        },
+      },
+    },
   },
 });

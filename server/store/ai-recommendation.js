@@ -169,3 +169,84 @@ export async function getCompetitorMentionCounts(siteId, sinceDate, beforeDate) 
   }
   return { ourMentions, totalProbes: rows.length, competitorCounts };
 }
+
+// ── AI visibility page (migration 205) ──────────────────────────────────────
+
+// Every active prompt with its most recent runs (all providers), for the page's
+// seen / missing lists. Two queries rather than a lateral join so the run cap is
+// applied in JS where the "last N distinct check dates" rule lives (see
+// agents/lib/ai-visibility-board.js).
+export async function listPromptsWithRuns(siteId, { sinceDays = 200 } = {}) {
+  const prompts = await listActivePrompts(siteId);
+  if (!prompts.length) return { prompts, runs: [] };
+  const { rows: runs } = await query(
+    `SELECT prompt_id, provider, mentioned, approximate_position, competitors_mentioned, run_date, created_at
+       FROM ai_prompt_runs
+      WHERE site_id = $1 AND prompt_id = ANY($2) AND run_date >= (now() - ($3 || ' days')::interval)::date
+      ORDER BY run_date DESC, created_at DESC`,
+    [siteId, prompts.map((p) => p.id), String(sinceDays)]
+  );
+  return { prompts, runs };
+}
+
+// Marks prompts as "ship this". Only active prompts of this site that have not already
+// got a draft; returns the rows that were actually marked.
+export async function requestPromptShip(siteId, promptIds) {
+  if (!promptIds.length) return [];
+  const { rows } = await query(
+    `UPDATE ai_tracked_prompts
+        SET ship_requested_at = COALESCE(ship_requested_at, now()), ship_error = NULL
+      WHERE site_id = $1 AND id = ANY($2) AND active = true AND ship_draft_id IS NULL
+      RETURNING *`,
+    [siteId, promptIds]
+  );
+  return rows;
+}
+
+export async function setPromptDraft(siteId, promptId, draftId) {
+  await query(
+    `UPDATE ai_tracked_prompts SET ship_draft_id = $3, ship_error = NULL WHERE site_id = $1 AND id = $2`,
+    [siteId, promptId, draftId]
+  );
+}
+
+export async function setPromptShipError(siteId, promptId, message) {
+  await query(
+    `UPDATE ai_tracked_prompts SET ship_error = $3 WHERE site_id = $1 AND id = $2`,
+    [siteId, promptId, String(message || '').slice(0, 300)]
+  );
+}
+
+// Prompts someone asked to ship that the daily run has not turned into a draft yet.
+export async function listPromptsAwaitingShip(siteId, limit = 10) {
+  const { rows } = await query(
+    `SELECT * FROM ai_tracked_prompts
+      WHERE site_id = $1 AND active = true AND ship_requested_at IS NOT NULL AND ship_draft_id IS NULL
+      ORDER BY ship_requested_at ASC LIMIT $2`,
+    [siteId, limit]
+  );
+  return rows;
+}
+
+// A blog-outline draft already covering this exact topic (the "Cover this topic" finding
+// from the ai-recommendation agent may have made one) — so shipping a prompt by hand
+// never produces a second post on the same question.
+export async function findDraftByTopic(siteId, topic) {
+  const { rows } = await query(
+    // Only a draft that is still alive: an abandoned one never shipped (its finding has reopened), and a
+    // rolled-back one was taken down, so re-linking to either would hand back something dead.
+    `SELECT id FROM drafts WHERE site_id = $1 AND action_type = 'blog-outline' AND lower(input->>'topic') = lower($2)
+        AND status <> 'abandoned' AND rolled_back_at IS NULL
+      ORDER BY id DESC LIMIT 1`,
+    [siteId, topic]
+  );
+  return rows[0]?.id ?? null;
+}
+
+export async function countActiveCustomPrompts(siteId) {
+  const { rows } = await query(
+    `SELECT count(*)::int AS n FROM ai_tracked_prompts WHERE site_id = $1 AND source = 'custom' AND active = true`,
+    [siteId]
+  );
+  return rows[0].n;
+}

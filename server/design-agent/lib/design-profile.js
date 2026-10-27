@@ -88,6 +88,28 @@ export function validateDesignProfile(profile) {
   return { ok: errors.length === 0, errors };
 }
 
+// The FULL set a captured design should cover — wider than the usable minimum
+// above, which only says a projector can run. Returns what is still missing so
+// onboarding can re-capture instead of quietly working from a thin profile.
+const FULL_CAPTURE = [
+  ['typography.body', (p) => p.typography?.body],
+  ['typography.heading.item', (p) => p.typography?.heading?.item],
+  ['typography.heading.section', (p) => p.typography?.heading?.section],
+  ['layout.container', (p) => p.layout?.container],
+  ['spacing.section', (p) => p.spacing?.section],
+  ['spacing.itemGap', (p) => p.spacing?.itemGap],
+  ['color', (p) => p.color && Object.keys(p.color).length],
+  ['responsive', (p) => p.responsive && Object.keys(p.responsive).length],
+  ['components', (p) => p.components && Object.keys(p.components).length],
+  ['navigation', (p) => p.navigation && Object.keys(p.navigation).length],
+  ['pages', (p) => Array.isArray(p.pages) && p.pages.length],
+  ['pageTypePatterns', (p) => p.pageTypePatterns && Object.keys(p.pageTypePatterns).length],
+];
+export function profileCaptureGaps(profile) {
+  if (!profile || typeof profile !== 'object') return FULL_CAPTURE.map(([k]) => k);
+  return FULL_CAPTURE.filter(([, get]) => !get(profile)).map(([k]) => k);
+}
+
 export function isProfileUsable(profile) {
   return validateDesignProfile(profile).ok;
 }

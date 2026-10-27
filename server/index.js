@@ -13,6 +13,7 @@ import agentsRouter from './routes/agents.js';
 import actionCenterRouter from './routes/action-center.js';
 import reportsRouter from './routes/reports.js';
 import commandCenterRouter from './routes/command-center.js';
+import aiVisibilityRouter from './routes/ai-visibility.js';
 import copilotRouter from './routes/copilot.js';
 import assistantRouter from './routes/assistant.js';
 import integrationsRouter from './routes/integrations.js';
@@ -49,6 +50,7 @@ import { runStartupCatchup, reconcileBlockedRecommendationsOnStartup } from './j
 import { reapStaleAuditRuns, countAuditRunsByTrigger } from './store/audit-runs.js';
 import { startFullSiteAudit } from './agents/lib/bulk-audit.js';
 import { pool } from './db.js';
+import { serveDist } from './lib/static-assets.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -146,6 +148,7 @@ app.use('/api', agentsRouter);
 app.use('/api', actionCenterRouter);
 app.use('/api', reportsRouter);
 app.use('/api', commandCenterRouter);
+app.use('/api', aiVisibilityRouter);
 app.use('/api', growthReportRouter);
 // Client-facing mirrors of three staff-only routers (keywords, the Analyst,
 // backlinks): the same handlers, always against the session's own site. Their
@@ -206,8 +209,10 @@ const httpServer = createHttpServer(app);
 if (process.env.NODE_ENV === 'production') {
   const dist = join(here, '..', 'web', 'dist');
   if (existsSync(dist)) {
-    app.use(express.static(dist));
-    app.get('*', (req, res) => res.sendFile(join(dist, 'index.html')));
+    const site = serveDist(dist);
+    app.use(site.assets);
+    app.use(site.rest);
+    app.get('*', site.page);
   }
 } else {
   // See vite.config.js: this marks the embedded (middleware-mode) case so
@@ -241,11 +246,17 @@ app.use((err, req, res, _next) => {
   res.status(err.status || 500).json({ error: 'Something went wrong on our end. Our team has been notified.', errorId: id });
 });
 
+// One stray rejected promise (a background job, a dropped DB connection) must
+// be logged, not take the whole server — and every client's session — down.
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] unhandled rejection:', reason instanceof Error ? reason.stack || reason.message : reason);
+});
+
 httpServer.listen(port, () => {
   console.log(`[server] listening on :${port}`);
   if (process.env.DISABLE_CRON !== 'true') startCron();
   // Catch up on anything missed while the machine was off/asleep (non-blocking).
-  runStartupCatchup();
+  runStartupCatchup().catch((err) => console.error('[catchup] startup catch-up failed:', err.message));
   // Independent of the DISABLE_CATCHUP-gated call above (staging sets that
   // flag permanently) — re-evaluates blocked_reason on every restart so a
   // config fix that just deployed clears the same moment it goes live

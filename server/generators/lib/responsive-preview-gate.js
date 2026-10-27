@@ -140,7 +140,7 @@ export async function checkResponsivePreview({
     // server/lib/errors.js: a caught exception's raw text may be returned
     // as diagnostic detail on an internal result object, but never built
     // into a new string via template interpolation).
-    return { ok: false, reason: 'unreachable', error: err.message };
+    return { ok: false, reason: 'browser-unavailable', error: err.message };
   }
 
   try {

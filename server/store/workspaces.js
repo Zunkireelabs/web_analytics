@@ -287,6 +287,36 @@ export async function createWorkspace({ name }) {
   return rows[0];
 }
 
+// Takes back a workspace (and the project made with it) that was created in a request which then failed
+// part-way, so a retry does not leave an orphan workspace behind or make a second one. Only ever called
+// for rows made in that same request, BEFORE the person's home project was set (deleting a home project
+// would delete the person), and in one transaction so it is all or nothing.
+export async function discardNewWorkspace({ workspaceId, siteId = null }) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (siteId != null) await client.query('DELETE FROM sites WHERE id = $1 AND workspace_id = $2', [siteId, workspaceId]);
+    await client.query('DELETE FROM workspace_members WHERE workspace_id = $1', [workspaceId]);
+    await client.query('DELETE FROM workspaces WHERE id = $1', [workspaceId]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Is this website already a (live) project of this workspace? The unique index (migration 210) is the
+// real guard, but it can be absent where old data had duplicates, so the route asks first as well.
+export async function workspaceHasDomain(workspaceId, domain) {
+  if (!domain) return false;
+  const { rows } = await query(
+    `SELECT 1 FROM sites WHERE workspace_id = $1 AND lower(website_domain) = lower($2) AND status IS DISTINCT FROM 'soft_deleted' LIMIT 1`,
+    [workspaceId, domain]);
+  return rows.length > 0;
+}
+
 export async function renameWorkspace(workspaceId, name) {
   const { rows } = await query('UPDATE workspaces SET name = $2 WHERE id = $1 RETURNING id, name', [workspaceId, name]);
   return rows[0] || null;
@@ -342,6 +372,10 @@ const NO_PROJECT_ALLOWED = [
   { methods: ['POST'], re: /^\/api\/workspaces\/switch\/?$/ },
   { methods: null, re: /^\/api\/workspaces\/\d+(\/|$)/ },
   { methods: null, re: /^\/api\/projects\/\d+(\/|$)/ },
+  // Google/GitHub send the browser back here after "Connect". A person on
+  // their first project may have no active site yet; the handlers verify the
+  // single-use nonce and the user themselves, so they must not 403 as JSON.
+  { methods: ['GET'], re: /^\/api\/(google|github)\/callback\/?$/ },
 ];
 
 export function isAllowedWithoutProject({ method, path }) {
