@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Activity, ArrowLeftRight, Check, ChevronsUpDown, Globe, KeyRound, Search, Settings as SettingsIcon, Target, Users, UserPlus, X } from 'lucide-react';
+import { Activity, ArrowLeftRight, Check, ChevronsUpDown, Globe, KeyRound, MapPin, Search, Settings as SettingsIcon, Target, Users, UserPlus, X } from 'lucide-react';
 import { api, timeAgo } from '../../api.js';
 import Avatar from '../Avatar.jsx';
 import Badge from '../Badge.jsx';
@@ -9,6 +9,8 @@ import RichSelect from '../RichSelect.jsx';
 import SettingsCard from '../settings/SettingsCard.jsx';
 import UnderlineTabs from '../settings/UnderlineTabs.jsx';
 import GoalModal from './GoalModal.jsx';
+import BusinessProfileModal from './BusinessProfileModal.jsx';
+import { GBP_LABELS } from './BusinessProfileFields.jsx';
 import GiveAccessModal from './GiveAccessModal.jsx';
 import MonitoringTab from './MonitoringTab.jsx';
 import TokensTab from './TokensTab.jsx';
@@ -33,6 +35,7 @@ const options = ['admin', 'member'].map((value) => ({ value, label: SCOPED_PERMI
 export default function ProjectSettings({ projects, project, email, tab, onTab, onPickProject, onChanged }) {
   const [overview, setOverview] = useState(null);
   const [goalOpen, setGoalOpen] = useState(false);
+  const [gbpOpen, setGbpOpen] = useState(false);
   const [transferOpen, setTransferOpen] = useState(false);
   const [pickOpen, setPickOpen] = useState(false);
   const [pickQuery, setPickQuery] = useState('');
@@ -167,6 +170,19 @@ export default function ProjectSettings({ projects, project, email, tab, onTab, 
                 </div>
               </div>
             </SettingsCard>
+            <SettingsCard icon={MapPin} title="Business Profile" description="Your listing on Google Maps and local search. Optional."
+              action={manage && <Button variant="light" onClick={() => setGbpOpen(true)}>{p?.businessProfile?.status ? 'Change' : 'Add'}</Button>}>
+              <div className="px-5 py-4 min-w-0">
+                <div className="text-[13px] font-medium text-fg">{!overview ? ' ' : GBP_LABELS[p?.businessProfile?.status] || 'Not set up yet'}</div>
+                <div className="text-xs text-faint mt-0.5 break-words">
+                  {p?.businessProfile?.status === 'linked' && p.businessProfile.url
+                    ? <a href={p.businessProfile.url} target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:text-primary">{p.businessProfile.url.replace(/^https?:\/\//, '')}</a>
+                    : p?.businessProfile?.status === 'none' ? 'Create one so you show up in Maps and local searches.'
+                    : p?.businessProfile?.status === 'not_applicable' ? 'Marked as not a local business.'
+                    : 'Add it so Google Maps and local results can show your business.'}
+                </div>
+              </div>
+            </SettingsCard>
             <SettingsCard icon={Globe} title="Details" description="What this project tracks.">
               <dl className="px-5 py-1">
                 {[['Name', project.name], ['Website address', siteDomain({ website_domain: project.domain }) || 'Not set'], ...(project.workspaceName && !project.shared ? [['Workspace', project.workspaceName]] : [])].map(([l, v]) => (
@@ -183,6 +199,8 @@ export default function ProjectSettings({ projects, project, email, tab, onTab, 
         {active === 'monitoring' && <MonitoringTab overview={overview} email={email} />}
       </div>
 
+      <BusinessProfileModal project={gbpOpen ? { id: project.id, name: project.name, domain: project.domain, businessProfile: p?.businessProfile } : null}
+        onClose={() => setGbpOpen(false)} onSaved={async () => { setGbpOpen(false); await refresh(); await onChanged?.(); }} />
       <GoalModal project={goalOpen ? { id: project.id, name: project.name, goal: p?.goal } : null} saveGoal={(g) => api.project.setGoal(project.id, g)}
         onClose={() => setGoalOpen(false)} onSaved={async () => { setGoalOpen(false); await refresh(); await onChanged?.(); }} />
       {project.canTransfer && <TransferProjectModal project={project} isOpen={transferOpen} onClose={() => setTransferOpen(false)} onDone={async (res) => { await onChanged?.(res); }} />}

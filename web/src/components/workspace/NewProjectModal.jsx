@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Download, Check, FolderPlus, GitBranch, Globe, Loader2, Search, BarChart3, Target, AlertTriangle, ExternalLink, Info, Link2 } from 'lucide-react';
+import { Download, Check, FolderPlus, GitBranch, Globe, Loader2, Search, BarChart3, Target, AlertTriangle, ExternalLink, Info, Link2, MapPin } from 'lucide-react';
 import { api } from '../../api.js';
 import Modal from '../Modal.jsx';
 import Field from '../Field.jsx';
 import Button from '../Button.jsx';
 import Badge from '../Badge.jsx';
 import GoalFields from './GoalFields.jsx';
+import BusinessProfileFields, { gbpReady, gbpSource } from './BusinessProfileFields.jsx';
 import { DEFAULT_GOAL, goalComplete } from '../../lib/workspace.js';
 
 // Adding a project, end to end, with no staff step anywhere in it:
@@ -15,10 +16,13 @@ import { DEFAULT_GOAL, goalComplete } from '../../lib/workspace.js';
 //   2 Goal      the presets or your own words
 //   3 Google    PICK a Search Console property and a GA4 property from the
 //               lists our Google account can actually see
-//   4 GitHub    PICK the repository from the list our GitHub app can reach.
+//   4 Business  Google Business Profile, optional: paste its Maps link, learn how to
+//     Profile   create one (and why it matters), or say it does not apply. Nothing is
+//               read from Google, so it needs no extra access, and it never blocks.
+//   5 GitHub    PICK the repository from the list our GitHub app can reach.
 //               Required: the agent reads the site's code to make a fix, so a
 //               project without a repo has nothing it can open a PR against.
-//   5 Baseline  runs by itself and lands on the project
+//   6 Baseline  runs by itself and lands on the project
 //
 // Nothing is typed in that could be mistyped — the two connect steps are
 // pickers over real listings, so a property or repo that is missing is honest
@@ -27,7 +31,7 @@ import { DEFAULT_GOAL, goalComplete } from '../../lib/workspace.js';
 //
 // Closing part-way is safe: the project already exists, and the Projects page
 // shows "Finish setting up" on it, which reopens this at the step still owed.
-const STEPS = ['Details', 'Goal', 'Google', 'GitHub', 'Baseline'];
+const STEPS = ['Details', 'Goal', 'Google', 'Business', 'GitHub', 'Baseline'];
 
 const CARD = { boxShadow: '0 0 0 1px var(--input), 0 1px 2px rgba(0,0,0,.03)' };
 const CARD_ON = { boxShadow: '0 0 0 1px var(--primary), 0 0 0 4px var(--primary-tint)' };
@@ -197,6 +201,8 @@ export default function NewProjectModal({ workspace, first = false, project: exi
   const [useStage, setUseStage] = useState(false); // review on a stage branch before production
   const [stage, setStage] = useState('stage');
   const [githubChecks, setGithubChecks] = useState(null);
+  const [gbpChoice, setGbpChoice] = useState(null); // linked | none | not_applicable | null = not answered
+  const [gbpUrl, setGbpUrl] = useState('');
   const [baseline, setBaseline] = useState(existing ? 'idle' : 'idle'); // idle | running | done | failed
 
   // Reopening on an existing project: start at the first step it still owes.
@@ -240,6 +246,9 @@ export default function NewProjectModal({ workspace, first = false, project: exi
       setGsc((v) => v ?? data.state.google.gscProperty ?? data.google.suggested?.gscProperty ?? null);
       setGa4((v) => v ?? data.state.google.ga4PropertyId ?? data.google.suggested?.ga4PropertyId ?? null);
       setRepo((v) => v ?? data.state.github.repo ?? null);
+      // What was already answered wins, so reopening the popup shows it instead of asking again.
+      setGbpChoice((v) => v ?? data.state.businessProfile?.status ?? null);
+      setGbpUrl((v) => v || data.state.businessProfile?.url || '');
     } catch (err) {
       setConnect({ error: err.message || 'Could not read what there is to connect.' });
     }
@@ -254,7 +263,7 @@ export default function NewProjectModal({ workspace, first = false, project: exi
 
   // Their own GitHub repositories, once they have signed in to GitHub (clients always use this; staff on its tab).
   useEffect(() => {
-    if (!isOpen || !project?.id || step !== 4 || connect === null || !connect.github?.connected || mine) return;
+    if (!isOpen || !project?.id || step !== 5 || connect === null || !connect.github?.connected || mine) return;
     api.project.connect.githubMine(project.id).then(setMine).catch((err) => setMine({ signedIn: false, repos: [], error: err.message }));
   }, [isOpen, project?.id, step, connect]);
 
@@ -322,6 +331,14 @@ export default function NewProjectModal({ workspace, first = false, project: exi
     setStep(4);
   });
 
+  useEffect(() => { if (isOpen && notice?.gbp) setGbpChoice('linked'); }, [isOpen, notice?.gbp]);
+
+  const saveBusinessProfile = () => run(async () => {
+    const r = await api.project.connect.businessProfile(project.id, { status: gbpChoice, ...(gbpChoice === 'linked' ? { url: gbpUrl } : {}) });
+    setConnect((c) => ({ ...c, state: r.state }));
+    setStep(5);
+  });
+
   const restrictedNow = Boolean(connect?.githubRestricted);
   // Everyone connects the same way: signing in to GitHub as themselves. Only while that sign-in is not set up on the
   // server do staff fall back to the shared SuperRank app list, so a project can still be linked.
@@ -332,7 +349,7 @@ export default function NewProjectModal({ workspace, first = false, project: exi
     const r = await api.project.connect.github(project.id, { repoOwner: owner, repoName, ...(usingMine ? { source: 'mine' } : {}), ...(usingMine && branch ? { repoDefaultBranch: branch } : {}), ...(useStage && stage.trim() ? { prTargetBranch: stage.trim() } : {}) });
     setConnect((c) => ({ ...c, state: r.state }));
     setGithubChecks({ ...r.checks, techStack: r.techStack });
-    setStep(5);
+    setStep(6);
   });
 
   // A run that is already going (this popup was closed and reopened, the page was refreshed, a
@@ -368,7 +385,7 @@ export default function NewProjectModal({ workspace, first = false, project: exi
   // ...but only when it can mean something: it is built from Google's real data, so
   // with Google not connected yet it waits rather than starting and failing.
   useEffect(() => {
-    if (!isOpen || step !== 5 || baseline !== 'idle' || !project?.id || connect === null) return;
+    if (!isOpen || step !== 6 || baseline !== 'idle' || !project?.id || connect === null) return;
     if (connect?.state?.google?.connected) runBaseline();
     else setBaseline('waiting');
   }, [isOpen, step, baseline, project?.id, connect]);
@@ -548,6 +565,25 @@ export default function NewProjectModal({ workspace, first = false, project: exi
   }
 
   if (step === 4) {
+    icon = MapPin;
+    title = 'Your Business Profile';
+    subtitle = 'Your listing on Google Maps and local search. This step is optional.';
+    body = (
+      <div className="space-y-4">
+        <BusinessProfileFields choice={gbpChoice} setChoice={setGbpChoice} url={gbpUrl} setUrl={setGbpUrl} source={project?.id ? gbpSource(project.id) : null} outcome={notice?.gbp || null} />
+        {errorBox}
+      </div>
+    );
+    footer = (
+      <>
+        <Button variant="light" onClick={() => setStep(3)} disabled={busy}>Back</Button>
+        <Button variant="light" onClick={() => setStep(5)} disabled={busy}>Skip for now</Button>
+        <Button variant="primary" onClick={saveBusinessProfile} disabled={busy || !gbpReady(gbpChoice, gbpUrl)}>{busy ? 'Saving…' : 'Continue'}</Button>
+      </>
+    );
+  }
+
+  if (step === 5) {
     icon = GitBranch;
     title = 'Connect GitHub';
     subtitle = 'The repository the agent reads and opens pull requests against.';
@@ -752,10 +788,10 @@ export default function NewProjectModal({ workspace, first = false, project: exi
     );
     footer = (
       <>
-        <Button variant="light" onClick={() => setStep(3)} disabled={busy}>Back</Button>
+        <Button variant="light" onClick={() => setStep(4)} disabled={busy}>Back</Button>
         {restricted ? (
           <>
-            <Button variant="light" onClick={() => setStep(5)} disabled={busy}>Skip for now</Button>
+            <Button variant="light" onClick={() => setStep(6)} disabled={busy}>Skip for now</Button>
             {mineLoaded && mine.repos.length > 0 && <Button variant="primary" onClick={saveGithub} disabled={busy || !repo || (useStage && !stage.trim())}>{busy ? 'Connecting…' : 'Connect repository'}</Button>}
           </>
         ) : (
@@ -765,7 +801,7 @@ export default function NewProjectModal({ workspace, first = false, project: exi
     );
   }
 
-  if (step === 5) {
+  if (step === 6) {
     icon = baseline === 'done' ? Check : Loader2;
     title = baseline === 'done' ? `${project?.name} is ready` : baseline === 'waiting' ? `${project?.name} is created` : 'Building your baseline';
     subtitle = baseline === 'done' ? 'Here is where things stand.' : baseline === 'waiting' ? 'Here is what is left before it starts collecting data.' : 'This takes a few minutes. You can close this and it keeps going.';
@@ -817,7 +853,7 @@ export default function NewProjectModal({ workspace, first = false, project: exi
     <Modal isOpen={isOpen} onClose={close} icon={icon} title={title} subtitle={subtitle} maxWidth="max-w-[560px]" footer={footer} anchor="top">
       <Stepper step={step} />
       {/* A floor under every step's height, so a list loading in does not make the popup jump. */}
-      <div className="min-h-[340px]">{body}</div>
+      <div>{body}</div>
     </Modal>
   );
 }

@@ -166,6 +166,29 @@ export async function updateSiteConnection({ siteId, gscProperty, ga4PropertyId,
   return rows[0];
 }
 
+// Google Business Profile answer from the New project flow (see parseBusinessProfile). Callers pass an
+// already-validated { status, url }.
+export async function setSiteBusinessProfile(siteId, { status, url }) {
+  const { rows } = await query(
+    'UPDATE sites SET gbp_status = $1, gbp_url = $2, gbp_updated_at = now() WHERE id = $3 RETURNING *',
+    [status, url, siteId]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
+// The saved Business Profile answer. Read on its own (not added to getProject's column list) so a database
+// that has not run migration 212 yet answers "not answered" instead of failing every project route.
+export async function getSiteBusinessProfile(siteId) {
+  try {
+    const { rows } = await query('SELECT gbp_status, gbp_url FROM sites WHERE id = $1', [siteId]);
+    return { gbp_status: rows[0]?.gbp_status || null, gbp_url: rows[0]?.gbp_url || null };
+  } catch (e) {
+    if (e?.code === '42703') return { gbp_status: null, gbp_url: null }; // undefined_column: migration 212 not applied
+    throw e;
+  }
+}
+
 // Attach a GitHub repo (and optionally tech stack / url_file_map) to a site
 // for the Action Center's "apply approved draft as a PR" flow (see
 // server/scripts/connect-repo.js, migration 028). Same partial-update shape

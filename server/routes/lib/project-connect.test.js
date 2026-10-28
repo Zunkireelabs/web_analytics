@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { attachStreamDomains, bareDomain, suggestGoogleProperties, connectionState, GSC_PROPERTY_RE } from './project-connect.js';
+import { attachStreamDomains, bareDomain, suggestGoogleProperties, connectionState, GSC_PROPERTY_RE, parseBusinessProfile } from './project-connect.js';
 import { validateGoal, GOAL_CUSTOM_MAX } from '../../store/workspaces.js';
 
 describe('bareDomain', () => {
@@ -120,4 +120,43 @@ test('the slow part has a time limit: out of budget, remaining properties are le
   await attachStreamDomains(admin, rows, { now: () => t, budgetMs: 4000 });
   assert.ok(rows.some((r) => r.domain === null), 'some are skipped once the budget is spent');
   assert.ok(rows.every((r) => r.domain !== undefined));
+});
+
+describe('parseBusinessProfile', () => {
+  test('a Maps link is accepted and normalised to https', () => {
+    for (const url of ['https://maps.app.goo.gl/abc123', 'g.page/admizz', 'https://www.google.com/maps/place/Admizz+Education', 'http://business.google.com/n/123']) {
+      const r = parseBusinessProfile({ status: 'linked', url });
+      assert.equal(r.ok, true, url);
+      assert.match(r.value.url, /^https:\/\//);
+    }
+  });
+  test('a website, a non-Maps Google page or garbage is refused', () => {
+    for (const url of ['https://admizzeducation.com', 'https://www.google.com/search?q=admizz', 'not a link', 'javascript:alert(1)', 'https://evil.com/maps/place/x']) {
+      assert.equal(parseBusinessProfile({ status: 'linked', url }).ok, false, url);
+    }
+  });
+  test('linked needs a link; none and not_applicable store no link', () => {
+    assert.equal(parseBusinessProfile({ status: 'linked' }).ok, false);
+    assert.deepEqual(parseBusinessProfile({ status: 'none', url: 'https://maps.app.goo.gl/x' }), { ok: true, value: { status: 'none', url: null } });
+    assert.deepEqual(parseBusinessProfile({ status: 'not_applicable' }).value, { status: 'not_applicable', url: null });
+  });
+  test('an unknown status is refused', () => {
+    assert.equal(parseBusinessProfile({ status: 'maybe' }).ok, false);
+    assert.equal(parseBusinessProfile({}).ok, false);
+  });
+});
+
+describe('connectionState — business profile', () => {
+  test('is reported, but never part of `ready`', () => {
+    const base = { gsc_property: 'sc-domain:a.com', ga4_property_id: '1', repo_owner: 'o', repo_name: 'n' };
+    assert.deepEqual(connectionState(base).businessProfile, { status: null, url: null });
+    assert.equal(connectionState(base).ready, true);
+    assert.deepEqual(connectionState({ ...base, gbp_status: 'linked', gbp_url: 'https://g.page/x' }).businessProfile, { status: 'linked', url: 'https://g.page/x' });
+  });
+});
+
+describe('parseBusinessProfile — links Google itself returns', () => {
+  test('a maps.google.com listing address (what the listing search returns) is accepted', () => {
+    assert.equal(parseBusinessProfile({ status: 'linked', url: 'https://maps.google.com/?cid=12345678901234567890' }).ok, true);
+  });
 });

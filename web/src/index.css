@@ -442,3 +442,11 @@
 /* Prediction timeline connectors */
 @keyframes anPulseDash { to { stroke-dashoffset: -28; } }
 .an-pulse-dash { animation: anPulseDash 2.4s linear infinite; }
+
+/* A scroll box inside a popup that must LOOK scrollable: macOS hides overlay scrollbars until you scroll, so draw a thin
+   one that is always there. Used with a bottom fade and a "More" button (see BusinessProfileFields). */
+.scroll-always { scrollbar-width: thin; scrollbar-color: #c4c4c4 transparent; }
+.scroll-always::-webkit-scrollbar { width: 8px; }
+.scroll-always::-webkit-scrollbar-track { background: transparent; }
+.scroll-always::-webkit-scrollbar-thumb { background: #c4c4c4; border-radius: 8px; }
+.scroll-always::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
