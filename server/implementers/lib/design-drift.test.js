@@ -2000,3 +2000,25 @@ describe('bodySlotLooksLikeLabel', () => {
     assert.match(reason, /14px/);
   });
 });
+
+const { lacksDesignBaseline } = await import('./design-drift.js');
+describe('lacksDesignBaseline', () => {
+  const base = { componentKey: 'expandContent', mode: 'visible', gateMode: 'enforce' };
+  test('holds a visible draft when the site has no template, capture or profile', () => {
+    assert.equal(lacksDesignBaseline({ url_file_map: { siteRoot: {} } }, base), true);
+  });
+  test('does not hold when a configured template exists', () => {
+    const site = { url_file_map: { siteRoot: { componentTemplates: { expandContent: { x: 1 } } } } };
+    assert.equal(lacksDesignBaseline(site, base), false);
+  });
+  test('does not hold when a page capture exists', () => {
+    const site = { url_file_map: { siteRoot: { pageComponentTemplates: { expandContent: {} } } } };
+    assert.equal(lacksDesignBaseline(site, base), false);
+  });
+  test('never holds outside enforce mode, schema-only mode, or non-design types', () => {
+    const site = { url_file_map: { siteRoot: {} } };
+    assert.equal(lacksDesignBaseline(site, { ...base, gateMode: 'log' }), false);
+    assert.equal(lacksDesignBaseline(site, { ...base, mode: 'schema-only' }), false);
+    assert.equal(lacksDesignBaseline(site, { ...base, componentKey: undefined }), false);
+  });
+});

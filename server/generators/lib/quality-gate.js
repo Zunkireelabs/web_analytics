@@ -12,6 +12,7 @@ import { findCompetitorProminenceIssues } from './competitor-prominence.js';
 import { findDesignIntegrityIssues } from './design-integrity-guard.js';
 import { findBlogImageIssues } from './blog-image-guard.js';
 import { findBareMarkupIssues, findBareNewPageMarkupIssues } from './rendered-markup-guard.js';
+import { findVisibleClaimIssues } from './visible-claim-guard.js';
 import { checkStructureConformance } from './structure-conformance.js';
 import { DESIGN_CONTEXT_GENERATOR_IDS, NO_MARKUP_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
 
@@ -164,6 +165,7 @@ export async function runQualityGate(content, generatorId, siteId, { site = null
     // template. Its issues carry a `correction`, so generateDraft repairs
     // them by regenerating with that feedback rather than refusing the
     // draft — see design-repair-feedback.js.
+    ...findVisibleClaimIssues(content, generatorId, site).issues,
     ...(site ? checkStructureConformance(content, generatorId, site).issues : []),
     // Renders the draft through the same buildMergeValues() call apply-time
     // splicing uses and flags any resulting block tag with no class at all

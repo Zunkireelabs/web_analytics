@@ -16,7 +16,8 @@ import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, hasExistingFaqSchema, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
 import { decideFaqRenderMode } from './lib/faq-render-mode.js';
-import { COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, checkDesignIntegrityGate, resolvePageComponentTemplate } from './lib/design-drift.js';
+import { COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, checkDesignIntegrityGate, resolvePageComponentTemplate, lacksDesignBaseline } from './lib/design-drift.js';
+import { designGateMode } from '../design-agent/lib/design-completeness.js';
 import { checkResponsivePreview, describeResponsiveRegressions } from '../generators/lib/responsive-preview-gate.js';
 import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination-routes.js';
 import { checkSharedTemplateWrite } from './lib/action-scope.js';
@@ -1301,6 +1302,27 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   const siteLevelTemplate = componentKey && site.url_file_map?.siteRoot?.componentTemplates?.[componentKey];
   const hasPageCaptures = componentKey && site.url_file_map?.siteRoot?.pageComponentTemplates?.[componentKey];
   let componentTemplatesForMerge = site.url_file_map?.siteRoot?.componentTemplates;
+  // Nothing of this site's design to ground the markup in: hold, never ship
+  // the generic built-in fallback onto a real client page.
+  if (lacksDesignBaseline(site, { componentKey, mode, gateMode: designGateMode() })) {
+    // Same self-heal as frontend.js's completeness hold (design-gates.js): ask
+    // the Design Agent to capture this site so the next run can ship, and keep
+    // the miss as knowledge for this tenant. Best effort — never masks the hold.
+    await (await import('../store/design-gate-decisions.js')).recordGateDecision(site.id, {
+      draftId: draft.id ?? null, actionType: draft.action_type, gate: 'completeness', mode: 'enforce', blocked: true,
+      reason: 'no-design-profile', detail: { componentKey, repairable: true },
+    }).catch(() => {});
+    await (await import('../design-agent/lib/design-block-repair.js')).requeueProfileForRepeatedBlocks(site).catch(() => {});
+    await (await import('../store/design-knowledge.js')).recordDesignFailure(site.id, {
+      patternId: 'design-incomplete', pageUrl: page, detail: `no captured design for ${componentKey}`,
+      draftId: draft.id ?? null, validation: { passed: false, gate: 'baseline', mode: 'enforce' },
+    }).catch(() => {});
+    return {
+      ok: false, reason: 'design-incomplete',
+      error: `This site has no captured design (no template, page capture or usable design profile) for "${componentKey}", so this was held for review instead of shipping generic markup. Run the Design Agent for the site, then retry.`,
+      componentKey, actionType: draft.action_type,
+    };
+  }
   if (mode === 'visible' && componentKey && (siteLevelTemplate || hasPageCaptures || siteHasUsableDesignProfile(site))) {
     const resolved = await resolvePageComponentTemplate(site, draft.action_type, page);
     if (!resolved.ok) {
