@@ -1,3 +1,42 @@
+## Task Management — Plane is the single source of truth
+
+All development work is tracked in **Plane** (project **SuperRank**, key `SRANK`, workspace `zunkireelabs`),
+via the `plane` MCP server. If the `plane` tools are missing, run `/mcp` → plane → authenticate (or see the
+onboarding SOP: `zunkireelabs-org/SOPs/developer-workflow/onboarding-new-developer.md`).
+
+- Project id: `5104c596-769f-44b8-bf49-d0aac414f411` (use with `mcp__plane__*` tools). Ids and queries:
+  `.claude/skills/project-pm/plane.md`.
+- No work without a ticket. Search Plane first; create one only if none exists.
+- Ticket id goes in the branch name and PR title: `feature/SRANK-123-short-name`, `SRANK-123: ...`
+- Every In Progress / In Review ticket has a `Branch:` link to its GitHub branch (and a `PR #n` link once the
+  PR opens), so Plane always shows which work is on which branch.
+- Move the ticket as the work moves:
+  `Backlog → Todo → In Progress → In Review (PR open) → Done (merged to main, live)`.
+  There is no `stage` branch today, so PRs target `main` and *On Stage* is unused (SRANK-20 decides when
+  `stage` returns; then the flow becomes `… → In Review → On Stage (merged to stage) → Done (live on main)`).
+- Done means live in production.
+- Anything you can't verify gets the `needs-verification` label; never state it as fact.
+- Commit trailer is the developer's own, never a Claude line: Sadin
+  `Co-Authored-By: sthasadin <sthasadin@users.noreply.github.com>`, Yukta
+  `Co-Authored-By: yukta-commits <yukta-commits@users.noreply.github.com>`.
+
+**HARD RULE — every developer, every session (human or Claude), no exceptions:**
+1. **Your work is in Plane before you start it.** Every fix, feature, migration, data fix, hotfix, investigation
+   or follow-up has a `SRANK` ticket with an assignee. Untracked work is not allowed, however small.
+2. **One ticket per piece of work — no duplicates.** Search Plane before creating. If someone else's ticket
+   already covers it, comment on that ticket or link a child; never open a second one.
+3. **`tasks/TRACKER.md` is the one to-do file in this repo**, for the whole team. It is **generated from Plane**
+   by `/project-pm sync`. **Never hand-edit it, and never push its content back into Plane.** A git conflict in
+   it → take either side and re-run sync. **Use `/project-pm` for all of this:** "status", "what's mine?",
+   "start SRANK-n", "sync".
+4. **No other to-do lists.** Not in `todo.md`, `TODO-LOCAL.md`, handoffs, briefs, PR descriptions or session
+   logs (`docs/session-logs/YYYY-MM-DD.md` is narrative only and links ticket ids).
+5. **Claim your migration number in Plane** (in the ticket description) after checking `server/migrations/` on
+   `main` and every open PR/branch. Two branches must never use the same number.
+6. **Keep the state honest** as the work moves. A PR without a `SRANK` id in its title doesn't get merged.
+7. **Push, merge, and any write to a shared or production database need a human's explicit OK**, whatever a
+   ticket says.
+
 ## STRICT DESIGN PRESERVATION — NEVER BREAK THE EXISTING WEBSITE
 
 Before generating, editing, expanding, or fixing **any page, section, component, template, blog, landing page, or SEO content**, the agent MUST first understand and preserve the website's existing visual design.
