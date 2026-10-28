@@ -1,4 +1,4 @@
-import { resolveFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
+import { resolveFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, isPageMapped, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, getRepoTree } from '../github/client.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
@@ -1380,7 +1380,13 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // file.content already fetched above (known engineering issue: validate a
   // schema type doesn't already exist before inserting one).
   const suppressSchema = INSPECTABLE_ACTION_TYPES.includes(draft.action_type) && hasExistingFaqSchema(file.content);
-  const built = buildMergeValues(draft.action_type, draft.content, mode, componentTemplatesForMerge, site.url_file_map?.siteRoot?.designProfile, { suppressSchema, page, fileContent: file.content });
+  const hasLinkMap = Boolean(site.url_file_map && (Object.keys(site.url_file_map.pages || {}).length || (site.url_file_map.patterns || []).length));
+  const built = buildMergeValues(draft.action_type, draft.content, mode, componentTemplatesForMerge, site.url_file_map?.siteRoot?.designProfile, {
+    suppressSchema, page, fileContent: file.content,
+    // A link target must resolve in this site's url_file_map; a site with no
+    // page map at all is not judged on it (nothing to resolve against).
+    resolveLinkTarget: hasLinkMap ? (url) => isPageMapped(site, url, 'internal-links') : null,
+  });
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
   // Responsive preview (generators/lib/responsive-preview-gate.js) — every

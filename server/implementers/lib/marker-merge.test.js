@@ -1172,7 +1172,7 @@ describe('buildMergeValues — captured template with unsafe classes never ships
     assert.equal(expandResult.ok, true);
     assert.doesNotMatch(expandResult.values.expandedContent, /h-\[70px\]|max-w-7xl|mx-auto/);
 
-    const linksResult = buildMergeValues('internal-links', { suggestions: [{ url: '/a/', anchorText: 'A' }] }, 'visible', { internalLinks: {
+    const linksResult = buildMergeValues('internal-links', { suggestions: [{ targetUrl: '/ai-guide/', anchorText: 'AI guide' }] }, 'visible', { internalLinks: {
       wrapper: '<ul class="max-w-7xl mx-auto h-[70px]">{{ROWS}}</ul>',
       row: '<li><a href="{{URL}}">{{ANCHOR_TEXT}}</a></li>',
     } }, null, { page: 'https://example.com/blog/some-post/' });
@@ -1187,7 +1187,7 @@ describe('buildMergeValues — captured template with unsafe classes never ships
   // right along with h-[70px]/h-12, leaving the icon at its browser-default
   // intrinsic height instead of its real square size.
   test('a fixed height on an <svg> icon survives the strip, unlike a text-flow element', () => {
-    const linksResult = buildMergeValues('internal-links', { suggestions: [{ url: '/a/', anchorText: 'A' }] }, 'visible', { internalLinks: {
+    const linksResult = buildMergeValues('internal-links', { suggestions: [{ targetUrl: '/ai-guide/', anchorText: 'AI guide' }] }, 'visible', { internalLinks: {
       wrapper: '<ul class="max-w-7xl mx-auto h-[70px]">{{ROWS}}</ul>',
       row: '<li><a href="{{URL}}">{{ANCHOR_TEXT}}<svg class="w-4 h-4"></svg></a></li>',
     } }, null, { page: 'https://example.com/blog/some-post/' });

@@ -10,6 +10,7 @@ import { tenantContextTextFor } from '../lib/tenant-context.js';
 import { loadExpandStructurePrior } from '../design-agent/lib/expand-structure-loader.js';
 import { structurePlanText } from '../design-agent/lib/expand-structure-spec.js';
 import { classifyPageType } from '../design-agent/live-analysis/schema.js';
+import { findContentIssues, describeIssues } from './lib/output-guard.js';
 
 // Real citation search is opt-in, separate from TAVILY_API_KEY simply being
 // set — citation search would silently start spending Tavily's quota the
@@ -370,18 +371,41 @@ export async function generate({ siteId, params }) {
     if (!sections.length) {
       throw Object.assign(new Error('None of the real search results was relevant enough to cite for this page — refusing to draft a references section.'), { status: 400, userFacing: true, refusal: true, reason: 'citation-grounding-no-relevant-sources' });
     }
-  } else try {
-    sections = await callLLMForJson(system, user, {
-      maxTokens: 1200, generatorId: meta.id, siteId, pageUrl: page, validate: Array.isArray,
-    });
-  } catch {
-    throw Object.assign(new Error('Content expansion failed: model did not return valid JSON'), { status: 400, userFacing: true });
+  } else {
+    // Same cleanup for the first draft and the one retry below.
+    const draftSections = async (prompt) => {
+      let raw;
+      try {
+        raw = await callLLMForJson(system, prompt, {
+          maxTokens: 1200, generatorId: meta.id, siteId, pageUrl: page, validate: Array.isArray,
+        });
+      } catch {
+        throw Object.assign(new Error('Content expansion failed: model did not return valid JSON'), { status: 400, userFacing: true });
+      }
+      return raw
+        .filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string')
+        // 4 is the long-standing cap; a tenant's own structure can only tighten it.
+        .slice(0, Math.min(4, structurePrior?.sectionCount?.max ?? 4))
+        .map((s) => ({ ...s, table: sanitizeTable(s.table) }));
+    };
+    sections = await draftSections(user);
+    // Output guard (lib/output-guard.js): a section whose table has no header,
+    // an unnamed "Alternative" column or hedged filler cells, or that profiles
+    // competitors, never reaches a client page. Regenerate ONCE with the exact
+    // correction; if it still fails, hold the draft for a human instead.
+    let guardIssues = findContentIssues({ sections });
+    if (guardIssues.length) {
+      const fix = [...new Set(guardIssues.map((i) => i.correction).filter(Boolean))].join(' ');
+      sections = await draftSections(`${user}\n\nYour previous draft was rejected: ${fix} Draft it again without those defects.`);
+      guardIssues = findContentIssues({ sections });
+      if (guardIssues.length) {
+        throw Object.assign(
+          new Error(`Content expansion was held: the draft failed the output guard twice (${describeIssues(guardIssues)}), so it needs attention instead of shipping.`),
+          { status: 400, userFacing: true, refusal: true, reason: 'output-guard-failed' },
+        );
+      }
+    }
   }
-  sections = sections
-    .filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string')
-    // 4 is the long-standing cap; a tenant's own structure can only tighten it.
-    .slice(0, Math.min(4, structurePrior?.sectionCount?.max ?? 4))
-    .map((s) => ({ ...s, table: sanitizeTable(s.table) }));
 
   if (focus === 'external-citations') sections = mergeCitationSections(sections);
 

@@ -141,7 +141,7 @@ describe('internal-links generator — mustLinkTo (query-cannibalization resolut
 describe('internal-links generator — hallucinated URL rejection', () => {
   test('a targetUrl not in the real candidate list is dropped, not written into the page', async () => {
     llmResponse = [
-      { anchorText: 'real', targetUrl: 'https://example.com/boots', rationale: 'r' },
+      { anchorText: 'boots guide', targetUrl: 'https://example.com/boots', rationale: 'r' },
       { anchorText: 'invented', targetUrl: 'https://example.com/does-not-exist', rationale: 'r' },
     ];
     const { content, summary } = await generate({ siteId: 1, params: { page: SOURCE } });
@@ -171,14 +171,14 @@ describe('internal-links generator — hallucinated URL rejection', () => {
   });
 
   test('a null entry in the model array does not crash the filter', async () => {
-    llmResponse = [null, { anchorText: 'real', targetUrl: 'https://example.com/boots', rationale: 'r' }];
+    llmResponse = [null, { anchorText: 'boots guide', targetUrl: 'https://example.com/boots', rationale: 'r' }];
     const { content } = await generate({ siteId: 1, params: { page: SOURCE } });
     assert.equal(content.suggestions.length, 1);
   });
 
   test('caps at 5 suggestions even when every one is valid', async () => {
     rankingPages = Array.from({ length: 8 }, (_, i) => ({ dim_value: `https://example.com/p${i}` }));
-    llmResponse = Array.from({ length: 8 }, (_, i) => ({ anchorText: `a${i}`, targetUrl: `https://example.com/p${i}`, rationale: 'r' }));
+    llmResponse = Array.from({ length: 8 }, (_, i) => ({ anchorText: `page p${i}`, targetUrl: `https://example.com/p${i}`, rationale: 'r' }));
     const { content } = await generate({ siteId: 1, params: { page: SOURCE } });
     assert.equal(content.suggestions.length, 5);
     assert.equal(content.droppedHallucinated, 0, 'a cap is not a hallucination — droppedHallucinated must stay 0');
