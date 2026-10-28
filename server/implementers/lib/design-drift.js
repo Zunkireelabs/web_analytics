@@ -1752,6 +1752,20 @@ export function siteHasUsableDesignProfile(site) {
   return isProfileUsable(getDesignProfile(site));
 }
 
+// True when a visible, design-sensitive draft would be spliced in with NOTHING
+// of the site's own design to ground it: no configured template, no page
+// capture, no usable profile. buildMergeValues would then fall back to its
+// zero-config DEFAULT_* markup, which by its own contract makes no attempt to
+// match the site — exactly the generic insertion CLAUDE.md forbids. Callers
+// hold the draft for review instead of shipping it (enforce mode only, the
+// same switch as every other design gate, so log/off rollouts are unchanged).
+export function lacksDesignBaseline(site, { componentKey, mode, gateMode }) {
+  if (gateMode !== 'enforce' || mode !== 'visible' || !componentKey) return false;
+  const root = site?.url_file_map?.siteRoot;
+  if (root?.componentTemplates?.[componentKey] || root?.pageComponentTemplates?.[componentKey]) return false;
+  return !siteHasUsableDesignProfile(site);
+}
+
 // Generators whose output is real, visible page content — the set every
 // website-facing draft is drawn from, as opposed to purely technical output
 // (meta-title, schema, canonical, sitemap, robots-fix, security-headers,

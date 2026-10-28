@@ -232,6 +232,35 @@ export async function listGithubRepos({ fresh = false } = {}) {
   return repoInflight;
 }
 
+// Google Business Profile, the optional step after Google. Pure so the rules are testable without a
+// database. A link is accepted only when it points at a Google Maps / Business Profile address, so a
+// pasted website, a typo or someone else's page is refused before it is stored.
+export const GBP_STATUSES = ['linked', 'none', 'not_applicable'];
+const GBP_HOST_RE = /^(www\.|maps\.)?google\.[a-z.]{2,6}$|^(maps\.app\.goo\.gl|goo\.gl|g\.page|g\.co|share\.google|business\.google\.com)$/i;
+
+export function parseBusinessProfile(body = {}) {
+  const status = String(body?.status || '').trim();
+  if (!GBP_STATUSES.includes(status)) return { ok: false, error: 'Choose one of the options for your Business Profile.' };
+  if (status !== 'linked') return { ok: true, value: { status, url: null } };
+
+  const raw = String(body?.url || '').trim();
+  if (!raw) return { ok: false, error: 'Paste the link to your Business Profile.' };
+  if (raw.length > 500) return { ok: false, error: 'That link is too long to be a Business Profile address.' };
+  let u;
+  try { u = new URL(/^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`); } catch { return { ok: false, error: 'That does not look like a link.' }; }
+  if (!/^https?:$/.test(u.protocol)) return { ok: false, error: 'That does not look like a link.' };
+  const host = u.hostname.toLowerCase();
+  const onGoogle = GBP_HOST_RE.test(host);
+  // google.com/... is only a Business Profile when it is a Maps address (or the business.google.com / g.page ones above).
+  // maps.google.* addresses are Maps by definition (what Google's own listing search returns); a bare google.* one must be /maps.
+  const isMaps = /^(www\.)?google\.[a-z.]{2,6}$/i.test(host) ? /^\/maps(\/|$)/.test(u.pathname) : true;
+  if (!onGoogle || !isMaps) {
+    return { ok: false, error: 'Paste the Google Maps link to your business (it starts with maps.app.goo.gl, g.page or google.com/maps).' };
+  }
+  u.protocol = 'https:';
+  return { ok: true, value: { status, url: u.toString() } };
+}
+
 // What a project still needs before the agent can work on it, in the order the
 // New project flow asks for it. Pure, so the wording is testable without a
 // database or a network call.
@@ -252,6 +281,8 @@ export function connectionState(site) {
       // token; a repo connected without one falls back to the shared PAT.
       installationId: site?.github_app_installation_id ? String(site.github_app_installation_id) : null,
     },
+    // Optional: never part of `ready`. null status = not answered yet.
+    businessProfile: { status: site?.gbp_status || null, url: site?.gbp_url || null },
     baseline: { done: Boolean(site?.onboarded_at), runId: site?.baseline_run_id || null },
     // The one question the flow exists to answer.
     ready: gsc && ga4 && repo,

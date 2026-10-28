@@ -171,6 +171,12 @@ export const api = {
       google: (siteId, body) => req(`/projects/${siteId}/connect/google`, { method: 'POST', body: JSON.stringify(body) }),
       githubRepos: (siteId, { fresh = false } = {}) => req(`/projects/${siteId}/connect/github${fresh ? '?fresh=1' : ''}`),
       github: (siteId, body) => req(`/projects/${siteId}/connect/github`, { method: 'POST', body: JSON.stringify(body) }),
+      // Optional Google Business Profile answer: { status: 'linked' | 'none' | 'not_applicable', url? }
+      // Pick the business from the Google account that manages it: start returns { url } for Google's own screen;
+      // locations returns { canConnect, locations: [{ id, name, address, mapsUrl, verified }] | null, account }.
+      businessProfileStart: (siteId) => req(`/projects/${siteId}/connect/business-profile/start`),
+      businessProfileLocations: (siteId) => req(`/projects/${siteId}/connect/business-profile/locations`),
+      businessProfile: (siteId, body) => req(`/projects/${siteId}/connect/business-profile`, { method: 'POST', body: JSON.stringify(body) }),
     },
     // Runs the real baseline (discovery, GSC/GA4 ingestion, first analysis).
     // Slow by nature — minutes, not seconds.

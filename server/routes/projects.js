@@ -8,7 +8,7 @@ import { getRecentAgentRunFailureCounts } from '../store/admin/system-health.js'
 import { PERMISSION_LEVELS, DEFAULT_PERMISSION_LEVEL } from '../../mcp-server/permissions.js';
 import { HttpError, grantProjectAccess, PROJECT_ROLES } from './lib/project-access.js';
 import {
-  GSC_PROPERTY_RE, listGoogleProperties, suggestGoogleProperties, listGithubRepos, connectionState,
+  GSC_PROPERTY_RE, listGoogleProperties, suggestGoogleProperties, listGithubRepos, connectionState, parseBusinessProfile,
 } from './lib/project-connect.js';
 import { getSiteById } from '../store/read.js';
 import { jobLockInfo, jobKeyFor } from '../lib/job-lock.js';
@@ -19,7 +19,8 @@ import {
 import { encryptSecret, secretBoxConfigured } from '../lib/secret-box.js';
 import { getProjectGoogleAuth, forgetProjectGoogleAuth } from '../auth/project-google.js';
 import { githubConnectConfigured, newGithubNonce, redirectUriFor as githubRedirectUriFor, buildAuthorizeUrl as buildGithubAuthorizeUrl, exchangeCode as exchangeGithubCode, listUserRepos, GithubConnectError, listRepoBranches, connectAppCredentials, CONNECT_KEY_ENV } from '../github/user-auth.js';
-import { updateSiteConnection, updateSiteRepoConfig, updateSiteAutoRemediation } from '../db.js';
+import { buildBusinessConsentUrl, exchangeBusinessCode, listBusinessLocations } from '../integrations/gbp-locations.js';
+import { updateSiteConnection, updateSiteRepoConfig, updateSiteAutoRemediation, setSiteBusinessProfile, getSiteBusinessProfile } from '../db.js';
 
 // Repo discovery, the config audit and the baseline sequence are loaded only
 // when a connect or baseline request actually runs. They pull in the whole
@@ -95,6 +96,7 @@ router.get('/projects/:siteId/overview', requireAuth, requireProjectRole('member
     const p = req.project;
     const project = {
       id: p.id, name: p.name, domain: p.website_domain, goal: goals[p.id] || null,
+      businessProfile: await getSiteBusinessProfile(siteId).then((r) => ({ status: r.gbp_status, url: r.gbp_url })),
       health: summarizeProjectHealth({ site: p, dataAsOf: freshness?.as_of, agentFailures24h: failed }),
     };
     res.json({
@@ -200,7 +202,7 @@ router.get('/projects/:siteId/connect', requireAuth, requireProjectRole('admin')
 
     res.json({
       project: { id: req.project.id, name: req.project.name, domain: req.project.website_domain },
-      state: connectionState(req.project),
+      state: connectionState({ ...req.project, ...(await getSiteBusinessProfile(req.projectId)) }),
       githubRestricted: !staff,
       github: { canConnect: githubConnectConfigured(), connected: Boolean(githubSessionFor(req)), account: githubSessionFor(req)?.login || null },
       google: {
@@ -349,6 +351,7 @@ router.get('/projects/:siteId/connect/google/start', requireAuth, requireProject
 // API call, so every outcome ends in a redirect to the Workspace page (which reopens the
 // New project popup on the Google step), never a JSON error the person would stare at.
 router.get('/google/callback', async (req, res) => {
+  if (req.session?.gbpConnect) return businessProfileCallback(req, res);
   const back = (params) => res.redirect(`/workspace?${new URLSearchParams(params)}`);
   const pending = req.session?.googleConnect;
   if (req.session) delete req.session.googleConnect; // single use, whatever happens next
@@ -469,6 +472,88 @@ router.post('/projects/:siteId/connect/google', requireAuth, requireProjectRole(
       action: 'tenant.connected', targetType: 'site', targetId: String(req.projectId), tenantSiteId: req.projectId, tenantName: site.name,
       metadata: { workspaceId: req.project.workspace_id, gscProperty, ga4PropertyId, selfServe: true, ownGoogle: Boolean(own) }, success: true,
     });
+    res.json({ state: connectionState(site) });
+  } catch (e) { next(e); }
+});
+
+// "Which of my Business Profiles is this?": sign in with the Google account that manages them, approve read access,
+// and pick from the list (see integrations/gbp-locations.js). A separate, optional consent from Connect Google, and
+// the list is read once and held in the session for a few minutes: no long-lived token is stored.
+const GBP_SESSION_MS = 15 * 60 * 1000;
+
+router.get('/projects/:siteId/connect/business-profile/start', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    if (!googleConnectConfigured()) return res.status(503).json({ error: GOOGLE_ERRORS.not_configured, code: 'NOT_CONFIGURED' });
+    const nonce = newConnectNonce();
+    const redirectUri = redirectUriFor(`${req.protocol}://${req.get('host')}`);
+    req.session.gbpConnect = { nonce, siteId: req.projectId, userId: req.userId, redirectUri, at: Date.now() };
+    res.json({ url: buildBusinessConsentUrl({ redirectUri, state: nonce }) });
+  } catch (e) { next(e); }
+});
+
+// What the Business step shows: the list this person's Google account returned a moment ago (if they just came back
+// from Google for THIS project), and whether signing in with Google is possible on this server at all.
+router.get('/projects/:siteId/connect/business-profile/locations', requireAuth, requireProjectRole('admin'), (req, res) => {
+  const held = req.session?.gbpLocations;
+  const fresh = held && held.siteId === req.projectId && held.userId === req.userId && Date.now() - held.at < GBP_SESSION_MS;
+  res.json({ canConnect: googleConnectConfigured(), locations: fresh ? held.locations : null, account: fresh ? held.email : null });
+});
+
+// Google's answer to the Business Profile sign-in. Same rules as the main callback (single-use nonce for THIS session,
+// user and project, ten minutes, still an admin), and every outcome ends in a redirect back to the popup.
+async function businessProfileCallback(req, res) {
+  const pending = req.session.gbpConnect;
+  delete req.session.gbpConnect; // single use, whatever happens next
+  const back = (params) => res.redirect(`/workspace?${new URLSearchParams({ finish: pending?.siteId ?? '', ...params })}`);
+  try {
+    if (!req.session?.userId) return res.redirect('/');
+    if (req.query.error) return back({ gbp: 'cancelled' });
+    const fresh = pending && Date.now() - pending.at < 10 * 60 * 1000;
+    if (!fresh || !req.query.state || req.query.state !== pending.nonce || pending.userId !== req.session.userId) return back({ gbp: 'expired' });
+    if ((await getUserStatus(req.session.userId)) !== 'active') return back({ gbp: 'denied' });
+    const ctx = await getAccessContext(req.session.userId, pending.siteId);
+    const role = ctx && siteRoleFromDecision(decideSiteAccess({ ...ctx, companySiteId: companySiteId() }));
+    if (!role || !roleAtLeast(role, 'admin')) return back({ gbp: 'denied' });
+    const project = await getProject(pending.siteId);
+    if (!project) return back({ gbp: 'denied' });
+
+    const { accessToken, email } = await exchangeBusinessCode({ code: String(req.query.code || ''), redirectUri: pending.redirectUri });
+    const locations = await listBusinessLocations(accessToken);
+    req.session.gbpLocations = { siteId: project.id, userId: req.session.userId, at: Date.now(), email, locations };
+    await recordAuditEvent(asSessionActor(req), {
+      action: 'project.business_profiles_listed', targetType: 'site', targetId: String(project.id), tenantSiteId: project.id, tenantName: project.name,
+      metadata: { workspaceId: project.workspace_id, googleAccount: email, count: locations.length }, success: true,
+    });
+    return back({ gbp: 'listed' });
+  } catch (err) {
+    if (err instanceof GoogleConnectError) return back({ gbp: err.code });
+    if (err?.gbp) {
+      console.warn(`[projects] Business Profile list refused for site ${pending?.siteId}: ${err.gbp} (${err.message})`);
+      return back({ gbp: err.gbp });
+    }
+    console.error('[projects] Business Profile callback failed:', err.message);
+    return back({ gbp: 'failed' });
+  }
+}
+
+// Google Business Profile: the optional step after Google. Nothing here is read from Google (no API
+// access is needed): the person says whether they have one, pastes its Maps link, or says it does not apply.
+router.post('/projects/:siteId/connect/business-profile', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const parsed = parseBusinessProfile(req.body);
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+    let site;
+    try {
+      site = await setSiteBusinessProfile(req.projectId, parsed.value);
+    } catch (err) {
+      if (err?.code === '42703') return res.status(503).json({ error: 'Saving a Business Profile is not available on this server yet.' });
+      throw err;
+    }
+    await recordAuditEvent(req, {
+      action: 'project.business_profile_set', targetType: 'site', targetId: String(req.projectId), tenantSiteId: req.projectId, tenantName: site.name,
+      metadata: { workspaceId: req.project.workspace_id, status: parsed.value.status }, success: true,
+    });
+    if (req.session) delete req.session.gbpLocations; // the list was only there to choose from
     res.json({ state: connectionState(site) });
   } catch (e) { next(e); }
 });

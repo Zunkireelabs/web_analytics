@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import Button from './Button.jsx';
@@ -13,7 +13,28 @@ export default function Modal({ isOpen, onClose, title, subtitle, icon: Icon, ch
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isOpen, onClose]);
 
+  // anchor="top" (the multi-step popup): the card is centred on its CURRENT height, so the gap above and below is
+  // always equal, and it moves smoothly as a step grows or shrinks. A card taller than the window sits 16px from
+  // the top and scrolls inside, with its footer still on screen.
+  const cardRef = useRef(null);
+  const [fit, setFit] = useState({ vh: typeof window === 'undefined' ? 800 : window.innerHeight, h: 0 });
+  const [animate, setAnimate] = useState(false); // no glide on the very first paint, only between steps
+  useLayoutEffect(() => {
+    if (!isOpen || anchor !== 'top') return undefined;
+    const measure = () => setFit((f) => {
+      const next = { vh: window.innerHeight, h: cardRef.current?.offsetHeight || 0 };
+      return f.vh === next.vh && f.h === next.h ? f : next;
+    });
+    measure();
+    const raf = requestAnimationFrame(() => setAnimate(true));
+    const ro = typeof ResizeObserver === 'undefined' || !cardRef.current ? null : new ResizeObserver(measure);
+    ro?.observe(cardRef.current);
+    window.addEventListener('resize', measure);
+    return () => { cancelAnimationFrame(raf); ro?.disconnect(); window.removeEventListener('resize', measure); };
+  }, [isOpen, anchor, footer]);
+
   if (!isOpen) return null;
+  const topPad = Math.max(16, (fit.vh - fit.h) / 2);
 
   // Portal to <body> so a transformed/filtered ancestor (fade-up, backdrop-blur) can't become the fixed overlay's containing block.
   const shadow = { boxShadow: '0 0 0 1px rgba(0,0,0,.06), 0 30px 60px -20px rgba(0,0,0,.12)' };
@@ -31,13 +52,12 @@ export default function Modal({ isOpen, onClose, title, subtitle, icon: Icon, ch
 
   // Portal to <body> so a transformed/filtered ancestor (fade-up, backdrop-blur) can't become the fixed overlay's containing block.
   return createPortal(
-    // anchor="top" fixes the top edge where the first step's height (about 580px) is exactly centred, so it looks centred
-    // yet does not move when its content grows or shrinks between steps (a list loading in): it only extends downward.
+    // anchor="top": centred on the card's measured height (see topPad above) so the gap above and below stays equal.
     <div className={`fixed inset-0 z-50 flex justify-center p-4 bg-neutral-900/40 animate-fade-in ${anchor === 'top' ? 'items-start overflow-y-auto' : 'items-center'}`}
-      style={anchor === 'top' ? { paddingTop: 'max(16px, calc((100vh - 580px) / 2))' } : undefined} onClick={onClose}>
+      style={anchor === 'top' ? { paddingTop: topPad, transition: animate ? 'padding-top 160ms ease-out' : 'none' } : undefined} onClick={onClose}>
       {footer ? (
         // Sectioned layout: header / scrolling body / pinned footer.
-        <div className={`w-full ${maxWidth} rounded-card bg-white text-sm text-fg overflow-hidden flex flex-col max-h-[calc(100vh-2rem)]`}
+        <div ref={cardRef} className={`w-full ${maxWidth} rounded-card bg-white text-sm text-fg overflow-hidden flex flex-col max-h-[calc(100vh-2rem)]`}
           style={shadow} onClick={(e) => e.stopPropagation()}>
           <div className="flex items-start gap-3 px-5 py-4 border-b border-border">
             {iconTile}
