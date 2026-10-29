@@ -1,21 +1,26 @@
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { AlertCircle, Building2, ChevronLeft, ChevronRight, CreditCard, Globe, LogOut, ShieldCheck, User } from 'lucide-react';
+import { AlertCircle, Building2, ChevronLeft, Globe, LogOut, ShieldCheck, User } from 'lucide-react';
 import { api } from '../api.js';
 import Button from '../components/Button.jsx';
-import Badge from '../components/Badge.jsx';
 import AccountCard from '../components/AccountCard.jsx';
 import SecurityCard from '../components/SecurityCard.jsx';
 import ScopeCards from '../components/settings/ScopeCards.jsx';
 import SettingsCard from '../components/settings/SettingsCard.jsx';
+import PlanBilling from '../components/settings/PlanBilling.jsx';
 import WorkspaceSettings from '../components/workspace/WorkspaceSettings.jsx';
 import ProjectSettings from '../components/workspace/ProjectSettings.jsx';
 import PlatformSettings from '../components/workspace/PlatformSettings.jsx';
 import { STATUS } from '../lib/palette.js';
 
-// PLACEHOLDER until billing exists: the plan name and status come from this one
-// constant, nothing is read from the server.
-const ACCOUNT_PLAN = { name: 'Agency Scale', status: 'Active' };
+// PLACEHOLDER until billing exists: the current plan comes from this one constant,
+// nothing is read from the server. `audience` + `plan` pick the card in lib/plans.js.
+const ACCOUNT_PLAN = { audience: 'agencies', plan: 'Scale', label: 'Agency Scale', status: 'Active' };
+
+// Whether the plans under "Manage billing" were left open; remembered per browser.
+const BILLING_KEY = 'sr.account.billingOpen';
+const readBillingOpen = () => { try { return localStorage.getItem(BILLING_KEY) === '1'; } catch { return false; } };
+const writeBillingOpen = (v) => { try { localStorage.setItem(BILLING_KEY, v ? '1' : '0'); } catch { /* private mode: the panel just starts closed next time */ } };
 
 const DangerIcon = (props) => <AlertCircle {...props} style={{ color: '#b42318' }} />;
 const workspaceRoleOf = (role) => (role === 'platform' ? 'owner' : role);
@@ -33,6 +38,7 @@ export default function Account({ email, role, sites, siteId, onLogout, onSwitch
   const [params, setParams] = useSearchParams();
   const [workspaces, setWorkspaces] = useState(null); // null = loading
   const [shared, setShared] = useState([]); // projects given to this person one by one
+  const [billingOpen, setBillingOpen] = useState(() => params.get('tab') === 'billing' || readBillingOpen());
 
   const load = () => api.workspaces().then((r) => { setWorkspaces(r.workspaces || []); setShared(r.shared || []); }).catch(() => setWorkspaces([]));
   useEffect(() => { load(); }, [siteId]);
@@ -62,6 +68,8 @@ export default function Account({ email, role, sites, siteId, onLogout, onSwitch
     return next;
   }, { replace: true });
 
+  const toggleBilling = () => { const next = !billingOpen; setBillingOpen(next); writeBillingOpen(next); go({ tab: next ? 'billing' : null }); };
+
   const items = [
     { key: 'account', label: 'Account', description: 'Profile, sign-in and plan', icon: User, onSelect: () => go({ scope: 'account', tab: null }) },
     ...(hasWorkspaces || pending ? [{ key: 'workspace', label: 'Workspace', description: 'General, people and activity', icon: Building2, onSelect: () => go({ scope: 'workspace', tab: null }) }] : []),
@@ -71,7 +79,7 @@ export default function Account({ email, role, sites, siteId, onLogout, onSwitch
 
   return (
     <div className="min-h-screen bg-canvas text-sm">
-      <div className={`${scope === 'account' ? 'max-w-[768px]' : 'max-w-[960px]'} mx-auto px-4 md:px-6 pt-8 pb-12`}>
+      <div className={`${scope === 'account' && !billingOpen ? 'max-w-[768px]' : 'max-w-[960px]'} mx-auto px-4 md:px-6 pt-8 pb-12`}>
         {/* A direct visit has no history to go back to. */}
         <button type="button" className="inline-flex items-center gap-1.5 text-sm text-fg hover:text-text"
           onClick={() => (location.key !== 'default' ? navigate(-1) : navigate('/'))}>
@@ -102,18 +110,7 @@ export default function Account({ email, role, sites, siteId, onLogout, onSwitch
           <div className="space-y-3 mt-5">
             <AccountCard email={email} role={role} />
             <SecurityCard />
-            <SettingsCard icon={CreditCard} title="Plan & billing" description="Your subscription applies to your whole account — every workspace and project.">
-              <div className="px-5 py-4 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="text-[13px] text-faint">Current plan</div>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    <span className="text-[20px] font-medium tracking-[-0.02em] text-fg">{ACCOUNT_PLAN.name}</span>
-                    <Badge tone="grey">{ACCOUNT_PLAN.status}</Badge>
-                  </div>
-                </div>
-                <Button variant="light" disabled aria-disabled title="Billing management is coming soon.">Manage billing <ChevronRight size={14} /></Button>
-              </div>
-            </SettingsCard>
+            <PlanBilling current={ACCOUNT_PLAN} email={email} open={billingOpen} onToggle={toggleBilling} />
 
             <SettingsCard icon={LogOut} title="Sign out" description="End your session on this device">
               <div className="px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
