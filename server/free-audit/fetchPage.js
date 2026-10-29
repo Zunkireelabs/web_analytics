@@ -245,7 +245,9 @@ async function fetchDnsRecords(hostname) {
   };
 }
 
-async function fetchPage(inputUrl) {
+// `siteCache` (optional Map) lets a multi-page scan fetch the per-site files (robots.txt, sitemap, DNS, TLS probes)
+// once and reuse them for every page of the same origin, instead of repeating them for each page.
+async function fetchPage(inputUrl, { siteCache } = {}) {
   const startUrl = normalizeUrl(inputUrl);
   const startedAt = Date.now();
 
@@ -253,7 +255,7 @@ async function fetchPage(inputUrl) {
   const origin = main.finalUrl.origin;
   const hostname = main.finalUrl.hostname;
 
-  const [robotsRaw, sitemapDirect, llmsTxt, mcpManifest, dnsRecords, httpToHttps, http2] = await Promise.all([
+  const loadSiteFiles = () => Promise.all([
     fetchSiblingFile(origin, '/robots.txt'),
     fetchSiblingFile(origin, '/sitemap.xml'),
     fetchSiblingFile(origin, '/llms.txt'),
@@ -262,6 +264,14 @@ async function fetchPage(inputUrl) {
     probeHttpToHttpsRedirect(hostname),
     main.finalUrl.protocol === 'https:' ? probeHttp2(hostname) : Promise.resolve(false),
   ]);
+  let siteFiles;
+  if (siteCache) {
+    if (!siteCache.has(origin)) siteCache.set(origin, loadSiteFiles());
+    siteFiles = siteCache.get(origin);
+  } else {
+    siteFiles = loadSiteFiles();
+  }
+  const [robotsRaw, sitemapDirect, llmsTxt, mcpManifest, dnsRecords, httpToHttps, http2] = await siteFiles;
 
   const robotsTxt = parseRobotsTxt(robotsRaw);
   const sitemap = sitemapDirect.present
@@ -294,4 +304,4 @@ async function fetchPage(inputUrl) {
   };
 }
 
-export { fetchPage, fetchMainPage, normalizeUrl, guardUrl, AuditError };
+export { fetchPage, fetchMainPage, fetchSiblingFile, normalizeUrl, guardUrl, AuditError };

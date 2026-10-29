@@ -1,0 +1,89 @@
+/* Page Fixer (app.superrank.si/page-fixer). Builds on /free-audit/style.css (tokens, form, ar-* blocks). */
+.pf-fav { width: 18px; height: 18px; border-radius: 4px; object-fit: contain; flex: none; }
+.pf-fav[hidden] { display: none; }
+.pf-hint { margin-top: 12px; text-align: center; font-size: 13px; color: var(--faint); }
+.pf-out { max-width: 780px; margin: 28px auto 0; text-align: left; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.pf-out > *, .pf-list, .pf-page, .pf-fixes, .pf-fix, .pf-fix__body, .pf-fix .ar-fix { min-width: 0; max-width: 100%; }
+.pf-out[hidden] { display: none; }
+
+.pf-card { padding: 22px 24px; border-radius: 16px; background: #fff; box-shadow: 0 0 0 1px var(--border-2); }
+.pf-eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+
+/* progress */
+.pf-prog h2 { margin-top: 6px; font-size: 20px; font-weight: 600; letter-spacing: -.02em; }
+.pf-prog h2 b { font-weight: 600; }
+.pf-bar { margin-top: 16px; height: 6px; border-radius: 99px; background: var(--muted); overflow: hidden; }
+.pf-bar i { display: block; height: 100%; width: 6%; border-radius: inherit; background: var(--primary); transition: width .5s ease; }
+.pf-pages { margin: 16px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; max-height: 280px; overflow: hidden; }
+.pf-pages li { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 10px; align-items: center; font-size: 13.5px; color: var(--faint); }
+.pf-pages li span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-pages li::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--border-2); }
+.pf-pages .is-now { color: var(--fg); }
+.pf-pages .is-now::before { background: var(--primary); box-shadow: 0 0 0 4px var(--primary-tint); }
+.pf-pages .is-done::before { background: var(--green); }
+.pf-pages .is-fail::before { background: var(--faint-2); }
+
+/* summary */
+.pf-who { display: flex; align-items: center; gap: 10px; }
+.pf-who img { width: 22px; height: 22px; border-radius: 6px; object-fit: contain; }
+.pf-who b { font-size: 16px; font-weight: 600; }
+.pf-sum { margin-top: 16px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 24px; align-items: center; }
+.pf-sum h2 { font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -.025em; }
+.pf-sum p { margin-top: 6px; font-size: 14px; line-height: 21px; color: var(--text); }
+.pf-stats { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 13.5px; color: var(--text); }
+.pf-stats b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* page cards */
+.pf-list { display: grid; gap: 10px; }
+.pf-page { border-radius: 16px; background: #fff; box-shadow: 0 0 0 1px var(--border-2); }
+.pf-page[open] { box-shadow: 0 0 0 1px var(--border-2), 0 18px 34px -28px rgba(0, 0, 0, .3); }
+.pf-page > summary { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto 16px; gap: 14px; align-items: center; padding: 16px 20px; cursor: pointer; list-style: none; border-radius: 16px; }
+.pf-page > summary::-webkit-details-marker { display: none; }
+.pf-page > summary:hover { background: #fafafa; }
+.pf-page > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.pf-rank { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--muted); font-size: 13px; font-weight: 600; }
+.pf-page[open] .pf-rank { background: var(--fg); color: #fff; }
+.pf-ptitle { min-width: 0; }
+.pf-ptitle b { display: block; font-size: 15px; font-weight: 600; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-ptitle small { display: block; margin-top: 2px; font-size: 13px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-score { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); white-space: nowrap; }
+.pf-score b { font-size: 18px; font-weight: 600; color: var(--fg-strong); font-variant-numeric: tabular-nums; }
+.pf-chev { width: 8px; height: 8px; border-right: 1.6px solid var(--faint); border-bottom: 1.6px solid var(--faint); rotate: 45deg; transition: rotate .2s; margin-top: -3px; }
+.pf-page[open] .pf-chev { rotate: 225deg; margin-top: 3px; }
+.pf-fixes { padding: 0 20px 18px; display: grid; gap: 8px; }
+.pf-fix { border-radius: 12px; box-shadow: inset 0 0 0 1px var(--border); background: #fafafa; }
+.pf-fix > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto 14px; gap: 12px; align-items: center; padding: 12px 14px; cursor: pointer; list-style: none; border-radius: 12px; }
+.pf-fix > summary::-webkit-details-marker { display: none; }
+.pf-fix > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.pf-fix__t b { display: block; font-size: 14px; font-weight: 500; }
+.pf-fix__t small { display: block; margin-top: 2px; font-size: 12.5px; line-height: 18px; color: var(--text); }
+.pf-fix__body { padding: 0 14px 14px; }
+.pf-fix__body > p { font-size: 13.5px; line-height: 21px; color: var(--text); }
+.pf-fix__body .ar-fix { background: #fff; }
+.pf-sev { padding: 3px 9px; border-radius: 7px; font-size: 11.5px; font-weight: 600; background: var(--muted); color: var(--text); }
+.pf-sev--high { background: #fee4e2; color: #b42318; }
+.pf-sev--medium { background: #fef0c7; color: #93370d; }
+
+.pf-more { font-size: 14px; color: var(--text); text-align: center; padding: 6px 12px; }
+
+/* email gate */
+.pf-unlock h3 { margin-top: 6px; font-size: 20px; line-height: 26px; font-weight: 600; letter-spacing: -.02em; }
+.pf-unlock p { margin-top: 6px; font-size: 14px; line-height: 21px; color: var(--text); }
+.pf-unlock form { margin-top: 14px; display: flex; gap: 8px; }
+.pf-unlock input { flex: 1; min-width: 0; height: 44px; padding: 0 14px; border: 0; border-radius: 10px; background: #fff; box-shadow: 0 0 0 1px var(--input); font: inherit; font-size: 15px; outline: none; }
+.pf-unlock input:focus { box-shadow: 0 0 0 2px var(--primary-ring), inset 0 0 0 1px var(--primary); }
+.pf-unlock .btn { height: 44px; white-space: nowrap; }
+.pf-unlock small { display: block; margin-top: 10px; font-size: 12px; color: var(--faint); }
+.pf-row { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+
+@media (max-width: 640px) {
+  .pf-card { padding: 18px 16px; }
+  .pf-sum { grid-template-columns: minmax(0, 1fr); justify-items: start; gap: 14px; }
+  .pf-page > summary { grid-template-columns: 28px minmax(0, 1fr) 16px; padding: 14px 14px; gap: 12px; }
+  .pf-score { grid-column: 2; grid-row: 2; }
+  .pf-fixes { padding: 0 12px 14px; }
+  .pf-fix > summary { grid-template-columns: minmax(0, 1fr) 14px; }
+  .pf-fix > summary .pf-sev { display: none; }
+  .pf-unlock form { flex-direction: column; }
+  .audit-form { flex-direction: column; align-items: stretch; }
+}

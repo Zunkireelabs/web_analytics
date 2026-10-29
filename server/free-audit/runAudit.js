@@ -82,9 +82,9 @@ function extractKeywordsAndPhrases($, title, description, headingsText) {
   };
 }
 
-async function runAudit(inputUrl, { renderMode = 'raw' } = {}) {
+async function runAudit(inputUrl, { renderMode = 'raw', siteCache } = {}) {
   const startedAt = Date.now();
-  const pageData = await fetchPage(inputUrl);
+  const pageData = await fetchPage(inputUrl, { siteCache });
 
   if (renderMode === 'js') {
     pageData.render = await renderPageDetails(pageData.finalUrl);
