@@ -14,6 +14,7 @@ const fakeDeps = (overrides = {}) => ({
   getSearchPerformanceRangeFn: async () => [],
   upsertPageInventoryBatchFn: async () => {},
   markOrphanedPagesFn: async () => {},
+  ensureSitemapRegisteredFn: async () => ({ status: 'already-registered', sitemaps: [] }),
   ...overrides,
 });
 
@@ -100,5 +101,56 @@ describe('runSiteDiscoveryIfDueForAllSites — force threads through to every si
     });
     assert.equal(results.length, 1);
     assert.equal(results[0].siteId, 2);
+  });
+});
+
+describe('runSiteDiscoveryIfDue — registers the sitemap before reading it', () => {
+  test('runs the registration before the sitemap is read, and returns its outcome', async () => {
+    const order = [];
+    const result = await runSiteDiscoveryIfDue(SITE, fakeDeps({
+      ensureSitemapRegisteredFn: async () => { order.push('register'); return { status: 'submitted', sitemap: 'https://example.com/sitemap.xml' }; },
+      discoverFromSitemapsFn: async () => { order.push('read'); return []; },
+    }));
+    assert.deepEqual(order, ['register', 'read']);
+    assert.equal(result.sitemapRegistration.status, 'submitted');
+  });
+
+  test('a registration that throws never stops discovery', async () => {
+    const result = await runSiteDiscoveryIfDue(SITE, fakeDeps({ ensureSitemapRegisteredFn: async () => { throw new Error('google down'); } }));
+    assert.notEqual(result, null);
+    assert.equal(result.sitemapRegistration.status, 'failed');
+  });
+
+  test('a week already discovered does not touch Search Console again', async () => {
+    let called = false;
+    await runSiteDiscoveryIfDue(SITE, fakeDeps({
+      getLastDiscoveryAtFn: async () => new Date().toISOString(),
+      ensureSitemapRegisteredFn: async () => { called = true; return { status: 'skipped' }; },
+    }));
+    assert.equal(called, false);
+  });
+});
+
+describe('runSiteDiscoveryIfDueForAllSites — runs inside the morning window', () => {
+  const sites = [{ id: 1, name: 'A' }, { id: 2, name: 'B' }];
+
+  test('runs every site while the window is open', async () => {
+    const ran = [];
+    const results = await runSiteDiscoveryIfDueForAllSites({ listAllSites: async () => sites, runForSite: async (s) => { ran.push(s.id); return { id: s.id }; }, windowEndsAt: Date.now() + 60_000 });
+    assert.deepEqual(ran, [1, 2]);
+    assert.equal(results.length, 2);
+  });
+
+  test('starts no new site once the window has closed', async () => {
+    const ran = [];
+    await runSiteDiscoveryIfDueForAllSites({ listAllSites: async () => sites, runForSite: async (s) => { ran.push(s.id); return {}; }, windowEndsAt: Date.now() - 1 });
+    assert.deepEqual(ran, []);
+  });
+
+  test('one site failing does not stop the next', async () => {
+    const ran = [];
+    const results = await runSiteDiscoveryIfDueForAllSites({ listAllSites: async () => sites, runForSite: async (s) => { ran.push(s.id); if (s.id === 1) throw new Error('crawl failed'); return { id: s.id }; } });
+    assert.deepEqual(ran, [1, 2]);
+    assert.equal(results.length, 1);
   });
 });

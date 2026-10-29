@@ -1,5 +1,5 @@
 import { fetchResponseHeaders, effortForGenerator } from './lib/page-content.js';
-import { getSearchPerformanceForPages } from '../store/read.js';
+import { getSearchPerformanceForPages, getSiteById } from '../store/read.js';
 import { aggregateSystemicFinding, makeFinding } from './lib/findings.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { callLLM } from '../llm.js';
@@ -87,6 +87,8 @@ export async function run({ siteId, start, end, params }) {
     }))
     : await selectCandidatePages(siteId, 'security-headers', { start, end, batchSize: MAX_PAGES });
 
+  const site = await getSiteById(siteId).catch(() => null);
+  const nginxConfigPath = site?.url_file_map?.siteRoot?.nginxConfig || null;
   const batch = dedupePageVariants(rawBatch);
   if (!batch.length) {
     return {
@@ -149,11 +151,20 @@ export async function run({ siteId, start, end, params }) {
       evidence: { missingHeaders: missingKeys, checkedCount: reachable.length },
       whyItMatters: `${missingKeys.length} recommended security header${missingKeys.length === 1 ? ' is' : 's are'} missing sitewide — a single nginx config block adds ${missingKeys.length === 1 ? 'it' : 'them all'}.`,
       priority: 'high',
-      recommendedAction: {
+      // Headers are added by editing the site's own server config. A site with none mapped (a static host such
+      // as Vercel, Netlify or GitHub Pages sets them in its own dashboard) gets the real gap REPORTED, never a
+      // draft that would be declined every morning: same treatment as the compression and redirect checks.
+      recommendedAction: nginxConfigPath ? {
         label: 'Add security headers',
         generatorId: 'security-headers',
         params: { missingHeaders: missingKeys },
         effort: effortForGenerator('security-headers'),
+      } : null,
+      reportOnly: nginxConfigPath ? null : {
+        kind: 'missing-security-headers',
+        label: 'Security headers missing',
+        page: '',
+        whyBlocked: 'Adding these headers means editing this site\'s server config, and none is tracked for it. If the site is on a static host (Vercel, Netlify, GitHub Pages) they are set in that host\'s own headers settings, so there is nothing for SuperRank to change in the repository. Map the server config in the project settings if there is one.',
       },
       expectedImpact: { label: 'High', basis: 'computed', value: totalImpressions },
     }));

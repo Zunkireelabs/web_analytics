@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 let candidatePages = [];
+let siteRow = { id: 1, url_file_map: { siteRoot: { nginxConfig: 'deploy/nginx.conf' } } };
 mock.module(resolve('../store/read.js'), {
   namedExports: {
     getSearchPerformanceForPages: async (siteId, start, end, pages) => pages.map((p) => ({ dim_value: p, impressions: 0 })),
     getSearchPerformanceRange: async () => [],
-    getSiteById: async () => null,
+    getSiteById: async () => siteRow,
   },
 });
 mock.module(resolve('../llm.js'), { namedExports: { callLLM: async () => 'stub' } });
@@ -62,5 +63,21 @@ describe('security-headers run()', () => {
     const res = await run({ siteId: 1, start: 'a', end: 'b', params: { pages: ['http://example.com/a', 'https://example.com/a'] } });
     const hsts = res.facts.findings.find((x) => x.id === 'security-headers:strict-transport-security');
     assert.equal(hsts.evidence.checkedCount, 1);
+  });
+});
+
+describe('security-headers run() — a site with no server config', () => {
+  test('the sitewide gap is reported, not drafted (so it is not declined every morning)', async () => {
+    const before = siteRow;
+    siteRow = { id: 1, url_file_map: {} };
+    try {
+      headerResponses = { default: {} };
+      const res = await run({ siteId: 1, start: 'a', end: 'b', params: { pages: ['https://example.com/'] } });
+      const f = res.facts.findings.find((x) => x.id === 'security-headers:site:missing-security-headers');
+      assert.ok(f, 'the real gap is still reported');
+      assert.equal(f.recommendedAction, null);
+      assert.equal(f.reportOnly.kind, 'missing-security-headers');
+      assert.match(f.reportOnly.whyBlocked, /server config/);
+    } finally { siteRow = before; }
   });
 });

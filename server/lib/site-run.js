@@ -16,7 +16,13 @@ export function rotateForToday(list, now = Date.now()) {
   return [...list.slice(offset), ...list.slice(0, offset)];
 }
 
-export const SITE_RUN_TIMEOUT_MS = Number(process.env.SITE_RUN_TIMEOUT_MS) || 45 * 60 * 1000;
+// One client gets 30 minutes for its detection work and 30 for shipping; then the pass moves to the next client.
+export const SITE_RUN_TIMEOUT_MS = Number(process.env.SITE_RUN_TIMEOUT_MS) || 30 * 60 * 1000;
+
+// The whole morning run (07:00 to 11:00) is one window. When it closes, no NEW client is started: whoever was not
+// reached is left for the hourly catch-up and, because the order rotates, goes earlier in tomorrow's run.
+export const RUN_WINDOW_MS = Number(process.env.RUN_WINDOW_MS) || 4 * 60 * 60 * 1000;
+export const windowClosed = (endsAt, now = Date.now()) => endsAt != null && now >= endsAt;
 // How long past its soft deadline a site may keep running before the pass stops waiting for it.
 export const SITE_RUN_GRACE_MS = Number(process.env.SITE_RUN_GRACE_MS) || 5 * 60 * 1000;
 

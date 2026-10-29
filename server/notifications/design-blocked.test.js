@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { designBlockedEvent, notifyDesignBlocked, DESIGN_BLOCKED_COOLDOWN_DAYS } from './design-blocked.js';
+import { designBlockedEvent, notifyDesignBlocked, DESIGN_BLOCKED_COOLDOWN_DAYS, designCaptureHeldEvent, notifyDesignCaptureHeld, DESIGN_BLOCKED_TYPE } from './design-blocked.js';
 import { eventKeyFor, COOLDOWN_DAYS } from './alert-gate.js';
 
 const site = { id: 5, name: 'Admizz' };
@@ -47,5 +47,23 @@ describe('notifyDesignBlocked', () => {
   test('never throws into the ship path', async () => {
     const r = await notifyDesignBlocked(site, {}, { hasRecent: async () => { throw new Error('db'); }, deliver: async () => {} });
     assert.deepEqual([r.sent, r.reason], [false, 'error']);
+  });
+});
+
+describe('design capture held for a person', () => {
+  test('the alert says what is held and what to do, and carries a stable identity per site', () => {
+    const e = designCaptureHeldEvent(site);
+    assert.equal(e.type, DESIGN_BLOCKED_TYPE);
+    assert.equal(e.severity, 'high');
+    assert.match(e.title, /Admizz/);
+    assert.match(e.body, /re-run the design capture/);
+    assert.equal(e.insightId, 'design-capture-held:5');
+  });
+  test('sends once per episode, and a delivery problem never throws', async () => {
+    const sent = [];
+    assert.deepEqual(await notifyDesignCaptureHeld(site, { hasRecent: async () => false, deliver: async (id, evs) => { sent.push([id, evs.length]); } }), { sent: true });
+    assert.deepEqual(sent, [[5, 1]]);
+    assert.deepEqual(await notifyDesignCaptureHeld(site, { hasRecent: async () => true, deliver: async () => { throw new Error('must not send'); } }), { sent: false, reason: 'same-episode' });
+    assert.equal((await notifyDesignCaptureHeld(site, { hasRecent: async () => false, deliver: async () => { throw new Error('mail down'); } })).sent, false);
   });
 });

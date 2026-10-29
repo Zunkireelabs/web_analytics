@@ -19,6 +19,7 @@
 
 import { extname } from 'node:path';
 import { updateSiteRepoConfig } from '../db.js';
+import { deriveLayoutTemplate } from '../discovery/layout-template.js';
 
 // Frameworks whose documented, default behaviour is to render Markdown page
 // files to HTML. This is the claim renderCapabilities exists to record, and
@@ -197,7 +198,7 @@ export function deriveContentConfig({ technology, structure, existingUrlFileMap 
 // it. Merge, never replace: discovery/auto-configure.js has already written
 // pages/patterns into this same column by the time this runs, and siteRoot
 // carries the Design Agent's profile.
-export async function persistDerivedContentConfig(site, discovery, { saveConfig = updateSiteRepoConfig } = {}) {
+export async function persistDerivedContentConfig(site, discovery, { saveConfig = updateSiteRepoConfig, deriveLayout = deriveLayoutTemplate } = {}) {
   const existingUrlFileMap = site.url_file_map || {};
   const result = deriveContentConfig({
     technology: discovery?.technology,
@@ -205,11 +206,23 @@ export async function persistDerivedContentConfig(site, discovery, { saveConfig 
     existingUrlFileMap,
   });
 
-  if (!Object.keys(result.patch).length) return { ...result, applied: false, site };
+  // The shared layout (siteRoot.layoutTemplate) is worked out from the repo's own evidence, and a value a person
+  // already set is never replaced (see discovery/layout-template.js). When it cannot be told, it stays unset and
+  // the reason is returned, so the gap is explained instead of silently blocking every sitewide fix.
+  const layout = await deriveLayout(site).catch((err) => {
+    console.error(`[derive-config] site ${site.id}: layout template could not be derived:`, err.message);
+    return { path: null, reason: 'derivation-error' };
+  });
+  const layoutPatch = layout.path && !layout.kept
+    ? { layoutTemplate: layout.path, layoutTemplateEvidence: layout.evidence }
+    : null;
+
+  if (!Object.keys(result.patch).length && !layoutPatch) return { ...result, layout, applied: false, site };
 
   const merged = { ...existingUrlFileMap, ...result.patch };
+  if (layoutPatch) merged.siteRoot = { ...(existingUrlFileMap.siteRoot || {}), ...layoutPatch };
   const updated = await saveConfig({ siteId: site.id, urlFileMap: merged });
-  return { ...result, applied: true, site: updated };
+  return { ...result, layout, applied: true, site: updated };
 }
 
 export const __testables = { MARKDOWN_NATIVE_FRAMEWORKS, NET_NEW_TYPES, markdownPageDirectories, extnameOf: extname };

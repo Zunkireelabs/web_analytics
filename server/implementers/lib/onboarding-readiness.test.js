@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { isOnboardingAnalysisPending, FIRST_DESIGN_PROFILE_TIMEOUT_MS } from './onboarding-readiness.js';
+import { isOnboardingAnalysisPending, FIRST_DESIGN_PROFILE_TIMEOUT_MS, designCaptureNeedsPerson } from './onboarding-readiness.js';
 
 // Two-stage onboarding: connect-repo (server/routes/clients.js, server/scripts/connect-repo.js)
 // grants auto_remediation_enabled AND queues the whole-site analysis job
@@ -145,5 +145,24 @@ describe('isOnboardingAnalysisPending', () => {
       });
     }
     assert.deepEqual(seenSiteIds, [7, 42, 501]);
+  });
+});
+
+describe('designCaptureNeedsPerson — held until a person looks', () => {
+  const site = { id: 3 };
+  const jobs = (n) => async () => Array.from({ length: n }, (_, i) => ({ id: i }));
+  const base = { hasUsableProfile: () => false, maxAttempts: 5 };
+
+  test('true only after every allowed try has failed', async () => {
+    assert.equal(await designCaptureNeedsPerson(site, { ...base, latestProfileJob: async () => ({ status: 'failed' }), recentProfileJobs: jobs(5) }), true);
+    assert.equal(await designCaptureNeedsPerson(site, { ...base, latestProfileJob: async () => ({ status: 'failed' }), recentProfileJobs: jobs(2) }), false);
+  });
+  test('false while a capture is still queued or running, or when there is a usable profile', async () => {
+    assert.equal(await designCaptureNeedsPerson(site, { ...base, latestProfileJob: async () => ({ status: 'executing' }), recentProfileJobs: jobs(5) }), false);
+    assert.equal(await designCaptureNeedsPerson(site, { ...base, latestProfileJob: async () => ({ status: 'queued' }), recentProfileJobs: jobs(5) }), false);
+    assert.equal(await designCaptureNeedsPerson(site, { ...base, hasUsableProfile: () => true, latestProfileJob: async () => ({ status: 'failed' }), recentProfileJobs: jobs(5) }), false);
+  });
+  test('false when no capture was ever requested (that case starts one, it is not a person problem)', async () => {
+    assert.equal(await designCaptureNeedsPerson(site, { ...base, latestProfileJob: async () => null, recentProfileJobs: jobs(0) }), false);
   });
 });

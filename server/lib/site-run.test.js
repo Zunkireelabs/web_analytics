@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rotateForToday, runSiteWithDeadline } from './site-run.js';
+import { rotateForToday, runSiteWithDeadline, windowClosed, RUN_WINDOW_MS, SITE_RUN_TIMEOUT_MS } from './site-run.js';
 
 const DAY = 86400000;
 test('rotation starts somewhere else each day and keeps everyone', () => {
@@ -49,4 +49,17 @@ test('an abandoned run is told to stop, so it does not keep working in the backg
   release();
   await new Promise((res) => setTimeout(res, 10));
   assert.equal(abortedSeen, true);
+});
+
+test('the morning window is four hours, and one client gets thirty minutes', () => {
+  assert.equal(RUN_WINDOW_MS, 4 * 60 * 60 * 1000);
+  assert.equal(SITE_RUN_TIMEOUT_MS, 30 * 60 * 1000);
+});
+
+test('the morning window is open until its end, closed from then on, and never closed when there is no window', () => {
+  const end = 1_000_000;
+  assert.equal(windowClosed(end, end - 1), false);
+  assert.equal(windowClosed(end, end), true);
+  assert.equal(windowClosed(end, end + 5), true);
+  assert.equal(windowClosed(null, end + 5), false);
 });

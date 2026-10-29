@@ -1,4 +1,5 @@
 import cron from 'node-cron';
+import { RUN_WINDOW_MS } from './lib/site-run.js';
 import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, runAiVisibilityShipForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, checkDesignChangesForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites, runTrendRadarIfDueForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
@@ -56,10 +57,23 @@ export function startCron() {
   );
 
   async function runDailyJobBody() {
+      let runStartedAt = null;
       const startedAt = new Date().toISOString();
       console.log(`[cron] daily job started ${startedAt}`);
       try {
-        const results = await runDailyJobForAllSites();
+        // One window for the whole morning run (07:00 to 11:00). Detection may use the first half so there is
+        // always time left to ship; the shipping pass below uses the full window.
+        runStartedAt = Date.now();
+        // Page discovery (weekly, so cheap on every other day) runs FIRST, so the pages it finds today are
+        // the ones today's detection and shipping work from, not next week's. It may use the first hour.
+        try {
+          const found = await runSiteDiscoveryIfDueForAllSites({ windowEndsAt: runStartedAt + RUN_WINDOW_MS / 4 });
+          const discovered = found.filter(Boolean).length;
+          if (discovered) console.log(`[cron] site discovery before the daily run — ${discovered} site(s) discovered`);
+        } catch (err) {
+          console.error('[cron] site discovery before the daily run failed:', err.message);
+        }
+        const results = await runDailyJobForAllSites({ windowEndsAt: runStartedAt + RUN_WINDOW_MS / 2 });
         console.log(`[cron] daily job finished — ${results.length} site(s) processed`);
       } catch (err) {
         console.error('[cron] daily job error:', err.message);
@@ -172,7 +186,7 @@ export function startCron() {
         // that stalled.
         console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
         try {
-          const results = await runAutoRemediationForAllSites();
+          const results = await runAutoRemediationForAllSites({ windowEndsAt: (runStartedAt ?? Date.now()) + RUN_WINDOW_MS });
           const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
           const locked = results.filter((r) => r.skipped === 'locked').length;
           console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)${locked ? `, ${locked} site(s) already shipping elsewhere` : ''}`);
@@ -403,7 +417,7 @@ export function startCron() {
       // chained call above for why there is no platform-wide key here.
       console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
       try {
-        const results = await runAutoRemediationForAllSites();
+        const results = await runAutoRemediationForAllSites({ windowEndsAt: Date.now() + RUN_WINDOW_MS });
         const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
         console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)`);
       } catch (err) {

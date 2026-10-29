@@ -141,3 +141,18 @@ export async function isOnboardingAnalysisPending(site, {
   await enqueue(`${job.status} without a usable profile (attempt ${attempts}/${maxAttempts})`);
   return true;
 }
+
+// True when the design capture has failed every allowed try and shipping is held for a person to look at.
+// Read-only: unlike isOnboardingAnalysisPending it never queues another attempt.
+export async function designCaptureNeedsPerson(site, {
+  hasUsableProfile = siteHasUsableProfile,
+  latestProfileJob = getLatestDesignAgentJob,
+  recentProfileJobs = getRecentDesignAgentJobs,
+  maxAttempts = DESIGN_PROFILE_MAX_ATTEMPTS,
+} = {}) {
+  if (hasUsableProfile(site)) return false;
+  const job = await latestProfileJob(site.id, DESIGN_PROFILE_JOB_KEY);
+  if (!job || job.status === 'queued' || job.status === 'executing') return false;
+  const attempts = (await recentProfileJobs(site.id, DESIGN_PROFILE_JOB_KEY, maxAttempts)).length;
+  return attempts >= maxAttempts;
+}
