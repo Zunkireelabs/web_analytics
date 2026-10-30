@@ -80,28 +80,31 @@ function fakeSite(reports, { failUrls = [] } = {}) {
   };
 }
 
-test('returns the 5 worst pages, each with at most 3 fixes, worst first', async () => {
+test('returns the 10 worst pages, worst first; only the worst 3 carry fixes, the rest are locked', async () => {
   const reports = {};
-  for (let i = 0; i < 9; i++) {
-    reports[i === 0 ? '/' : `/p${i}`] = pageReport(i === 0 ? '/' : `/p${i}`, { 'qa-content': 9, 'freshness-signals': 8, 'author-expertise': 7, 'meta-description': 5, favicon: 2 }, { seo: 100 - i * 10, aeo: 100 - i * 10, geo: 100 - i * 10, agentic: 100 - i * 10 });
+  for (let i = 0; i < 14; i++) {
+    reports[i === 0 ? '/' : `/p${i}`] = pageReport(i === 0 ? '/' : `/p${i}`, { 'qa-content': 9, 'freshness-signals': 8, 'author-expertise': 7, 'meta-description': 5, favicon: 2 }, { seo: 100 - i * 6, aeo: 100 - i * 6, geo: 100 - i * 6, agentic: 100 - i * 6 });
   }
   const events = [];
   const r = await scanSite('acme.io', { ...fakeSite(reports), onProgress: (e) => events.push(e) });
-  assert.equal(r.pages.length, 5);
-  assert.deepEqual(r.pages.map((p) => p.path), ['/p8', '/p7', '/p6', '/p5', '/p4']);
-  assert.ok(r.pages.every((p) => p.issues.length === 3 && p.issues.every((i) => i.fix?.code)));
+  assert.equal(r.pages.length, 10);
+  assert.deepEqual(r.pages.map((p) => p.path), ['/p13', '/p12', '/p11', '/p10', '/p9', '/p8', '/p7', '/p6', '/p5', '/p4']);
+  const open = r.pages.slice(0, 3);
+  const locked = r.pages.slice(3);
+  assert.ok(open.every((p) => !p.locked && p.issues.length === 3 && p.issues.every((i) => i.fix?.code)));
+  assert.ok(locked.every((p) => p.locked && p.issues.length === 0 && p.failing > 0));
   assert.equal(r.pages[0].issues[0].id, 'qa-content');
-  assert.equal(r.site.pagesAudited, 9);
-  assert.equal(r.site.pagesFound, 29);
+  assert.equal(r.site.pagesAudited, 14);
+  assert.equal(r.site.pagesFound, 34);
   assert.equal(r.morePages, 4);
   assert.ok(r.entryReport.finalUrl.endsWith('acme.io/'));
   assert.equal(events[0].type, 'finding');
   assert.equal(events[1].type, 'pages');
-  assert.equal(events[1].pages.length, 9);
-  assert.equal(events.filter((e) => e.type === 'auditing').length, 9);
-  assert.equal(events.filter((e) => e.type === 'audit').length, 9);
+  assert.equal(events[1].pages.length, 14);
+  assert.equal(events.filter((e) => e.type === 'auditing').length, 14);
+  assert.equal(events.filter((e) => e.type === 'audit').length, 14);
   assert.equal(events.at(-1).type, 'audit');
-  assert.equal(events.at(-1).done, 9);
+  assert.equal(events.at(-1).done, 14);
 });
 
 test('issues without a fix generator still come back with their recommendation, after the fixable ones', async () => {

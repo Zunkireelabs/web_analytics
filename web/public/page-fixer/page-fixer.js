@@ -1,6 +1,6 @@
 // Page Fixer (/page-fixer): posts the website to /api/page-fixer (server/routes/free-audit.js, server/free-audit/siteScan.js),
-// reads the streamed progress (newline-delimited JSON), then shows the 5 pages with the most issues, each with three fixes.
-// The email form reuses the free audit unlock (/api/free-audit/unlock) for the full report of the entered page.
+// reads the streamed progress (newline-delimited JSON), then shows the 10 pages with the most issues. The worst three come
+// with three fixes each; the other seven are locked rows (the server sends no fixes for them) that point to Start free trial / Book a demo.
 import { reduceMotion, el, gradeOf, fixBlock } from '/free-audit/audit-shared.js';
 
 const form = document.querySelector('[data-pf-form]');
@@ -13,8 +13,8 @@ if (form) {
   const fav = form.querySelector('.pf-fav');
   const globe = form.querySelector('.pf-globe');
   const BTN = 'Fix my pages';
+  const SITE = 'https://superrank.si';
   const validSite = (v) => /^(https?:\/\/)?[\w-]+(\.[\w-]+)+(\/.*)?$/i.test(v);
-  const validEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v);
   const hostOf = (v) => { try { return new URL(/^https?:\/\//i.test(v) ? v : `https://${v}`).hostname; } catch { return ''; } };
   const showError = (msg) => { err.textContent = msg; err.hidden = false; };
   const GRADE = { a: 'Excellent', b: 'Good', c: 'Fair', d: 'Needs work', f: 'Critical gaps' };
@@ -32,13 +32,6 @@ if (form) {
       fav.src = `https://${h}/favicon.ico`;
     }, 350);
   };
-
-  async function post(path, body) {
-    const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.message || 'Something went wrong. Please try again.');
-    return data;
-  }
 
   // Reads the NDJSON stream, calling onEvent for each line. Returns when the stream ends.
   async function scan(site, onEvent) {
@@ -72,7 +65,6 @@ if (form) {
   // ---------- progress ----------
   function progressView(site) {
     const card = el('section', 'pf-card pf-prog');
-    card.append(el('p', 'pf-eyebrow', 'Scanning'));
     const h = el('h2');
     const bar = el('div', 'pf-bar'); const fill = el('i'); bar.append(fill);
     const list = el('ul', 'pf-pages');
@@ -121,7 +113,43 @@ if (form) {
     return d;
   }
 
-  function pageCard(p, i) {
+  function lockIcon() {
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    Object.entries({ width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }).forEach(([k, v]) => svg.setAttribute(k, v));
+    const body = document.createElementNS(NS, 'rect'); Object.entries({ x: 3, y: 7, width: 10, height: 7, rx: 1.6 }).forEach(([k, v]) => body.setAttribute(k, v));
+    const shackle = document.createElementNS(NS, 'path'); shackle.setAttribute('d', 'M5.2 7V5.2a2.8 2.8 0 0 1 5.6 0V7');
+    svg.append(body, shackle);
+    return svg;
+  }
+
+  // Start free trial / Book a demo, the two ways to see the pages that are locked here.
+  function ctaButtons(site) {
+    const row = el('div', 'pf-row');
+    const trial = el('a', 'btn btn--primary', 'Start free trial'); trial.href = `${SITE}/get-started`;
+    const demo = el('a', 'btn btn--light', 'Book a demo'); demo.href = `${SITE}/book-demo?website=${encodeURIComponent(site)}&intent=page-fixer`;
+    row.append(trial, demo);
+    return row;
+  }
+
+  function lockedCard(p, i, site) {
+    const d = el('details', 'pf-page pf-page--locked');
+    const s = el('summary');
+    const rank = el('span', 'pf-rank', String(i + 1));
+    const t = el('span', 'pf-ptitle');
+    t.append(el('b', '', p.title || p.path), el('small', '', p.path));
+    const sc = el('span', 'pf-score');
+    sc.append(el('b', '', String(p.score)), ringBadge(p.score), `${p.failing} issue${p.failing === 1 ? '' : 's'}`);
+    const lock = el('span', 'pf-lock'); lock.append(lockIcon());
+    s.append(rank, t, sc, lock);
+    const body = el('div', 'pf-lockbody');
+    body.append(el('p', '', 'The fixes for this page are in your SuperRank workspace. Start a free trial or book a demo to see them.'), ctaButtons(site));
+    d.append(s, body);
+    return d;
+  }
+
+  function pageCard(p, i, site) {
+    if (p.locked) return lockedCard(p, i, site);
     const d = el('details', 'pf-page'); d.open = i === 0;
     const s = el('summary');
     s.append(el('span', 'pf-rank', String(i + 1)));
@@ -136,32 +164,11 @@ if (form) {
     return d;
   }
 
-  function unlockCard(r, site) {
+  function ctaCard(site, lockedCount) {
     const box = el('section', 'pf-card pf-unlock');
-    box.append(el('p', 'pf-eyebrow', 'Everything else'));
-    box.append(el('h3', '', 'Get the full report with a fix for every issue'));
-    box.append(el('p', '', 'We email you a private link to the complete report for your page. We can also ship each change for your approval.'));
-    const f = el('form'); f.noValidate = true;
-    const email = el('input'); Object.assign(email, { type: 'email', name: 'email', placeholder: 'you@company.com', autocomplete: 'email', required: true });
-    email.setAttribute('aria-label', 'Your email');
-    const go = el('button', 'btn btn--primary', 'Send me the report'); go.type = 'submit';
-    f.append(email, go);
-    const msg = el('p', 'audit-form__err'); msg.hidden = true;
-    box.append(f, msg, el('small', '', 'Free, no spam. The report link stays private to you.'));
-    f.addEventListener('submit', async (e) => {
-      e.preventDefault(); msg.hidden = true;
-      if (!r.id) { msg.textContent = 'The full report is not available for this scan. Please run it again.'; msg.hidden = false; return; }
-      if (!validEmail(email.value.trim())) { msg.textContent = 'Enter a valid email address.'; msg.hidden = false; email.focus(); return; }
-      go.disabled = true; go.textContent = 'Sending…';
-      try {
-        const res = await post('/api/free-audit/unlock', { id: r.id, email: email.value.trim() });
-        box.replaceChildren(el('p', 'pf-eyebrow', 'You are in'), el('h3', '', 'Your full report is on its way.'), el('p', '', res.emailed ? 'We emailed you the link. You can also open it now.' : 'Open your full report now. The link is private to you.'));
-        const row = el('div', 'pf-row');
-        const open = el('a', 'btn btn--primary', 'Open the full report'); open.href = res.reportUrl;
-        const demo = el('a', 'btn btn--light', 'Book a call'); demo.href = `https://superrank.si/book-demo?website=${encodeURIComponent(site)}&intent=audit`;
-        row.append(open, demo); box.append(row);
-      } catch (ex) { msg.textContent = ex.message; msg.hidden = false; go.disabled = false; go.textContent = 'Send me the report'; }
-    });
+    box.append(el('h3', '', lockedCount ? `See the fixes for the other ${lockedCount} page${lockedCount === 1 ? '' : 's'}` : 'Want these fixes shipped for you?'));
+    box.append(el('p', '', 'Start a free trial and SuperRank writes every fix in your site\'s own design and sends it for your approval. Or book a demo and we walk you through it.'));
+    box.append(ctaButtons(site));
     return box;
   }
 
@@ -180,7 +187,7 @@ if (form) {
       ? `${r.pages.length === 1 ? 'One page needs' : `${r.pages.length} pages need`} your attention first.`
       : 'No page needs fixing.'));
     right.append(el('p', '', r.pages.length
-      ? `Site average ${s.averageScore}/100 · ${GRADE[g]}. These are the pages with the most to fix, worst first.`
+      ? `Site average ${s.averageScore}/100 · ${GRADE[g]}. These are the pages with the most to fix, worst first. The fixes for the top three are open below.`
       : 'Every page we checked passes our checks.'));
     const stats = el('div', 'pf-stats');
     const stat = (n, label) => { const x = el('span'); x.append(el('b', '', String(n)), ` ${label}`); return x; };
@@ -192,16 +199,16 @@ if (form) {
 
     if (r.pages.length) {
       const list = el('div', 'pf-list');
-      r.pages.forEach((p, i) => list.append(pageCard(p, i)));
+      r.pages.forEach((p, i) => list.append(pageCard(p, i, site)));
       wrap.append(list);
     }
     if (r.morePages > 0) {
-      wrap.append(el('p', 'pf-more', `${r.morePages} more page${r.morePages === 1 ? '' : 's'} need work too. They are in your full report.`));
+      wrap.append(el('p', 'pf-more', `${r.morePages} more page${r.morePages === 1 ? '' : 's'} need work too. Start a free trial to see them all.`));
     }
     if (s.pagesFailed > 0) {
       wrap.append(el('p', 'pf-more', `${s.pagesFailed} page${s.pagesFailed === 1 ? '' : 's'} could not be read and ${s.pagesFailed === 1 ? 'was' : 'were'} skipped.`));
     }
-    wrap.append(unlockCard(r, site));
+    wrap.append(ctaCard(site, r.pages.filter((p) => p.locked).length));
     return wrap;
   }
 

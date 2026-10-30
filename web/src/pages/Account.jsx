@@ -43,6 +43,15 @@ export default function Account({ email, role, sites, siteId, onLogout, onSwitch
   const load = () => api.workspaces().then((r) => { setWorkspaces(r.workspaces || []); setShared(r.shared || []); }).catch(() => setWorkspaces([]));
   useEffect(() => { load(); }, [siteId]);
 
+  // Same width on every tab (Account, Workspace, Project, Platform), and the scrollbar's space stays reserved, so the
+  // page does not shift sideways when a short tab and a long tab are switched.
+  useEffect(() => {
+    const root = document.documentElement;
+    const before = root.style.scrollbarGutter;
+    root.style.scrollbarGutter = 'stable';
+    return () => { root.style.scrollbarGutter = before; };
+  }, []);
+
   const loading = workspaces === null;
   const hasWorkspaces = (workspaces?.length || 0) > 0;
   const allProjects = [
@@ -79,7 +88,7 @@ export default function Account({ email, role, sites, siteId, onLogout, onSwitch
 
   return (
     <div className="min-h-screen bg-canvas text-sm">
-      <div className={`${scope === 'account' && !billingOpen ? 'max-w-[768px]' : 'max-w-[960px]'} mx-auto px-4 md:px-6 pt-8 pb-12`}>
+      <div className="max-w-[1040px] mx-auto px-4 md:px-6 pt-8 pb-12">
         {/* A direct visit has no history to go back to. */}
         <button type="button" className="inline-flex items-center gap-1.5 text-sm text-fg hover:text-text"
           onClick={() => (location.key !== 'default' ? navigate(-1) : navigate('/'))}>

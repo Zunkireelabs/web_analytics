@@ -54,21 +54,23 @@ export default function SecurityCard() {
             {state === 'running' ? 'Changing password…' : 'Change password'}
           </Button>
         )}>
-        <div className="px-5 py-4 space-y-3.5 max-w-[460px]">
-          <Field label="Current password" type="password" value={currentPassword} autoComplete="current-password"
-            onChange={(e) => setCurrentPassword(e.target.value)} placeholder="Current password" required />
-          <Field label="New password" type="password" value={newPassword} autoComplete="new-password"
-            onChange={(e) => setNewPassword(e.target.value)} placeholder="At least 8 characters" required minLength={8} />
-          <Field label="Confirm new password" type="password" value={confirmPassword} autoComplete="new-password"
-            onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Re-enter new password" required minLength={8} />
+        <div className="px-5 py-4">
+          <div className="grid gap-3.5 md:grid-cols-3">
+            <Field label="Current password" type="password" value={currentPassword} autoComplete="current-password"
+              onChange={(e) => setCurrentPassword(e.target.value)} placeholder="Current password" required />
+            <Field label="New password" type="password" value={newPassword} autoComplete="new-password"
+              onChange={(e) => setNewPassword(e.target.value)} placeholder="At least 8 characters" required minLength={8} />
+            <Field label="Confirm new password" type="password" value={confirmPassword} autoComplete="new-password"
+              onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Re-enter new password" required minLength={8} />
+          </div>
 
           {state === 'error' && formError && (
-            <div className="rounded-control bg-[#fdecec] text-[#b42318] text-[13px] px-3 py-2">
+            <div className="mt-3.5 rounded-control bg-[#fdecec] text-[#b42318] text-[13px] px-3 py-2">
               {formError}
             </div>
           )}
           {state === 'success' && (
-            <div className="rounded-control bg-green-tint text-green text-[13px] px-3 py-2 flex items-center gap-2">
+            <div className="mt-3.5 rounded-control bg-green-tint text-green text-[13px] px-3 py-2 flex items-center gap-2">
               <CheckCircle2 size={14} /> Password changed.
             </div>
           )}

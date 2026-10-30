@@ -4,14 +4,16 @@ import { runAudit } from './runAudit.js';
 import { fixFor } from './fixes.js';
 
 // Page Fixer: give it a website and it finds the site's pages, audits a sample of them, and
-// returns the five pages with the most to fix, each with its three highest-impact fixes.
+// returns the ten pages with the most to fix. The three worst get their three highest-impact fixes; the other
+// seven come back as a locked row (score and issue count only), so their fixes never leave the server.
 //
 // Every outbound request goes through the same SSRF guard as the single-page audit
 // (fetchPage.js -> urlGuard.js): the entry page, robots.txt, sitemaps and each audited page.
 // Nothing here fetches a URL that did not come from the visitor's own site (same host only).
 
-const MAX_PAGES = 12;           // candidate pages audited per scan
-const TOP_PAGES = 5;            // pages returned
+const MAX_PAGES = 20;           // candidate pages audited per scan
+const TOP_PAGES = 10;           // pages returned
+const OPEN_PAGES = 3;           // of those, the worst pages that get their fixes; the rest are locked
 const FIXES_PER_PAGE = 3;
 const CONCURRENCY = 3;
 const BUDGET_MS = 40_000;       // total time spent auditing pages (after discovery)
@@ -217,7 +219,7 @@ function rankPages(audited) {
 // Runs the whole scan. `onProgress(event)` receives { type: 'finding' | 'pages' | 'auditing' | 'audit', ... };
 // `{type:'auditing',url}` fires as each page starts; `shouldStop()` lets the caller abort (client went away). `discover` and `audit` are injectable for tests.
 async function scanSite(inputUrl, {
-  limit = MAX_PAGES, top = TOP_PAGES, fixes = FIXES_PER_PAGE, concurrency = CONCURRENCY,
+  limit = MAX_PAGES, top = TOP_PAGES, open = OPEN_PAGES, fixes = FIXES_PER_PAGE, concurrency = CONCURRENCY,
   budgetMs = BUDGET_MS, pageTimeoutMs = PAGE_TIMEOUT_MS, discoveryTimeoutMs = DISCOVERY_TIMEOUT_MS,
   onProgress = () => {}, shouldStop = () => false,
   discover = discoverPages, audit = runAudit,
@@ -276,14 +278,15 @@ async function scanSite(inputUrl, {
       averageGrade: gradeOf(average),
       pagesWithIssues: withIssues.length,
     },
-    pages: worst.map((p) => ({
+    pages: worst.map((p, i) => ({
       url: p.report.finalUrl,
       path: pathOf(p.report.finalUrl),
       title: p.report.pageMetadata?.title || null,
       score: p.score,
       grade: gradeOf(p.score),
       failing: p.failing.length,
-      issues: pickFixes(p.report, p.failing, fixes),
+      locked: i >= open,
+      issues: i < open ? pickFixes(p.report, p.failing, fixes) : [],
     })),
     morePages: Math.max(0, withIssues.length - worst.length),
     // For saving the free report behind the email unlock (not sent to the client).
@@ -293,5 +296,5 @@ async function scanSite(inputUrl, {
 
 export {
   discoverPages, scanSite, rankPages, pickFixes, failingChecks, overallScore, parseSitemap, pageUrl,
-  MAX_PAGES, TOP_PAGES, FIXES_PER_PAGE, BUDGET_MS,
+  MAX_PAGES, TOP_PAGES, OPEN_PAGES, FIXES_PER_PAGE, BUDGET_MS,
 };

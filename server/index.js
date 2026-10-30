@@ -206,6 +206,16 @@ const httpServer = createHttpServer(app);
 // runs as one process on one port rather than a separate `vite` process
 // proxying to this one. Vite auto-discovers the project's vite.config.js
 // (root vite.config.js sets `root: 'web'`) from process.cwd().
+// Page Fixer is a public static page (web/public/page-fixer), open to people who are not clients. Neither express.static
+// (index:false) nor Vite serves a folder's index.html for a clean URL, so without this /page-fixer would fall through
+// to the dashboard shell and its login. Production serves the built copy; dev serves the source copy.
+const pageFixerHtml = join(here, '..', 'web', process.env.NODE_ENV === 'production' ? 'dist' : 'public', 'page-fixer', 'index.html');
+app.get(['/page-fixer', '/page-fixer/'], (req, res, next) => {
+  if (!existsSync(pageFixerHtml)) return next();
+  res.set('Cache-Control', 'no-cache');
+  res.sendFile(pageFixerHtml);
+});
+
 if (process.env.NODE_ENV === 'production') {
   const dist = join(here, '..', 'web', 'dist');
   if (existsSync(dist)) {

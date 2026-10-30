@@ -20,7 +20,7 @@ const WINDOW_MS = 10 * 60 * 1000;
 const takeAudit = createRateLimiter({ windowMs: WINDOW_MS, max: Number(process.env.FREE_AUDIT_RATE_MAX) || 10 });
 const takeRenderAudit = createRateLimiter({ windowMs: WINDOW_MS, max: 3 });
 const takeUnlock = createRateLimiter({ windowMs: WINDOW_MS, max: 5 });
-// The Page Fixer audits up to ~12 pages per request, so it gets its own, stricter per-IP limit and cap.
+// The Page Fixer audits up to ~20 pages per request, so it gets its own, stricter per-IP limit and cap.
 const takeScan = createRateLimiter({ windowMs: WINDOW_MS, max: Number(process.env.PAGE_FIXER_RATE_MAX) || 3 });
 const MAX_CONCURRENT_SCANS = 2;
 let activeScans = 0;
@@ -75,8 +75,9 @@ router.post('/free-audit', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Page Fixer: POST /api/page-fixer { url }. Finds the site's pages, audits a sample, and returns the five
-// pages with the most issues and three fixes for each (see free-audit/siteScan.js). The response is
+// Page Fixer: POST /api/page-fixer { url }. Finds the site's pages, audits a sample, and returns the ten
+// pages with the most issues; the worst three come with three fixes each, the rest are locked ({locked:true}, no
+// issues) for the Start free trial / Book a demo prompt (see free-audit/siteScan.js). The response is
 // newline-delimited JSON so the page can show progress: {type:'finding'}, {type:'pages',total},
 // {type:'audit',done,total,url,ok}, then {type:'done',result} (or {type:'error',error,message}).
 // Send { stream: false } to get just the final JSON instead.
