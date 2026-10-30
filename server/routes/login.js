@@ -1,11 +1,13 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { randomBytes } from 'node:crypto';
-import { getUserByEmail, getUserById, updateUserPassword, getUserStatus } from '../store/users.js';
+import { getUserByEmail, getUserById, updateUserPassword, getUserStatus, createUser } from '../store/users.js';
 import { appOrigin } from './lib/app-url.js';
 import { authRateLimit } from '../lib/rate-limit.js';
 import { createSignupRequest, hasOpenSignupRequest, peekVerificationToken, consumeVerificationToken, getActivationRequest, getCompanyNameForEmail } from '../store/signup-requests.js';
 import { issueLoginCode, checkLoginCode, CODE_MINUTES } from '../store/login-codes.js';
+import { googleConnectConfigured, redirectUriFor, newConnectNonce, buildSignInUrl, exchangeSignInCode } from '../integrations/google-connect.js';
+import { noteGetStartedSignup, markGetStartedVerified } from '../store/onboarding.js';
 import { createContactRequest } from '../store/contact-requests.js';
 import { sendContactLeadEmail, sendPasswordResetEmail, sendSignupReceivedEmail, sendSignupStaffNotice, sendLoginCodeEmail } from '../report/email.js';
 import { getSiteStatus } from '../store/read.js';
@@ -112,6 +114,103 @@ router.post('/login/code/verify', async (req, res, next) => {
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
+
+// Where a person lands after signing in with Google: the page that asked. SITE_BASE_URL is the public site when
+// that is not the same address the app answers on (superrank.si vs app.superrank.si); unset means "here".
+const siteUrl = (path) => `${String(process.env.SITE_BASE_URL || '').trim().replace(/\/+$/, '')}${path}`;
+// Only a path on this site is ever followed: "//evil.test" and "https://evil.test" are both refused.
+const safeNextPath = (next) => {
+  const value = String(next ?? '');
+  return value.startsWith('/') && !value.startsWith('//') && !value.includes('\\') && !/[\r\n]/.test(value) ? value.slice(0, 300) : '/';
+};
+
+// The public /get-started page: a visitor trying the product types an email and gets a 6-digit code (no
+// approval, they are prospects, not clients). A right code makes the login (when there is none) and signs them
+// in; the onboarding steps and POST /onboarding/complete then run on that session. Asking answers the same for
+// every address, so the page cannot be used to find out who already has an account.
+const TRIAL_CODE_SENT = { ok: true, message: 'If that address can start a trial, a code is on its way.' };
+router.post('/get-started/code/send', async (req, res, next) => {
+  try {
+    if (req.body?.honeypot) return res.json(TRIAL_CODE_SENT); // a bot filled the hidden field: pretend it worked
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return res.status(400).json({ error: 'Enter a valid work email.' });
+    const user = await getUserByEmail(email);
+    if (!user || (await getUserStatus(user.id)) === 'active') {
+      const issued = await issueLoginCode(email);
+      if (issued.code) {
+        if (!user) await noteGetStartedSignup(email);
+        sendLoginCodeEmail({ email, code: issued.code, minutes: CODE_MINUTES, trial: true })
+          .catch((err) => console.error('[get-started] code email failed:', err.message));
+      }
+    }
+    res.json(TRIAL_CODE_SENT);
+  } catch (e) { next(e); }
+});
+
+router.post('/get-started/code/verify', async (req, res, next) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    // 400, not 401: the app treats any 401 as "your session ended" and signs the person out of the page.
+    const bad = () => res.status(400).json({ error: 'That code is not right, or it has expired. Ask for a new one.' });
+    if (!email) return bad();
+    const checked = await checkLoginCode(email, req.body?.code);
+    if (!checked.ok) return bad();
+    let user = await getUserByEmail(email);
+    const isNew = !user;
+    if (!user) {
+      // The code proved the inbox. No password was chosen, so the stored hash is of a random value nobody knows:
+      // they sign in next time with an emailed code, or set a password of their own in Account settings.
+      user = await createUser({ siteId: null, email, passwordHash: await bcrypt.hash(randomBytes(32).toString('hex'), 10) });
+      await markGetStartedVerified(email, user.id);
+    }
+    const refused = await openSession(req, user);
+    if (refused) return res.status(refused.status).json({ error: refused.error });
+    res.json({ ok: true, isNew });
+  } catch (e) { next(e); }
+});
+
+// "Continue with Google": send the browser to Google's own screen, which asks only who they are. The nonce
+// is kept in their session and has to come back unchanged, so a link copied to someone else is refused.
+router.get('/auth/google', (req, res) => {
+  const failed = (why) => res.redirect(siteUrl(`/get-started?google=${why}`));
+  try {
+    if (!googleConnectConfigured()) return failed('unavailable');
+    const nonce = newConnectNonce();
+    const redirectUri = redirectUriFor(appOrigin(req));
+    req.session.googleSignIn = { nonce, mode: req.query.mode === 'signin' ? 'signin' : 'signup', next: safeNextPath(req.query.next), redirectUri, at: Date.now() };
+    res.redirect(buildSignInUrl({ redirectUri, state: nonce }));
+  } catch (err) {
+    console.error('[login] could not start Google sign-in:', err.message);
+    failed('unavailable');
+  }
+});
+
+// Google sends the browser back to the one registered callback (routes/projects.js, which hands it here when
+// a sign-in is pending). Every outcome is a redirect, never JSON, because this is a page navigation.
+export async function googleSignInCallback(req, res) {
+  const pending = req.session?.googleSignIn;
+  if (req.session) delete req.session.googleSignIn; // single use, whatever happens next
+  const failed = (why) => res.redirect(siteUrl(`/get-started?google=${why}`));
+  try {
+    if (req.query.error) return failed('cancelled');
+    const fresh = pending && Date.now() - pending.at < 10 * 60 * 1000;
+    if (!fresh || !req.query.state || req.query.state !== pending.nonce) return failed('expired');
+    const { email } = await exchangeSignInCode({ code: String(req.query.code || ''), redirectUri: pending.redirectUri });
+    let user = await getUserByEmail(email);
+    if (!user) {
+      if (pending.mode !== 'signup') return failed('no-account');
+      // Google proved the address, so a visitor trying the product needs nothing more (no approval, like the code).
+      user = await createUser({ siteId: null, email, passwordHash: await bcrypt.hash(randomBytes(32).toString('hex'), 10) });
+      await markGetStartedVerified(email, user.id, { via: 'google' });
+    }
+    const refused = await openSession(req, user);
+    if (refused) return failed('disabled');
+    res.redirect(siteUrl(pending.next));
+  } catch (err) {
+    console.error('[login] Google sign-in failed:', err.message);
+    failed('failed');
+  }
+}
 
 // Public — no requireAuth, same as /login above. Never creates a real
 // account directly: only a pending signup_requests row, reviewed by staff

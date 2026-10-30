@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth } from './login.js';
+import { requireAuth, googleSignInCallback } from './login.js';
 import { getUserById, getUserStatus } from '../store/users.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
 import { createApiToken, listApiTokensForSite, revokeApiToken } from '../store/api-tokens.js';
@@ -351,6 +351,7 @@ router.get('/projects/:siteId/connect/google/start', requireAuth, requireProject
 // API call, so every outcome ends in a redirect to the Workspace page (which reopens the
 // New project popup on the Google step), never a JSON error the person would stare at.
 router.get('/google/callback', async (req, res) => {
+  if (req.session?.googleSignIn) return googleSignInCallback(req, res);
   if (req.session?.gbpConnect) return businessProfileCallback(req, res);
   const back = (params) => res.redirect(`/workspace?${new URLSearchParams(params)}`);
   const pending = req.session?.googleConnect;

@@ -86,3 +86,26 @@ export async function exchangeCode({ code, redirectUri }) {
 
   return { refreshToken: tokens.refresh_token, email, scopes: granted.join(' ') };
 }
+
+// "Continue with Google" on the get-started and sign-in pages: only WHO the person is, no Search Console or
+// Analytics access (that is asked later, per project, by the connect flow above). Uses the same web client and
+// the same registered callback address, so nothing new has to be registered in Google Cloud.
+export function buildSignInUrl({ redirectUri, state }) {
+  if (!googleConnectConfigured()) throw new GoogleConnectError('not_configured', 'Google sign-in is not set up on this server yet.');
+  return clientFor(redirectUri).generateAuthUrl({ scope: ['openid', 'email', 'profile'], state, prompt: 'select_account', include_granted_scopes: false });
+}
+
+// One-time code -> the Google account's email, only when Google itself says that address is verified.
+export async function exchangeSignInCode({ code, redirectUri }) {
+  const client = clientFor(redirectUri);
+  let tokens;
+  try {
+    ({ tokens } = await client.getToken(code));
+  } catch (err) {
+    throw new GoogleConnectError('exchange_failed', `Google did not accept the sign-in (${err?.response?.data?.error || err.message}).`);
+  }
+  const ticket = await client.verifyIdToken({ idToken: tokens.id_token, audience: connectClientCreds().id });
+  const payload = ticket.getPayload() || {};
+  if (!payload.email || payload.email_verified !== true) throw new GoogleConnectError('unverified', 'Google has not verified that email address.');
+  return { email: String(payload.email).trim().toLowerCase(), name: payload.name || null };
+}

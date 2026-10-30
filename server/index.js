@@ -76,7 +76,14 @@ app.use(
     secret: process.env.SESSION_SECRET || (() => { throw new Error('SESSION_SECRET is not set'); })(),
     resave: false,
     saveUninitialized: false,
+    // The public site (superrank.si) reaches this app at superrank.si/api, and the product lives on
+    // app.superrank.si. A sign-in made on the first must still count on the second, and Google's return trip lands
+    // on the second, so on that setup the cookie is shared across the whole domain: SESSION_COOKIE_DOMAIN=.superrank.si.
+    // It gets its own name so an old address-only cookie of the same name can never shadow it. Unset (a laptop, a
+    // single-address deploy) changes nothing.
+    ...(process.env.SESSION_COOKIE_DOMAIN ? { name: 'superrank.sid' } : {}),
     cookie: {
+      ...(process.env.SESSION_COOKIE_DOMAIN ? { domain: process.env.SESSION_COOKIE_DOMAIN } : {}),
       httpOnly: true,
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
