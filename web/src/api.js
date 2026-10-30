@@ -196,6 +196,8 @@ export const api = {
   range: (site) => req(`/range?site=${site}`),
   reportSummary: (site, period) => req(`/report-summary?site=${site}&period=${period}`),
   reportInsights: (site) => req(`/report-insights?site=${site}`),
+  // The project's own brand for its report pages: colour, what to print on it, and its logo (server/report/brand.js).
+  reportBrand: (site) => req(`/report-brand?site=${site}`),
   series: (site, start, end) => req(`/series?site=${site}&start=${start}&end=${end}`),
   // siteId is only ever passed by an internal admin's Milestones picker
   // (web/src/pages/GrowthReport.jsx) to view another client's site — every
@@ -210,6 +212,10 @@ export const api = {
   baselineReport: (siteId) => (siteId ? req(`/internal/baseline-report/${siteId}`) : req('/baseline-report')),
   baselineReportDownloadUrl: (siteId) =>
     `${import.meta.env.BASE_URL}api${siteId ? `/internal/baseline-report/${siteId}/download` : '/baseline-report/download'}`,
+  progressReportDownloadUrl: (siteId) =>
+    `${import.meta.env.BASE_URL}api${siteId ? `/internal/progress-report/${siteId}/download` : '/progress-report/download'}`,
+  weeklyReportDownloadUrl: (siteId) =>
+    `${import.meta.env.BASE_URL}api${siteId ? `/internal/weekly-report/${siteId}/download` : '/weekly-report/download'}`,
   generateBaselineReport: (siteId) => req(`/internal/baseline-report/${siteId}/generate`, { method: 'POST' }),
   growthTargets: {
     set: (body) => req('/growth-targets', { method: 'POST', body: JSON.stringify(body) }),
@@ -475,6 +481,18 @@ export const api = {
     generators: (siteId) => req(withSite('/action-center/generators', siteId)),
     generate: (generatorId, params, source, findingId, siteId) => req(withSite('/action-center/generate', siteId), { method: 'POST', body: JSON.stringify({ generatorId, params, source, findingId }) }),
     drafts: (filters = {}, siteId) => req(withSite(`/action-center/drafts?${new URLSearchParams(filters)}`, siteId)),
+    // Content picks: the one-click approval on a content idea. GET returns { picks, catalog } (the options come from the
+    // server, so this page carries no copy of them). Saving builds nothing; the next scheduled run builds the picks.
+    contentPicks: (siteId) => req(withSite('/action-center/content-picks', siteId)),
+    saveContentPick: (findingId, body, siteId) => req(withSite(`/action-center/content-picks/${encodeURIComponent(findingId)}`, siteId), { method: 'PUT', body: JSON.stringify(body) }),
+    clearContentPick: (findingId, siteId) => req(withSite(`/action-center/content-picks/${encodeURIComponent(findingId)}`, siteId), { method: 'DELETE' }),
+    // Design choices: fixes the agent could not fit into the client's design. Picking builds nothing now; the next run builds it.
+    // Approve everything selected at once (the Approve button under the list): { picks: [{ findingId, generatorId, optionKey }] } / { choices: [{ id, optionKey }] }.
+    approveContentPicks: (picks, siteId) => req(withSite('/action-center/content-picks', siteId), { method: 'PUT', body: JSON.stringify({ picks }) }),
+    approveDesignChoices: (choices, siteId) => req(withSite('/action-center/design-choices/approve', siteId), { method: 'PUT', body: JSON.stringify({ choices }) }),
+    designChoices: (siteId) => req(withSite('/action-center/design-choices', siteId)),
+    chooseDesign: (id, optionKey, siteId) => req(withSite(`/action-center/design-choices/${id}/choice`, siteId), { method: 'PUT', body: JSON.stringify({ optionKey }) }),
+    clearDesignChoice: (id, siteId) => req(withSite(`/action-center/design-choices/${id}/choice`, siteId), { method: 'DELETE' }),
     // Exact tab-badge counts (total/nonImplemented/implemented/abandoned/
     // submittedForApproval/implementedThisWeek) — independent of drafts()'s
     // own cap on the unfiltered board load, so a badge is never wrong just

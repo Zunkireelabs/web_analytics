@@ -7,7 +7,6 @@ import KpiStrip from '../components/layout/KpiStrip.jsx';
 import { Tray, TrayCard } from '../components/layout/Tray.jsx';
 import Section from '../components/layout/Section.jsx';
 import SegmentedTabs from '../components/SegmentedTabs.jsx';
-import Button from '../components/Button.jsx';
 import { fmtRange } from '../lib/format.js';
 import PerformanceTrendCard from '../components/PerformanceTrendCard.jsx';
 import MoversList from '../components/MoversList.jsx';
@@ -16,6 +15,9 @@ import AgentFindingsHub from '../components/AgentFindingsHub.jsx';
 import RecommendationCard from '../components/RecommendationCard.jsx';
 import ReportHistoryRail from '../components/ReportHistoryRail.jsx';
 import { GrowthReportBody } from './GrowthReport.jsx';
+import ReportBand from '../components/report/ReportBand.jsx';
+import BrandTiles from '../components/report/BrandTiles.jsx';
+import ReportBody from '../components/report/ReportBody.jsx';
 
 const fmtInt = (v) => Number(v).toLocaleString();
 const fmtFloat = (v) => Number(v).toFixed(1);
@@ -65,6 +67,19 @@ export default function Reports({ siteId, isInternal = false }) {
   // Page-level, not period-scoped — agent findings/recommendations aren't
   // tied to a Daily/Weekly/Monthly tab, so fetched once per site, not per tab.
   const [insights, setInsights] = useState(null);
+  // The project's own brand (colour, logo): the report is painted in it, so each client's looks like theirs.
+  const [brand, setBrand] = useState(null);
+  // Whether a baseline report exists: the Baseline tab's own Download PDF depends on that alone, not on the rest of the
+  // growth report being ready (the card inside it only shows then).
+  const [baselineReady, setBaselineReady] = useState(false);
+  useEffect(() => {
+    if (!siteId) return;
+    (isInternal ? api.baselineReport(siteId) : api.baselineReport()).then((r) => setBaselineReady(!!r?.available)).catch(() => setBaselineReady(false));
+  }, [siteId, isInternal]);
+  useEffect(() => {
+    if (!siteId) return;
+    api.reportBrand(siteId).then(setBrand).catch(() => setBrand(null));
+  }, [siteId]);
 
   useEffect(() => {
     if (!siteId || isBaseline) return; // the baseline tab loads its own report
@@ -116,12 +131,17 @@ export default function Reports({ siteId, isInternal = false }) {
           <SegmentedTabs options={TABS.map((p) => ({ value: p.key, label: p.label }))} value={period} onChange={changePeriod} />
         </div>
         {!isBaseline && !loading && data && label && <span className="hidden md:inline text-[13px] text-faint ml-2">Report for {label}</span>}
+        {isBaseline && baselineReady && (
+          <div className="ml-auto flex gap-2 no-print">
+            <a className="btn btn--primary" href={api.baselineReportDownloadUrl(isInternal ? siteId : undefined)}>Download PDF</a>
+          </div>
+        )}
         {!isBaseline && (
           <div className="ml-auto flex gap-2 no-print">
             {!loading && data?.docUrl && (
               <a href={data.docUrl} target="_blank" rel="noreferrer" className="btn btn--light">View Google Doc ↗</a>
             )}
-            <Button variant="primary" onClick={() => window.print()}>Export PDF</Button>
+            <a className="btn btn--primary" href={(period === 'weekly' ? api.weeklyReportDownloadUrl : api.progressReportDownloadUrl)(isInternal ? siteId : undefined)}>Export PDF</a>
           </div>
         )}
       </PageToolbar>
@@ -132,7 +152,10 @@ export default function Reports({ siteId, isInternal = false }) {
           : 'Your AI executive briefing, with how search moved over the period.'} />
 
       {isBaseline ? (
-        <GrowthReportBody isInternal={isInternal} siteId={siteId} />
+        <>
+          <div className="mb-3"><ReportBand brand={brand} kind="Baseline report" period="Where your site started" /></div>
+          <GrowthReportBody isInternal={isInternal} siteId={siteId} />
+        </>
       ) : error ? (
         <div className="rounded-card bg-[#fdecec] text-[#b42318] text-sm px-4 py-3 mb-6">Unable to load this report right now.</div>
       ) : (
@@ -141,11 +164,18 @@ export default function Reports({ siteId, isInternal = false }) {
               never actually returns either (only Command Center's route
               does), so passing them here would always be null/false and
               imply a freshness timestamp this page doesn't really have. */}
-          <Tray><ExecutiveSummaryPanel text={data?.narrative} /></Tray>
+          <div className="mb-3"><ReportBand brand={brand} kind={data?.period === 'weekly' ? 'Weekly report' : data?.period === 'monthly' ? 'Monthly report' : 'Report'} period={label} /></div>
+          {data?.body && brand ? (
+            <ReportBody body={data.body} brand={brand} narrative={data.narrative} />
+          ) : (
+            <>
+              <Tray><ExecutiveSummaryPanel text={data?.narrative} /></Tray>
 
-          <div className="mt-3">
-            <KpiStrip items={kpis} loading={loading} cols={5} />
-          </div>
+              <div className="mt-3">
+                {brand ? <BrandTiles items={kpis} brand={brand} loading={loading} /> : <KpiStrip items={kpis} loading={loading} cols={5} />}
+              </div>
+            </>
+          )}
 
           <Tray className="mt-3 lg:grid-cols-[1.6fr_1fr]">
             <PerformanceTrendCard series={data?.series} loading={loading} />

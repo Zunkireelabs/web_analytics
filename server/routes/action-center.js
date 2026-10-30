@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import { previewsFor } from '../lib/content-preview.js';
+import { classify } from '../agents/lib/recommendation-taxonomy.js';
 import { requireAuth } from './login.js';
 import { runOrchestration } from '../agents/orchestrator.js';
 import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
@@ -56,6 +58,12 @@ import { triggerCmsRebuild } from '../sanity/rebuild.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
 import { resolvePageSource } from '../implementers/lib/page-resolution.js';
 import { getFileContent, getPullRequest, getLastKnownRateLimit, getDefaultBranchSha, RATE_LIMIT_RESERVE } from '../github/client.js';
+import { CONTENT_OPTIONS, validatePick, validatePickBatch } from '../lib/content-options.js';
+import { listContentPicks, saveContentPick, clearContentPick, getPickDay } from '../store/content-picks.js';
+import { todayInTz } from '../util/dates.js';
+import { validateDesignPick } from '../lib/fix-design-options.js';
+import { listDesignChoices, getDesignChoice, chooseDesignOption, clearDesignChoice, createDesignChoice } from '../store/design-choices.js';
+import { designChoiceInputFor, layoutNeedsPersonReason } from '../lib/design-choice-input.js';
 import { baseBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush, openPrForBranch } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
 import { getSiteById } from '../store/read.js';
@@ -780,7 +788,10 @@ router.get('/action-center/drafts', async (req, res, next) => {
     const drafts = (actionType || status)
       ? await listDrafts(req.siteId, { actionType, status })
       : await listDraftsForBoard(req.siteId);
-    res.json(actionType ? drafts : drafts.filter((d) => !ACTION_CENTER_HIDDEN_ACTION_TYPES.has(d.action_type)));
+    const visible = actionType ? drafts : drafts.filter((d) => !ACTION_CENTER_HIDDEN_ACTION_TYPES.has(d.action_type));
+    // Which signal family (SEO / AEO / GEO) the fix belongs to, by the same rule the recommendations use, so the
+    // signal boxes can list what was fixed next to what is open.
+    res.json(visible.map((d) => ({ ...d, bucket: classify({ source: d.source, generatorId: d.action_type }).bucket })));
   } catch (e) { next(e); }
 });
 
@@ -1008,12 +1019,14 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
       const MAX_DESIGN_VALIDATE_ATTEMPTS = 3; // 1 real check + 2 repair retries
       let previewResult = null;
       let activeContent = draft.content;
+      const designAttempts = []; // what the repair loop tried, kept so a person sees it if the loop gives up
       for (let attempt = 1; attempt <= MAX_DESIGN_VALIDATE_ATTEMPTS; attempt++) {
         previewResult = await resolved.implementer.preview(site, { ...draft, content: activeContent }, { renderModeOverride: renderMode });
         if (previewResult.ok || previewResult.reason !== 'responsive-regression' || attempt === MAX_DESIGN_VALIDATE_ATTEMPTS) break;
 
         const regressionSummary = describeResponsiveRegressions(previewResult.regressions);
         console.warn(`[action-center] draft ${draft.id} broke the page's real layout on approval preview (attempt ${attempt}), attempting repair: ${regressionSummary}`);
+        designAttempts.push({ what: attempt === 1 ? 'Built the block in your site\'s usual style and checked it in a browser' : `Rewrote the block with the measured layout problem as feedback (repair ${attempt - 1})`, result: regressionSummary });
         // eslint-disable-next-line no-await-in-loop
         const generator = await getGenerator(draft.action_type);
         if (!generator) break; // nothing that can regenerate this action type — fall through to the honest failure below
@@ -1038,6 +1051,20 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
         if (!repairGate.clean) { console.warn(`[action-center] draft ${draft.id}'s design-validate repair failed the Quality Gate, abandoning repair`); break; }
 
         activeContent = repaired.content;
+      }
+      if (!previewResult.ok && previewResult.reason === 'responsive-regression') {
+        designAttempts.push({ what: `Rewrote the block with the measured layout problem as feedback (repair ${designAttempts.length})`, result: describeResponsiveRegressions(previewResult.regressions) });
+        // The loop gave up. If the site has more than one of its OWN layouts that can show this block, a person picks
+        // which one; the next run builds it. Nothing is published meanwhile, and the draft is withdrawn as before.
+        const choice = designChoiceInputFor({ draft, componentTemplates: site.url_file_map?.siteRoot?.componentTemplates, attempts: designAttempts });
+        if (choice) {
+          await createDesignChoice(siteId, choice).catch((err) => console.error(`[action-center] could not record the design choice for draft ${draft.id}:`, err.message));
+          throw httpError(422, 'This block could not be fitted into your page without changing how it looks. It was sent to you to choose which of your own layouts it should use.', { reason: 'needs-design-choice' });
+        }
+        // No second layout to offer. The automatic recovery rounds re-check a page that has not changed, so they cannot
+        // fix a layout: hand it to a person now (the card stays visible, with this reason) instead of cycling through them.
+        const rec = draft.finding_id ? await getRecommendationByFindingId(siteId, draft.finding_id).catch(() => null) : null;
+        if (rec) await blockRecommendation(rec.id, layoutNeedsPersonReason({ draft, attempts: designAttempts })).catch((err) => console.error(`[action-center] could not hand rec ${rec.id} to a person:`, err.message));
       }
       if (!previewResult.ok) {
         throw httpError(422, previewResult.error, {
@@ -2692,6 +2719,99 @@ router.post('/action-center/drafts/:id/rollback', async (req, res, next) => {
     await markDraftRolledBack(req.siteId, draft.id);
 
     res.json({ ok: true, prNumber: opened.prNumber, prUrl: opened.prUrl, branchName: pushed.branchName });
+  } catch (e) { next(e); }
+});
+
+// Has today's run already built what people approved? Then anything approved now is built in tomorrow's run. The screens
+// say so, so nobody expects a commit today.
+async function builtTodayFor(siteId) {
+  try {
+    const site = await getSiteById(siteId);
+    return (await getPickDay(siteId)) === todayInTz(site?.timezone || 'UTC');
+  } catch { return false; }
+}
+
+// Content picks: the one-click approval on a content idea the agent found. Saving a pick builds nothing; the next
+// scheduled run reads the saved picks and builds them, so a pick can be changed or cleared until then.
+// GET also returns the option catalog, so the Content page never carries its own copy of the choices.
+router.get('/action-center/content-picks', async (req, res, next) => {
+  try {
+    // `previews`: each option drawn in this site's own look (lib/content-preview.js); a failure just means sketches.
+    const previews = await getSiteById(req.siteId).then((site) => previewsFor(site, CONTENT_OPTIONS)).catch(() => ({}));
+    res.json({ picks: await listContentPicks(req.siteId), catalog: CONTENT_OPTIONS, previews, builtToday: await builtTodayFor(req.siteId) });
+  } catch (e) { next(e); }
+});
+
+// Approve everything selected on the Content page in one go (the Approve button under the list). All of it is checked
+// first; nothing is saved unless every selection is valid. Saving still builds nothing: the next run does.
+router.put('/action-center/content-picks', async (req, res, next) => {
+  try {
+    const list = (req.body || {}).picks;
+    const check = validatePickBatch(list);
+    if (!check.ok) return res.status(400).json({ error: check.error, index: check.index });
+    const saved = [];
+    for (const p of list) saved.push(await saveContentPick(req.siteId, { findingId: p.findingId, generatorId: p.generatorId, optionKey: p.optionKey, userId: req.userId || null }));
+    res.json({ saved });
+  } catch (e) { next(e); }
+});
+
+router.put('/action-center/content-picks/:findingId', async (req, res, next) => {
+  try {
+    const { generatorId, optionKey } = req.body || {};
+    const check = validatePick({ generatorId, optionKey });
+    if (!check.ok) return res.status(400).json({ error: check.error });
+    res.json(await saveContentPick(req.siteId, { findingId: req.params.findingId, generatorId, optionKey, userId: req.userId || null }));
+  } catch (e) { next(e); }
+});
+
+router.delete('/action-center/content-picks/:findingId', async (req, res, next) => {
+  try {
+    const ok = await clearContentPick(req.siteId, req.params.findingId);
+    if (!ok) return res.status(409).json({ error: 'This pick is already being built, so it can no longer be taken back here.' });
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+// Design choices: fixes the agent could not fit into the client's design on its own (it tried, checked each try at
+// desktop, tablet and phone width, and published nothing). A pick builds nothing now; the next scheduled run builds it.
+router.get('/action-center/design-choices', async (req, res, next) => {
+  try { res.json({ items: await listDesignChoices(req.siteId), builtToday: await builtTodayFor(req.siteId) }); } catch (e) { next(e); }
+});
+
+// Approve every design choice selected in the Action Center in one go. Each is checked against the options it was
+// offered before any is saved. Saving builds nothing; the next run builds each chosen layout.
+router.put('/action-center/design-choices/approve', async (req, res, next) => {
+  try {
+    const list = (req.body || {}).choices;
+    if (!Array.isArray(list) || list.length === 0) return res.status(400).json({ error: 'Select an option first.' });
+    if (list.length > 100) return res.status(400).json({ error: 'That is too many at once.' });
+    const rows = [];
+    for (const c of list) {
+      const row = await getDesignChoice(req.siteId, c?.id);
+      const check = validateDesignPick(row, c?.optionKey);
+      if (!check.ok) return res.status(check.status).json({ error: check.error, id: c?.id });
+      rows.push([row, c.optionKey]);
+    }
+    const items = [];
+    for (const [row, optionKey] of rows) items.push(await chooseDesignOption(req.siteId, row.id, optionKey, req.userId || null));
+    res.json({ items });
+  } catch (e) { next(e); }
+});
+
+router.put('/action-center/design-choices/:id/choice', async (req, res, next) => {
+  try {
+    const row = await getDesignChoice(req.siteId, req.params.id);
+    const check = validateDesignPick(row, (req.body || {}).optionKey);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    res.json(await chooseDesignOption(req.siteId, row.id, req.body.optionKey, req.userId || null));
+  } catch (e) { next(e); }
+});
+
+router.delete('/action-center/design-choices/:id/choice', async (req, res, next) => {
+  try {
+    const row = await clearDesignChoice(req.siteId, req.params.id);
+    if (!row) return res.status(409).json({ error: 'This choice is already being built, so it can no longer be taken back here.' });
+    res.json(row);
   } catch (e) { next(e); }
 });
 

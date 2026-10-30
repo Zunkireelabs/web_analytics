@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   extractMarkdownSection, recommendationTitle, descriptionRepeatsTitle,
   selectFeaturedRecommendations, scoreStatusWord,
+  plainScoreWord, plainIssue, prettyUrl, measuredHealth, buildIssueList, renderBaselineReportHtml,
 } from './baseline-pdf.js';
 
 // Regression coverage for real defects found by generating and inspecting
@@ -90,5 +91,78 @@ describe('scoreStatusWord', () => {
     assert.equal(scoreStatusWord(69), 'DEVELOPING');
     assert.equal(scoreStatusWord(70), 'STRONG');
     assert.equal(scoreStatusWord(100), 'STRONG');
+  });
+});
+
+describe('plain-language layer', () => {
+  test('plainScoreWord bands use everyday words', () => {
+    assert.equal(plainScoreWord(39), 'NEEDS WORK');
+    assert.equal(plainScoreWord(40), 'GETTING THERE');
+    assert.equal(plainScoreWord(70), 'STRONG');
+  });
+
+  test('plainIssue maps real defect labels to plain titles, routes and auto-fixability', () => {
+    const alt = plainIssue('Missing alt text');
+    assert.equal(alt.title, 'Photos have no description');
+    assert.deepEqual(alt.routes, ['SEO']);
+    assert.ok(alt.auto);
+    assert.deepEqual(plainIssue('Missing FAQ section').routes, ['AEO', 'GEO']);
+    assert.equal(plainIssue('Missing FAQ section').auto, null);
+  });
+
+  test('an unrecognized label falls back to its own cleaned text, never an invented claim', () => {
+    const p = plainIssue('weird-internal_label');
+    assert.equal(p.title, 'Weird internal label');
+    assert.deepEqual(p.routes, []);
+  });
+
+  test('prettyUrl strips protocol, www, query and trailing slash', () => {
+    assert.equal(prettyUrl('https://www.site.com/a/b/?x=1#y'), 'site.com/a/b');
+  });
+
+  test('measuredHealth treats a stored 0 with no audit as not measured', () => {
+    assert.equal(measuredHealth({ healthScore: 0 }, { auditFindings: null }), null);
+    assert.equal(measuredHealth({ healthScore: 0 }, { auditFindings: { total: 3 } }), 0);
+    assert.equal(measuredHealth({ healthScore: 34 }, {}), 34);
+    assert.equal(measuredHealth({}, {}), null);
+  });
+
+  test('buildIssueList groups defects that share a plain title and keeps a real example page', () => {
+    const list = buildIssueList({ auditFindings: { topDefects: [
+      { issue: 'Missing schema markup', priority: 'high', pages: 10, examplePages: ['https://s.com/a'] },
+      { issue: 'Missing structured data', priority: 'medium', pages: 5, examplePages: ['https://s.com/b'] },
+    ] } });
+    assert.equal(list.length, 1);
+    assert.equal(list[0].pages, 15);
+    assert.equal(list[0].example, 'https://s.com/a');
+  });
+
+  test('renders five light pages with no dark panels and says "not measured" when data is missing', () => {
+    const html = renderBaselineReportHtml({
+      generated_at: '2026-10-28T00:00:00Z', narrative_md: '', kpi_snapshot: { healthScore: 0 },
+      issues_snapshot: { auditFindings: null, aiVisibility: { available: false }, competitors: [], openRecommendations: { total: 0, byPriority: {}, items: [] } },
+    }, { name: 'Acme' });
+    assert.equal((html.match(/<section class="page/g) || []).length, 5);
+    assert.match(html, /NOT MEASURED YET/);
+    assert.doesNotMatch(html, /background:\s*#000|background:\s*\$\{BRAND\.navy\}/);
+  });
+});
+
+describe('baseline report brand colour', () => {
+  const report = {
+    generated_at: '2026-10-28T00:00:00Z', narrative_md: '', kpi_snapshot: { healthScore: 34 },
+    issues_snapshot: { auditFindings: null, aiVisibility: { available: false }, competitors: [], openRecommendations: { total: 0, byPriority: {}, items: [] } },
+  };
+  test('uses the client\'s stored accent colour', () => {
+    const html = renderBaselineReportHtml(report, { name: 'Acme', url_file_map: { siteRoot: { designProfile: { color: { accent: '#c8a96e' } } } } });
+    assert.match(html, /--red:#c8a96e/);
+  });
+  test('falls back to Zunkiree green when the client has no colour', () => {
+    assert.match(renderBaselineReportHtml(report, { name: 'Acme' }), /--red:#76b900/);
+  });
+  test('warning reds stay red even when the accent is not', () => {
+    const html = renderBaselineReportHtml(report, { name: 'Acme', url_file_map: { siteRoot: { designProfile: { color: { accent: '#c8a96e' } } } } });
+    assert.match(html, /NEEDS WORK/);
+    assert.match(html, /color:#eb1600/);
   });
 });

@@ -31,6 +31,8 @@ import {
 } from 'lucide-react';
 import { STATUS } from '../lib/palette.js';
 import { inDraftScope } from '../lib/draft-scope.js';
+import SignalBoxes from '../components/SignalBoxes.jsx';
+import DesignChoices from '../components/DesignChoices.jsx';
 
 const GENERATOR_META = {
   'meta-title': { label: 'Meta Titles' },
@@ -382,7 +384,7 @@ export default function ActionCenter({ scope }) {
   const loadTodayStats = () => api.actionCenter.todayExecutionStats(siteId).then(setTodayStats).catch(() => {});
 
   useEffect(() => { loadRecs(); loadDrafts(); loadDraftCounts(); loadTodayStats(); }, [siteId]);
-  useEffect(() => { if (tab === 'drafts' || tab === 'implemented') { loadDrafts(); loadDraftCounts(); } }, [tab]);
+  useEffect(() => { if (tab === 'drafts' || tab === 'implemented' || tab === 'recommendations') { loadDrafts(); loadDraftCounts(); } }, [tab]); // the signal boxes on the Open tab list what was fixed too
 
   // Deep link from a notification's "where the agent decided how to fix
   // it" click (NotificationBell.jsx's targetFor) — ?openDraft=<id> lands
@@ -1321,11 +1323,17 @@ export default function ActionCenter({ scope }) {
         )}
 
         <div className="mt-5">
+          {tab === 'recommendations' && <DesignChoices siteId={siteId} />}
           {tab === 'recommendations' && (
             recs === null ? (
               <div className="grid gap-3 lg:grid-cols-3">{[0, 1, 2].map((i) => <div key={i} className="h-56 rounded-card bg-muted animate-pulse" />)}</div>
             ) : (
-              <div className="grid gap-3 lg:grid-cols-3 items-start">{KIND_ORDER.map(groupCard)}</div>
+              <>
+                <div className="grid gap-3 lg:grid-cols-3 items-start">{KIND_ORDER.map(groupCard)}</div>
+                <SignalBoxes items={openIssues} inProgress={(recs?.items || []).filter((i) => i.lifecycle === 'in_progress')} fixed={implementedDrafts} only={sourceFilter}
+                  titleFor={titleFor} draftTitleFor={(d) => `${(GENERATOR_META[d.action_type] || { label: d.action_type }).label} · ${draftTarget(d)}`}
+                  onOpen={openIssue} onOpenDraft={(d) => { setTab('implemented'); pickDraft(d); }} renderBadge={(item) => stateBadge(item, false)} />
+              </>
             )
           )}
           {tab === 'drafts' && draftRows(visibleDrafts || [], false)}

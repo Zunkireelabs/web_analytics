@@ -26,6 +26,7 @@ import { isSectionScaleTextClass, isFixedHeightClass } from '../../lib/text-scal
 //     title: "current value" # SEOAI:NAME
 
 import { isJsxFile } from './structural-detect.js';
+import { isFaqCapableTemplate } from '../../lib/fix-design-options.js';
 import { findMergeValueIssues, describeIssues, isEmptyMarkerValue } from '../../generators/lib/output-guard.js';
 
 function escapeRegExp(s) {
@@ -1414,9 +1415,15 @@ function buildMergeValuesUnchecked(actionType, content, mode = 'visible', compon
     // height strip every captured template gets, not the blog-unsafe one.
     // Falls back to the ordinary faq template/projection when no inline
     // variant has been captured yet — never invents a look.
-    const faqTemplate = inline && componentTemplates.faqInline
-      ? sanitizeCapturedTemplate(componentTemplates.faqInline)
-      : templateFor('faq', componentTemplates.faq, DEFAULT_FAQ_TEMPLATE);
+    // A person's design choice (Action Center, "Needs your design choice") names one of the site's OWN templates; it wins
+    // over the default selection below, but only if that template really can show FAQ items on this site.
+    const pickedKey = typeof content.designTemplate === 'string' ? content.designTemplate : null;
+    const picked = pickedKey && isFaqCapableTemplate(componentTemplates[pickedKey]) ? componentTemplates[pickedKey] : null;
+    const faqTemplate = picked
+      ? sanitizeCapturedTemplate(picked, { inline, groundedHeadingClass })
+      : inline && componentTemplates.faqInline
+        ? sanitizeCapturedTemplate(componentTemplates.faqInline)
+        : templateFor('faq', componentTemplates.faq, DEFAULT_FAQ_TEMPLATE);
     const visible = renderFaqHtml(content.items, faqTemplate);
     // suppressSchema: the page already carries an FAQPage schema from the
     // OTHER FAQ/Q&A slot (qa-content) — see backend.js's hasExistingFaqSchema

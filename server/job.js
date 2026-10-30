@@ -31,6 +31,7 @@ import { buildRecommendations } from './agents/lib/recommendations.js';
 import { repairSiteTemplates } from './agents/lib/template-repair.js';
 import { syncFromGrounded, refreshBlockedRecommendations } from './agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.js';
+import { buildApprovedForToday } from './agents/lib/pick-runner.js';
 import { runWorkArbiter } from './agents/lib/work-arbiter.js';
 import { withJobLock, jobKeyFor } from './lib/job-lock.js';
 import { rotateForToday, runSiteWithDeadline, windowClosed } from './lib/site-run.js';
@@ -1493,6 +1494,16 @@ async function shipSiteWithLocks(site, globalRemaining, { deadlineAt = null } = 
         // arbitrated ships exactly as it did before, by first-come.
         await runWorkArbiter(site.id, { site }).catch((err) =>
           console.warn(`[work-arbiter] site ${site.id}: ${err.message}`));
+        // What a person approved (Content picks and design choices) is built here, once a day, before the safe auto-fixes, so
+        // it lands in the same branch and pull request. Approved after today's run? It waits for tomorrow's. Best-effort:
+        // a failure here must never stop the rest.
+        await buildApprovedForToday(site)
+          .then((r) => {
+            if (r.skipped) return;
+            const n = (x) => (x ? `built ${x.built}, ${x.withdrawn ?? x.backToPerson ?? 0} sent back, ${x.retryLater} retry later` : 'none');
+            console.log(`[approved] site ${site.id}: picks ${n(r.picks)}; design choices ${n(r.choices)}`);
+          })
+          .catch((err) => console.warn(`[approved] site ${site.id}: ${err.message}`));
         return autoRemediateSafeRecommendations(site.id, { globalRemaining, deadlineAt });
       },
     ),

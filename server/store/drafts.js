@@ -970,7 +970,15 @@ export async function getDraftedFindingIds(siteId) {
     "SELECT DISTINCT finding_id FROM drafts WHERE site_id = $1 AND finding_id IS NOT NULL AND status != 'abandoned' AND rolled_back_at IS NULL AND apply_error IS NULL",
     [siteId]
   );
-  return new Set(rows.map((r) => r.finding_id));
+  const ids = new Set(rows.map((r) => r.finding_id));
+  // An item waiting for a person's design choice (or being built from it) is spoken for too: it is shown in the Action
+  // Center's "Needs your design choice" section, and the unattended run must not draft it again meanwhile. Best-effort on
+  // purpose: if design_choices does not exist yet (migration 215 not applied), this must never break the feed.
+  try {
+    const { rows: open } = await query("SELECT finding_id FROM design_choices WHERE site_id = $1 AND status IN ('needs_choice', 'chosen', 'building')", [siteId]);
+    for (const r of open) ids.add(r.finding_id);
+  } catch { /* table not there yet */ }
+  return ids;
 }
 
 // The live draft behind each finding, for the Action Center's lifecycle

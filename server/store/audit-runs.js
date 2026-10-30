@@ -90,6 +90,25 @@ export async function getLatestAuditRun(siteId, { mode = 'full' } = {}) {
   return rows[0] || null;
 }
 
+// The first and the latest FINISHED full audit of a site, for the per-page score in the weekly/monthly reports.
+// getLatestAuditRun above deliberately returns running/failed runs too (the audit screen must show them honestly);
+// a score must only ever be computed from a run that finished, so these two ignore the rest.
+export async function getFirstCompletedAuditRun(siteId) {
+  const { rows } = await query(
+    "SELECT * FROM audit_runs WHERE site_id = $1 AND mode = 'full' AND status IN ('completed', 'partial') ORDER BY started_at ASC LIMIT 1",
+    [siteId]
+  );
+  return rows[0] || null;
+}
+
+export async function getLatestCompletedAuditRun(siteId) {
+  const { rows } = await query(
+    "SELECT * FROM audit_runs WHERE site_id = $1 AND mode = 'full' AND status IN ('completed', 'partial') ORDER BY started_at DESC LIMIT 1",
+    [siteId]
+  );
+  return rows[0] || null;
+}
+
 // A run stuck in 'running' with no finished_at usually means the process
 // that owned it died/restarted mid-audit (runFullSiteAudit's own try/catch
 // already marks a real in-process failure as 'failed' — this only catches

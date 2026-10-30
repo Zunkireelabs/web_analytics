@@ -1543,3 +1543,27 @@ describe('meta-title — description gets a real marker, not just title (regress
     assert.match(spliced.newContent, /description: "A new, correctly sized meta description for this exact page, long enough to clear the minimum recommended character count for search snippets\." # SEOAI:METADESCRIPTION/);
   });
 });
+
+// ── a person's design choice names one of the site's own templates (Action Center, "Needs your design choice") ──
+import { test as designChoiceTest } from 'node:test';
+import assertDesignChoice from 'node:assert/strict';
+designChoiceTest('buildMergeValues: a picked template is used for the FAQ, and an unusable pick falls back to the default', () => {
+  const faq = { wrapper: '<dl class="faq-list">\n{{ROWS}}\n</dl>', row: '  <dt>{{QUESTION}}</dt>\n  <dd>{{ANSWER}}</dd>' };
+  const qaContent = { wrapper: '<div class="qa-stack">\n{{ROWS}}\n</div>', row: '  <details><summary><h3>{{QUESTION}}</h3></summary><div>{{ANSWER}}</div></details>' };
+  const links = { wrapper: '<ul>{{ROWS}}</ul>', row: '<li>{{URL}}</li>' };
+  const items = [{ question: 'How long does it take?', answer: 'About ten weeks.' }];
+  const build = (content, templates) => buildMergeValues('faq', { items, ...content }, 'visible', templates, null, { page: null });
+
+  const byDefault = build({}, { faq, qaContent });
+  assertDesignChoice.equal(byDefault.ok, true);
+  assertDesignChoice.match(byDefault.values.faq, /faq-list/, 'with no choice the site\'s default faq template is used');
+
+  const picked = build({ designTemplate: 'qaContent' }, { faq, qaContent });
+  assertDesignChoice.match(picked.values.faq, /qa-stack/);
+  assertDesignChoice.match(picked.values.faq, /<details>/, 'the same questions, rendered in the picked accordion');
+  assertDesignChoice.match(picked.values.faq, /How long does it take\?/);
+  assertDesignChoice.doesNotMatch(picked.values.faq, /faq-list/);
+
+  assertDesignChoice.match(build({ designTemplate: 'internalLinks' }, { faq, internalLinks: links }).values.faq, /faq-list/, 'a template that cannot show FAQ items is ignored');
+  assertDesignChoice.match(build({ designTemplate: 'qaContent' }, { faq }).values.faq, /faq-list/, 'a template the site does not have is ignored');
+});

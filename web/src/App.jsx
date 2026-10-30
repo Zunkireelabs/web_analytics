@@ -227,6 +227,7 @@ export default function App() {
               <Route path="/keywords" element={<Keywords isProduct={isProduct} />} />
               <Route path="/competitors" element={<Competitors />} />
               <Route path="/content" element={<Content />} />
+              <Route path="/content/drafts" element={<ActionCenter scope="content" />} />
               <Route path="/analyst" element={<Analyst siteId={siteId} isPlatformAdmin={isPlatformAdmin} />} />
               {/* /ai-orchestration is Orchestration — the agent runner console
                   and the orchestration diagram showing how the 10 specialist
