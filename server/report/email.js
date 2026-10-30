@@ -420,16 +420,16 @@ export function buildSignupApprovedEmail({ companyName, contactEmail, signInUrl 
 
 // The code is in the subject too, so a phone shows it without opening the message. No link on purpose:
 // a link in a sign-in email is what phishing copies.
-export function buildLoginCodeEmail({ email, code, minutes = 10 }) {
+export function buildLoginCodeEmail({ email, code, minutes = 10, trial = false }) {
   const spaced = `${code.slice(0, 3)} ${code.slice(3)}`;
   return {
-    subject: `Your SuperRank sign-in code: ${spaced}`,
+    subject: `Your SuperRank ${trial ? 'verification' : 'sign-in'} code: ${spaced}`,
     html: emailShell({
-      eyebrow: 'Sign-in code',
+      eyebrow: trial ? 'Start your free trial' : 'Sign-in code',
       title: 'Here is your code',
-      intro: 'Enter this code on the sign-in page to open your workspace.',
+      intro: trial ? 'Enter this code on the get-started page to confirm your email and start your free trial.' : 'Enter this code on the sign-in page to open your workspace.',
       body: `<div style="margin:22px 0;background:#fff4ed;border-radius:10px;box-shadow:inset 0 0 0 1px #ffe1cc;padding:18px;text-align:center;font-size:34px;letter-spacing:.32em;font-weight:600;color:#171717;font-family:ui-monospace,Menlo,monospace">${escapeHtml(code)}</div>
-     <p style="margin:0;font-size:13px;line-height:19px;color:#525252">It works once and expires in <b>${minutes} minutes</b>. We sent it because someone asked to sign in as <b>${escapeHtml(email)}</b>.</p>`,
+     <p style="margin:0;font-size:13px;line-height:19px;color:#525252">It works once and expires in <b>${minutes} minutes</b>. We sent it because someone ${trial ? 'asked to start a trial' : 'asked to sign in'} as <b>${escapeHtml(email)}</b>.</p>`,
       footnote: 'Didn\'t ask for this? Ignore this email, nobody can sign in without the code. Never share it. SuperRank staff will never ask for it.',
     }),
   };
@@ -457,6 +457,18 @@ export function buildSignupStaffNotice({ companyName, websiteDomain, contactEmai
   };
 }
 
+// A plain-text twin of the HTML. Mail that is HTML only, with no text part, is one of the things spam filters
+// mark down; a real mail client shows the HTML and a filter sees both agree. Links keep their address.
+export function plainTextOf(html) {
+  return String(html)
+    .replace(/<(style|head|script)[\s\S]*?<\/\1>/gi, '')
+    .replace(/<a\s[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href, label) => `${label.replace(/<[^>]+>/g, '').trim()} (${href})`)
+    .replace(/<\/(p|div|tr|h[1-6]|li|table)>|<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+    .replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 async function sendBuilt({ to, built, exempt, label }) {
   const transporter = getTransporter();
   if (!transporter) {
@@ -469,6 +481,7 @@ async function sendBuilt({ to, built, exempt, label }) {
     to,
     subject: built.subject,
     html: built.html,
+    text: plainTextOf(built.html),
   });
   console.log(`[email] ${label} sent to ${to}`);
   return true;

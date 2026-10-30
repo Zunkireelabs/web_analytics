@@ -32,6 +32,8 @@ export const AUTH_LIMITS = {
   '/login': { ip: [20, 900], email: [8, 900] },
   '/login/code/send': { ip: [10, 3600], email: [5, 3600] },
   '/login/code/verify': { ip: [30, 900], email: [10, 900] },
+  '/get-started/code/send': { ip: [10, 3600], email: [5, 3600] },
+  '/get-started/code/verify': { ip: [30, 900], email: [10, 900] },
   '/signup-requests': { ip: [5, 3600], email: [3, 3600], emailField: 'contactEmail' },
   '/signup/activate': { ip: [20, 900] },
   '/signup/verify': { ip: [20, 900] },

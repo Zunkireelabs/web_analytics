@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth } from './login.js';
+import { requireAuth, googleSignInCallback } from './login.js';
 import { getUserById, getUserStatus } from '../store/users.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
 import { createApiToken, listApiTokensForSite, revokeApiToken } from '../store/api-tokens.js';
@@ -351,6 +351,7 @@ router.get('/projects/:siteId/connect/google/start', requireAuth, requireProject
 // API call, so every outcome ends in a redirect to the Workspace page (which reopens the
 // New project popup on the Google step), never a JSON error the person would stare at.
 router.get('/google/callback', async (req, res) => {
+  if (req.session?.googleSignIn) return googleSignInCallback(req, res);
   if (req.session?.gbpConnect) return businessProfileCallback(req, res);
   const back = (params) => res.redirect(`/workspace?${new URLSearchParams(params)}`);
   const pending = req.session?.googleConnect;
@@ -496,7 +497,10 @@ router.get('/projects/:siteId/connect/business-profile/start', requireAuth, requ
 router.get('/projects/:siteId/connect/business-profile/locations', requireAuth, requireProjectRole('admin'), (req, res) => {
   const held = req.session?.gbpLocations;
   const fresh = held && held.siteId === req.projectId && held.userId === req.userId && Date.now() - held.at < GBP_SESSION_MS;
-  res.json({ canConnect: googleConnectConfigured(), locations: fresh ? held.locations : null, account: fresh ? held.email : null });
+  // "Connect Google" for Business Profiles is offered only once Google has approved SuperRank's API access (it answers with
+  // quota 0 until then). Off by default, so the step goes straight to "open your profile, copy its link, paste it"; set
+  // GBP_LIST_ENABLED=true after the approval and the pick-from-your-list path appears with no other change.
+  res.json({ canConnect: googleConnectConfigured() && process.env.GBP_LIST_ENABLED === 'true', locations: fresh ? held.locations : null, account: fresh ? held.email : null });
 });
 
 // Google's answer to the Business Profile sign-in. Same rules as the main callback (single-use nonce for THIS session,

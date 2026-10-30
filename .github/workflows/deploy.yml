@@ -125,13 +125,21 @@ jobs:
             SANITY_WRITE_TOKEN_ADMIZZ=${{ secrets.SANITY_WRITE_TOKEN_ADMIZZ }}
 
             # ── Email ────────────────────────────────────────────────────────
-            SMTP_HOST=${{ vars.SMTP_HOST }}
-            SMTP_PORT=${{ vars.SMTP_PORT }}
-            SMTP_SECURE=${{ vars.SMTP_SECURE }}
-            SMTP_USER=${{ vars.SMTP_USER }}
-            SMTP_PASS=${{ secrets.SMTP_PASS }}
-            REPORT_EMAIL_FROM=${{ vars.REPORT_EMAIL_FROM }}
+            # Production sends through Resend's SMTP (superrank.si is verified there): the user is always
+            # "resend" and the password is the Resend API key. Every email the app sends (sign-in codes,
+            # approvals, reports) goes out from MAIL_FROM, e.g. SuperRank <no-reply@superrank.si>.
+            SMTP_HOST=smtp.resend.com
+            SMTP_PORT=465
+            SMTP_SECURE=true
+            SMTP_USER=resend
+            SMTP_PASS=${{ secrets.RESEND_API_KEY }}
+            REPORT_EMAIL_FROM=${{ vars.MAIL_FROM }}
             REPORT_EMAIL_TO=${{ vars.REPORT_EMAIL_TO }}
+            # The public site (superrank.si) reaches this app at superrank.si/api while the product lives on
+            # app.superrank.si, so the sign-in cookie is shared across the domain, and Google's return trip
+            # sends people back to the public site (the get-started page).
+            SESSION_COOKIE_DOMAIN=.superrank.si
+            SITE_BASE_URL=https://superrank.si
             # The app's public address (no trailing slash). Emailed links (Sign in, staff review) and the
             # logo in emails are built from it; without it they fall back to whatever address the request hit.
             APP_BASE_URL=https://${{ vars.PROD_DOMAIN }}
