@@ -30,7 +30,7 @@ export function fingerprintOf(parts) {
 
 async function getText(fetchFn, url) {
   const res = await fetchFn(url, { redirect: 'follow', signal: AbortSignal.timeout(TIMEOUT_MS) });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new Error('The page could not be fetched.');
   return (await res.text()).slice(0, MAX_BYTES);
 }
 
