@@ -4,6 +4,11 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import 'dotenv/config';
+import { getProjectGoogleAuth } from './project-google.js';
+
+// Every googleapis request (Search Console, Docs, Drive) gets a time limit: with none, one
+// stuck connection could hold a site's run, and the all-sites lock behind it, indefinitely.
+google.options({ timeout: Number(process.env.GOOGLE_API_TIMEOUT_MS) || 60_000 });
 
 // Scopes: read-only for GA4, full read/write for Search Console (sitemap
 // resubmission needs write — see submitSitemap in server/ingest/gsc-technical.js),
@@ -60,9 +65,14 @@ export function getGoogleAuth(site) {
 }
 
 // Search Console API client, scoped to `site`'s own credentials if it has any.
+//
+// Order: a dedicated service-account file for the site (secrets/clients/<id>/) wins as
+// ever; otherwise the Google account that connected THIS project through "Connect with
+// Google" (migration 200); otherwise the shared platform credentials, exactly as before
+// for every project that has no connection of its own.
 export async function getSearchConsole(site) {
-  const auth = getGoogleAuth(site);
-  return google.searchconsole({ version: 'v1', auth });
+  const own = getSiteCredentialsPath(site) ? null : await getProjectGoogleAuth(site);
+  return google.searchconsole({ version: 'v1', auth: own || getGoogleAuth(site) });
 }
 
 // Google Docs API client, scoped to `site`'s own credentials if it has any.
@@ -75,6 +85,17 @@ export function getDocs(site) {
 // `site`'s own credentials if it has any. Falls back to the same shared-credentials logic as
 // getGoogleAuth() above (OAuth2 authClient, or {} so the GA4 client reads
 // GOOGLE_APPLICATION_CREDENTIALS itself for the service-account path).
+// Async twin of getGa4ClientOptions that also honours a project's own Google connection
+// (see getSearchConsole for the order). Analytics Data client construction is the only
+// caller, and it already runs inside async code.
+export async function getGa4ClientOptionsAsync(site) {
+  if (!getSiteCredentialsPath(site)) {
+    const own = await getProjectGoogleAuth(site);
+    if (own) return { authClient: own };
+  }
+  return getGa4ClientOptions(site);
+}
+
 export function getGa4ClientOptions(site) {
   const siteCredPath = getSiteCredentialsPath(site);
   if (siteCredPath) return { keyFilename: siteCredPath };

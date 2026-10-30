@@ -49,7 +49,7 @@ export function growthPlanNarrativeEnabled() {
 // math, not this call's job to re-derive).
 export async function generateGrowthPlanNarrative(facts) {
   const system = 'You are a growth strategist writing a CLIENT-FACING "Your Growth Plan" section of a ' +
-    'Milestones page. You are given `facts`, real already-computed data: `siteAuditFindingCounts` (this ' +
+    'Reports page (Baseline tab). You are given `facts`, real already-computed data: `siteAuditFindingCounts` (this ' +
     'client\'s own Full Site Audit findings, grouped by category, with high/medium/low counts per category — ' +
     'may be empty if no issues were found, which is good news, say so), `healthScoreProjection` and ' +
     '`clicksProjection` (deterministic month-by-month projections already computed from this client\'s real ' +

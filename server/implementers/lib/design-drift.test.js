@@ -1866,6 +1866,15 @@ describe('withDesignContext — the shared design-intelligence layer\'s system-p
   };
   const siteWith = (profile) => ({ id: 1, url_file_map: { siteRoot: { designProfile: profile } } });
 
+  test('a page the capture recorded on its own is described by its own sections', async () => {
+    const profile = { ...USABLE_PROFILE, pages: [{ url: 'https://x.test/packages/', pageType: 'other', sections: [{ role: 'hero', width: 'wide', spacing: { after: 56 } }, { role: 'cards', components: [{ type: 'card' }] }] }] };
+    const out = await withDesignContext('SYSTEM', 'faq', 1, { fetchSite: async () => siteWith(profile), pageUrl: 'https://x.test/packages' });
+    assert.match(out, /This exact page \(\/packages\)/);
+    assert.match(out, /hero wide 56px below -> cards with card/);
+    const other = await withDesignContext('SYSTEM', 'faq', 1, { fetchSite: async () => siteWith(profile), pageUrl: 'https://x.test/elsewhere' });
+    assert.doesNotMatch(other, /This exact page/);
+  });
+
   test('a generatorId outside the website-facing set is left completely untouched — never even fetches the site', async () => {
     let touched = false;
     const out = await withDesignContext('SYSTEM', 'meta-title', 1, { fetchSite: async () => { touched = true; return siteWith(USABLE_PROFILE); } });
@@ -1989,5 +1998,27 @@ describe('bodySlotLooksLikeLabel', () => {
     }, CSS);
     assert.ok(reason);
     assert.match(reason, /14px/);
+  });
+});
+
+const { lacksDesignBaseline } = await import('./design-drift.js');
+describe('lacksDesignBaseline', () => {
+  const base = { componentKey: 'expandContent', mode: 'visible', gateMode: 'enforce' };
+  test('holds a visible draft when the site has no template, capture or profile', () => {
+    assert.equal(lacksDesignBaseline({ url_file_map: { siteRoot: {} } }, base), true);
+  });
+  test('does not hold when a configured template exists', () => {
+    const site = { url_file_map: { siteRoot: { componentTemplates: { expandContent: { x: 1 } } } } };
+    assert.equal(lacksDesignBaseline(site, base), false);
+  });
+  test('does not hold when a page capture exists', () => {
+    const site = { url_file_map: { siteRoot: { pageComponentTemplates: { expandContent: {} } } } };
+    assert.equal(lacksDesignBaseline(site, base), false);
+  });
+  test('never holds outside enforce mode, schema-only mode, or non-design types', () => {
+    const site = { url_file_map: { siteRoot: {} } };
+    assert.equal(lacksDesignBaseline(site, { ...base, gateMode: 'log' }), false);
+    assert.equal(lacksDesignBaseline(site, { ...base, mode: 'schema-only' }), false);
+    assert.equal(lacksDesignBaseline(site, { ...base, componentKey: undefined }), false);
   });
 });

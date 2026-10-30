@@ -18,13 +18,19 @@ export default function BaselineReportCard({ report, siteId, isInternal, onGener
   if (report === null) return null; // still loading — let the page's own loading state cover this
 
   const downloadUrl = api.baselineReportDownloadUrl(isInternal ? siteId : undefined);
+  const progressUrl = api.progressReportDownloadUrl(isInternal ? siteId : undefined);
 
   return (
     <Section tray title="Your baseline report" subtitle="Where the site stood at onboarding"
       action={report.available && (
-        <a href={downloadUrl} className="btn btn--light">
-          <FileDown size={14} /> Download PDF
-        </a>
+        <div className="flex gap-2">
+          <a href={downloadUrl} className="btn btn--light">
+            <FileDown size={14} /> Baseline PDF
+          </a>
+          <a href={progressUrl} className="btn btn--light">
+            <FileDown size={14} /> Monthly report PDF
+          </a>
+        </div>
       )}>
       {report.available ? (
         <MarkdownReport bare content={report.narrativeMd} />
@@ -32,7 +38,7 @@ export default function BaselineReportCard({ report, siteId, isInternal, onGener
         <div className="px-4 py-8 text-center space-y-3 border-t border-border">
           <p className="text-sm text-text">{report.message}</p>
           {isInternal && siteId && (
-            <Button variant="light" size="sm" onClick={() => api.generateBaselineReport(siteId).then(onGenerated).catch(() => {})}>
+            <Button write variant="light" size="sm" onClick={() => api.generateBaselineReport(siteId).then(onGenerated).catch(() => {})}>
               <Sparkles size={14} /> Generate Now
             </Button>
           )}

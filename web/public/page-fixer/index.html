@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><title>Page Fixer | SuperRank</title><meta name="description" content="Enter your website. We find the 10 pages with the most issues and give you paste-ready fixes for the worst three."><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..700&display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/page-fixer/favicon.png"><link rel="stylesheet" href="/free-audit/style.css"><link rel="stylesheet" href="/page-fixer/page-fixer.css"></head>
+<body>
+<header class="header"><div class="header__inner"><a href="https://superrank.si/" class="logo" aria-label="SuperRank home"><img src="/page-fixer/logo.png" alt="" class="logo__icon"><span>super<b>rank</b></span></a><div class="header__actions"><a class="btn btn--ghost" href="https://superrank.si/">Back to superrank.si</a><a class="btn btn--dark" href="https://superrank.si/book-demo">Book a demo</a></div></div></header>
+<main class="section section--flush audit-main">
+  <div class="container audit-page">
+    <h1>Page Fixer</h1>
+    <p class="audit-page__sub">Enter your website. We find the 10 pages with the most issues and show you the fixes for the worst three.</p>
+
+    <form class="audit-form" data-pf-form novalidate>
+      <label class="audit-form__field">
+        <span class="sr-only">Your website</span>
+        <img class="pf-fav" alt="" width="18" height="18" hidden>
+        <svg class="pf-globe" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M1.8 8h12.4M8 1.8c1.8 1.7 2.7 3.8 2.7 6.2S9.800 12.500 8 14.200C6.200 12.500 5.300 10.200 5.300 8S6.200 3.500 8 1.800Z"/></svg>
+        <input type="text" name="website" placeholder="yourwebsite.com" autocomplete="url" inputmode="url" required>
+      </label>
+      <button type="submit" class="btn btn--primary btn--lg">Fix my pages</button>
+    </form>
+    <p class="audit-form__err" data-pf-err role="alert" hidden></p>
+    <p class="pf-hint">Free. No sign-up. We read up to 20 pages, about 30 seconds.</p>
+    <div class="pf-out" data-pf-out aria-live="polite" hidden></div>
+  </div>
+</main>
+<script type="module" src="/page-fixer/page-fixer.js"></script>
+</body></html>

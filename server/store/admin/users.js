@@ -11,7 +11,7 @@ export async function listAllUsers() {
   const { rows } = await query(
     `SELECT u.id, u.site_id, s.name AS site_name, u.email, u.role, u.status, u.last_login_at, u.created_at
      FROM users u
-     JOIN sites s ON s.id = u.site_id
+     LEFT JOIN sites s ON s.id = u.site_id
      ORDER BY u.site_id, u.id`
   );
   return rows;

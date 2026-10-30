@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { isValidTimezone } from './util/timezone.js';
 import 'dotenv/config';
 import { findSiteIdentityConflict, siteIdentityConflictMessage } from './lib/site-identity.js';
 
@@ -71,7 +72,8 @@ export const pool = new Pool({
   // this never raises the connection ceiling, only how long an idle one lives.
   idleTimeoutMillis: Number(process.env.DB_POOL_IDLE_MS || 30_000),
   connectionTimeoutMillis: 10_000,
-  ssl: { rejectUnauthorized: false },
+  // DB_SSL=off is for a throwaway local Postgres, which has no TLS. Anything else keeps TLS on.
+  ssl: process.env.DB_SSL === 'off' ? false : { rejectUnauthorized: false },
 });
 
 export const query = (text, params) => pool.query(text, params);
@@ -133,7 +135,7 @@ export async function createClientSite({ name, websiteDomain, timezone, property
   const inserted = await query(
     `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain, client_number, property_type, workspace_id)
      VALUES ($1, NULL, NULL, $2, $3, nextval('sites_client_number_seq'), $4, $5) RETURNING *`,
-    [name, timezone || 'Asia/Kolkata', websiteDomain || null, propertyType === 'product' ? 'product' : 'website', workspaceId ?? null]
+    [name, isValidTimezone(timezone) ? timezone : 'Asia/Kolkata', websiteDomain || null, propertyType === 'product' ? 'product' : 'website', workspaceId ?? null]
   );
   return inserted.rows[0];
 }
@@ -164,11 +166,34 @@ export async function updateSiteConnection({ siteId, gscProperty, ga4PropertyId,
   return rows[0];
 }
 
+// Google Business Profile answer from the New project flow (see parseBusinessProfile). Callers pass an
+// already-validated { status, url }.
+export async function setSiteBusinessProfile(siteId, { status, url }) {
+  const { rows } = await query(
+    'UPDATE sites SET gbp_status = $1, gbp_url = $2, gbp_updated_at = now() WHERE id = $3 RETURNING *',
+    [status, url, siteId]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
+// The saved Business Profile answer. Read on its own (not added to getProject's column list) so a database
+// that has not run migration 212 yet answers "not answered" instead of failing every project route.
+export async function getSiteBusinessProfile(siteId) {
+  try {
+    const { rows } = await query('SELECT gbp_status, gbp_url FROM sites WHERE id = $1', [siteId]);
+    return { gbp_status: rows[0]?.gbp_status || null, gbp_url: rows[0]?.gbp_url || null };
+  } catch (e) {
+    if (e?.code === '42703') return { gbp_status: null, gbp_url: null }; // undefined_column: migration 212 not applied
+    throw e;
+  }
+}
+
 // Attach a GitHub repo (and optionally tech stack / url_file_map) to a site
 // for the Action Center's "apply approved draft as a PR" flow (see
 // server/scripts/connect-repo.js, migration 028). Same partial-update shape
 // as updateSiteConnection above — only fields actually passed are touched.
-export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, githubAppInstallationId, githubAppId, githubAppPrivateKeyEnvVar, urlFileMap }) {
+export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, prTargetBranch, techStack, githubPatEnvVar, githubAppInstallationId, githubAppId, githubAppPrivateKeyEnvVar, urlFileMap }) {
   const fields = [];
   const values = [];
   let i = 1;
@@ -178,6 +203,8 @@ export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUr
   if (repoName !== undefined) set('repo_name', repoName);
   if (repoUrl !== undefined) set('repo_url', repoUrl);
   if (repoDefaultBranch !== undefined) set('repo_default_branch', repoDefaultBranch);
+  // null = open the batch PR into repo_default_branch (the default behaviour).
+  if (prTargetBranch !== undefined) set('pr_target_branch', prTargetBranch);
   if (techStack !== undefined) set('tech_stack', techStack);
   if (githubPatEnvVar !== undefined) set('github_pat_env_var', githubPatEnvVar);
   // null is meaningful here — it moves a site back off the App onto its PAT.

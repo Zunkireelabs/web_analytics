@@ -1,5 +1,7 @@
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 import { callLLM, callLLMForJson } from '../llm.js';
+import { getSiteById } from '../store/read.js';
+import { searchClaimsFor } from './lib/visible-claim-guard.js';
 
 export const meta = {
   id: 'meta-title',
@@ -51,6 +53,16 @@ export async function generate({ siteId, params }) {
     }
   }
 
+  // Phrases this business wants to be found for in search. They live ONLY in
+  // the title tag and meta description (never on the page body — see
+  // visible-claim-guard.js), so the owner's wording is honoured where search
+  // engines read it. A site with none configured is unchanged.
+  const searchClaims = searchClaimsFor(await getSiteById(siteId).catch(() => null));
+  const searchClaimNote = searchClaims.length
+    ? ` This business wants to be found in search for: ${searchClaims.map((c) => `"${c}"`).join(', ')}. ` +
+      'When a phrase fits the query and the page topic, use it naturally and verbatim in at least one title candidate ' +
+      'and in the meta description; never force it into an unrelated query.'
+    : '';
   const system = 'You are a technical SEO specialist who treats title tags and meta descriptions as data-driven, ' +
     'not creative-writing, exercises: character-length discipline and query-intent match matter more than clever ' +
     'phrasing. Given a real target search query and (if available) the page\'s current title and real body text, ' +
@@ -60,7 +72,7 @@ export async function generate({ siteId, params }) {
     'page on the same site that owns a different query. If the body text shows real E-E-A-T signals (author ' +
     'expertise, credentials, first-hand experience, cited sources), you may reflect them in the meta description ' +
     '— but ground every claim ONLY in the page content given; never invent a feature, price, credential, or fact ' +
-    'not present in the excerpt. If no page content is given, write generically around the query only. Respond ' +
+    'not present in the excerpt.' + searchClaimNote + ' If no page content is given, write generically around the query only. Respond ' +
     'with ONLY a JSON object: {"titles": ["...", "...", "..."], "metaDescription": "..."}';
   const user = `Query: ${query}\n${pageContext ? `Current title: ${pageContext.currentTitle}\nPage text: ${pageContext.bodyExcerpt}` : 'No existing page — new content.'}`;
   let parsed;

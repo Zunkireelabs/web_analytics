@@ -78,6 +78,13 @@ test('a site-level generator collapses to one row whatever page it reports', () 
   );
 });
 
+test('two different dead URLs proposed for redirect stay two recommendations, not one', () => {
+  const a = recommendationPageKey({ generatorId: 'redirect-add', params: { from: 'https://x.test/old-a', to: 'https://x.test/a' } });
+  const b = recommendationPageKey({ generatorId: 'redirect-add', params: { from: 'https://x.test/old-b', to: 'https://x.test/b' } });
+  assert.notEqual(a, b);
+  assert.equal(a, recommendationPageKey({ generatorId: 'redirect-add', params: { from: 'https://x.test/old-a', to: 'https://x.test/other' } }), 'the same dead URL is the same recommendation');
+});
+
 test('every registered generator has a considered dedup identity', async () => {
   // The structural guard. Every discriminator in DEDUP_IDENTITY was added
   // reactively, after a user reported one card where there should have been

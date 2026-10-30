@@ -1,13 +1,18 @@
 import { getDocs } from '../auth/google.js';
 import { query } from '../db.js';
 import { callLLM } from '../llm.js';
-import { getDailySeries, getRangeTopQueries } from '../store/read.js';
+import { getDailySeries, getRangeTopQueries, getHealthScoreOnOrBefore } from '../store/read.js';
+import { getBaselineReport } from '../store/baseline-reports.js';
+import { getFirstCompletedAuditRun, getLatestCompletedAuditRun, getAuditPageFindings } from '../store/audit-runs.js';
+import { pageScoreSection } from './page-score.js';
+import { resolveBrand } from './brand.js';
+import { writeSection } from './doc-layout.js';
+import { periodStats, tilesFor, headlineFor, bettermentTable, topSearchesSection } from './doc-model.js';
 import { saveWeeklyReportNarrative } from '../store/upsert.js';
 import { previousWeek, weekOf } from '../util/dates.js';
 
 const n = (v) => (v == null ? 0 : Number(v));
 const fmt = (v) => n(v).toLocaleString();
-const pad = (s, w) => String(s).padEnd(w);
 const pct = (cur, prev) => (prev ? Math.round(((cur - prev) / prev) * 1000) / 10 : null);
 
 // Friendly "Jun 2 – Jun 8, 2026" label.
@@ -35,76 +40,6 @@ async function ensureDoc(site) {
   await query('UPDATE sites SET weekly_doc_id = $1 WHERE id = $2', [id, site.id]);
   console.log(`[weekly] created report doc ${id}`);
   return id;
-}
-
-// Build the plain-text block for one week (heading + AI overview + day table).
-// Returns the text plus character ranges to style: the summary paragraph and each
-// weekday name (offsets are 0-based within `text`; callers shift by the insert index).
-function buildSection(label, overview, series, prevSeries) {
-  let text = '';
-  const bold = [];       // weekday name ranges  { start, end }
-  const add = (s) => { text += s; };
-
-  // "Week of …" heading — bold + 14pt, sits directly above the summary.
-  const weekHeadingStart = text.length;
-  add(`Week of ${label}\n`);
-  const weekHeading = { start: weekHeadingStart, end: text.length - 1 };
-
-  // AI overview — immediately below the heading (no separating lines).
-  const summaryStart = text.length;
-  add(overview);
-  const summary = { start: summaryStart, end: text.length };
-  add('\n\n');
-
-  // Subtitle moved after the summary so heading + summary are flush together.
-  add(`Search data final through ${label.split('–')[1].trim()}\n`);
-  add('\n');
-
-  // Week totals + vs previous week.
-  const tot = (rows) => ({
-    clicks: sum(rows, 'clicks'),
-    impressions: sum(rows, 'impressions'),
-    users: sum(rows, 'users'),
-    sessions: sum(rows, 'sessions'),
-  });
-  const t = tot(series);
-  const p = tot(prevSeries);
-  const delta = (a, b) => (b === 0 ? '—' : `${a - b >= 0 ? '+' : ''}${Math.round(((a - b) / b) * 100)}%`);
-  add(
-    `Totals: ${t.clicks} clicks (${delta(t.clicks, p.clicks)}), ${t.impressions} impressions ` +
-    `(${delta(t.impressions, p.impressions)}), ${t.users} users, ${t.sessions} sessions  — vs prior week\n`
-  );
-  add('\n');
-
-  // Column header row — tracked for bold.
-  const tableHeaderStart = text.length;
-  add(['Day', 'Date', 'Clicks', 'Impr.', 'Position', 'Users', 'Sessions'].join('\t') + '\n');
-  const tableHeader = { start: tableHeaderStart, end: text.length - 1 };
-
-  // Per-day rows — each tracked so we can add paragraph spacing.
-  const tableRows = [];
-  for (const r of series) {
-    const date = String(r.date).slice(0, 10);
-    const dn = dayName(date);
-    const rowStart = text.length;
-    const dStart = text.length;
-    add(dn);
-    bold.push({ start: dStart, end: text.length });   // weekday name only
-    add('\t' + [
-      date,
-      fmt(r.clicks),
-      fmt(r.impressions),
-      r.position == null ? '—' : Number(r.position).toFixed(1),
-      fmt(r.users),
-      fmt(r.sessions),
-    ].join('\t') + '\n');
-    tableRows.push({ start: rowStart, end: text.length - 1 });
-  }
-  add('\n');
-  add('────────────────────────────────────────\n');
-  add('\n');
-
-  return { text, bold, summary, weekHeading, tableHeader, tableRows };
 }
 
 // Generate (or regenerate) the weekly section and insert it at the TOP of the doc.
@@ -164,91 +99,52 @@ export async function runWeeklyDocReport(site, anchorDate) {
     'normal — report them plainly without alarm. If you cite a percent change, use ONLY the precomputed ' +
     'vsPriorWeekPct values given — never calculate your own percentage. null means no prior-week baseline; ' +
     'do not invent one. No preamble, no bullet symbols, no markdown headers.';
-  const overview = await callLLM(system, `Weekly digest:\n\n${JSON.stringify(digest, null, 2)}`, { maxTokens: 400 });
+  // The report is numbers first: if the summary cannot be written (model down, spend limit) it goes out without it.
+  let overview = null;
+  try { overview = await callLLM(system, `Weekly digest:\n\n${JSON.stringify(digest, null, 2)}`, { maxTokens: 400 }); }
+  catch (e) { console.warn('[weekly-doc] summary skipped:', e.message); }
 
-  const { text: sectionText, bold, summary, weekHeading, tableHeader, tableRows } =
-    buildSection(label, overview, series, prevSeries);
+  const brand = resolveBrand(site);
+  const cur = periodStats(series);
+  const prev = prevSeries.length ? periodStats(prevSeries) : null;
+  const baselineRow = await getBaselineReport(site.id);
+  const better = bettermentTable({
+    baseline: baselineRow?.kpi_snapshot, baselineAt: baselineRow?.generated_at, periodEnd: end,
+    cur, prev, currentHealth: await getHealthScoreOnOrBefore(site.id, end), labels: { prev: 'Last week', cur: 'This week' },
+  });
+  const dayRows = series.map((r) => {
+    const date = String(r.date).slice(0, 10);
+    return [`${dayName(date)} ${date.slice(8)}`, fmt(r.impressions), fmt(r.clicks), r.position == null ? '—' : Number(r.position).toFixed(1), fmt(r.users)];
+  });
+  // Per-page score: the same page scored the same way at the first audit and the latest one (null if there is only one).
+  const [baselineRun, latestRun] = await Promise.all([getFirstCompletedAuditRun(site.id), getLatestCompletedAuditRun(site.id)]);
+  let scoreSection = null;
+  if (baselineRun && latestRun && baselineRun.id !== latestRun.id) {
+    const [baselineFindings, latestFindings] = await Promise.all([getAuditPageFindings(baselineRun.id, { limit: 5000 }), getAuditPageFindings(latestRun.id, { limit: 5000 })]);
+    scoreSection = pageScoreSection({ baselineRun, latestRun, baselineFindings, latestFindings });
+  }
+  const model = {
+    marker: `Week of ${label}`,
+    band: { kind: 'Weekly report', period: `Week of ${label}`, sub: brand.website || 'Search and AI visibility' },
+    headline: headlineFor(cur, prev, 'this week', 'the prior week'),
+    summary: overview,
+    tiles: tilesFor(cur, prev, 'prior week'),
+    barsTitle: 'Clicks by day',
+    bars: series.map((r) => ({ label: dayName(String(r.date).slice(0, 10)), value: n(r.clicks), valueText: fmt(r.clicks) })),
+    sections: [
+      { title: 'Day by day', table: { head: ['Day', 'Impressions', 'Clicks', 'Position', 'Users'], totalRow: true,
+        rows: [...dayRows, ['Week', fmt(cur.impressions), fmt(cur.clicks), cur.position == null ? '—' : cur.position.toFixed(1), fmt(cur.users)]] } },
+      better && { title: better.title, sub: better.sub, table: better.table },
+      scoreSection,
+      topSearchesSection(topQueries),
+    ].filter(Boolean),
+    footer: `Prepared for ${site.name}${brand.website ? ` (${brand.website})` : ''} · search data final through ${label.split('–')[1].trim()}`,
+  };
 
   const docId = await ensureDoc(site);
-  const docs = getDocs(site);
-  // Insert at index 1 (top of body) so the newest week is first.
-  const base = 1;
-  const requests = [{ insertText: { location: { index: base }, text: sectionText } }];
+  await writeSection(getDocs(site), docId, model, brand);
 
-  // Justify every paragraph in this section.
-  requests.push({
-    updateParagraphStyle: {
-      range: { startIndex: base, endIndex: base + sectionText.length },
-      paragraphStyle: { alignment: 'JUSTIFIED' },
-      fields: 'alignment',
-    },
-  });
-
-  // "Week of …" heading — bold + 14pt, glued to the next paragraph (summary).
-  requests.push({
-    updateTextStyle: {
-      range: { startIndex: base + weekHeading.start, endIndex: base + weekHeading.end },
-      textStyle: { bold: true, fontSize: { magnitude: 14, unit: 'PT' } },
-      fields: 'bold,fontSize',
-    },
-  });
-  requests.push({
-    updateParagraphStyle: {
-      range: { startIndex: base + weekHeading.start, endIndex: base + weekHeading.end },
-      paragraphStyle: { keepWithNext: true },
-      fields: 'keepWithNext',
-    },
-  });
-
-  // Summary paragraph — italic, smaller, grey Georgia serif.
-  requests.push({
-    updateTextStyle: {
-      range: { startIndex: base + summary.start, endIndex: base + summary.end },
-      textStyle: {
-        italic: true,
-        fontSize: { magnitude: 10, unit: 'PT' },
-        weightedFontFamily: { fontFamily: 'Georgia' },
-        foregroundColor: { color: { rgbColor: { red: 0.32, green: 0.33, blue: 0.36 } } },
-      },
-      fields: 'italic,fontSize,weightedFontFamily,foregroundColor',
-    },
-  });
-
-  // Column header row — bold.
-  requests.push({
-    updateTextStyle: {
-      range: { startIndex: base + tableHeader.start, endIndex: base + tableHeader.end },
-      textStyle: { bold: true },
-      fields: 'bold',
-    },
-  });
-
-  // Bold each weekday name in the day table.
-  for (const b of bold) {
-    requests.push({
-      updateTextStyle: {
-        range: { startIndex: base + b.start, endIndex: base + b.end },
-        textStyle: { bold: true },
-        fields: 'bold',
-      },
-    });
-  }
-
-  // Add breathing room above each data row so the table isn't congested.
-  for (const row of tableRows) {
-    requests.push({
-      updateParagraphStyle: {
-        range: { startIndex: base + row.start, endIndex: base + row.end },
-        paragraphStyle: { spaceAbove: { magnitude: 4, unit: 'PT' } },
-        fields: 'spaceAbove',
-      },
-    });
-  }
-
-  // Requests apply in order, so styling references the just-inserted text's indices.
-  await docs.documents.batchUpdate({ documentId: docId, requestBody: { requests } });
-
-  await saveWeeklyReportNarrative(site.id, start, end, overview);
+  if (overview) await saveWeeklyReportNarrative(site.id, start, end, overview);
 
   console.log(`[weekly] wrote section for ${label} to doc ${docId}`);
   return { docId, start, end, url: `https://docs.google.com/document/d/${docId}/edit` };

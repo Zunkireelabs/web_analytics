@@ -44,7 +44,37 @@ import { pageTemplateGuidanceText } from '../../design-agent/lib/page-templates.
 // e.g. the MCP tool or a test) does this fall back to deriving guidance
 // live from pageTypePatterns, exactly as it always did — never a behavior
 // regression for a caller that never resolved a canonical template.
-export function pageStructureGuidance(site, pageType, { fallbackPageTypes = [] } = {}) {
+// One page's OWN captured design, by its exact address. Sites whose pages do not share a template
+// (each page has its own sections, widths and spacing) are not described by a page-TYPE average:
+// when the target page is one the capture recorded, its own sections lead.
+const pathOf = (u) => {
+  try { return new URL(u, 'https://placeholder.invalid').pathname.replace(/\/+$/, '') || '/'; } catch { return null; }
+};
+export function ownPageGuidance(site, pageUrl) {
+  if (!pageUrl) return null;
+  const want = pathOf(pageUrl);
+  const pages = site?.url_file_map?.siteRoot?.designProfile?.pages;
+  if (!want || !Array.isArray(pages)) return null;
+  const page = pages.find((p) => p?.url && pathOf(p.url) === want && Array.isArray(p.sections) && p.sections.length);
+  if (!page) return null;
+  const body = page.sections.filter((sec) => sec.role !== 'nav' && sec.role !== 'footer');
+  if (!body.length) return null;
+  const parts = body.map((sec) => {
+    const bits = [sec.role];
+    if (sec.width) bits.push(sec.width);
+    if (sec.alignment) bits.push(sec.alignment);
+    const comps = [...new Set((sec.components || []).map((c) => c.type).filter(Boolean))];
+    if (comps.length) bits.push(`with ${comps.join('/')}`);
+    const gap = sec.spacing?.after;
+    if (Number.isFinite(gap) && gap > 0) bits.push(`${gap}px below`); // 0 is "no measured gap", not a rule to follow
+    return bits.join(' ');
+  });
+  return `This exact page (${want}) was captured on its own, and its design is not assumed to match other pages. Its sections, in order: ${parts.join(' -> ')}. Match THIS page's structure, widths and spacing rhythm for anything added to it.`;
+}
+
+export function pageStructureGuidance(site, pageType, { fallbackPageTypes = [], pageUrl = null } = {}) {
+  const own = ownPageGuidance(site, pageUrl);
+  if (own) return own;
   const candidates = [pageType, ...fallbackPageTypes].filter(Boolean);
   const canonicalTemplates = site?.url_file_map?.siteRoot?.pageTemplates;
   if (canonicalTemplates && typeof canonicalTemplates === 'object') {

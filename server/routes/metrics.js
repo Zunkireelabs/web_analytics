@@ -1,3 +1,5 @@
+import { brandPayload } from '../report/brand.js';
+import { getGoogleConnection } from '../store/project-google.js';
 import { Router } from 'express';
 import {
   getSiteById, getDailySeries,
@@ -12,6 +14,7 @@ import { previousWeek } from '../util/dates.js';
 import { callLLM } from '../llm.js';
 import { translateQuery } from '../report/translate.js';
 import { buildReportSummary, buildCountryBreakdown } from '../report/summary.js';
+import { buildInAppModel } from '../report/inapp-model.js';
 
 // Precomputed A→B percent change per metric — handed to the LLM as grounded facts
 // so it never has to do (and risk botching) the comparison arithmetic itself.
@@ -32,7 +35,10 @@ router.use(requireAuth);
 router.get('/sites', async (req, res, next) => {
   try {
     const site = await getSiteById(req.siteId);
-    res.json(site ? [site] : []);
+    if (!site) return res.json([]);
+    // Health of the project's OWN Google sign-in, for the "Reconnect Google" strip. No token.
+    const conn = await getGoogleConnection(site.id).catch(() => null);
+    res.json([{ ...site, google_connection: conn ? { status: conn.status, email: conn.google_email, error: conn.status === 'ok' ? null : conn.status_error } : null }]);
   } catch (e) { next(e); }
 });
 
@@ -57,7 +63,21 @@ router.get('/report-summary', async (req, res, next) => {
     const site = await getSiteById(req.siteId);
     if (!site) return res.status(404).json({ error: 'Site not found.' });
 
-    res.json(await buildReportSummary(site, period));
+    const summary = await buildReportSummary(site, period);
+    // The page body (headline, tiles with changes, per-day or per-week table, since-baseline, page scores) is the
+    // same model the Google Doc is written from. A failure here must not take the rest of the report down.
+    const body = period === 'daily' ? null : await buildInAppModel(site, period).catch(() => null);
+    res.json({ ...summary, body });
+  } catch (e) { next(e); }
+});
+
+// The project's own brand for the Reports page (band, tiles, bars): its colour, what to print on it, and its logo.
+// See server/report/brand.js for where the colour comes from.
+router.get('/report-brand', async (req, res, next) => {
+  try {
+    const site = await getSiteById(req.siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found.' });
+    res.json(brandPayload(site));
   } catch (e) { next(e); }
 });
 

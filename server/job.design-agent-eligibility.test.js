@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {
   queueDesignAgentDerivationForSite, queueDesignAgentDerivationsForAllSites,
   queueDesignProfileDerivationForOnboarding,
-  queueDesignProfileRescanForSite, queueDesignProfileRescanForAllSites,
+  queueDesignProfileRescanForSite, queueDesignProfileRescanForAllSites, checkDesignChangesForAllSites,
+  docsAllowed, runWeeklyIfDue, runMonthlyIfDue,
 } from './job.js';
 
 // Design Agent capabilities (whole-site profile derivation, and by the same
@@ -176,7 +177,7 @@ describe('queueDesignProfileDerivationForOnboarding — repo-independent, needs 
 // has a usable profile, and only once that profile is old enough.
 describe('queueDesignProfileRescanForSite — refreshes an existing profile, never a first derivation', () => {
   const FRESH_ISO = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(); // 1 day old
-  const STALE_ISO = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(); // 10 days old
+  const STALE_ISO = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString(); // 40 days old (window is 28)
 
   const fakeRescanDeps = (overrides = {}) => ({
     hasUsableProfile: () => true,
@@ -278,5 +279,51 @@ describe('queueDesignProfileRescanForAllSites', () => {
       force: true,
     });
     assert.deepEqual(forceValues, [true]);
+  });
+});
+
+describe('checkDesignChangesForAllSites — weekly stylesheet check', () => {
+  const base = { auto_remediation_enabled: true, repo_owner: 'a', repo_name: 'b', website_domain: 'x.test', status: 'active' };
+  const run = async (site, fp) => {
+    const saved = []; const queued = [];
+    const r = await checkDesignChangesForAllSites({
+      listAllSites: async () => [site], fingerprint: async () => fp,
+      queueRescan: async (s) => { queued.push(s.id); return true; },
+      save: async (id, f) => { saved.push([id, f]); },
+    });
+    return { r, saved, queued };
+  };
+
+  test('first sight only records the fingerprint', async () => {
+    const { saved, queued } = await run({ ...base, id: 1 }, 'h1');
+    assert.deepEqual(saved, [[1, 'h1']]);
+    assert.deepEqual(queued, []);
+  });
+  test('a changed fingerprint queues a re-capture and records the new one', async () => {
+    const { saved, queued } = await run({ ...base, id: 2, design_fingerprint: 'old' }, 'new');
+    assert.deepEqual(queued, [2]);
+    assert.deepEqual(saved, [[2, 'new']]);
+  });
+  test('an unchanged or unreadable site does nothing', async () => {
+    assert.deepEqual((await run({ ...base, id: 3, design_fingerprint: 'same' }, 'same')).queued, []);
+    const none = await run({ ...base, id: 4, design_fingerprint: 'same' }, null);
+    assert.deepEqual(none.queued, []);
+    assert.deepEqual(none.saved, []);
+  });
+});
+
+describe('Google Docs are only written for a fully connected project', () => {
+  const full = { id: 1, gsc_property: 'sc-domain:a.com', ga4_property_id: '1', repo_owner: 'o', repo_name: 'r' };
+  test('Search Console, Analytics AND GitHub are all required', () => {
+    assert.equal(docsAllowed(full), true);
+    for (const missing of ['gsc_property', 'ga4_property_id', 'repo_owner', 'repo_name']) {
+      assert.equal(docsAllowed({ ...full, [missing]: null }), false, missing);
+    }
+    assert.equal(docsAllowed(null), false);
+  });
+  test('the weekly and monthly docs are skipped, touching nothing, until then', async () => {
+    const half = { ...full, repo_owner: null, timezone: 'Asia/Kolkata' };
+    assert.equal(await runWeeklyIfDue(half), null);
+    assert.equal(await runMonthlyIfDue(half), null);
   });
 });

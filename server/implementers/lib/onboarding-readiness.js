@@ -1,5 +1,5 @@
-import { getLatestDesignAgentJob, createDesignProfileJob, DESIGN_PROFILE_JOB_KEY } from '../../store/execution-jobs.js';
-import { isProfileUsable } from '../../design-agent/lib/design-profile.js';
+import { getLatestDesignAgentJob, getRecentDesignAgentJobs, createDesignProfileJob, DESIGN_PROFILE_JOB_KEY } from '../../store/execution-jobs.js';
+import { isProfileUsable, profileCaptureGaps } from '../../design-agent/lib/design-profile.js';
 
 // Deliberately NOT design-drift.js's own getDesignProfile/siteHasUsableDesignProfile/
 // sitePageUrl — pulling that module in here would drag its full production
@@ -32,6 +32,14 @@ function sitePageUrl(site) {
 // DESIGN_DRIFT_FETCH_TIMEOUT_MS (design-drift.js) and STALE_EXECUTING_MS
 // (this file's own module) — never a bare constant for a wall-clock bound
 // like this.
+// A project's captured design is the source of truth for every edit the agent
+// ever makes there, so a missing profile HOLDS shipping — it never falls
+// through to "ship blind". A finished-but-unusable or failed derivation is
+// retried (spaced by the backoff, up to the attempt cap); past the cap the site
+// stays held and the log says so loudly, for a person to look at.
+export const DESIGN_PROFILE_RETRY_BACKOFF_MS = Number(process.env.DESIGN_PROFILE_RETRY_BACKOFF_MS) || 60 * 60 * 1000;
+const RECAPTURE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+export const DESIGN_PROFILE_MAX_ATTEMPTS = Number(process.env.DESIGN_PROFILE_MAX_ATTEMPTS) || 5;
 export const FIRST_DESIGN_PROFILE_TIMEOUT_MS = Number(process.env.FIRST_DESIGN_PROFILE_TIMEOUT_MS) || 48 * 60 * 60 * 1000;
 
 // The two-stage onboarding gate: whether this site's initial whole-site
@@ -74,27 +82,77 @@ export const FIRST_DESIGN_PROFILE_TIMEOUT_MS = Number(process.env.FIRST_DESIGN_P
 export async function isOnboardingAnalysisPending(site, {
   hasUsableProfile = siteHasUsableProfile,
   latestProfileJob = getLatestDesignAgentJob,
+  recentProfileJobs = getRecentDesignAgentJobs,
   enqueueProfileJob = createDesignProfileJob,
   resolvePageUrl = sitePageUrl,
   now = () => Date.now(),
   timeoutMs = FIRST_DESIGN_PROFILE_TIMEOUT_MS,
+  backoffMs = DESIGN_PROFILE_RETRY_BACKOFF_MS,
+  maxAttempts = DESIGN_PROFILE_MAX_ATTEMPTS,
+} = {}) {
+  if (hasUsableProfile(site)) {
+    // Usable is only the minimum. If the capture has gaps (no spacing scale, no
+    // page patterns, ...) ask for a fuller one, without holding a site that can
+    // already be edited safely. At most one request per recapture window.
+    const gaps = profileCaptureGaps(site?.url_file_map?.siteRoot?.designProfile);
+    if (gaps.length) {
+      try {
+        const job = await latestProfileJob(site.id, DESIGN_PROFILE_JOB_KEY);
+        const idle = !job || (job.status !== 'queued' && job.status !== 'executing');
+        const last = job?.finished_at ? Date.parse(job.finished_at) : NaN;
+        if (idle && !(Number.isFinite(last) && now() - last < RECAPTURE_WINDOW_MS)) {
+          await enqueueProfileJob(site.id, { requestedBy: null, pageUrl: resolvePageUrl(site) });
+          console.warn(`[onboarding-readiness] site ${site.id}: design capture is missing ${gaps.join(', ')} — queued a fuller capture (shipping not held).`);
+        }
+      } catch (err) {
+        console.error(`[onboarding-readiness] could not queue a fuller design capture for site ${site.id}:`, err.message);
+      }
+    }
+    return false;
+  }
+  const enqueue = async (why) => {
+    try {
+      await enqueueProfileJob(site.id, { requestedBy: null, pageUrl: resolvePageUrl(site) });
+      console.warn(`[onboarding-readiness] site ${site.id}: design capture ${why} — queued another derivation; shipping stays held until a usable profile exists.`);
+    } catch (err) {
+      console.error(`[onboarding-readiness] could not queue design-profile derivation for site ${site.id}:`, err.message);
+    }
+  };
+  const job = await latestProfileJob(site.id, DESIGN_PROFILE_JOB_KEY);
+  if (!job) {
+    await enqueue('has not started');
+    return true;
+  }
+  const at = (v) => (v ? Date.parse(v) : NaN);
+  if (job.status === 'queued' || job.status === 'executing') {
+    const queuedAt = at(job.created_at);
+    if (Number.isFinite(queuedAt) && now() - queuedAt > timeoutMs) await enqueue(`stuck ${job.status} for over ${timeoutMs}ms`);
+    return true;
+  }
+  // Terminal, yet no usable profile: the capture failed or came back unusable.
+  const finishedAt = at(job.finished_at);
+  if (Number.isFinite(finishedAt) && now() - finishedAt < backoffMs) return true;
+  let attempts = 1;
+  try { attempts = (await recentProfileJobs(site.id, DESIGN_PROFILE_JOB_KEY, maxAttempts)).length; } catch { /* count unknown: retry */ }
+  if (attempts >= maxAttempts) {
+    console.error(`[onboarding-readiness] site ${site.id}: design capture failed ${attempts} times — shipping HELD, needs a person (is the live site reachable?).`);
+    return true;
+  }
+  await enqueue(`${job.status} without a usable profile (attempt ${attempts}/${maxAttempts})`);
+  return true;
+}
+
+// True when the design capture has failed every allowed try and shipping is held for a person to look at.
+// Read-only: unlike isOnboardingAnalysisPending it never queues another attempt.
+export async function designCaptureNeedsPerson(site, {
+  hasUsableProfile = siteHasUsableProfile,
+  latestProfileJob = getLatestDesignAgentJob,
+  recentProfileJobs = getRecentDesignAgentJobs,
+  maxAttempts = DESIGN_PROFILE_MAX_ATTEMPTS,
 } = {}) {
   if (hasUsableProfile(site)) return false;
   const job = await latestProfileJob(site.id, DESIGN_PROFILE_JOB_KEY);
-  if (!job) {
-    try {
-      await enqueueProfileJob(site.id, { requestedBy: null, pageUrl: resolvePageUrl(site) });
-    } catch (err) {
-      console.error(`[onboarding-readiness] could not queue first design-profile derivation for site ${site.id}:`, err.message);
-    }
-    return true;
-  }
-  if (job.status !== 'queued' && job.status !== 'executing') return false;
-
-  const queuedAt = job.created_at ? Date.parse(job.created_at) : NaN;
-  if (Number.isFinite(queuedAt) && now() - queuedAt > timeoutMs) {
-    console.warn(`[onboarding-readiness] site ${site.id}: first design-profile derivation has been pending for over ${timeoutMs}ms — shipping without a profile rather than blocking indefinitely.`);
-    return false;
-  }
-  return true;
+  if (!job || job.status === 'queued' || job.status === 'executing') return false;
+  const attempts = (await recentProfileJobs(site.id, DESIGN_PROFILE_JOB_KEY, maxAttempts)).length;
+  return attempts >= maxAttempts;
 }

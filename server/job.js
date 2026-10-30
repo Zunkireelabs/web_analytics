@@ -1,16 +1,16 @@
 import { getOrCreateSite, query, resumeDueAutoRemediationPauses } from './db.js';
 import { safeMessage } from './lib/errors.js';
 import { callDataAnalystAgent } from './lib/data-analyst-client.js';
+import { ensureAnalystRegistered } from './lib/tenant-provisioning.js';
 import { fetchGscForDate } from './ingest/gsc.js';
 import { fetchGa4ForDate } from './ingest/ga4.js';
 import { fetchCompetitorRankings } from './ingest/competitors.js';
 import { competitorProviderConfigured } from './ingest/competitor-providers/index.js';
-import { upsertGsc, upsertGa4, saveNarrative, markDailyDocDone, saveCompetitorRankings, saveHealthScoreSnapshot, recordIntegrationCheck } from './store/upsert.js';
+import { upsertGsc, upsertGa4, saveNarrative, saveCompetitorRankings, saveHealthScoreSnapshot, recordIntegrationCheck } from './store/upsert.js';
 import { getDay, getNarrative, listSites, getCompetitorRankingDates, getHealthScoreOnOrBefore } from './store/read.js';
 import { generateNarrative } from './report/narrative.js';
 import { sendDailyEmail } from './report/email.js';
 import { runWeeklyDocReport } from './report/weekly-doc.js';
-import { runDailyDocReport } from './report/daily-doc.js';
 import { runExecutiveDocReport } from './report/executive-doc.js';
 import { runMonthlyDocReport } from './report/monthly-doc.js';
 import { isGoogleAuthError } from './integrations/google-oauth.js';
@@ -23,14 +23,19 @@ import { meta as execReportMeta, orchestrationStatus } from './agents/executive-
 import { computeHealthScore } from './agents/lib/health-score.js';
 import { RECOMMENDATION_AGENT_IDS } from './agents/lib/insights.js';
 import { detectNotificationEvents } from './notifications/detect.js';
+import { notifyDesignCaptureHeld } from './notifications/design-blocked.js';
+import { designCaptureNeedsPerson } from './implementers/lib/onboarding-readiness.js';
 import { deliverToAllChannels } from './notifications/channels/index.js';
 import { hasRecentNotification } from './store/notifications.js';
 import { buildRecommendations } from './agents/lib/recommendations.js';
 import { repairSiteTemplates } from './agents/lib/template-repair.js';
 import { syncFromGrounded, refreshBlockedRecommendations } from './agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.js';
+import { buildApprovedForToday } from './agents/lib/pick-runner.js';
 import { runWorkArbiter } from './agents/lib/work-arbiter.js';
 import { withJobLock, jobKeyFor } from './lib/job-lock.js';
+import { rotateForToday, runSiteWithDeadline, windowClosed } from './lib/site-run.js';
+import { getGoogleConnection } from './store/project-google.js';
 
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
 
@@ -42,7 +47,7 @@ import { checkFaqOnboardingCoverage } from './agents/lib/faq-onboarding-check.js
 import { getImplementedFindingIds, countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
 import { countShippedFileEditsTodayAllSites } from './store/shipping-queue.js';
 import { AUTONOMOUS_DRAFT_SOURCES } from './lib/autonomous-quota.js';
-import { isShippable, isShipCatchupOwed, checkShipStall, SHIP_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './lib/ship-window.js';
+import { isShippable, isActiveSite, isShipCatchupOwed, checkShipStall, SHIP_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './lib/ship-window.js';
 import { rateLimitKey } from './github/client.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
 
@@ -55,6 +60,7 @@ import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages, pruneS
 import { runDueVerifications } from './agents/lib/fix-verification.js';
 import { siteHasUsableDesignProfile, sitePageUrl, getDesignProfile } from './implementers/lib/design-drift.js';
 import { createDesignProfileJob, getQueuedComponentTemplateJob, getLatestDesignAgentJob, DESIGN_PROFILE_JOB_KEY, createConsistencyScanJob, CONSISTENCY_SCAN_JOB_KEY } from './store/execution-jobs.js';
+import { ensureSitemapRegistered } from './ingest/sitemap-register.js';
 
 // Daily-cadence agents only. competitor-intelligence, authority, and
 // ai-recommendation are all throttled (see runAgentIfDue below — real
@@ -98,7 +104,12 @@ const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !THROTTLED_AGENT
 // failure only gets recorded when it's actually auth-shaped (isGoogleAuthError)
 // — a transient network blip or rate limit shouldn't read as "connection broken."
 // site_id is null (this connection is shared across all sites, not per-site).
-async function noteGoogleAuthOutcome(ok, err) {
+async function noteGoogleAuthOutcome(ok, err, site) {
+  // A project's own Google connection has its own health (project_google_connections.status).
+  // Its failure must not flip the shared platform check to "revoked", and a project's success
+  // must not clear a real platform failure.
+  if (err?.projectGoogle) return;
+  if (site?.id != null && await getGoogleConnection(site.id).catch(() => null)) return;
   if (ok) {
     await recordIntegrationCheck('google-oauth', null, {
       ok: true, authStatus: 'valid', errorMessage: null, recoveryAction: null,
@@ -282,8 +293,15 @@ export async function runDailyAgentAnalysisForSite(site) {
 // email → daily doc → agent analysis → notifications. Idempotent and safe
 // to re-run — identical logic to the original single-site runDailyJob(),
 // just parameterized by `site`.
-export async function runDailyJobForSite(site) {
+export async function runDailyJobForSite(site, { isAborted = () => false } = {}) {
   const { reportDate } = await runDailyIngestForSite(site);
+  // The all-sites pass gives each site a time limit; when it stops waiting for a site, the abandoned run is
+  // told here and stops at the next step boundary instead of carrying on beside the next site.
+  const abandoned = (before) => {
+    if (!isAborted()) return false;
+    console.warn(`[job] daily job for site ${site.id} "${site.name}" ran past its time limit — stopping before ${before}.`);
+    return true;
+  };
 
   // Each step below already tolerates its own failure (logs and moves on,
   // so one broken step doesn't take down the rest of the pipeline) — but
@@ -293,6 +311,7 @@ export async function runDailyJobForSite(site) {
   // of a false "ok" just because nothing threw all the way out.
   const stepErrors = [];
 
+  if (abandoned('the narrative')) return { site, reportDate, narrative: '', abandoned: true };
   let narrative = '';
   try {
     narrative = await generateNarrative(site, reportDate);
@@ -306,6 +325,7 @@ export async function runDailyJobForSite(site) {
   const day = await getDay(site.id, reportDate);
   const existing = await getNarrative(site.id, reportDate);
 
+  if (abandoned('the email')) return { site, reportDate, narrative, abandoned: true };
   try {
     // Email idempotency: only send once per report date, even across restarts/catch-ups.
     if (existing?.emailed_at) {
@@ -319,20 +339,10 @@ export async function runDailyJobForSite(site) {
     stepErrors.push(new Error(message));
   }
 
-  try {
-    // Daily doc idempotency: only write once per report date.
-    if (existing?.daily_doc_done) {
-      console.log(`[report] site ${site.id} daily doc already written for ${reportDate} — skipping.`);
-    } else {
-      const r = await runDailyDocReport(site, reportDate);
-      await markDailyDocDone(site.id, reportDate);
-      console.log(`[report] site ${site.id} daily doc entry written → ${r.url}`);
-    }
-  } catch (err) {
-    const { message } = safeMessage(`job.runDailyJobForSite.dailyDoc[site ${site.id}]`, err, 'daily doc write failed');
-    stepErrors.push(new Error(message));
-  }
+  // No daily Google Doc: the Overview already compares today with the earlier days, so a per-day document
+  // would only repeat it. (The daily email and the stored narrative are unchanged.)
 
+  if (abandoned('the agent analysis')) return { site, reportDate, narrative, abandoned: true };
   try {
     const { ranAgentIds, findingsCount, notificationsEmitted, watchlistAdded, watchlistClosed } = await runDailyAgentAnalysisForSite(site);
     console.log(`[job] site ${site.id} daily agent analysis: ${ranAgentIds.length} agents, ${findingsCount} findings, ${notificationsEmitted} notification(s), watchlist +${watchlistAdded}/-${watchlistClosed}.`);
@@ -356,7 +366,18 @@ export async function runDailyJob() {
 // Run the weekly doc report for the previous full week, but only if it hasn't
 // been written yet (idempotent across cron + startup catch-up + restarts).
 // Manual `npm run weekly -- <date>` bypasses this guard for backfills.
+// Google Docs reports are written only once a project is fully connected: Search Console, Analytics AND
+// its GitHub repository. Before that there is nothing real to report on and no agent working yet, so no doc
+// is created (and nothing is made in the shared Drive for a half-set-up project).
+export function docsAllowed(site) {
+  return Boolean(site?.gsc_property && site?.ga4_property_id && site?.repo_owner && site?.repo_name);
+}
+
 export async function runWeeklyIfDue(site) {
+  if (!docsAllowed(site)) {
+    console.log(`[weekly] site ${site.id} is not fully connected yet (Search Console, Analytics and GitHub) — no weekly doc.`);
+    return null;
+  }
   const { start, end } = previousWeek(site.timezone);
   // Read as a plain YYYY-MM-DD string (PG DATE → JS Date would shift across timezones).
   const { rows } = await query(
@@ -423,20 +444,40 @@ export async function listConnectedSites() {
 
 // Run the full daily pipeline independently for every connected site. A
 // failure for one site is logged and does not stop the others.
-export async function runDailyJobForAllSites() {
-  const sites = await listConnectedSites();
+export async function runDailyJobForAllSites({ windowEndsAt = null } = {}) {
+  const sites = rotateForToday(await listConnectedSites());
   const results = [];
-  for (const site of sites) {
-    try {
-      results.push(await runDailyJobForSite(site));
-      await noteGoogleAuthOutcome(true);
-    } catch (err) {
-      console.error(`[job] daily job failed for site ${site.id} "${site.name}":`, err.message);
-      await noteGoogleAuthOutcome(false, err);
-      await notePipelineOutcome(false, err);
+  for (const [i, site] of sites.entries()) {
+    if (windowClosed(windowEndsAt)) {
+      console.log(`[job] daily job: the morning window is closed — ${sites.length - i} site(s) not started this run (they go earlier tomorrow).`);
+      break;
+    }
+    // One slow or hung site must not hold the whole pass: it gets a time budget, and is
+    // recorded and left behind if it overruns. Google requests carry their own timeouts, which
+    // is what actually ends an abandoned call.
+    const run = await runSiteWithDeadline(site, ({ isAborted }) => runDailyJobForSite(site, { isAborted }), { label: 'daily job', onTimeout: recordSiteRunTimeout });
+    if (run.ok) {
+      results.push(run.value);
+      await noteGoogleAuthOutcome(true, undefined, site);
+    } else if (run.timedOut) {
+      await notePipelineOutcome(false, new Error(`daily job for site ${site.id} timed out`));
+    } else {
+      console.error(`[job] daily job failed for site ${site.id} "${site.name}":`, run.error.message);
+      await noteGoogleAuthOutcome(false, run.error, site);
+      await notePipelineOutcome(false, run.error);
     }
   }
   return results;
+}
+
+// A timed-out site run is shown in Integration Health against THAT site, so it is visible
+// and attributable instead of only a log line.
+async function recordSiteRunTimeout(site, label) {
+  await recordIntegrationCheck('site-run', site.id, {
+    ok: false, authStatus: 'unknown',
+    errorMessage: `The ${label} ran past its time limit and was left behind so other sites could run.`,
+    recoveryAction: 'It is tried again on the next run. If this repeats, check that the live site responds and that Google access is healthy.',
+  }).catch(() => {});
 }
 
 // Run the weekly-if-due check independently for every connected site. A
@@ -447,10 +488,10 @@ export async function runWeeklyIfDueForAllSites() {
   for (const site of sites) {
     try {
       results.push(await runWeeklyIfDue(site));
-      await noteGoogleAuthOutcome(true);
+      await noteGoogleAuthOutcome(true, undefined, site);
     } catch (err) {
       console.error(`[job] weekly doc failed for site ${site.id} "${site.name}":`, err.message);
-      await noteGoogleAuthOutcome(false, err);
+      await noteGoogleAuthOutcome(false, err, site);
     }
   }
   return results;
@@ -708,6 +749,7 @@ export async function runSiteDiscoveryIfDue(site, {
   getSearchPerformanceRangeFn = getSearchPerformanceRange,
   upsertPageInventoryBatchFn = upsertPageInventoryBatch,
   markOrphanedPagesFn = markOrphanedPages,
+  ensureSitemapRegisteredFn = ensureSitemapRegistered,
 } = {}) {
   const { start, end } = previousWeek(site.timezone);
   const lastDiscoveredAt = await getLastDiscoveryAtFn(site.id);
@@ -715,6 +757,15 @@ export async function runSiteDiscoveryIfDue(site, {
     console.log(`[site-discovery] site ${site.id} week of ${start} already discovered — skipping.`);
     return null;
   }
+
+  // Discovery reads the sitemaps Search Console has registered for the property, so make sure one is: a new
+  // project (first sync) and one connected before this existed (weekly run) both get it submitted here, and
+  // a project that already has one is left alone. Best-effort; the outcome comes back with the result.
+  const sitemapRegistration = await ensureSitemapRegisteredFn(site).catch((err) => {
+    console.error(`[site-discovery] site ${site.id} sitemap registration failed:`, err.message);
+    return { status: 'failed', reason: 'unexpected-error' };
+  });
+  if (sitemapRegistration.status === 'submitted') console.log(`[site-discovery] site ${site.id}: submitted ${sitemapRegistration.sitemap} to Search Console.`);
 
   const [sitemapUrls, crawledUrls, gscPagesRaw] = await Promise.all([
     discoverFromSitemapsFn(site).catch((err) => { console.error(`[site-discovery] site ${site.id} sitemap fetch failed:`, err.message); return []; }),
@@ -760,7 +811,7 @@ export async function runSiteDiscoveryIfDue(site, {
   }
 
   console.log(`[site-discovery] site ${site.id}: ${sitemapUrls.length} sitemap URL(s), ${crawledUrls.length} crawled URL(s), ${gscPages.length} GSC page(s), ${orphanedUrls.length} orphaned.`);
-  return { sitemapCount: sitemapUrls.length, crawlCount: crawledUrls.length, gscCount: gscPages.length, orphanedCount: orphanedUrls.length, prunedCount };
+  return { sitemapCount: sitemapUrls.length, crawlCount: crawledUrls.length, gscCount: gscPages.length, orphanedCount: orphanedUrls.length, prunedCount, sitemapRegistration };
 }
 
 // `force` bypasses only the weekly staleness gate (every other precondition
@@ -779,13 +830,21 @@ export async function runSiteDiscoveryIfDueForAllSites({
   force = false,
   listAllSites = listConnectedSites,
   runForSite = runSiteDiscoveryIfDue,
+  windowEndsAt = null,
 } = {}) {
   const sites = await listAllSites();
   const results = [];
   for (const site of sites) {
+    if (windowClosed(windowEndsAt)) {
+      console.log('[job] site discovery: the time set aside for it is used up — the remaining sites are checked on the next run.');
+      break;
+    }
     try {
+      // One slow crawl must not hold the morning run: each site gets the usual per-site time budget.
       // eslint-disable-next-line no-await-in-loop -- sequential, same as every other fleet loop in this file
-      results.push(await runForSite(site, { force }));
+      const run = await runSiteWithDeadline(site, () => runForSite(site, { force }), { label: 'site discovery', onTimeout: recordSiteRunTimeout });
+      if (run.ok) results.push(run.value);
+      else if (!run.timedOut) throw run.error;
     } catch (err) {
       console.error(`[job] site discovery failed for site ${site.id} "${site.name}":`, err.message);
     }
@@ -799,10 +858,10 @@ export async function runExecutiveIfDueForAllSites() {
   for (const site of sites) {
     try {
       results.push(await runExecutiveIfDue(site));
-      await noteGoogleAuthOutcome(true);
+      await noteGoogleAuthOutcome(true, undefined, site);
     } catch (err) {
       console.error(`[job] executive report failed for site ${site.id} "${site.name}":`, err.message);
-      await noteGoogleAuthOutcome(false, err);
+      await noteGoogleAuthOutcome(false, err, site);
     }
   }
   return results;
@@ -820,6 +879,10 @@ export async function runExecutiveIfDueForAllSites() {
 // Manual `npm run monthly -- <ym>` bypasses this guard for backfills, same
 // as weekly's manual override.
 export async function runMonthlyIfDue(site) {
+  if (!docsAllowed(site)) {
+    console.log(`[monthly] site ${site.id} is not fully connected yet (Search Console, Analytics and GitHub) — no monthly doc.`);
+    return null;
+  }
   const { year, month } = previousMonth(site.timezone);
   const { start } = monthBounds(year, month); // first day of that month, YYYY-MM-DD
   // Read as a plain YYYY-MM-DD string (PG DATE → JS Date would shift across timezones).
@@ -908,10 +971,10 @@ export async function runHourlyCatchupForAllSites(tz) {
       // weekly cadence, with the Thursday cron plausibly missed during one
       // of several same-day staging redeploys.
       await runGeoAuditIfDue(site);
-      await noteGoogleAuthOutcome(true);
+      await noteGoogleAuthOutcome(true, undefined, site);
     } catch (err) {
       console.error(`[job] hourly guard failed for site ${site.id} "${site.name}":`, err.message);
-      await noteGoogleAuthOutcome(false, err);
+      await noteGoogleAuthOutcome(false, err, site);
     }
   }
 }
@@ -1018,10 +1081,15 @@ export async function runFaqOnboardingCoverageForAllSites() {
 // and it being down must not take the rest of the schedule with it.
 export async function runAnalystSyncForAllSites() {
   const sites = await listConnectedSites();
-  const totals = { sites: 0, created: 0, skipped: 0, ineligible: 0 };
+  const totals = { sites: 0, created: 0, skipped: 0, ineligible: 0, registered: 0 };
 
   for (const site of sites) {
     try {
+      // A project the analyst never heard of (the service was down when it was connected) gets registered
+      // here, so it starts getting forecasts and anomaly checks instead of staying silently without them.
+      const analyst = await ensureAnalystRegistered(site).catch((err) => ({ status: 'failed', error: err.message }));
+      if (analyst.status === 'registered') { totals.registered++; console.log(`[job] analyst sync: site ${site.id} "${site.name}" was not registered with the Data Analyst — registered now.`); }
+      else if (analyst.status === 'failed') console.error(`[job] analyst sync: could not register site ${site.id} "${site.name}" with the Data Analyst: ${analyst.error}`);
       const insights = await fetchAnalystInsights(site.id);
       if (!insights.length) continue;
       const result = await syncAnalystInsightsToActionCenter(site.id, insights, { site });
@@ -1093,6 +1161,42 @@ export async function runKeywordGapDiscoveryRefreshForAllSites() {
     }
   }
   if (totals.observed) console.log(`[job] keyword-gap discovery refresh complete — ${totals.observed} observation(s) recorded across ${totals.sites} site(s).`);
+  return totals;
+}
+
+// AI visibility: drafts for the prompts someone ticked on the AI visibility page and left for the
+// daily run (ai_tracked_prompts.ship_requested_at, migration 205). Runs in the morning pass just
+// before autonomous shipping, so the drafts it makes are in Action Center when shipping looks.
+// Capped per site per run so one long tick-list cannot burn a day's LLM budget in one go.
+// Deps injectable, same shape as runKeywordGapShipCycleForAllSites (job.js cannot be loaded under
+// the test loader, see that function's note).
+export async function runAiVisibilityShipForAllSites({
+  listAllSites = listConnectedSites,
+  listAwaiting = async (siteId, limit) => (await import('./store/ai-recommendation.js')).listPromptsAwaitingShip(siteId, limit),
+  ship = async (siteId, prompt) => {
+    const store = await import('./store/ai-recommendation.js');
+    const { shipPromptDraft } = await import('./agents/lib/ai-visibility-ship.js');
+    return shipPromptDraft(siteId, prompt, store);
+  },
+  perSiteLimit = 5,
+} = {}) {
+  const sites = await listAllSites();
+  const totals = { sites: 0, drafted: 0, failed: 0 };
+  for (const site of sites) {
+    try {
+      const awaiting = await listAwaiting(site.id, perSiteLimit);
+      if (!awaiting.length) continue;
+      totals.sites++;
+      let drafted = 0;
+      for (const prompt of awaiting) {
+        const r = await ship(site.id, prompt);
+        if (r.ok) { totals.drafted++; drafted++; } else totals.failed++;
+      }
+      console.log(`[job] ai-visibility ship: site ${site.id} "${site.name}" drafted ${drafted} of ${awaiting.length} prompt(s).`);
+    } catch (err) {
+      console.error(`[job] ai-visibility ship failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
   return totals;
 }
 
@@ -1221,7 +1325,7 @@ async function globalRemainingSeed() {
 // site's repo failure must never cost every other site its own run.
 export async function runTemplateCapabilityRepairForAllSites() {
   const { repairTemplateCapabilitiesForSite } = await import('./scripts/repair-template-capability.js');
-  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name && isActiveSite(s));
   const results = [];
   for (const site of sites) {
     try {
@@ -1279,7 +1383,7 @@ export async function runDesignProfileRoleCorrectionForAllSites() {
 // commit, one PR" (the other is learned-repair.js).
 export async function runContentRepairForAllSites() {
   const { repairSiteContentLive } = await import('./scripts/repair-site-content-live.js');
-  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name && isActiveSite(s));
   const results = [];
   for (const site of sites) {
     try {
@@ -1310,7 +1414,7 @@ export async function runContentRepairForAllSites() {
 // Never touches anything already shipped/merged/closed: refreshBlockedRecommendations
 // only ever reads/writes status = 'open' rows.
 export async function refreshBlockedRecommendationsForAllSites() {
-  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name && isActiveSite(s));
   const results = [];
   for (const site of sites) {
     try {
@@ -1337,7 +1441,7 @@ export async function refreshBlockedRecommendationsForAllSites() {
 // content itself is meant to be revisited on, mirroring the existing
 // weekly design-context rescan pattern in cron.js.
 export async function refreshContentGapRecommendationsForAllSites() {
-  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name && isActiveSite(s));
   const results = [];
   for (const site of sites) {
     try {
@@ -1362,7 +1466,19 @@ export async function refreshContentGapRecommendationsForAllSites() {
 // sites sharing one credential contend on the SAME outer lock and are
 // serialized by it, while two sites on distinct credentials never share a
 // key and never wait on each other.
-async function shipSiteWithLocks(site, globalRemaining) {
+// shipSiteWithLocks under a per-site time budget (see lib/site-run.js). Resolves { timedOut: true } when the
+// site overran, otherwise what shipSiteWithLocks returns. An abandoned run can still ship after we stop
+// waiting, so callers re-read the platform-wide remainder from the database rather than assuming zero.
+async function shipWithDeadline(site, globalRemaining) {
+  const run = await runSiteWithDeadline(site, ({ deadlineAt }) => shipSiteWithLocks(site, globalRemaining, { deadlineAt }),
+    { label: 'shipping run', timeoutMs: SHIP_SITE_TIMEOUT_MS, onTimeout: recordSiteRunTimeout });
+  if (run.timedOut) return { timedOut: true };
+  if (!run.ok) throw run.error;
+  return run.value;
+}
+
+const SHIP_SITE_TIMEOUT_MS = Number(process.env.SHIP_SITE_TIMEOUT_MS) || 30 * 60 * 1000;
+async function shipSiteWithLocks(site, globalRemaining, { deadlineAt = null } = {}) {
   const { ran: credRan, result } = await withJobLock(
     jobKeyFor(GITHUB_CREDENTIAL_LOCK_JOB_NAME, rateLimitKey(site)),
     () => withJobLock(
@@ -1378,7 +1494,17 @@ async function shipSiteWithLocks(site, globalRemaining) {
         // arbitrated ships exactly as it did before, by first-come.
         await runWorkArbiter(site.id, { site }).catch((err) =>
           console.warn(`[work-arbiter] site ${site.id}: ${err.message}`));
-        return autoRemediateSafeRecommendations(site.id, { globalRemaining });
+        // What a person approved (Content picks and design choices) is built here, once a day, before the safe auto-fixes, so
+        // it lands in the same branch and pull request. Approved after today's run? It waits for tomorrow's. Best-effort:
+        // a failure here must never stop the rest.
+        await buildApprovedForToday(site)
+          .then((r) => {
+            if (r.skipped) return;
+            const n = (x) => (x ? `built ${x.built}, ${x.withdrawn ?? x.backToPerson ?? 0} sent back, ${x.retryLater} retry later` : 'none');
+            console.log(`[approved] site ${site.id}: picks ${n(r.picks)}; design choices ${n(r.choices)}`);
+          })
+          .catch((err) => console.warn(`[approved] site ${site.id}: ${err.message}`));
+        return autoRemediateSafeRecommendations(site.id, { globalRemaining, deadlineAt });
       },
     ),
   );
@@ -1401,6 +1527,16 @@ async function shipSiteWithLocks(site, globalRemaining) {
 // top of whatever the morning run already shipped, and comparing that
 // increment alone against the full daily target would misfire on a perfectly
 // healthy day.
+// Shipping is held (on purpose) for a project whose design could not be captured after every retry. Say so, once
+// per episode, so a person looks instead of the project silently going without fixes.
+async function alertIfDesignCaptureHeld(site) {
+  try {
+    if (await designCaptureNeedsPerson(site)) await notifyDesignCaptureHeld(site);
+  } catch (err) {
+    console.warn(`[job] design-capture-held check failed for site ${site.id}:`, err.message);
+  }
+}
+
 const SHIP_STALL_COOLDOWN_DAYS = 1;
 async function alertIfShipStalled(site, shipped) {
   const stallEvent = checkShipStall({ site, shipped });
@@ -1411,12 +1547,18 @@ async function alertIfShipStalled(site, shipped) {
     .catch((err) => console.error(`[job] ship-stall alert delivery failed for site ${site.id}:`, err.message));
 }
 
-export async function runAutoRemediationForAllSites() {
+export async function runAutoRemediationForAllSites({ windowEndsAt = null } = {}) {
   await resumeDueAutoRemediationPauses().catch((err) => console.error('[job] resumeDueAutoRemediationPauses failed:', err.message));
-  const sites = (await listSites()).filter(isShippable);
+  const sites = rotateForToday((await listSites()).filter(isShippable));
   const results = [];
   let globalRemaining = await globalRemainingSeed();
+  const unreachable = [];
   for (const site of sites) {
+    if (windowClosed(windowEndsAt)) {
+      const left = sites.length - results.length - unreachable.length;
+      console.log(`[job] auto-remediation: the morning window is closed — ${left} site(s) not started this run; the hourly catch-up picks them up and they go earlier tomorrow.`);
+      break;
+    }
     if (globalRemaining <= 0) {
       console.log(`[job] auto-remediation: platform-wide daily ceiling reached — skipping remaining ${sites.length - results.length} site(s) this run.`);
       break;
@@ -1433,20 +1575,47 @@ export async function runAutoRemediationForAllSites() {
       // 2026-09-08 laptop-vs-VPS double-run) is unchanged: two processes
       // still cannot ship the same site, or spend the same credential's
       // budget, at the same time.
-      const { ran, reason, result } = await shipSiteWithLocks(site, globalRemaining);
+      const outcome = await shipWithDeadline(site, globalRemaining);
+      if (outcome.timedOut) { results.push({ siteId: site.id, error: 'timed-out' }); globalRemaining = await globalRemainingSeed(); continue; }
+      const { ran, reason, result } = outcome;
       if (!ran) {
         console.log(`[job] auto-remediation site ${site.id} "${site.name}" skipped — ${reason === 'credential-locked' ? 'another site sharing its GitHub credential is shipping right now' : "another process holds this site's shipping lock"}`);
         results.push({ siteId: site.id, skipped: reason === 'credential-locked' ? 'credential-locked' : 'locked' });
         continue;
       }
       globalRemaining -= result.shipped || 0;
+      if (result.stoppedReason === 'onboarding-analysis-pending') await alertIfDesignCaptureHeld(site);
       if (result.attempted || result.shipped) {
         console.log(`[job] auto-remediation site ${site.id} "${site.name}": attempted ${result.attempted}, shipped ${result.shipped}, failed ${result.failed}${result.stoppedReason ? ` (stopped: ${result.stoppedReason})` : ''}`);
+      }
+      if (result.stoppedReason === 'site-unreachable') {
+        // Everyone else goes first; this client's site is tried again below.
+        unreachable.push(site);
+        continue;
       }
       await alertIfShipStalled(site, result.shipped || 0);
       results.push({ siteId: site.id, ...result });
     } catch (err) {
       console.error(`[job] auto-remediation failed for site ${site.id} "${site.name}":`, err.message);
+      results.push({ siteId: site.id, error: err.message });
+    }
+  }
+  // One more look at sites that could not be reached the first time round.
+  for (const site of unreachable) {
+    if (globalRemaining <= 0 || windowClosed(windowEndsAt)) break;
+    try {
+      const outcome = await shipWithDeadline(site, globalRemaining);
+      if (outcome.timedOut) { results.push({ siteId: site.id, error: 'timed-out' }); globalRemaining = await globalRemainingSeed(); continue; }
+      const { ran, result } = outcome;
+      if (!ran) { results.push({ siteId: site.id, skipped: 'locked' }); continue; }
+      globalRemaining -= result.shipped || 0;
+      if (result.stoppedReason === 'site-unreachable') {
+        console.error(`[job] auto-remediation site ${site.id} "${site.name}": live site still unreachable on the second try — its work stays queued for the next run.`);
+      }
+      await alertIfShipStalled(site, result.shipped || 0);
+      results.push({ siteId: site.id, retriedAfterUnreachable: true, ...result });
+    } catch (err) {
+      console.error(`[job] auto-remediation retry failed for site ${site.id} "${site.name}":`, err.message);
       results.push({ siteId: site.id, error: err.message });
     }
   }
@@ -1472,7 +1641,7 @@ export async function runAutoRemediationForAllSites() {
 // same batch branch/PR.
 export async function runAutoRemediationCatchupForAllSites(tz) {
   await resumeDueAutoRemediationPauses().catch((err) => console.error('[job] resumeDueAutoRemediationPauses failed:', err.message));
-  const sites = (await listSites()).filter(isShippable);
+  const sites = rotateForToday((await listSites()).filter(isShippable));
   let globalRemaining = await globalRemainingSeed();
   for (const site of sites) {
     if (globalRemaining <= 0) {
@@ -1488,7 +1657,9 @@ export async function runAutoRemediationCatchupForAllSites(tz) {
       // alongside a run already in flight for this site, or spending a
       // credential another site is mid-batch against — in this process or
       // another one.
-      const { ran, result } = await shipSiteWithLocks(site, globalRemaining);
+      const outcome = await shipWithDeadline(site, globalRemaining);
+      if (outcome.timedOut) { globalRemaining = await globalRemainingSeed(); continue; }
+      const { ran, result } = outcome;
       if (!ran) continue; // this site, or its GitHub credential, is already shipping right now
       globalRemaining -= result.shipped || 0;
       if (result.shipped) console.log(`[job] auto-remediation catch-up: site ${site.id} shipped ${result.shipped} after a missed ${SHIP_HOUR_LOCAL}:00 run`);
@@ -1637,7 +1808,8 @@ export async function queueDesignProfileDerivationForOnboarding(site, {
 // conflating "never analyzed" with "analyzed a week ago" would blur two
 // different situations (a broken site vs. a routine refresh) behind one
 // piece of logic.
-const DESIGN_PROFILE_RESCAN_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+// Shorter than the monthly cron's gap (28-31 days), so a profile derived late in one cycle is still due on the next 1st.
+const DESIGN_PROFILE_RESCAN_STALE_AFTER_MS = 25 * 24 * 60 * 60 * 1000;
 
 export async function queueDesignProfileRescanForSite(site, {
   hasUsableProfile = siteHasUsableDesignProfile,
@@ -1677,6 +1849,38 @@ export async function queueDesignProfileRescanForSite(site, {
     console.error(`[job] could not queue design-profile rescan for site ${site.id}:`, err.message);
     return false;
   }
+}
+
+// Weekly, cheap: compares a hash of each repo-connected site's live stylesheets
+// with last week's. First sight just records it. A change queues a full
+// re-capture right away (force), so a redesign is picked up within a week
+// instead of waiting for the monthly rescan. An unreadable site leaves the
+// stored value alone: no information is never "changed".
+export async function checkDesignChangesForAllSites({
+  listAllSites = listSites,
+  fingerprint = async (url) => (await import('./design-agent/lib/design-fingerprint.js')).computeDesignFingerprint(url),
+  queueRescan = (site) => queueDesignProfileRescanForSite(site, { force: true }),
+  save = async (siteId, fp) => query('UPDATE sites SET design_fingerprint = $2, design_fingerprint_at = now() WHERE id = $1', [siteId, fp]),
+} = {}) {
+  const sites = (await listAllSites()).filter((s) => s.auto_remediation_enabled && s.repo_owner && s.repo_name && isActiveSite(s));
+  let changed = 0;
+  for (const site of sites) {
+    try {
+      const url = sitePageUrl(site);
+      if (!url) continue;
+      const fp = await fingerprint(url);
+      if (!fp) continue;
+      if (site.design_fingerprint && site.design_fingerprint !== fp) {
+        console.log(`[job] design-change: site ${site.id} "${site.name}" stylesheets changed since last week — queueing a full design re-capture.`);
+        if (await queueRescan(site)) changed++;
+        else continue; // not queued (a job is already pending, or no usable profile yet): keep the old fingerprint so the change is seen again next week
+      }
+      if (site.design_fingerprint !== fp) await save(site.id, fp);
+    } catch (err) {
+      console.error(`[job] design-change check failed for site ${site.id}:`, err.message);
+    }
+  }
+  return { checked: sites.length, changed };
 }
 
 export async function queueDesignProfileRescanForAllSites({
@@ -1776,7 +1980,7 @@ export async function runPrStatusPollForAllSites() {
   // Repo-connected, not GSC/GA4-connected (listConnectedSites' filter) —
   // whether a site has open GitHub PRs to check depends on repo_owner/
   // repo_name, not analytics integration status.
-  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name && isActiveSite(s));
   let checked = 0;
   for (const site of sites) {
     let openDrafts;
@@ -1839,20 +2043,41 @@ export async function runStartupCatchup() {
     console.log('[catchup] disabled via DISABLE_CATCHUP.');
     return;
   }
-  const sites = await listConnectedSites();
-  for (const site of sites) {
-    try {
-      console.log(`[catchup] running daily job on startup for site ${site.id} "${site.name}"…`);
-      await runDailyJobForSite(site);
-      await runWeeklyIfDue(site);
-      await runExecutiveIfDue(site);
-      await runGeoAuditIfDue(site);
-      await noteGoogleAuthOutcome(true);
-    } catch (err) {
-      console.error(`[catchup] error for site ${site.id} "${site.name}":`, err.message);
-      await noteGoogleAuthOutcome(false, err);
+  // Same lock the 07:00 pass holds, so a restart (every deploy) can never run
+  // the daily job alongside it, or alongside another process's catch-up.
+  const { ran } = await withJobLock(jobKeyFor('daily-job', 'all-sites'), async () => {
+    const sites = await listConnectedSites();
+    for (const site of sites) {
+      try {
+        // A restart is not a reason to redo a day that is already complete:
+        // same "genuinely done today" test the hourly guard uses.
+        const reportDate = daysAgoInTz(site.timezone || process.env.TZ || 'Asia/Kolkata', GSC_LAG_DAYS);
+        const tzName = site.timezone || process.env.TZ || 'Asia/Kolkata';
+        const [existing, [latestExecReport]] = await Promise.all([
+          getNarrative(site.id, reportDate),
+          getLatestAgentRuns(site.id, ['executive-report']),
+        ]);
+        const doneToday = latestExecReport != null
+          && todayInTz(tzName, new Date(latestExecReport.created_at)) === todayInTz(tzName);
+        if (existing?.narrative && doneToday) {
+          console.log(`[catchup] site ${site.id} "${site.name}": today's work already complete — skipping.`);
+          continue;
+        }
+        console.log(`[catchup] running daily job on startup for site ${site.id} "${site.name}"…`);
+        await runDailyJobForSite(site);
+        await runWeeklyIfDue(site);
+        await runExecutiveIfDue(site);
+        await runGeoAuditIfDue(site);
+        await noteGoogleAuthOutcome(true, undefined, site);
+      } catch (err) {
+        console.error(`[catchup] error for site ${site.id} "${site.name}":`, err.message);
+        await noteGoogleAuthOutcome(false, err, site);
+      }
     }
+  });
+  if (!ran) {
+    console.log('[catchup] skipped — another process already holds the daily-job lock.');
+    return;
   }
-
   console.log('[catchup] done.');
 }

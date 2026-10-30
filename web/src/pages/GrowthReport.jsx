@@ -1,10 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
-import PageToolbar from '../components/PageToolbar.jsx';
-import PageIntro from '../components/layout/PageIntro.jsx';
 import KpiStrip from '../components/layout/KpiStrip.jsx';
 import Section from '../components/layout/Section.jsx';
-import Badge from '../components/Badge.jsx';
 import { fmtDay } from '../lib/format.js';
 import { STATUS } from '../lib/palette.js';
 import { Tray } from '../components/layout/Tray.jsx';
@@ -15,67 +12,29 @@ import SiteAuditSummaryCard from '../components/SiteAuditSummaryCard.jsx';
 import GrowthPlanNarrativeCard from '../components/GrowthPlanNarrativeCard.jsx';
 import BaselineReportCard from '../components/BaselineReportCard.jsx';
 
-// Chevron for the client picker (same as .fld select in index.css).
-const CHEVRON = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none' stroke='%238a8a8a' stroke-width='1.6'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E\")";
-
-// Client-facing "how much have we actually grown you" view — real data
-// only, strictly anchored to the site's real onboarding baseline (see
-// server/agents/lib/growth-report.js). No baseline yet -> an honest empty
-// state, never a chart anchored to a fabricated start date.
+// The baseline half of the Reports page (its "Baseline" tab; this used to be the Milestones page):
+// "how much have we actually grown you" — real data only, strictly anchored to the site's real onboarding
+// baseline (see server/agents/lib/growth-report.js). It opens with where the site stood when it first
+// landed (the baseline report, with the issues and security findings from the first full audit), then how
+// it has moved since. No baseline yet -> an honest empty state, never a chart anchored to a made-up date.
 //
-// isInternal (Platform Admin Milestones picker) — an internal admin can pick
-// a different client from a dropdown above the page; picking one re-fetches
-// via api.growthReport(siteId), which hits the staff-only
-// /internal/growth-report/:siteId route (server/routes/growth-report.js)
-// instead of the plain session-scoped one. Regular client users never get
-// the prop (or get it false), so they never see the picker and every fetch
-// stays exactly the plain api.growthReport() call, unchanged from before.
-export default function GrowthReport({ isInternal = false }) {
+// It always shows the session's own project. A platform admin looks at a client's by switching into that
+// project (the workspace switcher), not through a picker here. `siteId` is only used so staff can generate
+// a missing baseline report for the project they are in.
+export function GrowthReportBody({ isInternal = false, siteId }) {
   const [data, setData] = useState(null); // null = loading
   const [error, setError] = useState(false);
-  const [clients, setClients] = useState([]);
-  const [selectedSiteId, setSelectedSiteId] = useState(null); // null = admin's own site (default)
   const [baselineReport, setBaselineReport] = useState(null); // null = loading
 
-  const loadBaselineReport = () => {
-    const requestedSiteId = selectedSiteId;
-    return api.baselineReport(requestedSiteId || undefined)
-      .then((result) => { if (requestedSiteId === selectedSiteId) setBaselineReport(result); })
-      .catch(() => { if (requestedSiteId === selectedSiteId) setBaselineReport({ available: false, message: 'Unable to load your baseline report right now.' }); });
-  };
-  useEffect(() => { setBaselineReport(null); loadBaselineReport(); }, [selectedSiteId]);
+  const loadBaselineReport = () => api.baselineReport()
+    .then(setBaselineReport)
+    .catch(() => setBaselineReport({ available: false, message: 'Unable to load your baseline report right now.' }));
+  useEffect(() => { loadBaselineReport(); }, []);
 
-  const load = () => {
-    const requestedSiteId = selectedSiteId;
-    return api.growthReport(requestedSiteId || undefined)
-      .then((result) => {
-        // Ignore a stale response if the admin switched clients again while
-        // this request was still in flight.
-        if (requestedSiteId !== selectedSiteId) return;
-        setData(result);
-      })
-      .catch(() => { if (requestedSiteId === selectedSiteId) setError(true); });
-  };
-  useEffect(() => { setData(null); setError(false); load(); }, [selectedSiteId]);
-
-  useEffect(() => {
-    if (!isInternal) return;
-    api.clients.list()
-      // Milestones is a real-progress-since-onboarding view — only clients
-      // with an actual onboarding baseline belong here. This also happens to
-      // filter out soft-deleted sites, never-onboarded test sites, and
-      // leftover design-agent-worker.test.js fixture rows without needing a
-      // name-based blocklist.
-      .then((all) => {
-        const real = all.filter((c) => c.status === 'active' && c.baselined);
-        setClients(real);
-        // No "My site" option here (this is staff viewing clients, not a
-        // client viewing their own site) — land on the first real client
-        // instead of an unselected/blank picker.
-        setSelectedSiteId((prev) => prev ?? real[0]?.id ?? null);
-      })
-      .catch(() => {});
-  }, [isInternal]);
+  const load = () => api.growthReport()
+    .then(setData)
+    .catch(() => setError(true));
+  useEffect(() => { load(); }, []);
 
   // A Full Site Audit can take from seconds to well over an hour — poll
   // while it's still running so "Where You Stand Today" reflects real
@@ -104,33 +63,7 @@ export default function GrowthReport({ isInternal = false }) {
   ] : [];
 
   return (
-    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12 fade-up">
-      <PageToolbar>
-        {isInternal && clients.length > 0 && (
-          <>
-            <label htmlFor="milestones-client-picker" className="text-[13px] text-faint">Client</label>
-            <select id="milestones-client-picker" value={selectedSiteId ?? ''}
-              onChange={(e) => setSelectedSiteId(e.target.value ? Number(e.target.value) : null)}
-              className="h-8 pl-2.5 pr-8 rounded-control bg-white text-[13px] font-medium text-fg appearance-none"
-              style={{
-                boxShadow: 'var(--ring)',
-                backgroundImage: CHEVRON,
-                backgroundRepeat: 'no-repeat',
-                backgroundPosition: 'right 10px center',
-              }}>
-              {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          </>
-        )}
-        {data?.available && (
-          <span className="ml-auto hidden md:inline-flex"><Badge tone="green" dot>Active monitoring</Badge></span>
-        )}
-      </PageToolbar>
-
-      <PageIntro
-        title={data?.available ? `Progress since the ${fmtDay(data.onboardedAt)} ${onboardedYear} baseline` : 'Milestones'}
-        subtitle="Every number here traces to a real, already-verified source." />
-
+    <div>
       {error ? (
         <div className="rounded-card bg-[#fdecec] text-[#b42318] text-sm px-4 py-3">Unable to load your growth report right now.</div>
       ) : data === null ? (
@@ -142,7 +75,7 @@ export default function GrowthReport({ isInternal = false }) {
           <KpiStrip cols={3} items={kpis} />
 
           <div className="mt-3">
-            <BaselineReportCard report={baselineReport} siteId={isInternal ? selectedSiteId : undefined}
+            <BaselineReportCard report={baselineReport} siteId={isInternal ? siteId : undefined}
               isInternal={isInternal} onGenerated={loadBaselineReport} />
           </div>
 
@@ -204,3 +137,5 @@ export default function GrowthReport({ isInternal = false }) {
     </div>
   );
 }
+
+export default GrowthReportBody;

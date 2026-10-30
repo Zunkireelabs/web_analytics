@@ -2,6 +2,7 @@ import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
 import { ownDomains, filterOwnDomainPages, hostnameOf } from '../agents/lib/site-domain.js';
 import { callLLMForJson } from '../llm.js';
+import { findLinkSuggestionIssues } from './lib/output-guard.js';
 
 export const meta = {
   id: 'internal-links',
@@ -68,7 +69,7 @@ export async function generate({ siteId, params }) {
   const user = `Source page text: ${fetched.analysis.bodyText.slice(0, 2500)}\n\nCandidate target URLs:\n${candidates.join('\n')}`;
   let suggestions;
   try {
-    suggestions = await callLLMForJson(system, user, { maxTokens: 600, generatorId: meta.id, siteId });
+    suggestions = await callLLMForJson(system, user, { maxTokens: 600, generatorId: meta.id, siteId, pageUrl: page });
     if (!Array.isArray(suggestions)) throw new Error('not an array');
   } catch {
     throw Object.assign(new Error('Internal links generation failed: model did not return valid JSON'), { status: 400 });
@@ -77,9 +78,28 @@ export async function generate({ siteId, params }) {
   // Deterministic safety check — never trust the model's URL alone: drop
   // any suggestion whose targetUrl isn't literally one of the real
   // candidates given, rather than let a hallucinated link through.
-  const clean = suggestions.filter((s) => s && typeof s.anchorText === 'string' && candidateSet.has(s.targetUrl));
-  const dropped = suggestions.length - clean.length;
+  const valid = suggestions.filter((s) => s && typeof s.anchorText === 'string' && candidateSet.has(s.targetUrl));
+  const real = valid.slice(0, 5); // the cap is not a drop
 
-  const content = { page, suggestions: clean.slice(0, 5), droppedHallucinated: dropped };
+  // Anchor guard (lib/output-guard.js): an anchor must describe the page it
+  // links to. The target's real title is fetched once per distinct URL, so
+  // "strong English proficiency" can't point at an AI guide. Best effort: a
+  // page that can't be fetched is judged on its URL slug alone.
+  const titles = new Map(await Promise.all([...new Set(real.map((s) => s.targetUrl))].map(async (url) => {
+    const t = await analyzePageUrl(url).then((r) => (r.ok ? r.analysis.title : '')).catch(() => '');
+    return [url, t || ''];
+  })));
+  const withTitles = real.map((s) => (titles.get(s.targetUrl) ? { ...s, targetTitle: titles.get(s.targetUrl) } : s));
+  const badIdx = new Set(findLinkSuggestionIssues(withTitles).map((i) => Number(/^suggestions\[(\d+)\]/.exec(i.path)?.[1])));
+  const clean = withTitles.filter((_, i) => !badIdx.has(i));
+  const dropped = (suggestions.length - valid.length) + (real.length - clean.length);
+  if (!clean.length && real.length) {
+    throw Object.assign(
+      new Error('Every suggested internal link had an anchor that does not describe its target page, so none was drafted.'),
+      { status: 400, userFacing: true, refusal: true, reason: 'output-guard-failed' },
+    );
+  }
+
+  const content = { page, suggestions: clean, droppedHallucinated: dropped };
   return { content, summary: `${clean.length} internal link suggestion(s)` + (dropped ? ` (${dropped} dropped — not a real candidate URL)` : '') };
 }

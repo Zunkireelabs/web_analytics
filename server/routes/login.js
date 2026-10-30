@@ -1,11 +1,15 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
+import { randomBytes } from 'node:crypto';
 import { getUserByEmail, getUserById, updateUserPassword, getUserStatus } from '../store/users.js';
-import { createSignupRequest } from '../store/signup-requests.js';
+import { appOrigin } from './lib/app-url.js';
+import { authRateLimit } from '../lib/rate-limit.js';
+import { createSignupRequest, hasOpenSignupRequest, peekVerificationToken, consumeVerificationToken, getActivationRequest, getCompanyNameForEmail } from '../store/signup-requests.js';
+import { issueLoginCode, checkLoginCode, CODE_MINUTES } from '../store/login-codes.js';
 import { createContactRequest } from '../store/contact-requests.js';
-import { sendContactLeadEmail, sendPasswordResetEmail } from '../report/email.js';
+import { sendContactLeadEmail, sendPasswordResetEmail, sendSignupReceivedEmail, sendSignupStaffNotice, sendLoginCodeEmail } from '../report/email.js';
 import { getSiteStatus } from '../store/read.js';
-import { getAccessContext, decideSiteAccess, listWorkspacesForUser, pickLoginSite } from '../store/workspaces.js';
+import { getAccessContext, decideSiteAccess, listWorkspacesForUser, listSharedProjectsForUser, pickLoginSite, isBlockedForReadOnly, isAllowedWithoutProject } from '../store/workspaces.js';
 import { createPasswordReset, consumePasswordReset } from '../store/password-resets.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
 
@@ -13,7 +17,50 @@ import { recordAuditEvent } from '../store/admin/audit-log.js';
 // server/migrations/011_users_and_site_profile.sql) — provisioned via
 // `npm run create-client` or staff approval of a real signup request (see
 // POST /signup-requests below), never immediately self-serve.
+// Compared against when the address has no account, so a missing account costs the same time as a wrong password.
+const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', 10);
+
 const router = Router();
+
+// Throttles the public sign-in / sign-up routes by IP and by address, across every app instance.
+router.use(authRateLimit());
+
+// Starts the session for a user who has proven who they are (password, emailed code, or the approval
+// link plus their password). Lands them in their home project when they can still reach it, else in
+// another workspace they belong to; belonging to none is a refusal, not a session every route would
+// then 403. Returns null on success, or the refusal to send.
+async function openSession(req, user) {
+  // Every way in ends here, so a disabled account is refused whether it came with a password, an
+  // emailed code or the approval link.
+  if ((await getUserStatus(user.id)) !== 'active') return { status: 403, error: 'This account has been disabled. Contact your workspace owner or SuperRank.' };
+  const landingSiteId = await pickLoginSite(user, { companySiteId: Number(process.env.COMPANY_SITE_ID) });
+  // An account approved from a sign-up request has a login and no project yet
+  // (users.site_id is NULL, migration 198): it signs in to an empty account and
+  // creates its own workspace. That is the ONLY case let through without a
+  // project — someone who had a home project and lost every route to it is
+  // still refused, since for them it means access was taken away.
+  // Having no project is not having no access: an owner who deleted their last project still owns
+  // the workspace and must be able to sign in and create another. Refuse only someone who belongs to
+  // no workspace and has no shared project left, which does mean access was taken away.
+  if (!landingSiteId && user.site_id != null) {
+    const opts = { companySiteId: Number(process.env.COMPANY_SITE_ID) };
+    const [workspaces, shared] = await Promise.all([listWorkspacesForUser(user, opts), listSharedProjectsForUser(user, opts)]);
+    if (!workspaces.length && !shared.length) return { status: 403, error: 'Your account is not a member of any workspace.' };
+  }
+  // A fresh session id at the moment of sign-in, so an id someone planted or observed beforehand is
+  // worthless afterwards. (Not every caller has express-session's regenerate; plain objects skip it.)
+  if (typeof req.session?.regenerate === 'function') {
+    await new Promise((resolve, reject) => req.session.regenerate((err) => (err ? reject(err) : resolve())));
+  }
+  req.session.userId = user.id;
+  req.session.siteId = landingSiteId || null;
+  // siteId is the ACTIVE project and changes when the user switches
+  // projects (POST /workspaces/switch). homeSiteId never does: it is what
+  // the internal/platform gates key on, so a platform admin who switches
+  // into a client's project is still a platform admin.
+  req.session.homeSiteId = user.site_id;
+  return null;
+}
 
 router.post('/login', async (req, res, next) => {
   try {
@@ -22,21 +69,47 @@ router.post('/login', async (req, res, next) => {
       return res.status(401).json({ error: 'Email and password are required.' });
     }
     const user = await getUserByEmail(String(email).trim().toLowerCase());
-    const ok = user && (await bcrypt.compare(password, user.password_hash));
+    const ok = await bcrypt.compare(password, user ? user.password_hash : DUMMY_HASH) && Boolean(user);
     if (!ok) return res.status(401).json({ error: 'Invalid email or password.' });
-    // Land in the user's home project when they can still reach it, else in
-    // another workspace they belong to; belonging to none is a refusal, not
-    // a session every route would then 403.
-    const landingSiteId = await pickLoginSite(user, { companySiteId: Number(process.env.COMPANY_SITE_ID) });
-    if (!landingSiteId) return res.status(403).json({ error: 'Your account is not a member of any workspace.' });
-    req.session.userId = user.id;
-    req.session.siteId = landingSiteId;
-    // siteId is the ACTIVE project and changes when the user switches
-    // projects (POST /workspaces/switch). homeSiteId never does: it is what
-    // the internal/platform gates key on, so a platform admin who switches
-    // into a client's project is still a platform admin.
-    req.session.homeSiteId = user.site_id;
+    const refused = await openSession(req, user);
+    if (refused) return res.status(refused.status).json({ error: refused.error });
     return res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+// Sign in with an emailed code. Sending always answers the same way, whether or not the address has an
+// account, so the page cannot be used to find out who is a customer. A code is only made and mailed for
+// a real, active account; asking again too soon is quietly ignored (the page has its own resend timer).
+const CODE_SENT = { ok: true, message: 'If that address has an account, a sign-in code is on its way.' };
+router.post('/login/code/send', async (req, res, next) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return res.status(400).json({ error: 'Enter a valid work email.' });
+    const user = await getUserByEmail(email);
+    if (user && (await getUserStatus(user.id)) === 'active') {
+      const issued = await issueLoginCode(email);
+      if (issued.code) {
+        sendLoginCodeEmail({ email, code: issued.code, minutes: CODE_MINUTES })
+          .catch((err) => console.error('[login] sign-in code email failed:', err.message));
+      }
+    }
+    res.json(CODE_SENT);
+  } catch (e) { next(e); }
+});
+
+router.post('/login/code/verify', async (req, res, next) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    // 400, not 401: the app treats any 401 as "your session ended" and signs the person out of the page.
+    const bad = () => res.status(400).json({ error: 'That code is not right, or it has expired. Ask for a new one.' });
+    if (!email) return bad();
+    const checked = await checkLoginCode(email, req.body?.code);
+    if (!checked.ok) return bad();
+    const user = await getUserByEmail(email);
+    if (!user || (await getUserStatus(user.id)) !== 'active') return bad();
+    const refused = await openSession(req, user);
+    if (refused) return res.status(refused.status).json({ error: refused.error });
+    res.json({ ok: true });
   } catch (e) { next(e); }
 });
 
@@ -49,16 +122,28 @@ router.post('/login', async (req, res, next) => {
 // third-party service needed for this low-traffic B2B form).
 router.post('/signup-requests', async (req, res, next) => {
   try {
-    const { companyName, websiteDomain, contactEmail, password, message, honeypot } = req.body || {};
+    const { fullName, companyName, websiteDomain, contactEmail, password, role, heardFrom, termsAccepted, message, honeypot } = req.body || {};
     if (honeypot) return res.status(200).json({ ok: true }); // silently pretend success to the bot
 
+    if (!fullName || !String(fullName).trim()) return res.status(400).json({ error: 'Your full name is required.' });
     if (!companyName || !String(companyName).trim()) return res.status(400).json({ error: 'companyName is required.' });
+    if (!role || !String(role).trim()) return res.status(400).json({ error: 'Your role is required.' });
+    if (termsAccepted !== true) return res.status(400).json({ error: 'Please accept the Terms and Privacy policy.' });
     if (!contactEmail || !password) return res.status(400).json({ error: 'contactEmail and password are required.' });
     if (String(password).length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
 
     const normalizedEmail = String(contactEmail).trim().toLowerCase();
-    const existing = await getUserByEmail(normalizedEmail);
-    if (existing) return res.status(409).json({ error: `A user with email "${normalizedEmail}" already exists.` });
+    // The same answer whether this address is new, already has an account, or already has a request
+    // waiting: the form cannot be used to find out who is a customer, and a repeat submit makes no
+    // second request and mails no one again.
+    const received = {
+      ok: true, status: 'pending', approvalRequired: true,
+      message: 'Thanks, we have your request. A person at SuperRank checks every new account before it opens. When yours is approved we email you a link to confirm your address, and then you can sign in.',
+    };
+    if ((await getUserByEmail(normalizedEmail)) || (await hasOpenSignupRequest(normalizedEmail))) {
+      await bcrypt.hash(password, 10); // the same work a new address costs, so timing does not give it away
+      return res.status(201).json(received);
+    }
 
     const passwordHash = await bcrypt.hash(password, 10);
     const request = await createSignupRequest({
@@ -67,8 +152,98 @@ router.post('/signup-requests', async (req, res, next) => {
       contactEmail: normalizedEmail,
       passwordHash,
       message: message ? String(message).trim() : null,
+      fullName: String(fullName).trim().slice(0, 120),
+      role: String(role).trim().slice(0, 80),
+      heardFrom: heardFrom ? String(heardFrom).trim().slice(0, 120) : null,
+      termsAccepted: true,
     });
-    res.status(201).json({ id: request.id, status: request.status });
+    // Two emails, neither able to fail the sign-up (the request is already saved):
+    // one to the person, so they know it is waiting on a human and what happens
+    // next; one to SuperRank staff, so a request is not found by chance days later.
+    // Fire-and-forget on purpose — a slow or broken mail server must not make the
+    // form look like it failed.
+    const origin = appOrigin(req);
+    sendSignupReceivedEmail({ companyName: request.company_name, contactEmail: normalizedEmail })
+      .catch((err) => console.error('[signup] confirmation email failed:', err.message));
+    sendSignupStaffNotice({
+      companyName: request.company_name, websiteDomain: request.website_domain, contactEmail: normalizedEmail,
+      fullName: request.full_name, role: request.role, heardFrom: request.heard_from,
+      message: request.message, reviewUrl: `${origin}/account?scope=platform`,
+    }).catch((err) => console.error('[signup] staff notice failed:', err.message));
+
+    // `approvalRequired` + `message` let the sign-up page say plainly that this is
+    // not an open account yet, instead of implying they can sign in now.
+    res.status(201).json(received); // byte-for-byte what an existing address gets
+  } catch (e) { next(e); }
+});
+
+// The link in the approval email lands on a page that asks "confirm your email?" and only then
+// calls the second route. Looking a token up is a GET with no side effects, so a mail scanner that
+// pre-fetches links cannot use it up; creating the account is a POST someone has to click.
+const verifyFailure = { invalid: 'This link is not valid, or it was already used.', exists: 'An account with this email already exists. Try signing in.' };
+
+router.get('/signup/verify', async (req, res, next) => {
+  try {
+    const info = await peekVerificationToken(String(req.query.token || ''));
+    if (!info) return res.status(404).json({ error: verifyFailure.invalid, code: 'invalid' });
+    if (info.expired) return res.status(410).json({ error: 'This link has expired. Ask SuperRank to send you a new one.', code: 'expired' });
+    res.json({ email: info.email, companyName: info.companyName });
+  } catch (e) { next(e); }
+});
+
+router.post('/signup/verify', async (req, res, next) => {
+  try {
+    const result = await consumeVerificationToken(String(req.body?.token || ''));
+    if (!result.ok) return res.status(result.reason === 'exists' ? 409 : 400).json({ error: verifyFailure[result.reason] || verifyFailure.invalid, code: result.reason });
+    await recordAuditEvent({ userId: result.user.id, siteId: null, ip: req.ip, get: (h) => req.get(h) }, {
+      action: 'signup_request.verified', targetType: 'signup_request', targetId: String(result.requestId),
+      metadata: { signupRequestId: result.requestId, companyName: result.companyName }, success: true,
+    });
+    // No session is created here: they sign in with the password they chose, so confirming an email
+    // never doubles as a way in.
+    res.json({ ok: true, email: result.user.email });
+  } catch (e) { next(e); }
+});
+
+// The approval email's "Sign in" button lands on the sign-in page with the link's token. Pressing Sign
+// in there sends the token and the password they chose at sign-up. The password is checked BEFORE the
+// link is used (a mistyped password must not burn it); then the link is used, the login is created, and
+// they are signed in, in one step.
+router.post('/signup/activate', async (req, res, next) => {
+  try {
+    const token = String(req.body?.token || '');
+    const password = String(req.body?.password || '');
+    const pending = await getActivationRequest(token);
+    if (!pending) return res.status(400).json({ error: verifyFailure.invalid, code: 'invalid' });
+    // The emailed link proves the inbox, so it may also set a password: a person who forgot the one they
+    // chose at sign-up (or never needed it, signing in by emailed code) picks a new one here. Otherwise the
+    // password they chose must match, and is checked BEFORE the link is used so a typo cannot burn it.
+    const newPassword = String(req.body?.newPassword || '');
+    let passwordHash = null;
+    if (newPassword) {
+      if (newPassword.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.', code: 'password' });
+      passwordHash = await bcrypt.hash(newPassword, 10);
+    } else if (req.body?.oneClick === true) {
+      // "Continue" on the approval page: the emailed link alone is the way in, no password asked. The password typed
+      // on the sign-up form is deliberately NOT carried over. Anyone can type someone else's address into that form
+      // with a password only they know; if the real owner then clicked an approval email they did not expect, that
+      // password would give the stranger the account. So this account starts with a random password nobody knows, and
+      // the person signs in next time with an emailed code, or sets a password of their own ("I don't remember my
+      // password" on this page, or Account settings).
+      passwordHash = await bcrypt.hash(randomBytes(32).toString('hex'), 10);
+    } else if (!password || !(await bcrypt.compare(password, pending.passwordHash))) {
+      return res.status(400).json({ error: 'That is not the password you chose when you signed up.', code: 'password' });
+    }
+    const result = await consumeVerificationToken(token, { passwordHash });
+    if (!result.ok) return res.status(result.reason === 'exists' ? 409 : 400).json({ error: verifyFailure[result.reason] || verifyFailure.invalid, code: result.reason });
+    await recordAuditEvent({ userId: result.user.id, siteId: null, ip: req.ip, get: (h) => req.get(h) }, {
+      action: 'signup_request.verified', targetType: 'signup_request', targetId: String(result.requestId),
+      metadata: { signupRequestId: result.requestId, companyName: result.companyName }, success: true,
+    });
+    const user = await getUserById(result.user.id);
+    const refused = await openSession(req, user);
+    if (refused) return res.status(refused.status).json({ error: refused.error });
+    res.json({ ok: true, email: result.user.email });
   } catch (e) { next(e); }
 });
 
@@ -242,15 +417,30 @@ router.post('/password-reset/:token', async (req, res, next) => {
 
 router.get('/me', async (req, res, next) => {
   try {
-    const authed = !!(req.session?.userId && req.session?.siteId);
+    const authed = !!req.session?.userId;
     if (!authed) return res.json({ authed: false, isInternal: false });
     const user = await getUserById(req.session.userId);
+    // A new account with no project is asked to name its workspace first; its company name is the suggestion.
+    const suggestedWorkspaceName = !req.session.siteId && user?.email ? await getCompanyNameForEmail(user.email) : null;
+    // Read-only on the ACTIVE project (a workspace or project "member"), so the screens can hide or disable the
+    // write controls instead of letting them fail with a 403. The server still enforces it in requireAuth.
+    let readOnly = false;
+    if (req.session.siteId) {
+      const access = await getAccessContext(req.session.userId, req.session.siteId).catch(() => null);
+      const decision = access && decideSiteAccess({ ...access, companySiteId: Number(process.env.COMPANY_SITE_ID) });
+      readOnly = Boolean(decision?.allowed) && isBlockedForReadOnly({ ...decision, method: 'POST', path: '/api/projects-write-probe' });
+    }
     res.json({
+      readOnly,
       authed: true,
+      suggestedWorkspaceName,
       isInternal: isInternalSite(req.session.homeSiteId ?? req.session.siteId),
       role: user?.role || null,
       email: user?.email || null,
-      siteId: req.session.siteId,
+      siteId: req.session.siteId ?? null,
+      // Signed in, but no project yet (a new account): the app shows the
+      // create-a-workspace screen instead of the project views.
+      noProject: !req.session.siteId,
     });
   } catch (e) { next(e); }
 });
@@ -261,8 +451,14 @@ router.get('/me', async (req, res, next) => {
 router.get('/workspaces', requireAuth, async (req, res, next) => {
   try {
     const user = await getUserById(req.userId);
-    const workspaces = await listWorkspacesForUser(user, { companySiteId: Number(process.env.COMPANY_SITE_ID) });
-    res.json({ activeSiteId: req.siteId, workspaces });
+    const companySiteId = Number(process.env.COMPANY_SITE_ID);
+    const [workspaces, shared] = await Promise.all([
+      listWorkspacesForUser(user, { companySiteId }),
+      listSharedProjectsForUser(user, { companySiteId }),
+    ]);
+    // `shared` = projects the person was given access to one by one, outside any
+    // workspace of theirs. It deliberately carries no workspace name.
+    res.json({ activeSiteId: req.siteId, workspaces, shared });
   } catch (e) { next(e); }
 });
 
@@ -311,6 +507,23 @@ function isInternalSite(siteId) {
 // in parallel: independent lookups on independent tables, no reason to
 // serialize them.
 export async function requireAuth(req, res, next) {
+  // Signed in with no project yet (a new account). Let them through ONLY to the
+  // few routes that work without one — see isAllowedWithoutProject. The user
+  // is still checked every request, so disabling an account takes effect
+  // immediately here too; req.siteId stays null, so nothing downstream can
+  // mistake this for a project-scoped request.
+  if (req.session?.userId && !req.session?.siteId) {
+    if (!isAllowedWithoutProject({ method: req.method, path: req.originalUrl })) {
+      return res.status(403).json({ error: 'Create a workspace and a project first.', code: 'NO_PROJECT' });
+    }
+    try {
+      if (await getUserStatus(req.session.userId) !== 'active') return res.status(403).json({ error: 'This user has been disabled.' });
+    } catch (e) { return next(e); }
+    req.userId = req.session.userId;
+    req.siteId = null;
+    req.homeSiteId = req.session.homeSiteId ?? null;
+    return next();
+  }
   if (req.session?.userId && req.session?.siteId) {
     req.userId = req.session.userId;
     req.siteId = req.session.siteId;
@@ -336,6 +549,11 @@ export async function requireAuth(req, res, next) {
       const decision = access && decideSiteAccess({ ...access, companySiteId: Number(process.env.COMPANY_SITE_ID) });
       if (!decision?.allowed) {
         return res.status(403).json({ error: 'You do not have access to this project.' });
+      }
+      // A workspace "member" is read-only: refuse every write except personal
+      // account actions. One chokepoint here, so no write route has to remember.
+      if (isBlockedForReadOnly({ ...decision, method: req.method, path: req.originalUrl })) {
+        return res.status(403).json({ error: 'You have read-only access to this workspace.' });
       }
     } catch (e) { return next(e); }
     return next();

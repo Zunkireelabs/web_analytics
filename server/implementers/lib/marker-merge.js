@@ -26,6 +26,8 @@ import { isSectionScaleTextClass, isFixedHeightClass } from '../../lib/text-scal
 //     title: "current value" # SEOAI:NAME
 
 import { isJsxFile } from './structural-detect.js';
+import { isFaqCapableTemplate } from '../../lib/fix-design-options.js';
+import { findMergeValueIssues, describeIssues, isEmptyMarkerValue } from '../../generators/lib/output-guard.js';
 
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -549,6 +551,10 @@ export function spliceMarkers(fileContent, markerMap, values) {
 
   for (const [field, markerName] of Object.entries(markerMap)) {
     if (!(field in values)) continue; // this draft type doesn't set this field
+    // Never write an empty value into a marker (an empty wrapper / empty
+    // JSON-LD block ships as a blank strip or a broken schema). The marker is
+    // left exactly as it was.
+    if (isEmptyMarkerValue(values[field])) continue;
     const found = findMarker(fileContent, markerName);
     if (!found) { missingMarkers.push(markerName); continue; }
     // A field with a LINE_HEAD_FALLBACK_KEY (currently just `canonical`)
@@ -1326,7 +1332,30 @@ export function proseStyleFor(designProfile) {
   };
 }
 
-export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null, { suppressSchema = false, page = null, fileContent = null } = {}) {
+// The output guard (generators/lib/output-guard.js) runs on every value this
+// returns, so hand-built and auto-built drafts are both covered: a rendered
+// value with an empty wrapper, scraped-navigation/self-review JSON-LD, a
+// header-less table, a link whose anchor doesn't describe its target, or an
+// empty marker is refused here instead of being spliced into a client file.
+// `resolveLinkTarget(url)` is optional (backend.js passes the site's
+// url_file_map resolver); without it only the anchor/empty checks run.
+export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null, options = {}) {
+  const built = buildMergeValuesUnchecked(actionType, content, mode, componentTemplates, designProfile, options);
+  if (!built.ok) return built;
+  // For expand/refresh only the NEW render is checked: the stored marker may
+  // legitimately carry older sibling-focus content this draft does not own.
+  const guardIssues = findMergeValueIssues(built.fresh || built.values, {
+    suggestions: actionType === 'internal-links' ? content?.suggestions : null,
+    resolves: options.resolveLinkTarget || null,
+  });
+  if (guardIssues.length) {
+    return { ok: false, reason: 'output-guard', issues: guardIssues, error: `Output guard refused this draft before it reached the file: ${describeIssues(guardIssues)}.` };
+  }
+  const { fresh: _fresh, ...rest } = built;
+  return rest;
+}
+
+function buildMergeValuesUnchecked(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null, { suppressSchema = false, page = null, fileContent = null } = {}) {
   // Resolved per call rather than precomputed: only the branch that actually
   // renders visible HTML for this action type ever needs one.
   // sanitizeCapturedTemplate runs here, once, for every actionType that
@@ -1386,9 +1415,15 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     // height strip every captured template gets, not the blog-unsafe one.
     // Falls back to the ordinary faq template/projection when no inline
     // variant has been captured yet — never invents a look.
-    const faqTemplate = inline && componentTemplates.faqInline
-      ? sanitizeCapturedTemplate(componentTemplates.faqInline)
-      : templateFor('faq', componentTemplates.faq, DEFAULT_FAQ_TEMPLATE);
+    // A person's design choice (Action Center, "Needs your design choice") names one of the site's OWN templates; it wins
+    // over the default selection below, but only if that template really can show FAQ items on this site.
+    const pickedKey = typeof content.designTemplate === 'string' ? content.designTemplate : null;
+    const picked = pickedKey && isFaqCapableTemplate(componentTemplates[pickedKey]) ? componentTemplates[pickedKey] : null;
+    const faqTemplate = picked
+      ? sanitizeCapturedTemplate(picked, { inline, groundedHeadingClass })
+      : inline && componentTemplates.faqInline
+        ? sanitizeCapturedTemplate(componentTemplates.faqInline)
+        : templateFor('faq', componentTemplates.faq, DEFAULT_FAQ_TEMPLATE);
     const visible = renderFaqHtml(content.items, faqTemplate);
     // suppressSchema: the page already carries an FAQPage schema from the
     // OTHER FAQ/Q&A slot (qa-content) — see backend.js's hasExistingFaqSchema
@@ -1548,7 +1583,7 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
       // whose wording changed) — add alongside what's already there.
       html = `${existing.trim()}\n${taggedHtml}`;
     }
-    return { ok: true, values: { expandedContent: html } };
+    return { ok: true, values: { expandedContent: html }, fresh: { expandedContent: newHtml } };
   }
 
   if (actionType === 'qa-content') {
@@ -1631,7 +1666,7 @@ export function deriveMergeValueKey(actionType) {
   const probe = PROBE_CONTENT_BY_ACTION_TYPE[actionType];
   let key = null;
   if (probe) {
-    const result = buildMergeValues(actionType, probe, 'visible', {}, null);
+    const result = buildMergeValuesUnchecked(actionType, probe, 'visible', {}, null);
     const keys = result.ok ? Object.keys(result.values) : [];
     if (keys.length === 1) key = keys[0];
   }

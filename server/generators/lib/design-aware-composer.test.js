@@ -98,3 +98,30 @@ describe('pageStructureGuidance — canonical pageTemplates take priority', () =
     assert.doesNotMatch(guidance, /live-landing-pattern/);
   });
 });
+
+import { test as ownTest } from 'node:test';
+import assertOwn from 'node:assert/strict';
+import { pageStructureGuidance as guide, ownPageGuidance } from './design-aware-composer.js';
+
+const siteWithPages = {
+  url_file_map: { siteRoot: { designProfile: {
+    pageTypePatterns: { homepage: { sectionOrder: ['hero', 'faq'], notes: 'home only' } },
+    pages: [
+      { url: 'https://x.test/packages/', pageType: 'other', sections: [
+        { role: 'nav' }, { role: 'hero', width: 'wide', alignment: 'center', spacing: { after: 56 } },
+        { role: 'cards', width: 'container', components: [{ type: 'card' }], spacing: { after: 44 } }, { role: 'footer' }] },
+      { url: 'https://x.test/faq/', pageType: 'faq', sections: [{ role: 'faq', width: 'narrow' }] },
+    ],
+  } } },
+};
+
+ownTest("a page the capture recorded is described by its OWN sections, not its page type's", () => {
+  const g = guide(siteWithPages, 'faq', { pageUrl: 'https://x.test/packages' });
+  assertOwn.match(g, /This exact page \(\/packages\)/);
+  assertOwn.match(g, /hero wide center 56px below -> cards container with card 44px below/);
+  assertOwn.doesNotMatch(g, /nav|footer/);
+});
+ownTest('an unrecorded page falls back to the page-type guidance as before', () => {
+  assertOwn.equal(ownPageGuidance(siteWithPages, 'https://x.test/unknown/'), null);
+  assertOwn.match(guide(siteWithPages, 'homepage', { pageUrl: 'https://x.test/unknown/' }), /home only/);
+});

@@ -26,4 +26,8 @@ UPDATE sites SET client_number = 2 WHERE id = 8862 AND client_number IS NULL;
 -- rather than hardcoded to 2, so this migration stays safe to re-run after
 -- more real clients have been onboarded.
 CREATE SEQUENCE IF NOT EXISTS sites_client_number_seq;
-SELECT setval('sites_client_number_seq', (SELECT COALESCE(MAX(client_number), 0) FROM sites));
+-- setval() rejects 0, so an empty table (a brand-new database) starts the sequence at 1 and marks it
+-- "not yet used", while a populated one continues after its highest number, exactly as before.
+SELECT setval('sites_client_number_seq',
+  GREATEST((SELECT COALESCE(MAX(client_number), 0) FROM sites), 1),
+  (SELECT COALESCE(MAX(client_number), 0) FROM sites) > 0);

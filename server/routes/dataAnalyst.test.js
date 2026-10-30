@@ -21,8 +21,9 @@ mock.module(resolve('../store/users.js'), {
 });
 
 let siteById;
+let lastSiteLookup;
 mock.module(resolve('../store/read.js'), {
-  namedExports: { getSiteById: async () => siteById, getSiteStatus: async () => null },
+  namedExports: { getSiteById: async (id) => { lastSiteLookup = id; return siteById; }, getSiteStatus: async () => null },
 });
 
 let capturedPythonCall;
@@ -58,7 +59,7 @@ mock.module(resolve('./action-center.js'), {
   },
 });
 
-const dataAnalystRouter = (await import('./dataAnalyst.js')).default;
+const { default: dataAnalystRouter, clientAnalystRouter } = await import('./dataAnalyst.js');
 const { requireAuth } = await import('./login.js');
 
 function findRoute(method, path) {
@@ -160,5 +161,66 @@ describe('POST .../insights/generate-draft — the "Send to Action Center" butto
     assert.equal(capturedGenerateDraftCall.opts.source, 'analyst');
     assert.equal(capturedGenerateDraftCall.opts.findingId, seoAction.findingId);
     assert.deepEqual(res.body, generateDraftResult);
+  });
+});
+
+// The client mirror: the same handlers, but always the session's own site.
+describe('client mirror — /analyst/... (every client, their own site only)', () => {
+  const clientRoute = (method, path) => {
+    const layer = clientAnalystRouter.stack.find((l) => l.route?.path === path && l.route.methods[method]);
+    if (!layer) throw new Error(`client route ${method.toUpperCase()} ${path} not registered`);
+    return layer.route.stack[layer.route.stack.length - 1].handle;
+  };
+
+  test('requireAuth guards /analyst only — the prefix, so no other router is touched', () => {
+    const authLayer = clientAnalystRouter.stack.find((l) => !l.route);
+    assert.equal(authLayer.handle, requireAuth);
+    assert.ok(authLayer.regexp.test('/analyst/dashboard'));
+    assert.ok(!authLayer.regexp.test('/internal/analyst/dashboard/1'));
+    assert.ok(!authLayer.regexp.test('/keywords/gaps'));
+  });
+
+  test('exposes exactly the routes the page uses — never ask, business-values, investigations, alerts or the activity feed', () => {
+    const exposed = clientAnalystRouter.stack.filter((l) => l.route).map((l) => `${Object.keys(l.route.methods)[0].toUpperCase()} ${l.route.path}`).sort();
+    assert.deepEqual(exposed, [
+      'GET /analyst/dashboard',
+      'GET /analyst/dashboard/series/:metricKey',
+      'POST /analyst/insights/generate-draft',
+      'POST /analyst/recommendations/:recommendationId/dismiss',
+      'POST /analyst/recommendations/:recommendationId/resolve',
+    ]);
+  });
+
+  test('the dashboard is read for the SESSION site, whatever client id the URL carries', async () => {
+    const res = mockRes();
+    await clientRoute('get', '/analyst/dashboard')({ siteId: 7, userId: 1, params: { clientId: '999' } }, res, () => {});
+    assert.equal(capturedPythonCall.path, '/dashboard/7');
+  });
+
+  test('a metric series is read for the session site too', async () => {
+    await clientRoute('get', '/analyst/dashboard/series/:metricKey')({ siteId: 7, params: { clientId: '999', metricKey: 'gsc_clicks' } }, mockRes(), () => {});
+    assert.equal(capturedPythonCall.path, '/dashboard/7/series/gsc_clicks');
+  });
+
+  test('resolve targets the session site and still threads the actor through', async () => {
+    await clientRoute('post', '/analyst/recommendations/:recommendationId/resolve')(
+      { siteId: 7, userId: 3, params: { clientId: '999', recommendationId: '55' } }, mockRes(), () => {});
+    assert.equal(capturedPythonCall.path, '/clients/7/recommendations/55/resolve');
+    assert.equal(capturedPythonCall.opts.body.resolved_by, 'staff@zunkireelabs.com');
+  });
+
+  test('dismiss targets the session site', async () => {
+    await clientRoute('post', '/analyst/recommendations/:recommendationId/dismiss')(
+      { siteId: 7, userId: 3, params: { clientId: '999', recommendationId: '55' } }, mockRes(), () => {});
+    assert.equal(capturedPythonCall.path, '/clients/7/recommendations/55/dismiss');
+  });
+
+  test('send-to-Action-Center looks up and drafts for the session site, never the URL one', async () => {
+    siteById = { id: 7 };
+    seoAction = { generatorId: 'blog-outline', params: {}, findingId: 'f1' };
+    await clientRoute('post', '/analyst/insights/generate-draft')(
+      { siteId: 7, params: { clientId: '999' }, body: { insight: {} } }, mockRes(), () => {});
+    assert.equal(lastSiteLookup, '7');
+    assert.equal(capturedGenerateDraftCall.siteId, 7);
   });
 });

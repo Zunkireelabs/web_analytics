@@ -3,12 +3,18 @@ import { requireAuth, requirePlatformRole } from './login.js';
 import { callLLM } from '../llm.js';
 import {
   getKeywordClusters, getKeywordGaps, updateKeywordGapStatus, getSiteProfile,
-  getLatestKeywordNarrative, getAnomalyAlerts, getLatestForecastStatuses,
+  getLatestKeywordNarrative, getAnomalyAlerts, getLatestForecastStatuses, getGapContentPlan, setGapContentPlan,
   getLatestLayoutSuggestion, saveLayoutSuggestion, createUserKeywordGap,
   getProductCapabilities, createProductCapability, updateProductCapabilityStatus,
 } from '../store/data-analyst.js';
 import { PRODUCT_KNOWLEDGE_KINDS } from '../lib/product-knowledge-kinds.js';
-import { createActionCenterRecommendationForGap, buildProductTopicMap, opportunityDraftEligibility, recommendedActionForGap } from '../agents/lib/analyst-seo-mapping.js';
+import { createActionCenterRecommendationForGap, buildProductTopicMap, opportunityDraftEligibility, recommendedActionForGap, classifyGapRelevance } from '../agents/lib/analyst-seo-mapping.js';
+import {
+  PLANS, normalizeKeyword, recommendPlanForGap, buildHaveKeywords, buildKeywordsOverview, buildPagesOverview,
+} from '../agents/lib/keyword-plan.js';
+import { gscDailyDataAsOf } from '../store/data-freshness.js';
+import { getQueryPageMetrics } from '../store/read.js';
+import { listPageInventory } from '../store/page-inventory.js';
 import { buildGrowthOpportunities } from '../agents/lib/growth-opportunities.js';
 import { translateKeywords } from '../agents/lib/keyword-translation.js';
 import { generateDraft } from './action-center.js';
@@ -107,7 +113,118 @@ router.post('/internal/keywords/:siteId/gaps', async (req, res, next) => {
       topic,
       'Requested on the Analyst page as a growth target.'
     );
-    res.status(gap.alreadyQueued ? 200 : 201).json(gap);
+    // From the Keywords page the choice (blog, landing page or just track) arrives with the keyword.
+    const plan = req.body?.plan;
+    if (plan !== undefined && !PLANS.includes(plan)) {
+      const err = new Error("plan must be 'blog', 'landing' or 'track'.");
+      err.status = 400;
+      throw err;
+    }
+    const planned = plan ? await applyGapPlan(req.params.siteId, gap.id, plan) : null;
+    res.status(gap.alreadyQueued ? 200 : 201).json(planned ? { ...gap, planned } : gap);
+  } catch (e) { next(e); }
+});
+
+// ───────── the Keywords page ─────────
+//
+// Two read routes and two write routes behind the page's three questions: what does the site already rank
+// for, what do people search that it has no page for, and which pages rank for what. The numbers are the
+// last 28 days of Search Console data the site has (ending at its latest day, not at today, because Google
+// reports a few days late); the logic is in agents/lib/keyword-plan.js so it can be tested on its own.
+const STATS_WINDOW_DAYS = 28;
+const isoDay = (d) => d.toISOString().slice(0, 10);
+
+async function statsWindow(siteId) {
+  const { as_of: asOf } = await gscDailyDataAsOf(siteId);
+  if (!asOf) return null;
+  const end = new Date(`${asOf}T00:00:00Z`);
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - (STATS_WINDOW_DAYS - 1));
+  return { start: isoDay(start), end: isoDay(end) };
+}
+const windowMetrics = async (siteId) => {
+  const win = await statsWindow(siteId);
+  return { win, metrics: win ? await getQueryPageMetrics(siteId, win.start, win.end, { minImpressions: 1 }) : [] };
+};
+
+router.get('/internal/keywords/:siteId/overview', async (req, res, next) => {
+  try {
+    const siteId = req.params.siteId;
+    const [site, { win, metrics }, gaps, capabilities] = await Promise.all([
+      getSiteById(siteId), windowMetrics(siteId), getKeywordGaps(siteId),
+      getProductCapabilities(siteId, 'verified').catch(() => []),
+    ]);
+    const isProduct = site?.property_type === 'product';
+    res.json({ ...buildKeywordsOverview({ metrics, gaps, capabilities, isProduct }), isProduct, window: win });
+  } catch (e) { next(e); }
+});
+
+router.get('/internal/keywords/:siteId/pages', async (req, res, next) => {
+  try {
+    const siteId = req.params.siteId;
+    const [{ win, metrics }, inventory, gaps] = await Promise.all([windowMetrics(siteId), listPageInventory(siteId, { limit: 2000 }), getKeywordGaps(siteId)]);
+    res.json({ ...buildPagesOverview({ metrics, inventory, gaps }), window: win });
+  } catch (e) { next(e); }
+});
+
+// What to recommend for a keyword the person has typed, before anything is saved: one small classification
+// (what people want when they search it, and whether it matches what the site sells), or "just track" when
+// the site already ranks for it. Writes nothing, so cancelling the question leaves no trace.
+router.post('/internal/keywords/:siteId/recommend', async (req, res, next) => {
+  try {
+    const topic = typeof req.body?.topic === 'string' ? req.body.topic.trim() : '';
+    if (!topic) { const err = new Error('topic is required.'); err.status = 400; throw err; }
+    if (topic.length > MAX_TOPIC_LENGTH) { const err = new Error(`topic must be ${MAX_TOPIC_LENGTH} characters or fewer.`); err.status = 400; throw err; }
+
+    const { metrics } = await windowMetrics(req.params.siteId);
+    const ranked = buildHaveKeywords(metrics).find((h) => h.keyword === normalizeKeyword(topic));
+    if (ranked) {
+      return res.json({ plan: 'track', reason: 'Your site already ranks for this, so tracking is enough.', intent: null, relevance: null, alreadyRanks: true });
+    }
+    const classification = await classifyGapRelevance(req.params.siteId, { topic }).catch(() => null);
+    const rec = recommendPlanForGap({
+      topic, search_intent: classification?.searchIntent ?? null, product_relevance: classification?.productRelevance ?? null,
+    });
+    res.json({ ...rec, intent: classification?.searchIntent ?? null, relevance: classification?.productRelevance ?? null, alreadyRanks: false });
+  } catch (e) { next(e); }
+});
+
+// Carries out the person's choice for one keyword. 'track' keeps the keyword and creates nothing; 'blog' and
+// 'landing' create exactly one piece of content: a blog is queued for the daily run, a landing page is drafted
+// now and waits for the person's approval in Action Center. The gap is marked approved so the weekly
+// automatic cycle, which only looks at pending gaps, never writes a second piece for it. A different choice
+// for something already planned is refused rather than queuing a second piece of content.
+async function applyGapPlan(siteId, gapId, plan) {
+  const current = await getGapContentPlan(siteId, gapId);
+  if (!current) { const err = new Error('Keyword gap not found.'); err.status = 404; throw err; }
+  if (current.content_plan && current.content_plan !== 'track' && current.content_plan !== plan) {
+    const err = new Error(`This keyword is already planned as a ${current.content_plan === 'landing' ? 'landing page' : 'blog post'}. Cancel that in Action Center first.`);
+    err.status = 409;
+    throw err;
+  }
+  if (current.content_plan === plan && plan !== 'track') return { plan, alreadyPlanned: true, actionCenter: null };
+
+  const updated = await updateKeywordGapStatus(siteId, gapId, 'approved');
+  let actionCenter = null;
+  if (plan !== 'track') {
+    // A blog is safe-tier: queued for the daily run, which drafts it and opens the pull request. A landing page
+    // is manual-tier, so the daily run would never pick it up; it is drafted now and waits for approval in
+    // Action Center, like any other landing page.
+    actionCenter = await createActionCenterRecommendationForGap(siteId, updated, { deferDraft: plan === 'blog', clientRequested: plan === 'blog', plan });
+    if (!actionCenter?.eligible) {
+      await updateKeywordGapStatus(siteId, gapId, 'pending_review'); // nothing was created, so nothing was decided
+      return { plan: null, notCreated: true, actionCenter };
+    }
+  }
+  await setGapContentPlan(siteId, gapId, plan);
+  return { plan, actionCenter };
+}
+
+router.post('/internal/keywords/:siteId/gaps/:gapId/plan', async (req, res, next) => {
+  try {
+    const { plan } = req.body || {};
+    if (!PLANS.includes(plan)) { const err = new Error("plan must be 'blog', 'landing' or 'track'."); err.status = 400; throw err; }
+    res.json(await applyGapPlan(req.params.siteId, req.params.gapId, plan));
   } catch (e) { next(e); }
 });
 
@@ -379,5 +496,59 @@ router.get('/internal/keywords/:siteId/layout', async (req, res, next) => {
     res.json({ layout, reason, generated_at: saved.generated_at });
   } catch (e) { next(e); }
 });
+
+// ---------------------------------------------------------------------------
+// Client-facing mirror — /keywords/... for the logged-in client's OWN site.
+//
+// Every route above is staff-only and takes the site from the URL
+// (:siteId). The Keywords page is for every client, so this mirror re-exposes
+// the same handlers (exactly the same code, nothing re-implemented) under
+// /keywords/..., with two differences that make it safe for a tenant:
+//   - the site is ALWAYS the session's own (req.siteId, set by requireAuth),
+//     never anything the URL says — a client cannot name another site;
+//   - only the routes the Keywords page uses are exposed (no `layout`, which
+//     is a staff-only LLM call).
+// requireAuth already refuses writes from read-only workspace members, so
+// no write route here has to remember that.
+//
+// Mounted in server/index.js BEFORE the staff-only block (see the mount-order
+// note there): the path-prefixed requireAuth below only ever touches
+// /keywords/..., so it cannot interfere with any other router.
+// ---------------------------------------------------------------------------
+const INTERNAL_PREFIX = '/internal/keywords/:siteId';
+const CLIENT_ROUTES = [
+  ['get', '/clusters'],
+  ['get', '/growth-opportunities'],
+  ['post', '/growth-opportunities/generate-draft'],
+  ['get', '/overview'],
+  ['get', '/pages'],
+  ['post', '/recommend'],
+  ['post', '/gaps/:gapId/plan'],
+  ['get', '/gaps'],
+  ['post', '/gaps'],
+  ['post', '/translate'],
+  ['put', '/gaps/:gapId'],
+  ['post', '/gaps/:gapId/request-blog'],
+  ['get', '/profile'],
+  ['get', '/capabilities'],
+  ['post', '/capabilities'],
+  ['put', '/capabilities/:capabilityId'],
+  ['get', '/topic-map'],
+  ['get', '/narrative'],
+];
+
+export const clientKeywordsRouter = Router();
+clientKeywordsRouter.use('/keywords', requireAuth);
+for (const [method, suffix] of CLIENT_ROUTES) {
+  const layer = router.stack.find((l) => l.route?.path === INTERNAL_PREFIX + suffix && l.route.methods[method]);
+  if (!layer) throw new Error(`keywords client mirror: ${method.toUpperCase()} ${INTERNAL_PREFIX + suffix} is not registered`);
+  const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+  clientKeywordsRouter[method](`/keywords${suffix}`, (req, res, next) => {
+    // The one line that makes this tenant-safe: whatever the URL carried, the
+    // handler runs against the session's own site.
+    req.params.siteId = String(req.siteId);
+    return handler(req, res, next);
+  });
+}
 
 export default router;

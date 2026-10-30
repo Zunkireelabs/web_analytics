@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { ownPageGuidance } from '../../generators/lib/design-aware-composer.js';
 import { safeMessage } from '../../lib/errors.js';
 import { updateSiteRepoConfig } from '../../db.js';
 import { recordAuditEvent } from '../../store/admin/audit-log.js';
@@ -1751,6 +1752,20 @@ export function siteHasUsableDesignProfile(site) {
   return isProfileUsable(getDesignProfile(site));
 }
 
+// True when a visible, design-sensitive draft would be spliced in with NOTHING
+// of the site's own design to ground it: no configured template, no page
+// capture, no usable profile. buildMergeValues would then fall back to its
+// zero-config DEFAULT_* markup, which by its own contract makes no attempt to
+// match the site — exactly the generic insertion CLAUDE.md forbids. Callers
+// hold the draft for review instead of shipping it (enforce mode only, the
+// same switch as every other design gate, so log/off rollouts are unchanged).
+export function lacksDesignBaseline(site, { componentKey, mode, gateMode }) {
+  if (gateMode !== 'enforce' || mode !== 'visible' || !componentKey) return false;
+  const root = site?.url_file_map?.siteRoot;
+  if (root?.componentTemplates?.[componentKey] || root?.pageComponentTemplates?.[componentKey]) return false;
+  return !siteHasUsableDesignProfile(site);
+}
+
 // Generators whose output is real, visible page content — the set every
 // website-facing draft is drawn from, as opposed to purely technical output
 // (meta-title, schema, canonical, sitemap, robots-fix, security-headers,
@@ -1795,7 +1810,7 @@ export const NO_MARKUP_GENERATOR_IDS = new Set([
 // any lookup failure) returns `system` completely unchanged, so a
 // generator's output is byte-for-byte the same as before this existed until
 // a real Design Context has been derived.
-export async function withDesignContext(system, generatorId, siteId, { fetchSite = getSiteById } = {}) {
+export async function withDesignContext(system, generatorId, siteId, { fetchSite = getSiteById, pageUrl = null } = {}) {
   if (!generatorId || !siteId || !DESIGN_CONTEXT_GENERATOR_IDS.has(generatorId)) return system;
 
   let site;
@@ -1813,8 +1828,13 @@ export async function withDesignContext(system, generatorId, siteId, { fetchSite
     .map(([type, p]) => `- ${type}: sections in order ${JSON.stringify(p.sectionOrder || [])}${p.notes ? ` — ${p.notes}` : ''}`)
     .join('\n');
 
+  // The page being written for, when the capture recorded it on its own: a site whose pages do not share a
+  // template is not described by its page-type averages.
+  const own = pageUrl ? ownPageGuidance(site, pageUrl) : null;
+
   return `${system}\n\nThis site's real design and voice, derived from its own live pages — write to match it, not a generic style:\n`
     + `- Styling: ${profile.styling || 'unknown'}${profile.framework ? ` (${profile.framework})` : ''}\n`
+    + (own ? `- ${own}\n` : '')
     + (patternNotes ? `- Observed page-type patterns:\n${patternNotes}\n` : '')
     + (profile.evidence?.notes ? `- ${profile.evidence.notes}\n` : '');
 }

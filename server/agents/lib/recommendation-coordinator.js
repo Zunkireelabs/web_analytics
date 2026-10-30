@@ -172,6 +172,9 @@ export function recommendationPageKey(item) {
   if (item.generatorId === 'analytics-install') return `analytics:${item.params?.provider || 'unknown'}`;
   if (item.generatorId === 'expand-content') return `${item.params?.page || ''}::${item.params?.focus || ''}`;
   if (item.generatorId === 'broken-link-fix' || item.generatorId === 'missing-page-create') return `${normalizePageForKey(item.params?.page) || ''}::${item.params?.href || ''}`;
+  // redirect-add (agents/gsc-url-audit) carries {from, to} and no `page`: without its own case every dead URL
+  // of a site shared the key '' and collapsed into ONE card, so all but one redirect proposal was lost.
+  if (item.generatorId === 'redirect-add') return `redirect::${normalizePageForKey(item.params?.from) || item.params?.from || ''}`;
   if (item.generatorId === 'blog-outline') return `topic::${item.params?.topic || ''}`;
   // Same failure mode as blog-outline above: landing-page has no `page`
   // param either (country-intelligence.js calls it with {market}/{city},
@@ -241,6 +244,8 @@ export const DEDUP_IDENTITY = {
   'analytics-install': 'provider',
   'expand-content': 'focus',
   'broken-link-fix': 'href',
+  // One card per dead URL being redirected.
+  'redirect-add': 'from',
   // Same identity as broken-link-fix — both are "this one dead href", and a
   // link can flip between the two resolutions as the section around it gains
   // or loses sibling pages, so they must key identically.

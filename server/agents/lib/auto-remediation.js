@@ -134,6 +134,9 @@ const CREDENTIAL_RETRY_DELAY_MS = Number(process.env.CREDENTIAL_RETRY_DELAY_MS ?
 export async function autoRemediateSafeRecommendations(siteId, {
   globalRemaining = Infinity,
   onboardingAnalysisPending = isOnboardingAnalysisPending,
+  // Soft time limit for THIS site's run (ms since epoch). Checked between items, where
+  // stopping is safe; never mid-push.
+  deadlineAt = null,
 } = {}) {
   const site = await getSiteById(siteId);
   // No site row to attribute a run log to (auto_remediation_runs.site_id is a
@@ -439,7 +442,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // "skipped, never attempted-and-failed" contract every other
     // ineligibility path in this function already honors) so a caller can't
     // mistake an empty queue for a stopped run.
-    const reason = candidates.length === 0 ? null : (spentToday >= dailyLimit ? 'budget-exhausted' : 'global-ceiling-reached');
+    const reason = candidates.length === 0 ? null : (spentToday >= ceiling ? 'budget-exhausted' : 'global-ceiling-reached');
     console.log(`[auto-remediation] ${clientLabel} has no budget left this run (${spentToday}/${dailyLimit} site budget used${globalRemaining < Infinity ? `, ${globalRemaining} left in the platform-wide ceiling` : ''}) — nothing attempted.`);
     return finish({ attempted: 0, shipped: 0, failed: 0, skipped: candidates.length, spentToday, dailyLimit, stoppedReason: reason });
   }
@@ -714,6 +717,11 @@ export async function autoRemediateSafeRecommendations(siteId, {
       console.warn(`[auto-remediation] ${clientLabel}: GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${workQueue.length - cursor} candidate(s) left untouched and still open; they will be re-attempted next run.`);
       break;
     }
+    if (deadlineAt && Date.now() > deadlineAt) {
+      stoppedReason = 'site-time-limit';
+      console.warn(`[auto-remediation] ${clientLabel}: this site's time limit for the run is up — stopping before the next item so other sites get their turn. ${workQueue.length - cursor} candidate(s) left untouched and still open.`);
+      break;
+    }
     if (attempted >= remaining) break; // backfill can grow workQueue past the budget's raw length
     attempted++;
     try {
@@ -796,6 +804,14 @@ export async function autoRemediateSafeRecommendations(siteId, {
       if (shipFailure.kind === FAILURE_KIND.RATE_LIMIT) {
         stoppedReason = 'github-rate-limited';
         console.warn(`[auto-remediation] ${clientLabel}: GitHub rate limit hit on recommendation ${rec.id} (${rec.recommendation_type}) — stopping this run. ${workQueue.length - cursor - 1} candidate(s) left untouched; this item and they stay open and will be re-attempted next run. Not a fault.`);
+        break;
+      }
+      // The client's live site could not be reached (render check). Not a
+      // failure and not counted against the item: stop THIS site, leave its
+      // items open, and let the all-sites run come back to it after everyone else.
+      if (err?.reason === 'unreachable') {
+        stoppedReason = 'site-unreachable';
+        console.warn(`[auto-remediation] ${clientLabel}: live site unreachable on recommendation ${rec.id} (${rec.recommendation_type}) — stopping this site for now; it will be retried at the end of the run.`);
         break;
       }
       failed++;

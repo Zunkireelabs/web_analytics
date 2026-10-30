@@ -4,6 +4,7 @@ import {
   getFileContent, getFileSha, beginFileOverlay, endFileOverlay, recordFileOverlayWrites,
   createCommitObject, updateRef, commitFilesAtomic, getCommitMessage,
   getBranchSha, getLastKnownRateLimit, RATE_LIMIT_RESERVE, searchCodeForString,
+  openPullRequest, prTargetBranchName,
 } from './client.js';
 import { clearInstallationTokenCache } from './app-auth.js';
 
@@ -649,5 +650,32 @@ describe('authHeaders — missing-credential error names the right credential', 
         return true;
       },
     );
+  });
+});
+
+// A site that promotes content through a stage branch sets pr_target_branch
+// (migration 197): work is still CUT from the default branch, but the day's PR is
+// opened into the target. Without the setting nothing changes.
+describe('PR target branch', () => {
+  test('defaults to the repository default branch, then to main', () => {
+    assert.equal(prTargetBranchName({ repo_default_branch: 'production' }), 'production');
+    assert.equal(prTargetBranchName({}), 'main');
+  });
+  test('uses pr_target_branch when set, and does not touch the branch work is cut from', () => {
+    assert.equal(prTargetBranchName({ repo_default_branch: 'main', pr_target_branch: 'stage' }), 'stage');
+  });
+  test('openPullRequest sends the target as the PR base and the batch branch as the head', async () => {
+    const bodies = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, init) => { bodies.push(JSON.parse(init.body)); return jsonResponse({ number: 7, html_url: 'https://github.com/acme/site/pull/7' }, 201); };
+    try {
+      await openPullRequest({ ...site, repo_default_branch: 'main', pr_target_branch: 'stage' }, { branch: 'batch/2026-10-26', title: 't', body: 'b' });
+      await openPullRequest({ ...site, repo_default_branch: 'main' }, { branch: 'batch/2026-10-26', title: 't', body: 'b' });
+    } finally {
+      globalThis.fetch = original;
+    }
+    assert.equal(bodies[0].base, 'stage');
+    assert.equal(bodies[0].head, 'batch/2026-10-26');
+    assert.equal(bodies[1].base, 'main'); // no setting -> exactly as before
   });
 });

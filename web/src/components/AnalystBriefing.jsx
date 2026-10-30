@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Sparkles } from 'lucide-react';
-import { api } from '../api.js';
+import { api, SELF } from '../api.js';
 import { Tray, TrayCard } from './layout/Tray.jsx';
 
 // Per-client AI briefing — a short, fresh narrative generated for whichever
@@ -22,8 +22,10 @@ export default function AnalystBriefing({ clientId }) {
     setText(null);
     setLoading(true);
     let cancelled = false;
-    api.assistant.invoke('ask_analyst_data', { question: PROMPT }, clientId)
-      .then((res) => { if (!cancelled && res.ok) setText(res.data.answer); })
+    (clientId === SELF
+      ? api.analyst.briefing().then((res) => { if (!cancelled) setText(res.answer); })
+      : api.assistant.invoke('ask_analyst_data', { question: PROMPT }, clientId)
+        .then((res) => { if (!cancelled && res.ok) setText(res.data.answer); }))
       .catch(() => {})
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };

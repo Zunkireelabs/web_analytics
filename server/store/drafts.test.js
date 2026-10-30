@@ -45,7 +45,7 @@ function fakeQuery(text, params = []) {
   if (sql.startsWith('SELECT DISTINCT d.finding_id')) {
     return { rows: implementedFindingIdsRows };
   }
-  if (sql.startsWith('SELECT DISTINCT target_file_path FROM drafts')) {
+  if (sql.startsWith('SELECT DISTINCT d.target_file_path FROM drafts')) {
     return { rows: pendingDraftFilePathsRows };
   }
   if (sql.startsWith('SELECT COUNT(*)::int AS n FROM drafts WHERE site_id = $1 AND action_type = ANY')) {
@@ -155,7 +155,7 @@ describe('getImplementedFindingIds — verification-aware', () => {
 describe('getPendingDraftFilePaths', () => {
   test('query is scoped to pr_opened/pr_state=open, non-null target_file_path, not rolled back', async () => {
     await getPendingDraftFilePaths(7);
-    const q = issued.find((q) => q.sql.startsWith('SELECT DISTINCT target_file_path FROM drafts'));
+    const q = issued.find((q) => q.sql.startsWith('SELECT DISTINCT d.target_file_path FROM drafts'));
     assert.ok(q, 'expected the pending-draft-file-paths query to run');
     assert.match(q.sql, /target_file_path IS NOT NULL/);
     assert.match(q.sql, /status = 'pr_opened'/);

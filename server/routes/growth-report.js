@@ -7,6 +7,11 @@ import { runAiRecommendationIfDue } from '../job.js';
 import { buildBaselineReport } from '../agents/lib/baseline-report.js';
 import { getBaselineReport } from '../store/baseline-reports.js';
 import { renderBaselineReportHtml, renderBaselineReportPdf } from '../report/baseline-pdf.js';
+import { buildProgressReportData } from '../report/progress-data.js';
+import { renderProgressReportHtml } from '../report/progress-pdf.js';
+import { renderWeeklyReportHtml } from '../report/weekly-pdf.js';
+import { buildReportSummary } from '../report/summary.js';
+import { buildInAppModel } from '../report/inapp-model.js';
 
 // Client-facing — the logged-in client's own site only (req.siteId from
 // session), unlike Phase 4's staff-only /internal/clients/:id/review which
@@ -82,6 +87,64 @@ router.get('/baseline-report/download', async (req, res, next) => {
 
 router.get('/internal/baseline-report/:siteId/download', requirePlatformRole('platform_admin'), async (req, res, next) => {
   try { await sendBaselineReportPdf(res, req.params.siteId); }
+  catch (e) { next(e); }
+});
+
+// The standard MONTHLY progress report (report/progress-pdf.js): built fresh
+// from the site's own data on every export, so there is nothing to store and
+// nothing to go stale. It compares against the day-0 baseline, so a site with no
+// baseline yet has nothing to compare with and gets a plain 404.
+async function sendProgressReportPdf(res, siteId) {
+  const [site, baseline] = await Promise.all([getSiteById(siteId), getBaselineReport(siteId)]);
+  if (!site) return res.status(404).json({ error: 'Site not found.' });
+  if (!baseline) return res.status(404).json({ error: 'No baseline report yet, so there is nothing to compare this month against.' });
+  const pdf = await renderBaselineReportPdf(renderProgressReportHtml(await buildProgressReportData(siteId)));
+  res.set({
+    'Content-Type': 'application/pdf',
+    'Content-Disposition': `attachment; filename="${slugify(site.name)}-monthly-progress-report.pdf"`,
+  });
+  res.send(pdf);
+}
+
+router.get('/progress-report/download', async (req, res, next) => {
+  try { await sendProgressReportPdf(res, req.siteId); }
+  catch (e) { next(e); }
+});
+
+router.get('/internal/progress-report/:siteId/download', requirePlatformRole('platform_admin'), async (req, res, next) => {
+  try { await sendProgressReportPdf(res, req.params.siteId); }
+  catch (e) { next(e); }
+});
+
+// The WEEKLY report PDF (report/weekly-pdf.js): the previous full week, built fresh from the site's own data.
+// The page, the Google Doc and this PDF all read the same model (report/inapp-model.js).
+const weekRangeLabel = (start, end) => {
+  const o = { month: 'short', day: 'numeric', timeZone: 'UTC' };
+  const s = new Date(`${start}T00:00:00Z`).toLocaleDateString('en-US', o);
+  const t = new Date(`${end}T00:00:00Z`).toLocaleDateString('en-US', { ...o, year: 'numeric' });
+  return `${s} – ${t}`;
+};
+
+async function sendWeeklyReportPdf(res, siteId) {
+  const site = await getSiteById(siteId);
+  if (!site) return res.status(404).json({ error: 'Site not found.' });
+  const [summary, body] = await Promise.all([buildReportSummary(site, 'weekly'), buildInAppModel(site, 'weekly')]);
+  const html = renderWeeklyReportHtml({ site, periodLabel: weekRangeLabel(summary.start, summary.end), body, summary: summary.narrative });
+  const pdf = await renderBaselineReportPdf(html);
+  res.set({
+    'Content-Type': 'application/pdf',
+    'Content-Disposition': `attachment; filename="${slugify(site.name)}-weekly-report.pdf"`,
+  });
+  res.send(pdf);
+}
+
+router.get('/weekly-report/download', async (req, res, next) => {
+  try { await sendWeeklyReportPdf(res, req.siteId); }
+  catch (e) { next(e); }
+});
+
+router.get('/internal/weekly-report/:siteId/download', requirePlatformRole('platform_admin'), async (req, res, next) => {
+  try { await sendWeeklyReportPdf(res, req.params.siteId); }
   catch (e) { next(e); }
 });
 

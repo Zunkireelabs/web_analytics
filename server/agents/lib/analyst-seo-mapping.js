@@ -393,6 +393,20 @@ export function requestedBlogEligibility(gap) {
   };
 }
 
+// The landing-page twin of requestedBlogEligibility: the person chose "landing page" for this keyword on
+// the Keywords page, so that is what is created whatever the classifier would have picked. The recommended
+// choice shown beside it comes from recommendPlanForGap (keyword-plan.js), which follows the same rule.
+export function requestedLandingEligibility(gap) {
+  if (!gap?.id || !gap?.topic) return null;
+  const classified = gapDraftEligibility(gap);
+  return {
+    eligible: true,
+    generatorId: 'landing-page',
+    findingId: `keyword-gap:${gap.id}:landing`,
+    shapeHint: classified?.shapeHint ?? null,
+  };
+}
+
 // Real "build topic cluster" support (multi-tenant growth spec): when
 // find_gaps (data-analyst-agent) grouped this gap with 2+ siblings under one
 // topic_cluster name (persisted + normalized server-side, see migration 156
@@ -436,6 +450,8 @@ async function buildClusterContext(siteId, gap) {
 //                     there waiting to see the result); a client asking for a
 //                     blog is explicitly asking for tomorrow's run, not a
 //                     five-minute wait on their own page load.
+//   plan            — 'landing' creates a landing page whatever the classifier picked (the person chose it on
+//                     the Keywords page). Anything else keeps the behaviour below.
 //   clientRequested — records params.clientRequested on the recommendation so
 //                     ship-pacing.js can tell an explicitly-requested blog
 //                     from one the agent chose itself. That flag is the ONLY
@@ -445,7 +461,7 @@ async function buildClusterContext(siteId, gap) {
 //                     blog-outline on params.topic alone, so it can't split a
 //                     topic into two rows, and blog-outline.js destructures
 //                     only { topic, context }.
-export async function createActionCenterRecommendationForGap(siteId, gap, { deferDraft = false, clientRequested = false } = {}) {
+export async function createActionCenterRecommendationForGap(siteId, gap, { deferDraft = false, clientRequested = false, plan = null } = {}) {
   // Classification and the existing-page check both run once, on first
   // approval — in parallel, since neither depends on the other's result —
   // and never re-run once a value is already recorded (re-approval after a
@@ -497,7 +513,8 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
     }
   }
 
-  const eligibility = clientRequested ? requestedBlogEligibility(gap) : gapDraftEligibility(gap);
+  const eligibility = plan === 'landing' ? requestedLandingEligibility(gap)
+    : clientRequested ? requestedBlogEligibility(gap) : gapDraftEligibility(gap);
   if (!eligibility) return { eligible: false };
 
   const relatedQueries = await getRelatedQueriesForTopic(siteId, gap.topic);

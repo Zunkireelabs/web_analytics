@@ -1,14 +1,18 @@
 import { getDocs } from '../auth/google.js';
 import { query } from '../db.js';
 import { callLLM } from '../llm.js';
-import { getDailySeries, getRangeTopQueries } from '../store/read.js';
+import { getDailySeries, getRangeTopQueries, getHealthScoreOnOrBefore } from '../store/read.js';
+import { getBaselineReport } from '../store/baseline-reports.js';
+import { getFirstCompletedAuditRun, getLatestCompletedAuditRun, getAuditPageFindings } from '../store/audit-runs.js';
+import { pageScoreSection } from './page-score.js';
+import { resolveBrand } from './brand.js';
+import { writeSection } from './doc-layout.js';
+import { periodStats, tilesFor, headlineFor, bettermentTable, topSearchesSection } from './doc-model.js';
 import { saveMonthlyReportNarrative } from '../store/upsert.js';
 import { previousMonth } from '../util/dates.js';
 
 const n = (v) => (v == null ? 0 : Number(v));
 const fmt = (v) => n(v).toLocaleString();
-const pL = (s, w) => String(s).padEnd(w);
-const pR = (s, w) => String(s).padStart(w);
 
 const MONTH_NAMES = [
   'January','February','March','April','May','June',
@@ -47,10 +51,6 @@ function monthWeeks(monthStart, monthEnd) {
 
 const sum = (rows, k) => rows.reduce((a, r) => a + n(r[k]), 0);
 const pct = (cur, prev) => (prev ? Math.round(((cur - prev) / prev) * 1000) / 10 : null);
-const wavg = (rows, k) => {
-  const vals = rows.filter((r) => r[k] != null).map((r) => Number(r[k]));
-  return vals.length ? vals.reduce((a, v) => a + v, 0) / vals.length : null;
-};
 
 // If the doc's top section is already for this exact month (re-running the same
 // month), return its full range so the caller can delete it before re-inserting —
@@ -79,80 +79,6 @@ async function ensureDoc(site) {
   await query('UPDATE sites SET monthly_doc_id = $1 WHERE id = $2', [id, site.id]);
   console.log(`[monthly] created report doc ${id}`);
   return id;
-}
-
-function buildSection(label, overview, series, monthStart, monthEnd, prevLabel, prevTotals) {
-  let text = '';
-  const bold = [];
-  const add = (s) => { text += s; };
-
-  // Heading
-  const headingStart = text.length;
-  add(`${label}\n`);
-  const heading = { start: headingStart, end: text.length - 1 };
-
-  // AI summary
-  const summaryStart = text.length;
-  add(overview);
-  const summary = { start: summaryStart, end: text.length };
-  add('\n\n');
-
-  // Monthly totals vs prior month
-  const t = {
-    clicks: sum(series, 'clicks'),
-    impressions: sum(series, 'impressions'),
-    users: sum(series, 'users'),
-    sessions: sum(series, 'sessions'),
-  };
-  const p = prevTotals;
-  const delta = (a, b) => (b === 0 ? '—' : `${a - b >= 0 ? '+' : ''}${Math.round(((a - b) / b) * 100)}%`);
-  const totalsStart = text.length;
-  add(
-    `Totals: ${fmt(t.clicks)} clicks (${delta(t.clicks, p.clicks)}), ` +
-    `${fmt(t.impressions)} impressions (${delta(t.impressions, p.impressions)}), ` +
-    `${fmt(t.users)} users, ${fmt(t.sessions)} sessions — vs ${prevLabel}\n`
-  );
-  const totalsLine = { start: totalsStart, end: text.length - 1 };
-  add('\n');
-
-  // Week-by-week table — fixed-width columns (Courier New applied by caller).
-  // Week col = "May 01 – May 31" = 15 chars, col width 17 to give 2 spaces gap.
-  const WK_COL = 17;
-  const weeks = monthWeeks(monthStart, monthEnd);
-
-  const tableHeaderStart = text.length;
-  add(pL('Week', WK_COL) + pR('Clicks', 8) + pR('Impr.', 8) + pR('Pos.', 8) + pR('Users', 8) + pR('Sess.', 8) + '\n');
-  const tableHeader = { start: tableHeaderStart, end: text.length - 1 };
-
-  const tableRows = [];
-  for (const wk of weeks) {
-    const wkRows = series.filter((r) => {
-      const d = String(r.date).slice(0, 10);
-      return d >= wk.start && d <= wk.end;
-    });
-    const wkLabel = `${shortDate(wk.start)} – ${shortDate(wk.end)}`; // "May 01 – May 07"
-    const rowStart = text.length;
-    const lblStart = text.length;
-    add(wkLabel);
-    bold.push({ start: lblStart, end: text.length });
-    const pos = wavg(wkRows, 'position');
-    add(pL('', WK_COL - wkLabel.length) +
-      pR(fmt(sum(wkRows, 'clicks')), 8) +
-      pR(fmt(sum(wkRows, 'impressions')), 8) +
-      pR(pos == null ? '—' : pos.toFixed(1), 8) +
-      pR(fmt(sum(wkRows, 'users')), 8) +
-      pR(fmt(sum(wkRows, 'sessions')), 8) + '\n');
-    tableRows.push({ start: rowStart, end: text.length - 1 });
-  }
-
-  const tableSection = {
-    start: tableHeaderStart,
-    end: tableRows.length ? tableRows[tableRows.length - 1].end : tableHeader.end,
-  };
-
-  add('────────────────────────────────────────────────────────────────────────────────\n');
-
-  return { text, bold, summary, heading, tableHeader, tableRows, tableSection, totalsLine };
 }
 
 // Generate (or regenerate) the monthly section and insert it at the TOP of the doc.
@@ -226,137 +152,59 @@ export async function runMonthlyDocReport(site, anchorYm) {
     'normal — report them plainly without alarm. If you cite a percent change, use ONLY the precomputed ' +
     'vsPriorMonthPct values given — never calculate your own percentage. null means no prior-month baseline; ' +
     'do not invent one. No preamble, no bullet symbols, no markdown headers.';
-  const overview = await callLLM(system, `Monthly digest:\n\n${JSON.stringify(digest, null, 2)}`, { maxTokens: 400 });
+  // The report is numbers first: if the summary cannot be written (model down, spend limit) it goes out without it.
+  let overview = null;
+  try { overview = await callLLM(system, `Monthly digest:\n\n${JSON.stringify(digest, null, 2)}`, { maxTokens: 400 }); }
+  catch (e) { console.warn('[monthly-doc] summary skipped:', e.message); }
 
-  const { text: sectionText, bold, summary, heading, tableHeader, tableRows, tableSection, totalsLine } =
-    buildSection(label, overview, series, start, end, prevLabel, prevTotals);
+  const brand = resolveBrand(site);
+  const cur = periodStats(series);
+  const prev = prevSeries.length ? periodStats(prevSeries) : null;
+  const baselineRow = await getBaselineReport(site.id);
+  const better = bettermentTable({
+    baseline: baselineRow?.kpi_snapshot, baselineAt: baselineRow?.generated_at, periodEnd: end,
+    cur, prev, currentHealth: await getHealthScoreOnOrBefore(site.id, end), labels: { prev: 'Last month', cur: 'This month' },
+  });
+  const weekStats = monthWeeks(start, end).map((w) => ({
+    label: `${shortDate(w.start)} – ${shortDate(w.end)}`,
+    s: periodStats(series.filter((r) => { const d = String(r.date).slice(0, 10); return d >= w.start && d <= w.end; })),
+  }));
+  const pos = (v) => (v == null ? '—' : v.toFixed(1));
+  // Per-page score: the same page scored the same way at the first audit and the latest one (null if there is only one).
+  const [baselineRun, latestRun] = await Promise.all([getFirstCompletedAuditRun(site.id), getLatestCompletedAuditRun(site.id)]);
+  let scoreSection = null;
+  if (baselineRun && latestRun && baselineRun.id !== latestRun.id) {
+    const [baselineFindings, latestFindings] = await Promise.all([getAuditPageFindings(baselineRun.id, { limit: 5000 }), getAuditPageFindings(latestRun.id, { limit: 5000 })]);
+    scoreSection = pageScoreSection({ baselineRun, latestRun, baselineFindings, latestFindings });
+  }
+  const model = {
+    marker: label,
+    band: { kind: 'Monthly report', period: label, sub: brand.website || 'Search and AI visibility' },
+    headline: headlineFor(cur, prev, 'this month', 'the prior month'),
+    summary: overview,
+    tiles: tilesFor(cur, prev, 'prior month'),
+    barsTitle: 'Clicks, week by week',
+    bars: weekStats.map((w) => ({ label: w.label, value: w.s.clicks, valueText: fmt(w.s.clicks) })),
+    sections: [
+      { title: 'Week by week', table: { head: ['Week', 'Impressions', 'Clicks', 'Position', 'Users'], totalRow: true,
+        rows: [...weekStats.map((w) => [w.label, fmt(w.s.impressions), fmt(w.s.clicks), pos(w.s.position), fmt(w.s.users)]),
+          ['Month', fmt(cur.impressions), fmt(cur.clicks), pos(cur.position), fmt(cur.users)]] } },
+      better && { title: better.title, sub: better.sub, table: better.table },
+      scoreSection,
+      topSearchesSection(topQueries),
+    ].filter(Boolean),
+    footer: `Prepared for ${site.name}${brand.website ? ` (${brand.website})` : ''} · ${weekStats.length} weekly periods rolled up`,
+  };
 
   const docId = await ensureDoc(site);
   const docs = getDocs(site);
-  const base = 1;
-
   const docMeta = await docs.documents.get({ documentId: docId, fields: 'body.content' });
-  const content = docMeta.data.body.content;
-  const docWasEmpty = (content.at(-1)?.endIndex ?? 2) <= 2;
-
-  const requests = [];
-  const stale = staleTopSection(content, label);
-  if (stale) {
-    // Regenerating the same month: drop the old section first instead of duplicating it.
-    requests.push({ deleteContentRange: { range: { startIndex: stale.start, endIndex: stale.end } } });
-  }
-  requests.push({ insertText: { location: { index: base }, text: sectionText } });
-
-  // Left-align the whole section (monospace tables don't justify well).
-  requests.push({
-    updateParagraphStyle: {
-      range: { startIndex: base, endIndex: base + sectionText.length },
-      paragraphStyle: { alignment: 'START' },
-      fields: 'alignment',
-    },
-  });
-
-  // Base font for the whole section: Courier New 12pt bold (heading + summary override below).
-  requests.push({
-    updateTextStyle: {
-      range: { startIndex: base, endIndex: base + sectionText.length },
-      textStyle: { weightedFontFamily: { fontFamily: 'Courier New' }, fontSize: { magnitude: 12, unit: 'PT' }, bold: false },
-      fields: 'weightedFontFamily,fontSize,bold',
-    },
-  });
-
-  // Heading: 16pt bold, keep with next.
-  requests.push({
-    updateTextStyle: {
-      range: { startIndex: base + heading.start, endIndex: base + heading.end },
-      textStyle: { bold: true, fontSize: { magnitude: 16, unit: 'PT' } },
-      fields: 'bold,fontSize',
-    },
-  });
-
-  // Keep the entire month block (heading → last week row) on the same page.
-  requests.push({
-    updateParagraphStyle: {
-      range: { startIndex: base + heading.start, endIndex: base + tableSection.end - 1 },
-      paragraphStyle: { keepWithNext: true },
-      fields: 'keepWithNext',
-    },
-  });
-
-  // Summary: italic 14pt grey Georgia (not bold).
-  requests.push({
-    updateTextStyle: {
-      range: { startIndex: base + summary.start, endIndex: base + summary.end },
-      textStyle: {
-        italic: true,
-        bold: false,
-        fontSize: { magnitude: 14, unit: 'PT' },
-        weightedFontFamily: { fontFamily: 'Georgia' },
-        foregroundColor: { color: { rgbColor: { red: 0.32, green: 0.33, blue: 0.36 } } },
-      },
-      fields: 'italic,bold,fontSize,weightedFontFamily,foregroundColor',
-    },
-  });
-
-  // Totals line: bold.
-  requests.push({
-    updateTextStyle: {
-      range: { startIndex: base + totalsLine.start, endIndex: base + totalsLine.end },
-      textStyle: { bold: true },
-      fields: 'bold',
-    },
-  });
-
-  // Table header: bold.
-  requests.push({
-    updateTextStyle: {
-      range: { startIndex: base + tableHeader.start, endIndex: base + tableHeader.end },
-      textStyle: { bold: true },
-      fields: 'bold',
-    },
-  });
-
-  // Bold each week label.
-  for (const b of bold) {
-    requests.push({
-      updateTextStyle: {
-        range: { startIndex: base + b.start, endIndex: base + b.end },
-        textStyle: { bold: true },
-        fields: 'bold',
-      },
-    });
-  }
-
-  // Generous spacing above each week row.
-  for (const row of tableRows) {
-    requests.push({
-      updateParagraphStyle: {
-        range: { startIndex: base + row.start, endIndex: base + row.end },
-        paragraphStyle: { spaceAbove: { magnitude: 8, unit: 'PT' } },
-        fields: 'spaceAbove',
-      },
-    });
-  }
-
-  if (docWasEmpty) {
-    requests.push({
-      updateParagraphStyle: {
-        range: { startIndex: base + sectionText.length, endIndex: base + sectionText.length + 1 },
-        paragraphStyle: { alignment: 'START' },
-        fields: 'alignment',
-      },
-    });
-    requests.push({
-      deleteContentRange: {
-        range: { startIndex: base + sectionText.length - 1, endIndex: base + sectionText.length },
-      },
-    });
-  }
-
-  await docs.documents.batchUpdate({ documentId: docId, requestBody: { requests } });
+  // Regenerating the same month replaces its section instead of stacking a second one.
+  const stale = staleTopSection(docMeta.data.body.content, label);
+  await writeSection(docs, docId, model, brand, { stale });
 
   const ym = `${year}-${String(month).padStart(2, '0')}`;
-  await saveMonthlyReportNarrative(site.id, ym, overview);
+  if (overview) await saveMonthlyReportNarrative(site.id, ym, overview);
 
   console.log(`[monthly] wrote section for ${label} to doc ${docId}`);
   return { docId, start, end, year, month, url: `https://docs.google.com/document/d/${docId}/edit` };

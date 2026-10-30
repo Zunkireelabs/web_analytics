@@ -34,7 +34,7 @@ def _install_recorder(monkeypatch):
     stage_names = [
         "run_stats", "run_anomaly_detection", "run_forecasts",
         "run_forecast_accuracy_evaluation", "run_investigation_outcome_evaluation",
-        "run_feature_importance", "run_insight_engine",
+        "run_feature_importance", "run_insight_engine", "run_predictions", "run_pooled_training",
         "run_target_keyword_evidence", "run_cannibalization_detection", "run_root_cause_analysis",
         "run_recommendation_engine", "run_effort_estimation", "run_impact_prediction",
         "run_opportunity_scoring", "run_recommendation_prioritizer", "run_investigation_engine",
@@ -44,6 +44,10 @@ def _install_recorder(monkeypatch):
         async def _record(name=name):
             calls.append(name)
         monkeypatch.setattr(run_pass, name, _record)
+    monkeypatch.setattr(run_pass, "is_training_day", lambda today: False)  # weekday-independent
+    async def _has_model():
+        return True
+    monkeypatch.setattr(run_pass, "has_pooled_model", _has_model)
 
     return calls
 
@@ -57,7 +61,7 @@ def test_run_analysis_pass_now_runs_the_full_batch_pipeline_in_dependency_order(
     assert stage_order == [
         "run_stats", "run_anomaly_detection",
         "run_forecasts", "run_forecast_accuracy_evaluation", "run_investigation_outcome_evaluation",
-        "run_feature_importance", "run_insight_engine",
+        "run_feature_importance", "run_insight_engine", "run_predictions",
         "run_target_keyword_evidence", "run_cannibalization_detection", "run_root_cause_analysis",
         "run_recommendation_engine", "run_effort_estimation", "run_impact_prediction",
         "run_opportunity_scoring", "run_recommendation_prioritizer",
@@ -88,3 +92,31 @@ def test_predictive_alerts_and_briefings_remain_deliberately_unscheduled(monkeyp
     source = inspect.getsource(run_pass)
     assert "deliver_predictive_alerts" not in source
     assert "generate_morning_briefing" not in source
+
+
+def test_predictions_run_after_insights_and_before_recommendations_and_pooled_training_only_on_training_days(monkeypatch):
+    calls = _install_recorder(monkeypatch)
+    monkeypatch.setattr(run_pass, "is_training_day", lambda today: True)
+
+    asyncio.run(run_pass.run_analysis_pass())
+
+    order = [c for c in calls if not c.startswith("track:")]
+    assert order.index("run_insight_engine") < order.index("run_pooled_training") < order.index("run_predictions") < order.index("run_recommendation_engine")
+
+
+def test_first_ever_night_trains_even_when_it_is_not_a_monday(monkeypatch):
+    calls = _install_recorder(monkeypatch)
+
+    async def _no_model_yet():
+        return False
+    monkeypatch.setattr(run_pass, "has_pooled_model", _no_model_yet)
+
+    asyncio.run(run_pass.run_analysis_pass())
+
+    assert "run_pooled_training" in calls
+
+
+def test_pooled_training_is_a_monday_job():
+    from datetime import date
+    assert run_pass.is_training_day(date(2026, 10, 26)) is True   # Monday
+    assert run_pass.is_training_day(date(2026, 10, 28)) is False  # Wednesday

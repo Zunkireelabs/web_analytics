@@ -13,17 +13,21 @@ import agentsRouter from './routes/agents.js';
 import actionCenterRouter from './routes/action-center.js';
 import reportsRouter from './routes/reports.js';
 import commandCenterRouter from './routes/command-center.js';
+import aiVisibilityRouter from './routes/ai-visibility.js';
 import copilotRouter from './routes/copilot.js';
 import assistantRouter from './routes/assistant.js';
 import integrationsRouter from './routes/integrations.js';
 import notificationsRouter from './routes/notifications.js';
 import watchlistRouter from './routes/watchlist.js';
 import clientsRouter from './routes/clients.js';
-import dataAnalystRouter from './routes/dataAnalyst.js';
-import keywordsRouter from './routes/keywords.js';
+import dataAnalystRouter, { clientAnalystRouter } from './routes/dataAnalyst.js';
+import clientAnalystExtrasRouter from './routes/client-analyst.js';
+import keywordsRouter, { clientKeywordsRouter } from './routes/keywords.js';
 import growthReportRouter from './routes/growth-report.js';
 import siteAuditRouter from './routes/site-audit.js';
-import commoncrawlBacklinksRouter from './routes/commoncrawl-backlinks.js';
+import freeAuditRouter from './routes/free-audit.js';
+import onboardingRouter from './routes/onboarding.js';
+import commoncrawlBacklinksRouter, { clientBacklinksRouter } from './routes/commoncrawl-backlinks.js';
 import mcpTokensRouter from './routes/mcp-tokens.js';
 import { apiBridgeRouter, rootBridgeRouter } from './routes/mcp-bridge.js';
 import webhooksRouter from './routes/webhooks.js';
@@ -32,6 +36,8 @@ import trialSignupRouter from './routes/trial-signup.js';
 import oauthConsentRouter from './routes/oauth-consent.js';
 import usersRouter from './routes/users.js';
 import workspacesRouter from './routes/workspaces.js';
+import projectsRouter from './routes/projects.js';
+import platformRouter from './routes/platform.js';
 import userInvitationsRouter from './routes/user-invitations.js';
 import mcpAdminRouter from './routes/mcp-admin.js';
 import systemHealthRouter from './routes/system-health.js';
@@ -44,6 +50,7 @@ import { runStartupCatchup, reconcileBlockedRecommendationsOnStartup } from './j
 import { reapStaleAuditRuns, countAuditRunsByTrigger } from './store/audit-runs.js';
 import { startFullSiteAudit } from './agents/lib/bulk-audit.js';
 import { pool } from './db.js';
+import { serveDist } from './lib/static-assets.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -92,6 +99,11 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 // gate before ever reaching growth-report.js, despite growth-report.js
 // itself being correctly client-scoped).
 app.use('/api', loginRouter);
+// Fully public (no session): the landing page's free website audit. Must precede every
+// blanket-requireAuth router below.
+app.use('/api', freeAuditRouter);
+// Public too: reads a visitor's site to pre-fill the get-started brand profile.
+app.use('/api', onboardingRouter);
 // Fully public (no requireAuth at all, not even per-route) — parallel to
 // loginRouter's own public /signup-requests. Must be mounted before any
 // router with a blanket `router.use(requireAuth)` below (mcpTokensRouter,
@@ -136,7 +148,16 @@ app.use('/api', agentsRouter);
 app.use('/api', actionCenterRouter);
 app.use('/api', reportsRouter);
 app.use('/api', commandCenterRouter);
+app.use('/api', aiVisibilityRouter);
 app.use('/api', growthReportRouter);
+// Client-facing mirrors of three staff-only routers (keywords, the Analyst,
+// backlinks): the same handlers, always against the session's own site. Their
+// requireAuth is path-prefixed (/keywords, /analyst, /backlinks), but they still
+// belong here, ahead of the staff-only block below, like growthReportRouter.
+app.use('/api', clientKeywordsRouter);
+app.use('/api', clientAnalystRouter);
+app.use('/api', clientAnalystExtrasRouter);
+app.use('/api', clientBacklinksRouter);
 app.use('/api', siteAuditRouter);
 app.use('/api', mcpTokensRouter);
 // Every route in usersRouter applies requireAuth per-route, not as a
@@ -148,6 +169,8 @@ app.use('/api', usersRouter);
 // Per-route requireAuth + requireWorkspaceRole (no router-wide blanket), same
 // as usersRouter above, so its position is logical grouping only.
 app.use('/api', workspacesRouter);
+app.use('/api', projectsRouter);
+app.use('/api', platformRouter);
 // requireAuth-gated (session cookie) — backs the OAuth consent screen
 // (web/src/pages/OAuthAuthorize.jsx). Same tier as mcpTokensRouter above;
 // must still precede the internal-only block below.
@@ -183,11 +206,23 @@ const httpServer = createHttpServer(app);
 // runs as one process on one port rather than a separate `vite` process
 // proxying to this one. Vite auto-discovers the project's vite.config.js
 // (root vite.config.js sets `root: 'web'`) from process.cwd().
+// Page Fixer is a public static page (web/public/page-fixer), open to people who are not clients. Neither express.static
+// (index:false) nor Vite serves a folder's index.html for a clean URL, so without this /page-fixer would fall through
+// to the dashboard shell and its login. Production serves the built copy; dev serves the source copy.
+const pageFixerHtml = join(here, '..', 'web', process.env.NODE_ENV === 'production' ? 'dist' : 'public', 'page-fixer', 'index.html');
+app.get(['/page-fixer', '/page-fixer/'], (req, res, next) => {
+  if (!existsSync(pageFixerHtml)) return next();
+  res.set('Cache-Control', 'no-cache');
+  res.sendFile(pageFixerHtml);
+});
+
 if (process.env.NODE_ENV === 'production') {
   const dist = join(here, '..', 'web', 'dist');
   if (existsSync(dist)) {
-    app.use(express.static(dist));
-    app.get('*', (req, res) => res.sendFile(join(dist, 'index.html')));
+    const site = serveDist(dist);
+    app.use(site.assets);
+    app.use(site.rest);
+    app.get('*', site.page);
   }
 } else {
   // See vite.config.js: this marks the embedded (middleware-mode) case so
@@ -221,11 +256,17 @@ app.use((err, req, res, _next) => {
   res.status(err.status || 500).json({ error: 'Something went wrong on our end. Our team has been notified.', errorId: id });
 });
 
+// One stray rejected promise (a background job, a dropped DB connection) must
+// be logged, not take the whole server — and every client's session — down.
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] unhandled rejection:', reason instanceof Error ? reason.stack || reason.message : reason);
+});
+
 httpServer.listen(port, () => {
   console.log(`[server] listening on :${port}`);
   if (process.env.DISABLE_CRON !== 'true') startCron();
   // Catch up on anything missed while the machine was off/asleep (non-blocking).
-  runStartupCatchup();
+  runStartupCatchup().catch((err) => console.error('[catchup] startup catch-up failed:', err.message));
   // Independent of the DISABLE_CATCHUP-gated call above (staging sets that
   // flag permanently) — re-evaluates blocked_reason on every restart so a
   // config fix that just deployed clears the same moment it goes live

@@ -139,11 +139,11 @@ describe('checkResponsivePreview', () => {
     assert.match(result.error, /ERR_CONNECTION_REFUSED/);
   });
 
-  test('a browser that fails to launch at all fails as unreachable, not a crash', async () => {
+  test('a browser that fails to launch at all fails as browser-unavailable (not the site being down), not a crash', async () => {
     const launchBrowserFn = async () => { throw new Error('no chromium binary'); };
     const result = await checkResponsivePreview({ ...BASE_OPTS, launchBrowserFn });
     assert.equal(result.ok, false);
-    assert.equal(result.reason, 'unreachable');
+    assert.equal(result.reason, 'browser-unavailable');
   });
 
   test('missing required options is an honest error, no network attempted', async () => {

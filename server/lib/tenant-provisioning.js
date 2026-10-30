@@ -1,5 +1,5 @@
 import { query as dbQuery } from '../db.js';
-import { provisionAnalystClient } from './data-analyst-client.js';
+import { provisionAnalystClient, callDataAnalystAgent } from './data-analyst-client.js';
 
 // Everything a tenant needs in order to actually run autonomously, in one
 // place, so "onboarded" and "working" stop being different things.
@@ -32,6 +32,23 @@ export async function ensureAnalystClient(site, { provision = provisionAnalystCl
   const result = await provision(site.id, { name: site.name || `Site ${site.id}`, timezone: site.timezone || 'UTC' });
   if (!result.ok) return { ok: false, reason: 'error', error: result.error };
   return { ok: true, created: true, hasMcpToken: result.has_mcp_token === true };
+}
+
+// The catch-up for a registration that did not happen at connect time (the analyst service was down for
+// that one call). Runs from the nightly analyst sync: it asks the analyst whether it knows this project and
+// registers it only if it does not. Safe to repeat: the analyst's own upsert keeps an existing token and does
+// not reactivate a project that was paused.
+// -> { status: 'already-registered' | 'registered' | 'unreachable' | 'failed' | 'skipped', error? }
+export async function ensureAnalystRegistered(site, { call = callDataAnalystAgent, provision = ensureAnalystClient } = {}) {
+  if (!site?.id) return { status: 'skipped' };
+  try {
+    await call(`/admin/clients/by-site/${site.id}`);
+    return { status: 'already-registered' };
+  } catch (err) {
+    if (err?.status !== 404) return { status: 'unreachable', error: err?.message }; // service down: try again tomorrow night
+  }
+  const result = await provision(site);
+  return result.ok ? { status: 'registered' } : { status: 'failed', error: result.error };
 }
 
 // Read straight through the injected `query` rather than through the store
@@ -152,7 +169,13 @@ export async function assessTenantReadiness(site, { query = dbQuery } = {}) {
   const isProduct = site.property_type === 'product';
 
   const [logins, analyst, product] = await Promise.all([
-    query('SELECT count(*)::int AS n FROM users WHERE site_id = $1', [siteId])
+    // Who can sign in to this project: the person it was created for (users.site_id), anyone in its workspace, and
+    // anyone it was shared with one-to-one. Counting only users.site_id predates workspaces and called every
+    // workspace project "0 logins".
+    query(`SELECT count(*)::int AS n FROM users
+            WHERE site_id = $1
+               OR id IN (SELECT wm.user_id FROM workspace_members wm JOIN sites s ON s.workspace_id = wm.workspace_id WHERE s.id = $1)
+               OR id IN (SELECT pm.user_id FROM project_members pm WHERE pm.site_id = $1)`, [siteId])
       .then((r) => r.rows[0].n)
       .catch(() => null),
     // admin_clients.py's PUT stores mcp_token_prefix as the literal string

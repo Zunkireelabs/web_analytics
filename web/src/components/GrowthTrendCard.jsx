@@ -69,7 +69,7 @@ export default function GrowthTrendCard({ id, title, subtitle, unit = '', data, 
           <p>{emptyMessage || 'No real data yet.'}</p>
           {action && (
             <>
-              <Button variant="light" size="sm" onClick={runAction} disabled={actionState === 'running'}>
+              <Button write variant="light" size="sm" onClick={runAction} disabled={actionState === 'running'}>
                 {actionState === 'running' ? 'Running…' : action.label}
               </Button>
               {actionMessage && <p className="text-xs text-faint max-w-xs">{actionMessage}</p>}

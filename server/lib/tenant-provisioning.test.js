@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { ensureAnalystClient, assessTenantReadiness } from './tenant-provisioning.js';
+import { ensureAnalystClient, assessTenantReadiness, ensureAnalystRegistered } from './tenant-provisioning.js';
 
 describe('ensureAnalystClient', () => {
   test('provisions via provisionAnalystClient using site.id, name, timezone', async () => {
@@ -209,5 +209,58 @@ describe('assessTenantReadiness — product tenants', () => {
     const readiness = await assessTenantReadiness(site, { query: makeProductQuery() });
 
     assert.equal(readiness.items.some((i) => i.key.startsWith('product-')), false);
+  });
+});
+
+describe('ensureAnalystRegistered — the nightly catch-up for a project the analyst never heard of', () => {
+  const site = { id: 41, name: 'Demo', timezone: 'UTC' };
+  const notFound = () => { const e = new Error('Client not onboarded.'); e.status = 404; throw e; };
+
+  test('leaves a project the analyst already knows alone', async () => {
+    let provisioned = false;
+    const r = await ensureAnalystRegistered(site, { call: async () => ({ id: 41 }), provision: async () => { provisioned = true; return { ok: true }; } });
+    assert.deepEqual(r, { status: 'already-registered' });
+    assert.equal(provisioned, false);
+  });
+
+  test('registers a project the analyst answers 404 for', async () => {
+    const seen = [];
+    const r = await ensureAnalystRegistered(site, { call: async () => notFound(), provision: async (s) => { seen.push(s.id); return { ok: true }; } });
+    assert.deepEqual(r, { status: 'registered' });
+    assert.deepEqual(seen, [41]);
+  });
+
+  test('a service that is down is not mistaken for an unregistered project', async () => {
+    let provisioned = false;
+    const down = () => { const e = new Error('Data Analyst Agent is unreachable right now'); e.status = 502; throw e; };
+    const r = await ensureAnalystRegistered(site, { call: async () => down(), provision: async () => { provisioned = true; return { ok: true }; } });
+    assert.equal(r.status, 'unreachable');
+    assert.equal(provisioned, false);
+  });
+
+  test('reports a registration the analyst refused, without throwing', async () => {
+    const r = await ensureAnalystRegistered(site, { call: async () => notFound(), provision: async () => ({ ok: false, error: 'boom' }) });
+    assert.deepEqual(r, { status: 'failed', error: 'boom' });
+  });
+
+  test('a row with no id is skipped', async () => {
+    assert.deepEqual(await ensureAnalystRegistered({}, { call: async () => { throw new Error('must not call'); } }), { status: 'skipped' });
+  });
+});
+
+describe('the "client login" readiness line counts everyone who can sign in', () => {
+  test('looks at workspace members and project shares, not only the legacy users.site_id', async () => {
+    let loginSql = '';
+    const query = async (text) => {
+      const norm = text.replace(/\s+/g, ' ').trim();
+      if (norm.startsWith('SELECT count(*)::int AS n FROM users')) { loginSql = norm; return { rows: [{ n: 2 }] }; }
+      return { rows: [{ n: 1 }] };
+    };
+    const r = await assessTenantReadiness({ id: 7, gsc_property: 'sc-domain:x.com', ga4_property_id: '1', url_file_map: {} }, { query });
+    const login = r.items.find((i) => i.key === 'login');
+    assert.equal(login.ok, true);
+    assert.match(login.detail, /2 login/);
+    assert.match(loginSql, /workspace_members/);
+    assert.match(loginSql, /project_members/);
   });
 });

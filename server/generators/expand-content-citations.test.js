@@ -19,7 +19,7 @@ process.env.CITATION_SECTION_MODE = 'llm'; // this file covers the LLM-written v
 // tests can assert the model was really grounded in Tavily's own source
 // candidates, not just that *some* LLM call happened.
 let lastLlmCall = null;
-let llmResponse = [{ heading: 'Further Reading', body: 'See [Real Source](https://real-source.example.com/article) for more.' }];
+let llmResponse = [{ heading: 'Further Reading', body: 'See [Real Source](https://real-source.org/article) for more.' }];
 mock.module(resolve('../llm.js'), {
   namedExports: {
     callLLMForJson: async (system, user, options) => { lastLlmCall = { system, user, options }; return llmResponse; },
@@ -70,6 +70,9 @@ const { generate } = await import('./expand-content.js');
 const { _resetQuotaForTests } = await import('../ingest/search-grounding-providers/tavily.js');
 const { clearSearchCache } = await import('../ingest/search-grounding-providers/index.js');
 
+// The citation fixtures use a different registrable domain: the generator refuses sources on the page's own
+// host or its subdomains (they are internal links, not external authority), so a `*.example.com` source
+// against this example.com page would be filtered out.
 const PAGE_URL = 'https://example.com/citations-page';
 const PAGE_HTML = '<html><head><title>Real Page</title></head><body><main><p>'
   + 'Real, substantial page body content about renewable energy policy. '.repeat(10)
@@ -107,7 +110,7 @@ describe('expand-content generator — external-citations, real path through Tav
     const { fn, getTavilyCall } = mockFetch({
       tavilyBody: {
         results: [
-          { title: 'Real Source', url: 'https://real-source.example.com/article', content: 'A real extracted excerpt about renewable energy.' },
+          { title: 'Real Source', url: 'https://real-source.org/article', content: 'A real extracted excerpt about renewable energy.' },
         ],
       },
     });
@@ -125,7 +128,7 @@ describe('expand-content generator — external-citations, real path through Tav
       assert.equal(serpapiCalled, false, 'must never call SerpApi for this path');
 
       assert.ok(lastLlmCall, 'LLM must have been called to draft the section');
-      assert.match(lastLlmCall.user, /Real Source: https:\/\/real-source\.example\.com\/article/);
+      assert.match(lastLlmCall.user, /Real Source: https:\/\/real-source\.org\/article/);
       assert.match(lastLlmCall.user, /Excerpt: A real extracted excerpt about renewable energy\./);
 
       assert.equal(content.focus, 'external-citations');
@@ -244,7 +247,7 @@ describe('expand-content generator — external-citations, real path through Tav
     const { fn } = mockFetch({
       tavilyBody: {
         results: [
-          { title: 'Real Source', url: 'https://real-source.example.com/article', content: 'A real extracted excerpt about renewable energy.' },
+          { title: 'Real Source', url: 'https://real-source.org/article', content: 'A real extracted excerpt about renewable energy.' },
         ],
       },
     });
@@ -277,7 +280,7 @@ describe('expand-content generator — external-citations, real path through Tav
     const { fn } = mockFetch({
       tavilyBody: {
         results: [
-          { title: 'Real Source', url: 'https://real-source.example.com/article', content: 'A real excerpt.' },
+          { title: 'Real Source', url: 'https://real-source.org/article', content: 'A real excerpt.' },
           { title: 'Competitor Result', url: 'https://competitor-example.com/best-companies', content: 'A competing company profile.' },
         ],
       },
@@ -295,7 +298,7 @@ describe('expand-content generator — external-citations, real path through Tav
 
       assert.ok(lastLlmCall, 'LLM must have been called');
       assert.doesNotMatch(lastLlmCall.user, /competitor-example\.com/, 'a filtered-out competitor URL must never reach the model prompt');
-      assert.match(lastLlmCall.user, /real-source\.example\.com/, 'a non-competitor source must still reach the model prompt');
+      assert.match(lastLlmCall.user, /real-source\.org/, 'a non-competitor source must still reach the model prompt');
     } finally {
       globalThis.fetch = original;
       filterImpl = async (items) => ({ allowed: items, removed: [] });

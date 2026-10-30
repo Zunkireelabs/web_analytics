@@ -7,13 +7,6 @@ import LiveActivityRail from '../components/orchestration/LiveActivityRail.jsx';
 import GrowthScores from '../components/GrowthScores.jsx';
 import { Tray, TrayCard } from '../components/layout/Tray.jsx';
 import ExecutiveSummaryPanel from '../components/ExecutiveSummaryPanel.jsx';
-import CompetitorLeaderboard from '../components/CompetitorLeaderboard.jsx';
-import AuthorityScoreCard from '../components/AuthorityScoreCard.jsx';
-import ReferringDomainsCard from '../components/ReferringDomainsCard.jsx';
-import CompetitorBacklinkCard from '../components/CompetitorBacklinkCard.jsx';
-import CompetitorRankingCard from '../components/CompetitorRankingCard.jsx';
-import AiRecommendationCard from '../components/AiRecommendationCard.jsx';
-import GeoIntelligenceCard from '../components/GeoIntelligenceCard.jsx';
 import ActivityFeed from '../components/ActivityFeed.jsx';
 import ChangesTimeline from '../components/ChangesTimeline.jsx';
 import { ORCH_CATEGORY as CATEGORY } from '../components/orchestration/palette.js';
@@ -131,29 +124,6 @@ export default function AiGrowth({ isInternal }) {
   const [ccData, setCcData] = useState(null);
   useEffect(() => {
     api.commandCenter.get().then(setCcData).catch(() => setCcData(null));
-  }, []);
-
-  // Free Common Crawl "Referring Domains" card — its own independent fetch
-  // (migrated as-is from the old Command Center), not folded into ccData /
-  // api.commandCenter.get(), so it stays exactly what server/routes/
-  // commoncrawl-backlinks.js already exposes.
-  const [ccBacklinks, setCcBacklinks] = useState(null); // null = loading
-  const [ccDomainUnresolved, setCcDomainUnresolved] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    api.sites().then(([site]) => {
-      if (cancelled) return;
-      const domain = site?.website_domain
-        ? site.website_domain.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '')
-        : null;
-      if (!domain) { setCcDomainUnresolved(true); return; }
-      return api.commonCrawlBacklinks.summary(domain).then((summary) => {
-        if (!cancelled) setCcBacklinks(summary);
-      });
-    }).catch(() => {
-      if (!cancelled) setCcBacklinks({ status: 'insufficient-data', message: 'Could not load referring domain data right now.' });
-    });
-    return () => { cancelled = true; };
   }, []);
 
   // Deep-link target from a clicked notification (NotificationBell.jsx) —
@@ -527,45 +497,9 @@ export default function AiGrowth({ isInternal }) {
         )}
       </div>
 
-      {/* ============= COMPETITOR OVERVIEW ============= */}
-      {/* Real competitor standings, driven by the same ccData already powering
-          the score row above. */}
-      <Section tray className="mt-3" title="Competitors" subtitle="How you compare online · click a competitor to see why">
-        {ccData?.competitors && ccData.competitors.length > 0 ? (
-          <CompetitorLeaderboard profiles={ccData.competitors} />
-        ) : (
-          <div className="text-sm text-faint text-center py-10 border-t border-border">No competitors logged yet.</div>
-        )}
-      </Section>
-
-      {/* ============= DETAILED AGENT INSIGHTS ============= */}
-      {/* Per-category detail cards, shown together here rather than behind
-          tabs. Card insides are restyled in part 2. */}
-      <Tray className="mt-3 md:grid-cols-2" title="Detailed agent insights" subtitle="What each specialist agent found this cycle" source="Backlinks & rankings">
-        <AuthorityScoreCard authority={ccData?.authority} meta={ccData?.authorityMeta} loading={ccData === null} />
-        <ReferringDomainsCard
-          summary={ccDomainUnresolved ? null : ccBacklinks}
-          loading={!ccDomainUnresolved && ccBacklinks === null}
-        />
-        <CompetitorBacklinkCard
-          backlinkComparison={ccData?.backlinkComparison}
-          meta={ccData?.backlinkComparisonMeta}
-          loading={ccData === null}
-        />
-        <CompetitorRankingCard
-          rankingComparison={ccData?.rankingComparison}
-          meta={ccData?.rankingComparisonMeta}
-          loading={ccData === null}
-        />
-      </Tray>
-
-      <Tray className="mt-3" title="AI search visibility" source="ChatGPT buyer-intent prompts">
-        <AiRecommendationCard aiRecommendation={ccData?.aiRecommendation} meta={ccData?.aiRecommendationMeta} loading={ccData === null} />
-      </Tray>
-
-      <Tray className="mt-3" title="Geographic audience" subtitle="Where your sessions come from" source="Google Analytics">
-        <GeoIntelligenceCard geoIntelligence={ccData?.geoIntelligence} meta={ccData?.geoIntelligenceMeta} loading={ccData === null} />
-      </Tray>
+      {/* The competitor overview, the backlink and ranking cards, AI search visibility and the geographic
+          audience used to follow here. They have their own pages now (Competitors, AI visibility, and
+          Insights for the geographic audience), so this page is the agents: run them, watch them work. */}
 
       {/* ============= OPERATIONS HISTORY ============= */}
       <section>

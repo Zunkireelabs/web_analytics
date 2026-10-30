@@ -228,6 +228,7 @@ export async function getKeywordGaps(siteId, status) {
     `SELECT id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match,
             topic_cluster, cluster_role, search_volume, location_code,
             coverage_status, coverage_reason, coverage_checked_at, coverage_evidence, language_code,
+            content_plan,
             first_seen_at, last_seen_at, observation_count, evidence_snapshots, created_at,
             -- ::text deliberately. node-postgres parses a DATE into a JS Date at
             -- LOCAL midnight, so in any positive-offset timezone (this app runs
@@ -246,6 +247,24 @@ export async function getKeywordGaps(siteId, status) {
     [siteId, status ? GAP_STATUS_TO_DB[status] : null]
   );
   return rows.map((r) => ({ ...r, status: GAP_STATUS_FROM_DB[r.status] }));
+}
+
+// What the person chose for a keyword on the Keywords page ('blog' | 'landing' | 'track'), and what was
+// chosen before, so a second choice can be refused instead of queuing a second piece of content.
+export async function getGapContentPlan(siteId, gapId) {
+  const { rows } = await query(
+    `SELECT id, topic, content_plan FROM keyword_gaps WHERE site_id = $1 AND id = $2`,
+    [siteId, gapId]
+  );
+  return rows[0] || null;
+}
+
+export async function setGapContentPlan(siteId, gapId, plan) {
+  const { rowCount } = await query(
+    `UPDATE keyword_gaps SET content_plan = $3 WHERE site_id = $1 AND id = $2`,
+    [siteId, gapId, plan]
+  );
+  return rowCount === 1;
 }
 
 // Records one weekly discovery pass's real-GSC evidence for a still-pending

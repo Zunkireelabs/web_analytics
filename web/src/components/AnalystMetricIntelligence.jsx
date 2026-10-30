@@ -6,7 +6,7 @@ import {
   AlertTriangle, CheckCircle2, Loader2, Send, ChevronDown, ChevronRight,
   Activity, ShieldCheck, EyeOff, Search,
 } from 'lucide-react';
-import { api } from '../api.js';
+import { api, SELF } from '../api.js';
 import {
   formatByUnit, finding, supportingLine, groupDeclinesByMetric, lowConfidenceReason,
   SEVERITY_META, TYPE_META,
@@ -118,7 +118,7 @@ function CardActions({ clientId, primary, canDraft, draftedId, busy, sendToActio
   return (
     <div className="flex items-center gap-2 flex-wrap">
       {draftedId ? (
-        <a href={`/action-center?siteId=${clientId}`} className="text-[13px] font-medium flex items-center gap-1.5 hover:underline" style={{ color: STATUS.good.text }}>
+        <a href={clientId === SELF ? '/action-center' : `/action-center?siteId=${clientId}`} className="text-[13px] font-medium flex items-center gap-1.5 hover:underline" style={{ color: STATUS.good.text }}>
           <CheckCircle2 size={iconSize} /> In Action Center
         </a>
       ) : canDraft ? (
@@ -132,7 +132,7 @@ function CardActions({ clientId, primary, canDraft, draftedId, busy, sendToActio
         </span>
       )}
       <Button variant="light" size={size} onClick={() => act('resolve')} disabled={busy}>Fixed</Button>
-      <Button variant="ghost" size={size} onClick={() => act('dismiss')} disabled={busy}>Dismiss</Button>
+      <Button write variant="ghost" size={size} onClick={() => act('dismiss')} disabled={busy}>Dismiss</Button>
     </div>
   );
 }

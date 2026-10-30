@@ -3,6 +3,7 @@ import { api, daysAgo } from '../api.js';
 import DonutChart from '../components/DonutChart.jsx';
 import MoversList from '../components/MoversList.jsx';
 import CountriesWidget from '../components/CountriesWidget.jsx';
+import GeoIntelligenceCard from '../components/GeoIntelligenceCard.jsx';
 import PageToolbar from '../components/PageToolbar.jsx';
 import PageIntro from '../components/layout/PageIntro.jsx';
 import KpiStrip from '../components/layout/KpiStrip.jsx';
@@ -39,6 +40,10 @@ export default function Insights({ siteId }) {
   const [country, setCountry] = useState({ visitors: [], search: [] });
   const [movers, setMovers] = useState({ gainers: [], droppers: [] });
   const [error, setError] = useState(false);
+  // Geographic audience (where sessions come from, with the AI's read on it) used to sit at the bottom of
+  // the Orchestration page; it belongs with the rest of the traffic data, so it lives here now.
+  const [geo, setGeo] = useState(null); // null = loading
+  useEffect(() => { api.commandCenter.get().then(setGeo).catch(() => setGeo({})); }, [siteId]);
 
   // Auto-pick the freshest finalized day as the range end.
   useEffect(() => {
@@ -123,6 +128,10 @@ export default function Insights({ siteId }) {
       <Section tray className="mt-3" title="Search clicks by country" subtitle="Where your search clicks come from" source="Google Search Console">
         <CountriesWidget rows={country.search} />
       </Section>
+
+      <Tray className="mt-3" title="Geographic audience" subtitle="Where your sessions come from" source="Google Analytics">
+        <GeoIntelligenceCard geoIntelligence={geo?.geoIntelligence} meta={geo?.geoIntelligenceMeta} loading={geo === null} />
+      </Tray>
 
       {/* Detailed query movements and highlights at the bottom for analysis —
           MoversList renders its own trays. */}

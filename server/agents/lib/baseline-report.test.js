@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 // network call, not a query.
 
 let savedRows;
+let existingBaseline = null; // what `SELECT * FROM baseline_reports` finds for the site
 
 function fakeQuery(text, params = []) {
   const sql = text.replace(/\s+/g, ' ').trim();
@@ -30,6 +31,9 @@ function fakeQuery(text, params = []) {
   if (sql.startsWith('SELECT * FROM audit_runs')) {
     return { rows: [] }; // full site audit still running — not available yet
   }
+  if (sql.startsWith('SELECT * FROM baseline_reports WHERE site_id')) {
+    return { rows: existingBaseline ? [existingBaseline] : [] };
+  }
   if (sql.startsWith('INSERT INTO baseline_reports')) {
     savedRows = { site_id: params[0], kpi_snapshot: JSON.parse(params[1]), issues_snapshot: JSON.parse(params[2]), narrative_md: params[3], generated_at: new Date().toISOString() };
     return { rows: [savedRows] };
@@ -40,7 +44,7 @@ function fakeQuery(text, params = []) {
 mock.module('../../db.js', { namedExports: { query: (...args) => fakeQuery(...args) } });
 mock.module('../../llm.js', { namedExports: { callLLM: async () => '# Baseline Report — Test Site\n\n## Where Your Website Stood\nNo real history yet.\n\n## Issues We Found\n- One high-priority issue on /pricing.\n\n## What Happens Next\nFuture reports compare against this.' } });
 
-const { buildBaselineReport } = await import('./baseline-report.js');
+const { buildBaselineReport, refreshBaselineReportIfPending } = await import('./baseline-report.js');
 
 describe('buildBaselineReport', () => {
   beforeEach(() => { savedRows = null; });
@@ -62,5 +66,29 @@ describe('buildBaselineReport', () => {
   test('returns null for a site that does not exist', async () => {
     const report = await buildBaselineReport(999);
     assert.equal(report, null);
+  });
+});
+
+// The top-up that runs once a new client's first audit finishes. It once called getBaselineReport without
+// importing it, so bulk-audit swallowed the ReferenceError and the day-0 report never got its audit section.
+describe('refreshBaselineReportIfPending', () => {
+  beforeEach(() => { savedRows = null; existingBaseline = null; });
+
+  test('does nothing when no baseline report exists yet', async () => {
+    assert.equal(await refreshBaselineReportIfPending(1), null);
+    assert.equal(savedRows, null);
+  });
+
+  test('rebuilds a baseline whose audit section was still missing when it was frozen', async () => {
+    existingBaseline = { site_id: 1, issues_snapshot: { fullSiteAudit: { available: false, status: 'running' } } };
+    const report = await refreshBaselineReportIfPending(1);
+    assert.notEqual(report, null);
+    assert.equal(savedRows.site_id, 1);
+  });
+
+  test('leaves a baseline alone once it already holds the completed audit', async () => {
+    existingBaseline = { site_id: 1, issues_snapshot: { fullSiteAudit: { available: true, status: 'completed' } } };
+    assert.equal(await refreshBaselineReportIfPending(1), null);
+    assert.equal(savedRows, null);
   });
 });

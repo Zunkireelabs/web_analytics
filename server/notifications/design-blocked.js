@@ -52,3 +52,30 @@ export async function notifyDesignBlocked(site, info, deps = {}) {
     return { sent: false, reason: 'error' };
   }
 }
+
+// A project whose design could not be captured after every retry. Shipping stays on hold on purpose (nothing
+// is pushed that does not match the site's own design), so a person has to hear about it: without this the only
+// trace was a log line, and the project quietly stopped getting fixes.
+export function designCaptureHeldEvent(site) {
+  return {
+    type: DESIGN_BLOCKED_TYPE,
+    severity: 'high',
+    title: `${site?.name || 'This site'}: fixes are on hold because its design could not be captured`,
+    body: 'SuperRank tried several times to capture how this site looks and could not, so it is not pushing fixes it cannot check against that design. ' +
+      'Nothing is broken on the live site. Check that the site opens normally for visitors and is not blocking automated visits, then ask us to re-run the design capture and fixes will resume.',
+    insightId: `design-capture-held:${site?.id}`,
+  };
+}
+
+export async function notifyDesignCaptureHeld(site, deps = {}) {
+  try {
+    const hasRecent = deps.hasRecent || (await import('../store/notifications.js')).hasRecentNotification;
+    const deliver = deps.deliver || (await import('./channels/index.js')).deliverToAllChannels;
+    if (await hasRecent(site.id, DESIGN_BLOCKED_TYPE, DESIGN_BLOCKED_COOLDOWN_DAYS)) return { sent: false, reason: 'same-episode' };
+    await deliver(site.id, [designCaptureHeldEvent(site)]);
+    return { sent: true };
+  } catch (err) {
+    console.warn(`[design-blocked] could not notify site ${site?.id}: ${err.message}`);
+    return { sent: false, reason: 'error' };
+  }
+}

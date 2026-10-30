@@ -1,17 +1,27 @@
 import { BetaAnalyticsDataClient } from '@google-analytics/data';
-import { getGa4ClientOptions } from '../auth/google.js';
+import { getGa4ClientOptionsAsync } from '../auth/google.js';
 
 // One cached client per distinct credential set, keyed by site id — a single
 // shared singleton would silently reuse the wrong client's credentials for
 // other sites once any site has its own dedicated Google credentials file.
 const clients = new Map();
-function ga4(site) {
+// A project that connects (or disconnects) its own Google account changes which credential
+// this must use, so the cached client is dropped by forgetGa4Client below.
+const GA4_TIMEOUT_MS = Number(process.env.GOOGLE_API_TIMEOUT_MS) || 60_000;
+async function ga4(site) {
   const key = site?.id ?? '__shared__';
   if (!clients.has(key)) {
-    clients.set(key, new BetaAnalyticsDataClient(getGa4ClientOptions(site)));
+    const client = new BetaAnalyticsDataClient(await getGa4ClientOptionsAsync(site));
+    // Analytics Data calls go through gRPC, not googleapis, so they need their own time limit.
+    const run = client.runReport.bind(client);
+    client.runReport = (request, options, callback) => (typeof options === 'function'
+      ? run(request, { timeout: GA4_TIMEOUT_MS }, options)
+      : run(request, { timeout: GA4_TIMEOUT_MS, ...(options || {}) }, callback));
+    clients.set(key, client);
   }
   return clients.get(key);
 }
+export function forgetGa4Client(siteId) { clients.delete(siteId); }
 
 const num = (v) => (v == null || v === '' ? 0 : Number(v));
 
@@ -23,7 +33,7 @@ export async function fetchGa4ForDate(site, date) {
   const property = `properties/${site.ga4_property_id}`;
 
   // 1) Overall totals.
-  const [totalsRes] = await ga4(site).runReport({
+  const [totalsRes] = await (await ga4(site)).runReport({
     property,
     dateRanges: [{ startDate: date, endDate: date }],
     metrics: [
@@ -49,7 +59,7 @@ export async function fetchGa4ForDate(site, date) {
   };
 
   // 2) Traffic by default channel group.
-  const [chanRes] = await ga4(site).runReport({
+  const [chanRes] = await (await ga4(site)).runReport({
     property,
     dateRanges: [{ startDate: date, endDate: date }],
     dimensions: [{ name: 'sessionDefaultChannelGroup' }],
@@ -64,7 +74,7 @@ export async function fetchGa4ForDate(site, date) {
 
   // 3) Breakdown by device category and by country (sessions + users).
   const breakdown = async (dimName) => {
-    const [res] = await ga4(site).runReport({
+    const [res] = await (await ga4(site)).runReport({
       property,
       dateRanges: [{ startDate: date, endDate: date }],
       dimensions: [{ name: dimName }],

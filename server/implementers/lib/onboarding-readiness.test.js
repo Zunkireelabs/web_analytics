@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { isOnboardingAnalysisPending, FIRST_DESIGN_PROFILE_TIMEOUT_MS } from './onboarding-readiness.js';
+import { isOnboardingAnalysisPending, FIRST_DESIGN_PROFILE_TIMEOUT_MS, designCaptureNeedsPerson } from './onboarding-readiness.js';
 
 // Two-stage onboarding: connect-repo (server/routes/clients.js, server/scripts/connect-repo.js)
 // grants auto_remediation_enabled AND queues the whole-site analysis job
@@ -9,10 +9,18 @@ import { isOnboardingAnalysisPending, FIRST_DESIGN_PROFILE_TIMEOUT_MS } from './
 // PR-opening loop) must wait for that analysis to reach a terminal state.
 // This function is the single shared predicate both call sites use.
 
+const FULL_PROFILE = {
+  typography: { body: 'text-base', heading: { item: 'text-lg', section: 'text-2xl' } },
+  layout: { container: 'max-w-6xl' }, spacing: { section: 'py-12', itemGap: 'gap-4' },
+  color: { primary: '#000' }, responsive: { md: 1 }, components: { card: {} }, navigation: { header: 1 },
+  pages: [{ url: '/' }], pageTypePatterns: { blog: {} },
+};
+const fullSite = (id = 1) => ({ id, url_file_map: { siteRoot: { designProfile: FULL_PROFILE } } });
+
 describe('isOnboardingAnalysisPending', () => {
   test('a site with an already-usable design profile is never pending — no DB call at all', async () => {
     let jobLookups = 0;
-    const pending = await isOnboardingAnalysisPending({ id: 1 }, {
+    const pending = await isOnboardingAnalysisPending(fullSite(), {
       hasUsableProfile: () => true,
       latestProfileJob: async () => { jobLookups++; return null; },
     });
@@ -53,31 +61,71 @@ describe('isOnboardingAnalysisPending', () => {
       assert.equal(enqueueCalls, 0, 'a job already in flight must never be re-queued');
     });
 
-    test(`no profile yet, job status "${status}" pending PAST the timeout -> not pending (ships anyway)`, async () => {
+    test(`no profile yet, job status "${status}" stuck PAST the timeout -> still held, and a fresh derivation is queued`, async () => {
       const queuedAt = new Date(Date.now() - FIRST_DESIGN_PROFILE_TIMEOUT_MS - 1000).toISOString();
+      let enqueueCalls = 0;
       const pending = await isOnboardingAnalysisPending({ id: 1 }, {
         hasUsableProfile: () => false,
         latestProfileJob: async () => ({ status, created_at: queuedAt }),
-        enqueueProfileJob: async () => { throw new Error('must not be called'); },
+        enqueueProfileJob: async () => { enqueueCalls++; },
       });
-      assert.equal(pending, false, 'a stuck/failed-to-finish job must not block a client from shipping forever');
+      assert.equal(pending, true, 'a client without a captured design must never ship');
+      assert.equal(enqueueCalls, 1);
     });
   }
 
-  for (const status of ['completed', 'failed']) {
-    test(`no profile yet, job status "${status}" (terminal) -> not pending`, async () => {
-      const pending = await isOnboardingAnalysisPending({ id: 1 }, {
-        hasUsableProfile: () => false,
-        latestProfileJob: async () => ({ status }),
-      });
-      assert.equal(pending, false, 'a terminal job — success OR failure — must never block repair forever');
+  test('failed capture, past the backoff -> held and retried', async () => {
+    let enqueueCalls = 0;
+    const pending = await isOnboardingAnalysisPending({ id: 1 }, {
+      hasUsableProfile: () => false,
+      latestProfileJob: async () => ({ status: 'failed', finished_at: new Date(Date.now() - 2 * 3600e3).toISOString() }),
+      recentProfileJobs: async () => [{}],
+      enqueueProfileJob: async () => { enqueueCalls++; },
     });
-  }
+    assert.equal(pending, true);
+    assert.equal(enqueueCalls, 1);
+  });
+
+  test('completed without a usable profile, inside the backoff -> held, no re-queue yet', async () => {
+    let enqueueCalls = 0;
+    const pending = await isOnboardingAnalysisPending({ id: 1 }, {
+      hasUsableProfile: () => false,
+      latestProfileJob: async () => ({ status: 'completed', finished_at: new Date().toISOString() }),
+      enqueueProfileJob: async () => { enqueueCalls++; },
+    });
+    assert.equal(pending, true);
+    assert.equal(enqueueCalls, 0);
+  });
+
+  test('attempts exhausted -> still held, no endless re-queueing', async () => {
+    let enqueueCalls = 0;
+    const pending = await isOnboardingAnalysisPending({ id: 1 }, {
+      hasUsableProfile: () => false,
+      maxAttempts: 3,
+      latestProfileJob: async () => ({ status: 'failed', finished_at: new Date(Date.now() - 9 * 3600e3).toISOString() }),
+      recentProfileJobs: async () => [{}, {}, {}],
+      enqueueProfileJob: async () => { enqueueCalls++; },
+    });
+    assert.equal(pending, true);
+    assert.equal(enqueueCalls, 0);
+  });
+
+  test('a usable but thin capture is not held, yet a fuller capture is requested', async () => {
+    let enqueueCalls = 0;
+    const thin = { id: 9, url_file_map: { siteRoot: { designProfile: { typography: { body: 'x', heading: { item: 'y' } }, layout: { container: 'z' } } } } };
+    const pending = await isOnboardingAnalysisPending(thin, {
+      hasUsableProfile: () => true,
+      latestProfileJob: async () => null,
+      enqueueProfileJob: async () => { enqueueCalls++; },
+    });
+    assert.equal(pending, false);
+    assert.equal(enqueueCalls, 1);
+  });
 
   test('an established site with an existing (even stale) profile is completely unaffected', async () => {
     let jobLookups = 0;
     let enqueueCalls = 0;
-    const pending = await isOnboardingAnalysisPending({ id: 1 }, {
+    const pending = await isOnboardingAnalysisPending(fullSite(), {
       hasUsableProfile: () => true,
       latestProfileJob: async () => { jobLookups++; return null; },
       enqueueProfileJob: async () => { enqueueCalls++; },
@@ -97,5 +145,24 @@ describe('isOnboardingAnalysisPending', () => {
       });
     }
     assert.deepEqual(seenSiteIds, [7, 42, 501]);
+  });
+});
+
+describe('designCaptureNeedsPerson — held until a person looks', () => {
+  const site = { id: 3 };
+  const jobs = (n) => async () => Array.from({ length: n }, (_, i) => ({ id: i }));
+  const base = { hasUsableProfile: () => false, maxAttempts: 5 };
+
+  test('true only after every allowed try has failed', async () => {
+    assert.equal(await designCaptureNeedsPerson(site, { ...base, latestProfileJob: async () => ({ status: 'failed' }), recentProfileJobs: jobs(5) }), true);
+    assert.equal(await designCaptureNeedsPerson(site, { ...base, latestProfileJob: async () => ({ status: 'failed' }), recentProfileJobs: jobs(2) }), false);
+  });
+  test('false while a capture is still queued or running, or when there is a usable profile', async () => {
+    assert.equal(await designCaptureNeedsPerson(site, { ...base, latestProfileJob: async () => ({ status: 'executing' }), recentProfileJobs: jobs(5) }), false);
+    assert.equal(await designCaptureNeedsPerson(site, { ...base, latestProfileJob: async () => ({ status: 'queued' }), recentProfileJobs: jobs(5) }), false);
+    assert.equal(await designCaptureNeedsPerson(site, { ...base, hasUsableProfile: () => true, latestProfileJob: async () => ({ status: 'failed' }), recentProfileJobs: jobs(5) }), false);
+  });
+  test('false when no capture was ever requested (that case starts one, it is not a person problem)', async () => {
+    assert.equal(await designCaptureNeedsPerson(site, { ...base, latestProfileJob: async () => null, recentProfileJobs: jobs(0) }), false);
   });
 });

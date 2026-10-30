@@ -1,4 +1,4 @@
-import { resolveFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
+import { resolveFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, isPageMapped, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, getRepoTree } from '../github/client.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
@@ -16,7 +16,8 @@ import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, hasExistingFaqSchema, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
 import { decideFaqRenderMode } from './lib/faq-render-mode.js';
-import { COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, checkDesignIntegrityGate, resolvePageComponentTemplate } from './lib/design-drift.js';
+import { COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, checkDesignIntegrityGate, resolvePageComponentTemplate, lacksDesignBaseline } from './lib/design-drift.js';
+import { designGateMode } from '../design-agent/lib/design-completeness.js';
 import { checkResponsivePreview, describeResponsiveRegressions } from '../generators/lib/responsive-preview-gate.js';
 import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination-routes.js';
 import { checkSharedTemplateWrite } from './lib/action-scope.js';
@@ -1301,6 +1302,27 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   const siteLevelTemplate = componentKey && site.url_file_map?.siteRoot?.componentTemplates?.[componentKey];
   const hasPageCaptures = componentKey && site.url_file_map?.siteRoot?.pageComponentTemplates?.[componentKey];
   let componentTemplatesForMerge = site.url_file_map?.siteRoot?.componentTemplates;
+  // Nothing of this site's design to ground the markup in: hold, never ship
+  // the generic built-in fallback onto a real client page.
+  if (lacksDesignBaseline(site, { componentKey, mode, gateMode: designGateMode() })) {
+    // Same self-heal as frontend.js's completeness hold (design-gates.js): ask
+    // the Design Agent to capture this site so the next run can ship, and keep
+    // the miss as knowledge for this tenant. Best effort — never masks the hold.
+    await (await import('../store/design-gate-decisions.js')).recordGateDecision(site.id, {
+      draftId: draft.id ?? null, actionType: draft.action_type, gate: 'completeness', mode: 'enforce', blocked: true,
+      reason: 'no-design-profile', detail: { componentKey, repairable: true },
+    }).catch(() => {});
+    await (await import('../design-agent/lib/design-block-repair.js')).requeueProfileForRepeatedBlocks(site).catch(() => {});
+    await (await import('../store/design-knowledge.js')).recordDesignFailure(site.id, {
+      patternId: 'design-incomplete', pageUrl: page, detail: `no captured design for ${componentKey}`,
+      draftId: draft.id ?? null, validation: { passed: false, gate: 'baseline', mode: 'enforce' },
+    }).catch(() => {});
+    return {
+      ok: false, reason: 'design-incomplete',
+      error: `This site has no captured design (no template, page capture or usable design profile) for "${componentKey}", so this was held for review instead of shipping generic markup. Run the Design Agent for the site, then retry.`,
+      componentKey, actionType: draft.action_type,
+    };
+  }
   if (mode === 'visible' && componentKey && (siteLevelTemplate || hasPageCaptures || siteHasUsableDesignProfile(site))) {
     const resolved = await resolvePageComponentTemplate(site, draft.action_type, page);
     if (!resolved.ok) {
@@ -1358,7 +1380,13 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // file.content already fetched above (known engineering issue: validate a
   // schema type doesn't already exist before inserting one).
   const suppressSchema = INSPECTABLE_ACTION_TYPES.includes(draft.action_type) && hasExistingFaqSchema(file.content);
-  const built = buildMergeValues(draft.action_type, draft.content, mode, componentTemplatesForMerge, site.url_file_map?.siteRoot?.designProfile, { suppressSchema, page, fileContent: file.content });
+  const hasLinkMap = Boolean(site.url_file_map && (Object.keys(site.url_file_map.pages || {}).length || (site.url_file_map.patterns || []).length));
+  const built = buildMergeValues(draft.action_type, draft.content, mode, componentTemplatesForMerge, site.url_file_map?.siteRoot?.designProfile, {
+    suppressSchema, page, fileContent: file.content,
+    // A link target must resolve in this site's url_file_map; a site with no
+    // page map at all is not judged on it (nothing to resolve against).
+    resolveLinkTarget: hasLinkMap ? (url) => isPageMapped(site, url, 'internal-links') : null,
+  });
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
   // Responsive preview (generators/lib/responsive-preview-gate.js) — every
@@ -1388,6 +1416,13 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
       pageUrl: page, marker, newContentHtml: built.values[componentField],
     }).catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
 
+    // The live page could not be reached to render it: the layout check did
+    // NOT pass, it did not run. Hold this item (transient, retried — see
+    // attempt-classification) rather than ship unchecked; the run moves on to
+    // other clients and comes back to this one at the end.
+    if (!responsivePreview.ok && (responsivePreview.reason === 'unreachable' || responsivePreview.reason === 'browser-unavailable') && process.env.RESPONSIVE_GATE_ENFORCE !== 'false') {
+      return { ok: false, reason: 'unreachable', error: 'The layout check could not run (the live page was unreachable, or no browser was available), so this was held, not shipped.' };
+    }
     if (responsivePreview.ok && responsivePreview.broken && process.env.RESPONSIVE_GATE_ENFORCE !== 'false') {
       return {
         ok: false, reason: 'responsive-regression',

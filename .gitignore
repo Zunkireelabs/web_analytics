@@ -22,3 +22,6 @@ deploy/*.plist
 # pre-correction profile to CWD before it edits sites.url_file_map — real
 # output, not source, and not meant to accumulate in the repo root.
 design-profile-backup-site-*.json
+
+# Local email outbox (DEV_MAIL_OUTBOX): saved test emails, never committed.
+.local-mail/

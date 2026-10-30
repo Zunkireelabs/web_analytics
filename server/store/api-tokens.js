@@ -66,3 +66,30 @@ export async function findActiveTokenByRawValue(rawToken) {
 export async function touchApiTokenLastUsed(id) {
   await query(`UPDATE api_tokens SET last_used_at = now() WHERE id = $1`, [id]);
 }
+
+// Workspace-wide view of the same tokens: every token of every project in the
+// workspace, with the project's name. The join to sites is what scopes it; no
+// token outside this workspace can come back.
+export async function listApiTokensForWorkspace(workspaceId) {
+  const { rows } = await query(
+    `SELECT t.id, t.site_id, s.name AS site_name, t.token_prefix, t.label, t.permission_level,
+            t.created_at, t.last_used_at, t.revoked_at
+       FROM api_tokens t JOIN sites s ON s.id = t.site_id
+      WHERE s.workspace_id = $1 ORDER BY t.created_at DESC`,
+    [workspaceId]
+  );
+  return rows;
+}
+
+// Revoke by token id, but only when the token's project belongs to this
+// workspace, so an admin of one workspace cannot revoke another's tokens.
+export async function revokeApiTokenInWorkspace(workspaceId, id) {
+  const { rows } = await query(
+    `UPDATE api_tokens SET revoked_at = now()
+      WHERE id = $1 AND revoked_at IS NULL
+        AND site_id IN (SELECT id FROM sites WHERE workspace_id = $2)
+      RETURNING id, site_id`,
+    [id, workspaceId]
+  );
+  return rows[0] || null;
+}

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { withJobLock, jobKeyFor } from '../lib/job-lock.js';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requirePlatformRole } from './login.js';
 
@@ -17,7 +18,9 @@ import { hasVisibleFaqSignal } from '../implementers/lib/render-inspector.js';
 import { PERMISSION_LEVELS } from '../../mcp-server/permissions.js';
 import { getUserByEmail, createUser } from '../store/users.js';
 import { attachNewClientWorkspace } from '../store/workspaces.js';
-import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed, setSignupRequestCreatedSite } from '../store/signup-requests.js';
+import { sendSignupApprovedEmail } from '../report/email.js';
+import { appOrigin } from './lib/app-url.js';
+import { listPendingSignupRequests, listAwaitingVerification, getSignupRequestById, markSignupRequestReviewed, issueVerificationToken } from '../store/signup-requests.js';
 import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { getProductGrowthConfig, saveProductGrowthConfig, setProspectDiscoveryEnabled, ensureCrmWebhookToken } from '../store/product-growth-config.js';
 import { GOAL_TYPES, createGoal, listGoals, getGoal, updateGoal, setGoalStatus } from '../store/site-goals.js';
@@ -215,17 +218,19 @@ router.get('/internal/signup-requests', async (req, res, next) => {
     res.json(requests.map((r) => ({
       id: r.id, companyName: r.company_name, websiteDomain: r.website_domain,
       contactEmail: r.contact_email, message: r.message, createdAt: r.created_at,
+      fullName: r.full_name, role: r.role, heardFrom: r.heard_from,
     })));
   } catch (e) { next(e); }
 });
 
-// Approve — runs the exact same createClientSite + createUser sequence as
-// POST /internal/clients above, sourced from the stored request instead of
-// a staff-typed form. Uses the request's already-real bcrypt hash directly
-// (never re-hashed, never re-typed by staff) since the prospective client
-// set their own password at request time. Re-checks email uniqueness since
-// a request can sit pending long enough for the email to be taken another
-// way in the meantime.
+// Approve — turns a stored sign-up request into a LOGIN, nothing more. It no
+// longer creates a site or workspace: the person signs in to an empty account
+// and creates their own workspace and projects, connecting Google and GitHub
+// themselves. Uses the request's already-real bcrypt hash directly (never
+// re-hashed, never re-typed by staff) since the prospective client set their
+// own password at request time. Re-checks email uniqueness since a request can
+// sit pending long enough for the email to be taken another way in the
+// meantime.
 router.post('/internal/signup-requests/:id/approve', async (req, res, next) => {
   try {
     const requestId = Number(req.params.id);
@@ -245,33 +250,60 @@ router.post('/internal/signup-requests/:id/approve', async (req, res, next) => {
       return res.status(409).json({ error: `This request was already ${current?.status}.` });
     }
 
-    const site = await createClientSite({ name: request.company_name, websiteDomain: request.website_domain, timezone: undefined });
-    try {
-      const created = await createUser({ siteId: site.id, email: request.contact_email, passwordHash: request.password_hash });
-      await giveNewClientWorkspace(site, created);
-    } catch (err) {
-      // Site created but login failed — same orphaned-but-harmless recovery
-      // shape as POST /internal/clients above (siteId is returned so staff
-      // can finish it via `npm run create-client -- <email> <password>
-      // --site-id <id>`). The request is already claimed 'approved' above
-      // and can't be re-approved — that's the race guard working as intended.
-      const { message } = safeMessage('clients.approveSignupRequest', err, 'the login could not be created');
-      return res.status(500).json({ error: `Site #${site.id} was created, but ${message} — finish it via \`npm run create-client -- <email> <password> --site-id ${site.id}\`.`, siteId: site.id });
-    }
-
-    await setSignupRequestCreatedSite(requestId, site.id);
-
+    // Approval creates NOTHING yet. It marks the request approved and emails a one-time link to the
+    // address that signed up; the login is created when that link is used (see
+    // consumeVerificationToken), so an account can only ever exist for an inbox someone has
+    // actually read. They then sign in to an empty account and create their own workspace and
+    // projects (migration 198 makes users.site_id optional for exactly this).
+    const sent = await sendConfirmation(req, claimed);
     await recordAuditEvent(req, {
       action: 'signup_request.approved',
       targetType: 'signup_request',
       targetId: String(requestId),
-      tenantSiteId: site.id,
-      tenantName: site.name,
-      metadata: { signupRequestId: requestId, companyName: request.company_name, contactEmail: request.contact_email },
+      metadata: { signupRequestId: requestId, companyName: request.company_name, contactEmail: request.contact_email, awaitingEmailConfirmation: true },
       success: true,
     });
 
-    res.status(201).json({ id: site.id, clientNumber: site.client_number, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, propertyType: site.property_type, connected: false });
+    res.status(201).json({ awaitingVerification: true, requestId, email: request.contact_email, companyName: request.company_name, ...sent });
+  } catch (e) { next(e); }
+});
+
+// Mints a fresh one-time link for an approved request and emails it. A failed send must not undo the
+// approval, so it is reported back instead of thrown and staff can resend. When mail is not configured
+// on a NON-production server (a laptop), the link is returned so the flow can be tried without email;
+// in production it is never returned, only emailed.
+async function sendConfirmation(req, request) {
+  const token = await issueVerificationToken(request.id);
+  if (!token) return { emailSent: false };
+  const signInUrl = `${appOrigin(req)}/login?token=${encodeURIComponent(token)}`;
+  let emailSent = false;
+  try {
+    emailSent = await sendSignupApprovedEmail({ companyName: request.company_name, contactEmail: request.contact_email, signInUrl });
+  } catch (err) {
+    console.error(`[clients] confirmation email for signup request ${request.id} failed:`, err.message);
+  }
+  return { emailSent, ...(!emailSent && process.env.NODE_ENV !== 'production' ? { devConfirmUrl: signInUrl } : {}) };
+}
+
+// Approved, but the person has not confirmed their email yet. Lets staff resend the link (a new
+// link replaces the old one, so a stale email stops working).
+router.get('/internal/signup-requests/awaiting', async (req, res, next) => {
+  try {
+    const rows = await listAwaitingVerification();
+    res.json(rows.map((r) => ({ id: r.id, companyName: r.company_name, contactEmail: r.contact_email, approvedAt: r.reviewed_at, expired: r.verify_expires_at ? new Date(r.verify_expires_at) <= new Date() : false })));
+  } catch (e) { next(e); }
+});
+
+router.post('/internal/signup-requests/:id/resend', async (req, res, next) => {
+  try {
+    const request = await getSignupRequestById(Number(req.params.id));
+    if (!request || request.status !== 'approved' || request.verified_at) return res.status(404).json({ error: 'There is nothing to resend for that request.' });
+    const sent = await sendConfirmation(req, request);
+    await recordAuditEvent(req, {
+      action: 'signup_request.confirmation_resent', targetType: 'signup_request', targetId: String(request.id),
+      metadata: { signupRequestId: request.id, contactEmail: request.contact_email }, success: true,
+    });
+    res.json({ email: request.contact_email, ...sent });
   } catch (e) { next(e); }
 });
 
@@ -307,7 +339,21 @@ router.post('/internal/signup-requests/:id/reject', async (req, res, next) => {
 // insufficient-data findings, never a placeholder while something is
 // secretly still pending. Returns `{error, discovery}` (no throw) on a real
 // ingestion failure so the caller can decide the HTTP status.
-async function runBaselineSequence(siteId, site) {
+// Exported for the self-serve project flow (routes/projects.js), which runs the
+// SAME sequence rather than a second copy of it — a divergence here would mean a
+// client-run baseline quietly doing less than a staff-run one.
+export async function runBaselineSequence(siteId, site) {
+  // One baseline per project at a time, across processes and browsers: it re-runs every
+  // analysis agent and costs real money, and a reopened popup or a refresh used to start a
+  // second copy while the first was still going. A second caller gets { running: true }.
+  const locked = await withJobLock(baselineLockKey(siteId), () => runBaselineSequenceUnlocked(siteId, site));
+  if (!locked.ran) return { running: true, error: 'A baseline is already running for this project.' };
+  return locked.result;
+}
+
+export const baselineLockKey = (siteId) => jobKeyFor('baseline', siteId);
+
+async function runBaselineSequenceUnlocked(siteId, site) {
   // Design-integrity-gate proposal, change 01: the design read LEADS
   // onboarding, queued before anything else, so the browser capture runs
   // while discovery/ingestion/the site audit below are still working — by
