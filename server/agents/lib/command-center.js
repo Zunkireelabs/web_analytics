@@ -181,11 +181,15 @@ export async function getCommandCenterData(siteId) {
 
   const { score, penalty, findingsConsidered } = computeHealthScore(allFindings, implementedFindingIds, catByAgent);
   const today = new Date().toISOString().slice(0, 10);
-  await saveHealthScoreSnapshot(siteId, today, score)
+  // Four independent database calls, started together. They used to run one after another, and the database is
+  // far from the app server (about 170 ms per call), so the page paid four trips instead of one. The snapshot save
+  // is not awaited by the response: it only has to land eventually, and neither of the two reads below looks at today.
+  saveHealthScoreSnapshot(siteId, today, score)
     .catch((e) => console.error('[command-center] failed to save health score snapshot:', e.message));
-  const [weekAgoScore, monthAgoScore] = await Promise.all([
+  const [weekAgoScore, monthAgoScore, findingChanges] = await Promise.all([
     getHealthScoreOnOrBefore(siteId, shiftYmd(today, -7)),
     getHealthScoreOnOrBefore(siteId, shiftYmd(today, -30)),
+    getFindingsDiff(siteId, RECOMMENDATION_AGENT_IDS, 10),
   ]);
 
   const execRun = execRuns[0] || null;
@@ -193,7 +197,6 @@ export async function getCommandCenterData(siteId) {
 
   const generatedAt = new Date().toISOString();
   const trendWeek = weekAgoScore != null ? score - weekAgoScore : null;
-  const findingChanges = await getFindingsDiff(siteId, RECOMMENDATION_AGENT_IDS, 10);
   const healthEntry = healthChangeEntry(trendWeek, generatedAt);
   const recentChanges = (healthEntry ? [healthEntry, ...findingChanges] : findingChanges).slice(0, 10);
 

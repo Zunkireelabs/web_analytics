@@ -6,6 +6,7 @@ import { createServer as createHttpServer } from 'node:http';
 import express from 'express';
 import session from 'express-session';
 import connectPgSimple from 'connect-pg-simple';
+import { CachedSessionStore } from './lib/cached-session-store.js';
 import { logInternal } from './lib/errors.js';
 import loginRouter from './routes/login.js';
 import metricsRouter from './routes/metrics.js';
@@ -72,7 +73,7 @@ app.set('trust proxy', 1); // behind Traefik
 const PgSession = connectPgSimple(session);
 app.use(
   session({
-    store: new PgSession({ pool, createTableIfMissing: true }),
+    store: new CachedSessionStore(new PgSession({ pool, createTableIfMissing: true })),
     secret: process.env.SESSION_SECRET || (() => { throw new Error('SESSION_SECRET is not set'); })(),
     resave: false,
     saveUninitialized: false,
