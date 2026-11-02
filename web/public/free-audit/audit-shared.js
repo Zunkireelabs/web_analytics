@@ -52,6 +52,31 @@ export const clip = (s, n) => (s.length > n ? s.slice(0, n - 1).trimEnd() + '…
 export const gradeOf = (n) => (n >= 90 ? 'a' : n >= 75 ? 'b' : n >= 60 ? 'c' : n >= 40 ? 'd' : 'f');
 export const hostOf = (u) => new URL(u).hostname;
 
+// The typed site's own favicon in place of the globe, loaded straight from the site (the globe stays when it has none).
+// Used by the free audit and the AI visibility audit, the same way Page Fixer does it.
+export function attachFavicon(input, field) {
+  const globe = field.querySelector('svg');
+  const fav = document.createElement('img');
+  fav.className = 'audit-fav';
+  fav.alt = '';
+  fav.hidden = true;
+  if (globe) globe.after(fav); else field.prepend(fav);
+  const reset = () => { fav.hidden = true; if (globe) globe.style.display = ''; };
+  let timer;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const v = input.value.trim();
+      let h = '';
+      if (/^(https?:\/\/)?[\w-]+(\.[\w-]+)+(\/.*)?$/i.test(v)) { try { h = new URL(/^https?:\/\//i.test(v) ? v : `https://${v}`).hostname; } catch { h = ''; } }
+      if (!h) { reset(); return; }
+      fav.onload = () => { fav.hidden = false; if (globe) globe.style.display = 'none'; };
+      fav.onerror = reset;
+      fav.src = `https://${h}/favicon.ico`;
+    }, 350);
+  });
+}
+
 
 export function overallScore(overall) {
   let sum = 0, weight = 0;

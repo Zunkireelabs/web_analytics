@@ -2,7 +2,7 @@
 // shows a scanning animation, then a verdict, scores, the top issues, one free
 // sample fix and an email form that unlocks the full report. See audit-shared.js
 // for the common pieces.
-import { reduceMotion, el, dashboard, fixBlock } from './audit-shared.js';
+import { reduceMotion, el, dashboard, fixBlock, attachFavicon } from './audit-shared.js';
 
 const form = document.querySelector('[data-audit-form]');
 if (form) {
@@ -11,6 +11,7 @@ if (form) {
   const input = form.elements.website;
   const button = form.querySelector('button[type="submit"]');
   const field = input.closest('.audit-form__field');
+  attachFavicon(input, field);
   const title = document.querySelector('[data-audit-title]');
   const sub = document.querySelector('[data-audit-sub]');
   const validSite = (v) => /^(https?:\/\/)?[\w-]+(\.[\w-]+)+(\/.*)?$/i.test(v);
@@ -170,6 +171,7 @@ if (form) {
   const first = new URLSearchParams(location.search).get('site');
   if (first) {
     input.value = first;
+    input.dispatchEvent(new Event('input'));
     if (validSite(first.trim())) run(first.trim());
     else showError('Enter a valid website, like yourwebsite.com');
   }

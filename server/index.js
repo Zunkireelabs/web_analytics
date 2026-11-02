@@ -228,6 +228,23 @@ app.get(['/page-fixer', '/page-fixer/'], (req, res, next) => {
   res.sendFile(pageFixerHtml);
 });
 
+// The free audit (web/public/free-audit) is public in the same way. Without this, /free-audit/ fell through to the dashboard:
+// a signed-in account with no workspace saw "Name your workspace" there instead of the audit. Its report page
+// has its own route just below.
+const freeAuditHtml = join(here, '..', 'web', process.env.NODE_ENV === 'production' ? 'dist' : 'public', 'free-audit', 'index.html');
+app.get(['/free-audit', '/free-audit/'], (req, res, next) => {
+  if (!existsSync(freeAuditHtml)) return next();
+  res.set('Cache-Control', 'no-cache');
+  res.sendFile(freeAuditHtml);
+});
+// The saved report a person opens from the audit or its email is /free-audit/report?id=...
+const freeAuditReportHtml = join(here, '..', 'web', process.env.NODE_ENV === 'production' ? 'dist' : 'public', 'free-audit', 'report', 'index.html');
+app.get(['/free-audit/report', '/free-audit/report/'], (req, res, next) => {
+  if (!existsSync(freeAuditReportHtml)) return next();
+  res.set('Cache-Control', 'no-cache');
+  res.sendFile(freeAuditReportHtml);
+});
+
 // The AI visibility audit (web/public/ai-visibility) is public in the same way, so it gets the same clean URL.
 const aiVisibilityHtml = join(here, '..', 'web', process.env.NODE_ENV === 'production' ? 'dist' : 'public', 'ai-visibility', 'index.html');
 app.get(['/ai-visibility', '/ai-visibility/'], (req, res, next) => {
