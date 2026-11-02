@@ -8,6 +8,7 @@ import Badge from '../Badge.jsx';
 import GoalFields from './GoalFields.jsx';
 import BusinessProfileFields, { gbpReady, gbpSource } from './BusinessProfileFields.jsx';
 import { DEFAULT_GOAL, goalComplete } from '../../lib/workspace.js';
+import { useAccess } from '../../lib/access.jsx';
 
 // Adding a project, end to end, with no staff step anywhere in it:
 //
@@ -183,6 +184,12 @@ function Note({ tone = 'muted', icon: Icon, children }) {
 // to the Workspace page: the popup reopens on the Google step, with what happened
 // ({ google: 'saved' | 'connected', error }) shown at the top of it.
 export default function NewProjectModal({ workspace, first = false, project: existing = null, isOpen, onClose, onChanged, onOpenProject, startStep = null, notice = null }) {
+  // Staff can let a free-trial demo skip connecting GitHub (server/store/access.js): then the step gets a Skip button.
+  const accessInfo = useAccess() || null;
+  const githubOptional = Boolean(accessInfo?.githubOptional);
+  // A project made on /get-started (a real client, or a demo staff did not allow to skip) must connect GitHub. Other restricted
+  // projects keep the old Skip, because their GitHub is connected by staff.
+  const fromGetStarted = accessInfo?.source === 'get-started';
   const [step, setStep] = useState(1);
   const [name, setName] = useState('');
   const [domain, setDomain] = useState('');
@@ -791,11 +798,14 @@ export default function NewProjectModal({ workspace, first = false, project: exi
         <Button variant="light" onClick={() => setStep(4)} disabled={busy}>Back</Button>
         {restricted ? (
           <>
-            <Button variant="light" onClick={() => setStep(6)} disabled={busy}>Skip for now</Button>
+            {(githubOptional || !fromGetStarted) && <Button variant="light" onClick={() => setStep(6)} disabled={busy}>Skip for now</Button>}
             {mineLoaded && mine.repos.length > 0 && <Button variant="primary" onClick={saveGithub} disabled={busy || !repo || (useStage && !stage.trim())}>{busy ? 'Connecting…' : 'Connect repository'}</Button>}
           </>
         ) : (
-          <Button variant="primary" onClick={saveGithub} disabled={busy || !repo || (useStage && !stage.trim()) || (effSource === 'mine' && !mineLoaded)}>{busy ? 'Connecting…' : 'Connect repository'}</Button>
+          <>
+            {githubOptional && <Button variant="light" onClick={() => setStep(6)} disabled={busy}>Skip for now</Button>}
+            <Button variant="primary" onClick={saveGithub} disabled={busy || !repo || (useStage && !stage.trim()) || (effSource === 'mine' && !mineLoaded)}>{busy ? 'Connecting…' : 'Connect repository'}</Button>
+          </>
         )}
       </>
     );

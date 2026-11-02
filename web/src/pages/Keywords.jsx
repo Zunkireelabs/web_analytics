@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { AlertTriangle, BookOpen, FileText, Hash } from 'lucide-react';
+import { AlertTriangle, BookOpen, FileText, Hash, Sparkles } from 'lucide-react';
 import { api, SELF } from '../api.js';
 import AnalystProductCapabilities from '../components/AnalystProductCapabilities.jsx';
 import AnalystTopicMap from '../components/AnalystTopicMap.jsx';
 import KeywordsTab from '../components/keywords/KeywordsTab.jsx';
 import PagesTab from '../components/keywords/PagesTab.jsx';
+import PromptsTab from '../components/keywords/PromptsTab.jsx';
 import PageIntro from '../components/layout/PageIntro.jsx';
 import UnderlineTabs from '../components/settings/UnderlineTabs.jsx';
 import { STATUS } from '../lib/palette.js';
@@ -21,7 +22,12 @@ export default function Keywords({ isProduct = false }) {
   // Everything here is built from Search Console data, so a project with none connected is told that
   // specifically instead of looking like a quiet site.
   const [gscConnected, setGscConnected] = useState(null);
+  // The prompts written from the person's sign-up (only a project made on /get-started has any).
+  const [signup, setSignup] = useState(null);
+  useEffect(() => { api.onboardingSummary().then(setSignup).catch(() => setSignup(null)); }, []);
+  const hasPrompts = Boolean(signup?.promptList?.length);
   const tabs = [
+    ...(hasPrompts ? [{ key: 'prompts', label: 'Your prompts', icon: Sparkles }] : []),
     { key: 'keywords', label: 'Keywords', icon: Hash },
     { key: 'pages', label: 'Pages', icon: FileText },
     ...(isProduct ? [{ key: 'topics', label: 'What you sell', icon: BookOpen }] : []),
@@ -37,6 +43,13 @@ export default function Keywords({ isProduct = false }) {
   useEffect(() => {
     api.analyst.connections().then((r) => setGscConnected(r.gscConnected)).catch(() => setGscConnected(null));
   }, []);
+
+  // A project made on /get-started opens on the prompts from its sign-up, unless the link asked for a tab.
+  useEffect(() => {
+    if (!hasPrompts) return;
+    try { if (new URLSearchParams(window.location.search).get('tab')) return; } catch { /* no URL to read */ }
+    setTab('prompts');
+  }, [hasPrompts]);
 
   return (
     <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12 fade-up">
@@ -54,6 +67,7 @@ export default function Keywords({ isProduct = false }) {
 
         {tab === 'keywords' && <KeywordsTab isProduct={isProduct} />}
         {tab === 'pages' && <PagesTab />}
+        {tab === 'prompts' && hasPrompts && <PromptsTab data={signup} />}
         {tab === 'topics' && isProduct && (
           <>
             <p className="px-1 text-xs text-faint">What the product does and who it is sold to. The agent reads this to judge which keywords fit.</p>

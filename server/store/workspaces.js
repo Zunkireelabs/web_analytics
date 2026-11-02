@@ -110,18 +110,18 @@ export async function getAccessContext(userId, siteId) {
   };
 }
 
-// Workspaces a user can see, each with its projects. A platform admin gets
-// every workspace (role 'platform'); anyone else only the ones they belong to.
 // Never returns another workspace's projects to a non-member.
-export async function listWorkspacesForUser(user, { companySiteId }) {
+// The workspaces this person works in: the ones they belong to (created, or were added to). A platform admin is no
+// exception: the switcher lists THEIR workspaces, not every client's (those are in Account -> Platform, opened as support).
+// While a platform admin is looking at a client's project as support, that one workspace is added so the screen can show it.
+export async function listWorkspacesForUser(user, { companySiteId, currentSiteId = null }) {
   const memberCount = '(SELECT count(*)::int FROM workspace_members c WHERE c.workspace_id = w.id)';
-  const { rows } = isPlatformAdmin(user, companySiteId)
-    ? await query(
-      `SELECT w.id, w.name, 'platform' AS role, ${memberCount} AS member_count FROM workspaces w ORDER BY w.name`)
-    : await query(
-      `SELECT w.id, w.name, m.role, ${memberCount} AS member_count
-       FROM workspaces w JOIN workspace_members m ON m.workspace_id = w.id
-       WHERE m.user_id = $1 ORDER BY w.name`, [user.id]);
+  const admin = isPlatformAdmin(user, companySiteId);
+  const { rows } = await query(
+    `SELECT w.id, w.name, ${admin ? "'platform'" : 'm.role'} AS role, ${memberCount} AS member_count
+       FROM workspaces w LEFT JOIN workspace_members m ON m.workspace_id = w.id AND m.user_id = $1
+      WHERE w.deleted_at IS NULL AND (m.user_id IS NOT NULL ${admin && currentSiteId ? 'OR w.id = (SELECT workspace_id FROM sites WHERE id = $2)' : ''})
+      ORDER BY w.name`, admin && currentSiteId ? [user.id, currentSiteId] : [user.id]);
   if (!rows.length) return [];
   const ids = rows.map((w) => w.id);
   const { rows: projects } = await query(
@@ -137,6 +137,26 @@ export async function listWorkspacesForUser(user, { companySiteId }) {
   }));
 }
 
+// A whole workspace is removed (by a platform admin, or by its own owner with allowOwn): every project in it is soft-deleted (kept, but out of every list and
+// reachable by nobody), its people are taken out, and the workspace is marked deleted. Refused when it holds the
+// company's own site or when the admin is a member of it (they would be deleting their own workspace).
+export async function deleteWorkspaceAsPlatform(workspaceId, { adminUserId, companySiteId = 0, allowOwn = false }) {
+  const { rows: ws } = await query('SELECT id, name FROM workspaces WHERE id = $1 AND deleted_at IS NULL', [workspaceId]);
+  if (!ws[0]) return { ok: false, code: 'not_found' };
+  const { rows: sites } = await query(`SELECT id FROM sites WHERE workspace_id = $1 AND status IS DISTINCT FROM 'soft_deleted'`, [workspaceId]);
+  if (companySiteId && sites.some((s) => s.id === companySiteId)) return { ok: false, code: 'company' };
+  const { rows: mine } = await query('SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [workspaceId, adminUserId]);
+  if (mine.length && !allowOwn) return { ok: false, code: 'own' };
+  for (const s of sites) await softDeleteProject(s.id);
+  // Keep who was in it before taking them out, so a restore can put them back.
+  await query(
+    `UPDATE workspaces SET deleted_members = (SELECT COALESCE(jsonb_agg(jsonb_build_object('userId', user_id, 'role', role)), '[]'::jsonb)
+                                              FROM workspace_members WHERE workspace_id = $1) WHERE id = $1`, [workspaceId]);
+  await query('DELETE FROM workspace_members WHERE workspace_id = $1', [workspaceId]);
+  await query(`UPDATE workspaces SET deleted_at = now() WHERE id = $1`, [workspaceId]);
+  return { ok: true, name: ws[0].name, projects: sites.length };
+}
+
 // Every workspace on the platform, for the platform admin's own overview. Cheap
 // by design — one pass over workspaces, owners and sites, no per-project calls
 // out to Google or GitHub — because it is read whenever the admin opens the
@@ -150,7 +170,7 @@ export async function listWorkspacesForUser(user, { companySiteId }) {
 export async function listAllWorkspacesForPlatform() {
   const [{ rows: workspaces }, { rows: owners }, { rows: sites }] = await Promise.all([
     query(`SELECT w.id, w.name, w.created_at, (SELECT count(*)::int FROM workspace_members c WHERE c.workspace_id = w.id) AS member_count
-           FROM workspaces w ORDER BY w.name`),
+           FROM workspaces w WHERE w.deleted_at IS NULL ORDER BY w.name`),
     query(`SELECT m.workspace_id, u.email FROM workspace_members m JOIN users u ON u.id = m.user_id
            WHERE m.role = 'owner' ORDER BY u.email`),
     query(`SELECT id, name, website_domain, workspace_id, gsc_property, ga4_property_id, repo_owner, repo_name, onboarded_at
@@ -369,6 +389,11 @@ const NO_PROJECT_ALLOWED = [
   { methods: null, re: /^\/api\/change-password\/?$/ },
   { methods: null, re: /^\/api\/verify-password\/?$/ },
   { methods: ['GET', 'POST'], re: /^\/api\/workspaces\/?$/ },
+  // The last step of /get-started creates the person's first workspace and project, so it has to be reachable before they have one.
+  { methods: ['POST'], re: /^\/api\/onboarding\/complete\/?$/ },
+  // Picking up /get-started again: who is this, where did they get to, and the draft saved so far.
+  { methods: ['GET'], re: /^\/api\/get-started\/resume\/?$/ },
+  { methods: ['GET', 'PUT', 'DELETE'], re: /^\/api\/onboarding\/draft\/?$/ },
   { methods: ['POST'], re: /^\/api\/workspaces\/switch\/?$/ },
   { methods: null, re: /^\/api\/workspaces\/\d+(\/|$)/ },
   { methods: null, re: /^\/api\/projects\/\d+(\/|$)/ },

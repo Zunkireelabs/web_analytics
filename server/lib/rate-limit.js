@@ -1,4 +1,5 @@
 import { query } from '../db.js';
+import { devFixedCode } from '../store/login-codes.js';
 
 // Fixed-window counters kept in Postgres (migration 209), so a limit holds across every app instance.
 // A route is limited twice over — per IP and per normalised address — so neither one noisy IP
@@ -42,6 +43,7 @@ export const AUTH_LIMITS = {
 
 export function authRateLimit({ limits = AUTH_LIMITS, hitFn = hit } = {}) {
   return async function authRateLimitMiddleware(req, res, next) {
+    if (devFixedCode()) return next(); // local testing with a fixed code: no sign-in limits either
     // Express matches routes case-insensitively and ignores a trailing slash, so the lookup must too, or
     // `POST /login/` or `/LOGIN` would reach the route and skip its limit.
     const path = String(req.path || '').toLowerCase().replace(/\/+$/, '') || '/';

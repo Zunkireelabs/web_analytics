@@ -20,7 +20,7 @@ export function setupGap(site) {
 
 // A strip above every project page while that project's setup is unfinished. The button reopens the
 // same Add project popup on the step that is left (the Workspace page handles ?finish=<id>).
-export default function SetupBanner({ site }) {
+export default function SetupBanner({ site, fromGetStarted = false }) {
   const navigate = useNavigate();
   // The project's own Google sign-in stopped working (revoked, expired, or unreadable here).
   // Per project: another client's connection never changes what this one shows.
@@ -52,10 +52,10 @@ export default function SetupBanner({ site }) {
       style={{ boxShadow: 'inset 0 0 0 1px var(--primary-ring)' }} role="status">
       <span className="w-6 h-6 rounded-control bg-white text-primary grid place-items-center shrink-0"><Rocket size={13} /></span>
       <div className="min-w-0 flex-1 basis-[240px]">
-        <p className="text-[13px] font-medium text-fg">Finish setting up {site.name}</p>
+        <p className="text-[13px] font-medium text-fg">{fromGetStarted ? `Continue setting up your project: ${site.name}` : `Finish setting up ${site.name}`}</p>
         <p className="text-xs text-text">{gap}</p>
       </div>
-      <Button variant="primary" size="sm" onClick={() => navigate(`/workspace?finish=${site.id}`)}>Finish setup</Button>
+      <Button variant="primary" size="sm" onClick={() => navigate(`/workspace?finish=${site.id}`)}>{fromGetStarted ? 'Continue setup' : 'Finish setup'}</Button>
     </div>
   );
 }

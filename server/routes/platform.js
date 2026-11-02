@@ -5,7 +5,7 @@ import { recordAuditEvent } from '../store/admin/audit-log.js';
 import { callDataAnalystAgent } from '../lib/data-analyst-client.js';
 import { impactByGeneratorAllSites } from '../store/analyst-outlook.js';
 import { fixLabel } from '../agents/lib/analyst-outlook.js';
-import { isPlatformAdmin, listAllWorkspacesForPlatform, getProject } from '../store/workspaces.js';
+import { isPlatformAdmin, listAllWorkspacesForPlatform, getProject, deleteWorkspaceAsPlatform } from '../store/workspaces.js';
 
 // The platform admin's own view across every client workspace. Everything here
 // is a 404 for anyone else — not a 403 — so the existence of the view is not
@@ -32,6 +32,28 @@ router.get('/platform/workspaces', requireAuth, requirePlatformAdmin, async (req
         needsSetup: workspaces.reduce((n, w) => n + w.needsSetup, 0),
       },
     });
+  } catch (e) { next(e); }
+});
+
+// Remove a workspace and its projects. The admin must type the workspace's name back, the same re-typing the project
+// delete asks for, so one wrong click cannot do it.
+router.delete('/platform/workspaces/:id', requireAuth, requirePlatformAdmin, async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(404).json({ error: 'Not found.' });
+    const { rows } = await (await import('../db.js')).query('SELECT name FROM workspaces WHERE id = $1 AND deleted_at IS NULL', [id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
+    if (String(req.body?.confirmName || '').trim() !== rows[0].name) return res.status(400).json({ error: 'Type the workspace name exactly to delete it.' });
+    const out = await deleteWorkspaceAsPlatform(id, { adminUserId: req.userId, companySiteId: companySiteId(), allowOwn: true });
+    if (!out.ok) {
+      const msg = { company: 'This workspace holds the SuperRank company site and cannot be deleted.', own: 'You belong to this workspace, so you cannot delete it from here.', not_found: 'Not found.' }[out.code];
+      return res.status(out.code === 'not_found' ? 404 : 409).json({ error: msg });
+    }
+    await recordAuditEvent(req, {
+      action: 'platform.workspace_deleted', targetType: 'workspace', targetId: String(id), success: true,
+      metadata: { workspaceId: id, name: out.name, projects: out.projects },
+    });
+    res.json({ ok: true, name: out.name, projects: out.projects });
   } catch (e) { next(e); }
 });
 

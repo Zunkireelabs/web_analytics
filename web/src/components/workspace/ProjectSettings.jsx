@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Activity, ArrowLeftRight, Check, ChevronsUpDown, Globe, KeyRound, MapPin, Search, Settings as SettingsIcon, Target, Users, UserPlus, X } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Activity, ArrowLeftRight, Check, ChevronsUpDown, Globe, KeyRound, MapPin, PlugZap, Search, Settings as SettingsIcon, Target, Users, UserPlus, X } from 'lucide-react';
 import { api, timeAgo } from '../../api.js';
 import Avatar from '../Avatar.jsx';
 import Badge from '../Badge.jsx';
@@ -33,6 +34,15 @@ const options = ['admin', 'member'].map((value) => ({ value, label: SCOPED_PERMI
 // 'owner' / 'admin' manage it, 'member' (read-only) only looks. Someone given just
 // this project sees exactly the same page, with nothing about the workspace around it.
 export default function ProjectSettings({ projects, project, email, tab, onTab, onPickProject, onChanged }) {
+  const navigate = useNavigate();
+  // What is connected to this project (the project's own columns): the Setup card says what is left and lets each be done alone.
+  const [conn, setConn] = useState(null);
+  useEffect(() => {
+    let live = true;
+    setConn(null);
+    api.sites().then((list) => { if (live) setConn((list || []).find((x) => x.id === project.id) || null); }).catch(() => {});
+    return () => { live = false; };
+  }, [project.id]);
   const [overview, setOverview] = useState(null);
   const [goalOpen, setGoalOpen] = useState(false);
   const [gbpOpen, setGbpOpen] = useState(false);
@@ -160,6 +170,30 @@ export default function ProjectSettings({ projects, project, email, tab, onTab, 
       <div className="mt-5">
         {active === 'general' && (
           <div className="space-y-3">
+            {conn && conn.property_type !== 'product' && (() => {
+              // Each step on its own: a missing Google connection never blocks GitHub. `step` is where the setup form opens.
+              const rows = [
+                { label: 'Search Console and Analytics', ok: Boolean(conn.gsc_property && conn.ga4_property_id), step: 3, detail: conn.gsc_property ? String(conn.gsc_property).replace(/^sc-domain:/, '') : 'Not connected yet' },
+                { label: 'GitHub', ok: Boolean(conn.repo_owner && conn.repo_name), step: 5, detail: conn.repo_owner && conn.repo_name ? `${conn.repo_owner}/${conn.repo_name}` : 'Not connected yet' },
+                { label: 'Baseline report', ok: Boolean(conn.onboarded_at), step: 6, detail: conn.onboarded_at ? 'Built' : 'Not built yet' },
+              ];
+              const left = rows.filter((r) => !r.ok).length;
+              if (!left) return null; // all connected: nothing to show
+              return (
+                <SettingsCard icon={PlugZap} title="Setup" description={`${left} step${left === 1 ? '' : 's'} left. Skipped something? Connect it here, one step at a time.`}
+                  action={manage && <Button variant="primary" onClick={() => navigate(`/workspace?finish=${project.id}`)}>Complete setup</Button>}>
+                  <div className="px-5 py-1">
+                    {rows.map((r) => (
+                      <div key={r.label} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
+                        <span className={`w-5 h-5 rounded-full grid place-items-center shrink-0 ${r.ok ? 'bg-primary text-white' : 'bg-muted text-faint'}`}>{r.ok ? <Check size={11} strokeWidth={3} /> : <X size={11} />}</span>
+                        <div className="min-w-0 flex-1"><div className="text-[13px] font-medium text-fg">{r.label}</div><div className="text-xs text-faint truncate">{r.detail}</div></div>
+                        {r.ok ? <Badge tone="green">Connected</Badge> : manage && <Button variant="light" size="sm" onClick={() => navigate(`/workspace?finish=${project.id}&step=${r.step}`)}>Connect</Button>}
+                      </div>
+                    ))}
+                  </div>
+                </SettingsCard>
+              );
+            })()}
             <SettingsCard icon={Target} title="Goal" description="What you want to grow with this project. Set it when you create a project, change it here any time."
               action={manage && <Button variant="light" onClick={() => setGoalOpen(true)}>{p?.goal ? 'Edit goal' : 'Set a goal'}</Button>}>
               <div className="px-5 py-4 flex items-center gap-3">

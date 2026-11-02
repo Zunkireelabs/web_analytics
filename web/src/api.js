@@ -116,6 +116,8 @@ export const api = {
     // Create a workspace (creator becomes owner; a platform admin may pass ownerEmail to set one up for a client).
     create: (body) => req('/workspaces', { method: 'POST', body: JSON.stringify(body) }),
     rename: (id, name) => req(`/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+    // The owner removes their own workspace; its name must be typed back.
+    remove: (id, confirmName) => req(`/workspaces/${id}`, { method: 'DELETE', body: JSON.stringify({ confirmName }) }),
     // Projects with their goal + plain health checks, and recent activity.
     overview: (id) => req(`/workspaces/${id}/overview`),
     setGoal: (id, siteId, goal) => req(`/workspaces/${id}/projects/${siteId}/goal`, { method: 'PUT', body: JSON.stringify(goal) }),
@@ -134,6 +136,8 @@ export const api = {
   // The platform admin's own view across every client workspace (404 for anyone else).
   platform: {
     workspaces: () => req('/platform/workspaces'),
+    // Platform admin: remove a whole workspace and its projects. The workspace name must be typed back.
+    deleteWorkspace: (id, confirmName) => req(`/platform/workspaces/${id}`, { method: 'DELETE', body: JSON.stringify({ confirmName }) }),
     // Records that support opened a client's project, before the page switches to it.
     supportView: (siteId) => req('/platform/support-view', { method: 'POST', body: JSON.stringify({ siteId }) }),
   },
@@ -193,6 +197,10 @@ export const api = {
   agentsActivity: (limit = 12) => req(`/agents/activity?limit=${limit}`),
   runAgent: (id, start, end, params) => req(`/agents/${id}/run`, { method: 'POST', body: JSON.stringify({ start, end, params }) }),
   agentRuns: (id, limit = 10) => req(`/agents/${id}/runs?limit=${limit}`),
+  // Free-trial access for the active project (server/routes/access.js)
+  access: () => req('/access'),
+  requestAccess: () => req('/access/request', { method: 'POST' }),
+  onboardingSummary: () => req('/onboarding/summary'),
   range: (site) => req(`/range?site=${site}`),
   reportSummary: (site, period) => req(`/report-summary?site=${site}&period=${period}`),
   reportInsights: (site) => req(`/report-insights?site=${site}`),
@@ -285,6 +293,21 @@ export const api = {
     suspend: (id) => req(`/internal/tenants/${id}/suspend`, { method: 'POST' }),
     reactivate: (id) => req(`/internal/tenants/${id}/reactivate`, { method: 'POST' }),
     softDelete: (id) => req(`/internal/tenants/${id}/soft-delete`, { method: 'POST' }),
+    // Free-trial requests from /get-started: approve as a 15-day demo or a real client, renew, end, make client, reject.
+    access: {
+      list: () => req('/internal/access'),
+      details: (siteId) => req(`/internal/access/${siteId}/details`),
+      returning: {
+        list: () => req('/internal/returning'),
+        approve: (id) => req(`/internal/returning/${id}/approve`, { method: 'POST' }),
+        reject: (id) => req(`/internal/returning/${id}/reject`, { method: 'POST' }),
+      },
+      approve: (siteId, body) => req(`/internal/access/${siteId}/approve`, { method: 'POST', body: JSON.stringify(body) }),
+      renew: (siteId) => req(`/internal/access/${siteId}/renew`, { method: 'POST' }),
+      end: (siteId) => req(`/internal/access/${siteId}/end`, { method: 'POST' }),
+      makeClient: (siteId) => req(`/internal/access/${siteId}/make-client`, { method: 'POST' }),
+      reject: (siteId) => req(`/internal/access/${siteId}/reject`, { method: 'POST' }),
+    },
     signupRequests: {
       list: () => req('/internal/signup-requests'),
       approve: (id) => req(`/internal/signup-requests/${id}/approve`, { method: 'POST' }),

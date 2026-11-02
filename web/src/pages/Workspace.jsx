@@ -100,11 +100,11 @@ export default function Workspace({ siteId, onSwitchProject }) {
     const fromGithub = Boolean(github || params.get('gherror'));
     const error = gerror ? (fromGithub ? (GITHUB_ERRORS[gerror] || 'GitHub could not be connected.') : (GOOGLE_ERRORS[gerror] || 'Google could not be connected.')) : null;
     if (project) {
-      setReturning({ google, github, error, fromGithub, gbp });
+      setReturning({ google, github, error, fromGithub, gbp, step: Number(params.get('step')) || null });
       setResume({ id: project.id, name: project.name, domain: project.domain });
       setAddOpen(true);
     } else if (error) setPageError(error);
-    setParams((prev) => { const next = new URLSearchParams(prev); ['finish', 'google', 'gerror', 'github', 'gherror', 'gbp'].forEach((k) => next.delete(k)); return next; }, { replace: true });
+    setParams((prev) => { const next = new URLSearchParams(prev); ['finish', 'step', 'google', 'gerror', 'github', 'gherror', 'gbp'].forEach((k) => next.delete(k)); return next; }, { replace: true });
   }, [workspaces, params]);
 
   const open = async (project) => { await onSwitchProject(project.id); navigate('/overview'); };
@@ -254,7 +254,7 @@ export default function Workspace({ siteId, onSwitchProject }) {
       )}
       {addOpen && workspace && (
         <NewProjectModal workspace={workspace} project={resume} isOpen
-          startStep={returning ? (returning.gbp ? 4 : returning.fromGithub ? 5 : 3) : null} notice={returning}
+          startStep={returning ? (returning.step || (returning.gbp ? 4 : returning.fromGithub ? 5 : 3)) : null} notice={returning}
           onClose={() => { setAddOpen(false); setResume(null); setReturning(null); }}
           onChanged={async () => { await Promise.all([load(), loadOverview()]); }}
           onOpenProject={(p) => p && open(p)} />

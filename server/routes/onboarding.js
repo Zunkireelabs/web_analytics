@@ -3,11 +3,15 @@ import { AuditError } from '../free-audit/fetchPage.js';
 import { createRateLimiter } from '../free-audit/rateLimit.js';
 import { readSiteProfile } from '../onboarding/siteProfile.js';
 import { requireAuth } from './login.js';
+import { getUserById } from '../store/users.js';
 import { isValidTimezone } from '../util/timezone.js';
 import { normalizeDomain } from '../util/domain.js';
 import { createWorkspace, createProject, addMember, discardNewWorkspace, setProjectGoal, validateGoal, claimHomeSiteIfNone } from '../store/workspaces.js';
-import { mapGoals, cleanOnboarding, findExistingProject, saveOnboarding } from '../store/onboarding.js';
+import { mapGoals, cleanOnboarding, findExistingProject, saveOnboarding, cleanDraft, saveDraft, getDraft, deleteDraft } from '../store/onboarding.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
+import { markPending, summarizeOnboarding, findResumeProject, getSiteAccess, describeAccess } from '../store/access.js';
+import { sendAccessRequestStaffNotice, sendAccessReceivedEmail } from '../report/email.js';
+import { appOrigin } from './lib/app-url.js';
 
 // Public (no session yet): the get-started page calls this as soon as a visitor types their
 // site, to pre-fill the brand profile. It fetches third-party sites and makes one model call,
@@ -40,6 +44,36 @@ router.post('/onboarding/site', async (req, res, next) => {
   }
 });
 
+// Coming back to /get-started: where does this person stand? 'new' (nothing yet, carry on), or the state of their project
+// (pending, demo, ended, client, rejected) so the page can take them to the right place. `website` is the site they typed
+// on the page; it only ever finds one of THEIR projects. The draft saved so far comes back with it.
+router.get('/get-started/resume', requireAuth, async (req, res, next) => {
+  try {
+    const project = await findResumeProject(req.userId, { website: String(req.query.website || '') });
+    const draft = await getDraft(req.userId);
+    if (!project) return res.json({ state: 'new', project: null, draft });
+    const access = describeAccess(await getSiteAccess(project.id));
+    res.json({ state: access.state, requested: access.requested, daysLeft: access.daysLeft, endsAt: access.endsAt,
+      project: { id: project.id, name: project.name, domain: project.website_domain, current: Number(req.siteId) === project.id }, draft: access.state === 'client' ? null : draft });
+  } catch (e) { next(e); }
+});
+
+// The answers so far, saved as the person goes, so they can leave and carry on tomorrow or on another device.
+router.get('/onboarding/draft', requireAuth, async (req, res, next) => {
+  try { res.json(await getDraft(req.userId)); } catch (e) { next(e); }
+});
+router.put('/onboarding/draft', requireAuth, async (req, res, next) => {
+  try {
+    const draft = cleanDraft(req.body);
+    if (!draft) return res.status(400).json({ error: 'That draft is not valid, or it is too large.' });
+    await saveDraft(req.userId, draft);
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+router.delete('/onboarding/draft', requireAuth, async (req, res, next) => {
+  try { await deleteDraft(req.userId); res.json({ ok: true }); } catch (e) { next(e); }
+});
+
 // The last step of /get-started: the signed-in person approves their prompts and the trial workspace is made,
 // with the website as its first project, their goals set and everything they answered kept with it.
 // Pressing finish again, or coming back later, returns the project that already exists.
@@ -53,6 +87,7 @@ router.post('/onboarding/complete', requireAuth, async (req, res, next) => {
     const existing = await findExistingProject(req.userId, domain.domain);
     if (existing) {
       await saveOnboarding(existing.id, data, req.userId);
+      await deleteDraft(req.userId).catch(() => {});
       return res.json({ ok: true, existing: true, workspaceId: existing.workspace_id, project: { id: existing.id, name: existing.name, domain: existing.website_domain } });
     }
 
@@ -64,11 +99,12 @@ router.post('/onboarding/complete', requireAuth, async (req, res, next) => {
       : null;
 
     // Same all-or-nothing shape as POST /workspaces: a failure part-way takes back what was made here.
-    const workspace = await createWorkspace({ name: data.brand });
+    const workspace = await createWorkspace({ name: data.workspaceName || data.brand });
     let site = null;
     try {
       await addMember(workspace.id, req.userId, 'owner');
-      site = await createProject({ workspaceId: workspace.id, name: data.brand, websiteDomain: domain.domain, timezone });
+      site = await createProject({ workspaceId: workspace.id, name: data.projectName || data.brand, websiteDomain: domain.domain, timezone });
+      await markPending(site.id, { source: 'get-started', requested: true });
       if (goalCheck?.ok) await setProjectGoal({ siteId: site.id, ...goalCheck.goal, userId: req.userId });
       await saveOnboarding(site.id, data, req.userId);
     } catch (err) {
@@ -88,6 +124,15 @@ router.post('/onboarding/complete', requireAuth, async (req, res, next) => {
       action: 'project.created', targetType: 'site', targetId: String(site.id), tenantSiteId: site.id, tenantName: site.name,
       metadata: { workspaceId: workspace.id, name: site.name, websiteDomain: site.website_domain, via: 'get-started' }, success: true,
     });
+    // Finishing Get Started is the request for access: tell staff, without letting a slow mail server fail the sign-up.
+    sendAccessRequestStaffNotice({
+      companyName: site.name, websiteDomain: site.website_domain, contactEmail: req.session?.email || (await getUserById(req.userId))?.email || '',
+      summary: summarizeOnboarding(data), reviewUrl: `${appOrigin(req)}/account?scope=platform`,
+    }).catch((err) => console.error('[onboarding] staff notice failed:', err.message));
+    // And tell the visitor we have it, the same words as the screen they just saw.
+    const mailTo = req.session?.email || (await getUserById(req.userId))?.email;
+    if (mailTo) sendAccessReceivedEmail({ companyName: site.name, contactEmail: mailTo }).catch((err) => console.error('[onboarding] received email failed:', err.message));
+    await deleteDraft(req.userId).catch(() => {});
     res.status(201).json({ ok: true, existing: false, workspaceId: workspace.id, project: { id: site.id, name: site.name, domain: site.website_domain } });
   } catch (err) { next(err); }
 });

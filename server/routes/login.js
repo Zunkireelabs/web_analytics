@@ -9,9 +9,10 @@ import { issueLoginCode, checkLoginCode, CODE_MINUTES } from '../store/login-cod
 import { googleConnectConfigured, redirectUriFor, newConnectNonce, buildSignInUrl, exchangeSignInCode } from '../integrations/google-connect.js';
 import { noteGetStartedSignup, markGetStartedVerified } from '../store/onboarding.js';
 import { createContactRequest } from '../store/contact-requests.js';
-import { sendContactLeadEmail, sendPasswordResetEmail, sendSignupReceivedEmail, sendSignupStaffNotice, sendLoginCodeEmail } from '../report/email.js';
+import { sendContactLeadEmail, sendPasswordResetEmail, sendSignupReceivedEmail, sendSignupStaffNotice, sendLoginCodeEmail, sendReturnRequestStaffNotice } from '../report/email.js';
 import { getSiteStatus } from '../store/read.js';
 import { getAccessContext, decideSiteAccess, listWorkspacesForUser, listSharedProjectsForUser, pickLoginSite, isBlockedForReadOnly, isAllowedWithoutProject } from '../store/workspaces.js';
+import { needsReturnApproval, openReturnRequest, markReturnUsed, RETURN_WAIT_MESSAGE } from '../store/returning.js';
 import { createPasswordReset, consumePasswordReset } from '../store/password-resets.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
 
@@ -47,7 +48,16 @@ async function openSession(req, user) {
   if (!landingSiteId && user.site_id != null) {
     const opts = { companySiteId: Number(process.env.COMPANY_SITE_ID) };
     const [workspaces, shared] = await Promise.all([listWorkspacesForUser(user, opts), listSharedProjectsForUser(user, opts)]);
-    if (!workspaces.length && !shared.length) return { status: 403, error: 'Your account is not a member of any workspace.' };
+    if (!workspaces.length && !shared.length) {
+      // Their only project was deleted (the workspace removed by them or by SuperRank): that is a clean slate, not taken-away
+      // access. Forget the dangling home project so they can sign in and start again, as a new account does.
+      if ((await getSiteStatus(user.site_id)) === 'soft_deleted') {
+        await (await import('../db.js')).query('UPDATE users SET site_id = NULL WHERE id = $1', [user.id]);
+        user.site_id = null;
+      } else {
+        return { status: 403, error: 'Your account is not a member of any workspace.' };
+      }
+    }
   }
   // A fresh session id at the moment of sign-in, so an id someone planted or observed beforehand is
   // worthless afterwards. (Not every caller has express-session's regenerate; plain objects skip it.)
@@ -61,6 +71,7 @@ async function openSession(req, user) {
   // the internal/platform gates key on, so a platform admin who switches
   // into a client's project is still a platform admin.
   req.session.homeSiteId = user.site_id;
+  await markReturnUsed(user.id).catch(() => {}); // a return approval is for one sign-in
   return null;
 }
 
@@ -79,21 +90,37 @@ router.post('/login', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Sign in with an emailed code. Sending always answers the same way, whether or not the address has an
-// account, so the page cannot be used to find out who is a customer. A code is only made and mailed for
-// a real, active account; asking again too soon is quietly ignored (the page has its own resend timer).
+// Sign in with an emailed code. A code is only made and mailed for a real, active account; an address that is not one of
+// ours is told so (404), and asking again too soon is quietly ignored (the page has its own resend timer).
 const CODE_SENT = { ok: true, message: 'If that address has an account, a sign-in code is on its way.' };
+
+// An account that lost everything (all workspaces and projects deleted) gets no code until staff approve it. The first time, staff
+// are emailed with what happened; the person is told to wait. Returns the refusal to send, or null when a code may go out.
+async function returningGate(req, user) {
+  const need = await needsReturnApproval(user, { companySiteId: Number(process.env.COMPANY_SITE_ID) });
+  if (!need) return null;
+  const opened = await openReturnRequest(user, need.reason);
+  if (opened.created) {
+    sendReturnRequestStaffNotice({ email: user.email, name: user.display_name || null, reason: need.reason, reviewUrl: `${appOrigin(req)}/account?scope=platform` })
+      .catch((err) => console.error('[returning] staff notice failed:', err.message));
+  }
+  return { error: RETURN_WAIT_MESSAGE, code: 'APPROVAL_NEEDED' };
+}
 router.post('/login/code/send', async (req, res, next) => {
   try {
     const email = String(req.body?.email || '').trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return res.status(400).json({ error: 'Enter a valid work email.' });
     const user = await getUserByEmail(email);
-    if (user && (await getUserStatus(user.id)) === 'active') {
-      const issued = await issueLoginCode(email);
-      if (issued.code) {
-        sendLoginCodeEmail({ email, code: issued.code, minutes: CODE_MINUTES })
-          .catch((err) => console.error('[login] sign-in code email failed:', err.message));
-      }
+    // The page says so plainly when an address is not one of ours, with a way to become one (a product choice: people
+    // were left waiting for a code that never came). The rate limit above still stops anyone from sweeping addresses.
+    if (!user) return res.status(404).json({ error: 'That email is not one of our clients yet. Start your free trial at superrank.si/get-started, or check the address.', code: 'NO_ACCOUNT' });
+    if ((await getUserStatus(user.id)) !== 'active') return res.status(403).json({ error: 'This account has been disabled. Contact your workspace owner or SuperRank.' });
+    const wait = await returningGate(req, user);
+    if (wait) return res.status(403).json(wait);
+    const issued = await issueLoginCode(email);
+    if (issued.code) {
+      sendLoginCodeEmail({ email, code: issued.code, minutes: CODE_MINUTES })
+        .catch((err) => console.error('[login] sign-in code email failed:', err.message));
     }
     res.json(CODE_SENT);
   } catch (e) { next(e); }
@@ -135,6 +162,10 @@ router.post('/get-started/code/send', async (req, res, next) => {
     const email = String(req.body?.email || '').trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return res.status(400).json({ error: 'Enter a valid work email.' });
     const user = await getUserByEmail(email);
+    if (user && (await getUserStatus(user.id)) === 'active') {
+      const wait = await returningGate(req, user);
+      if (wait) return res.status(403).json(wait);
+    }
     if (!user || (await getUserStatus(user.id)) === 'active') {
       const issued = await issueLoginCode(email);
       if (issued.code) {
@@ -545,14 +576,15 @@ router.get('/me', async (req, res, next) => {
 });
 
 // Workspaces the signed-in user can see, each with its projects, and the
-// active project. A client user only ever gets their own workspace(s); only a
-// platform admin gets every one.
+// active project. Everyone gets only the workspaces they belong to; a platform admin
+// sees every client in Account -> Platform instead, and one is added here while they
+// have it open as support.
 router.get('/workspaces', requireAuth, async (req, res, next) => {
   try {
     const user = await getUserById(req.userId);
     const companySiteId = Number(process.env.COMPANY_SITE_ID);
     const [workspaces, shared] = await Promise.all([
-      listWorkspacesForUser(user, { companySiteId }),
+      listWorkspacesForUser(user, { companySiteId, currentSiteId: req.siteId }),
       listSharedProjectsForUser(user, { companySiteId }),
     ]);
     // `shared` = projects the person was given access to one by one, outside any
@@ -606,6 +638,7 @@ function isInternalSite(siteId) {
 // in parallel: independent lookups on independent tables, no reason to
 // serialize them.
 export async function requireAuth(req, res, next) {
+  const nextFn = next;
   // Signed in with no project yet (a new account). Let them through ONLY to the
   // few routes that work without one — see isAllowedWithoutProject. The user
   // is still checked every request, so disabling an account takes effect
@@ -635,6 +668,16 @@ export async function requireAuth(req, res, next) {
         getUserStatus(req.userId),
         getAccessContext(req.userId, req.siteId),
       ]);
+      // A project that was deleted (its workspace removed, or the project itself) is not "suspended": move the session to
+      // another project the person can reach (or to none) and run the checks again, instead of leaving them stuck.
+      if (siteStatus === 'soft_deleted') {
+        const me = await getUserById(req.userId);
+        const next = me ? await pickLoginSite(me, { companySiteId: Number(process.env.COMPANY_SITE_ID) }) : null;
+        req.session.siteId = next ?? null;
+        if (req.session.homeSiteId === req.siteId) req.session.homeSiteId = next ?? null;
+        await new Promise((resolve) => req.session.save(() => resolve()));
+        return requireAuth(req, res, nextFn);
+      }
       if (siteStatus !== 'active') {
         return res.status(403).json({ error: 'This account is suspended.' });
       }
