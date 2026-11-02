@@ -15,7 +15,7 @@ import tailwind from '@tailwindcss/vite';
 const APP_BASE = process.env.APP_BASE || '/';
 const isEmbedded = process.env.VITE_EMBEDDED === 'true';
 
-// Page Fixer is a public static page (web/public/page-fixer). Vite only serves a folder's index.html at its full
+// Page Fixer and the AI visibility audit are public static pages (web/public/page-fixer, web/public/ai-visibility). Vite only serves a folder's index.html at its full
 // path, so /page-fixer would otherwise fall through to the dashboard and its login. Rewrite the clean URL to the file.
 const publicPageFixer = {
   name: 'public-page-fixer',
@@ -23,6 +23,7 @@ const publicPageFixer = {
     server.middlewares.use((req, _res, next) => {
       const [path, query] = (req.url || '').split('?');
       if (path === '/page-fixer' || path === '/page-fixer/') req.url = '/page-fixer/index.html' + (query ? `?${query}` : '');
+      if (path === '/ai-visibility' || path === '/ai-visibility/') req.url = '/ai-visibility/index.html' + (query ? `?${query}` : '');
       next();
     });
   },

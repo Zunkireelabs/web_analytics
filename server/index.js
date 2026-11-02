@@ -228,6 +228,14 @@ app.get(['/page-fixer', '/page-fixer/'], (req, res, next) => {
   res.sendFile(pageFixerHtml);
 });
 
+// The AI visibility audit (web/public/ai-visibility) is public in the same way, so it gets the same clean URL.
+const aiVisibilityHtml = join(here, '..', 'web', process.env.NODE_ENV === 'production' ? 'dist' : 'public', 'ai-visibility', 'index.html');
+app.get(['/ai-visibility', '/ai-visibility/'], (req, res, next) => {
+  if (!existsSync(aiVisibilityHtml)) return next();
+  res.set('Cache-Control', 'no-cache');
+  res.sendFile(aiVisibilityHtml);
+});
+
 if (process.env.NODE_ENV === 'production') {
   const dist = join(here, '..', 'web', 'dist');
   if (existsSync(dist)) {
