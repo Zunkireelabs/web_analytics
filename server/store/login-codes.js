@@ -8,7 +8,10 @@ export const MIN_SECONDS_BETWEEN = 60;
 export const MAX_PER_HOUR = 5;
 
 const hashCode = (email, code) => createHash('sha256').update(`${email}:${code}`).digest('hex');
-export const generateCode = () => String(randomInt(0, 1_000_000)).padStart(6, '0');
+// LOCAL TESTING ONLY: when DEV_FIXED_CODE is a 6-digit number and this is not production, every sign-in and Get Started code is
+// that number and asking again is never held back. Unset (as it is everywhere real), nothing here changes.
+export const devFixedCode = (env = process.env) => (env.NODE_ENV !== 'production' && /^\d{6}$/.test(String(env.DEV_FIXED_CODE || '')) ? String(env.DEV_FIXED_CODE) : null);
+export const generateCode = () => devFixedCode() || String(randomInt(0, 1_000_000)).padStart(6, '0');
 export const normalizeCode = (v) => String(v ?? '').replace(/\D/g, '');
 
 // Makes a new code for an address, unless one was sent too recently. Returns { code } or
@@ -20,7 +23,7 @@ export async function issueLoginCode(email) {
     `SELECT COUNT(*) FILTER (WHERE created_at > now() - interval '1 hour')::int AS lasthour,
             COALESCE(EXTRACT(EPOCH FROM now() - MAX(created_at)), 1e9) AS since
        FROM login_codes WHERE email = $1`, [email]);
-  if (rows[0].lasthour >= MAX_PER_HOUR || Number(rows[0].since) < MIN_SECONDS_BETWEEN) return { tooSoon: true };
+  if (!devFixedCode() && (rows[0].lasthour >= MAX_PER_HOUR || Number(rows[0].since) < MIN_SECONDS_BETWEEN)) return { tooSoon: true };
   const code = generateCode();
   await query(
     `INSERT INTO login_codes (email, code_hash, expires_at) VALUES ($1, $2, now() + ($3 || ' minutes')::interval)`,
@@ -35,6 +38,7 @@ export async function issueLoginCode(email) {
 export async function checkLoginCode(email, typed) {
   const code = normalizeCode(typed);
   if (code.length !== 6) return { ok: false, reason: 'invalid' };
+  if (devFixedCode() && code === devFixedCode()) return { ok: true }; // local testing: the fixed code works every time
   const { rows } = await query(
     `SELECT id, code_hash FROM login_codes
       WHERE email = $1 AND consumed_at IS NULL AND expires_at > now() AND attempts < $2

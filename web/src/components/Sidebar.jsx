@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ChevronDown, ChevronsUpDown, LogOut, Settings as SettingsIcon } from 'lucide-react';
+import { ChevronDown, ChevronsUpDown, Lock, LogOut, Settings as SettingsIcon } from 'lucide-react';
+import { isOpenWhileLocked } from '../lib/access.jsx';
 import Logo from './Logo.jsx';
 import WorkspaceSwitcher from './WorkspaceSwitcher.jsx';
 import Avatar from './Avatar.jsx';
@@ -36,7 +37,7 @@ function emailInitials(email) {
 
 export default function Sidebar({
   sites, siteId, isInternal, isPlatformAdmin, onSwitchProject, onLogout, mobileOpen, onCloseMobile,
-  email, role, agentOpen, onAgent, agentAvailable,
+  email, role, agentOpen, onAgent, agentAvailable, access,
 }) {
   const loc = useLocation();
   const isActive = (to) => loc.pathname === to;
@@ -154,7 +155,7 @@ export default function Sidebar({
           <nav className="flex-1 overflow-y-auto px-3 py-1.5 custom-scrollbar">
             {groups.map((g, i) => (
               <SidebarGroup key={g.id} group={g} first={i === 0} isActive={isActive}
-                open={!collapsed[g.id]} onToggle={toggleSection} />
+                open={!collapsed[g.id]} onToggle={toggleSection} locked={Boolean(access?.locked)} />
             ))}
           </nav>
 
@@ -203,7 +204,7 @@ export default function Sidebar({
   );
 }
 
-function SidebarGroup({ group, first, isActive, open, onToggle }) {
+function SidebarGroup({ group, first, isActive, open, onToggle, locked }) {
   return (
     <div>
       <button
@@ -215,12 +216,12 @@ function SidebarGroup({ group, first, isActive, open, onToggle }) {
         <span>{group.label}</span>
         <ChevronDown size={10} className={`transition-transform duration-200 ${open ? '' : '-rotate-90'}`} />
       </button>
-      {open && group.items.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
+      {open && group.items.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} locked={Boolean(locked) && !isOpenWhileLocked(n.to)} />)}
     </div>
   );
 }
 
-function SidebarLink({ to, label, icon: Icon, active }) {
+function SidebarLink({ to, label, icon: Icon, active, locked }) {
   return (
     <Link to={to} aria-current={active ? 'page' : undefined}
       className={`flex items-center gap-2 h-[30px] px-2.5 rounded-control text-sm ${
@@ -230,6 +231,7 @@ function SidebarLink({ to, label, icon: Icon, active }) {
     >
       <Icon size={15} strokeWidth={1.75} className={active ? 'text-primary' : 'text-[#5c5c5c]'} />
       {label}
+      {locked && <Lock size={12} className="ml-auto text-faint" aria-label="Locked" />}
     </Link>
   );
 }

@@ -52,6 +52,7 @@ export const clip = (s, n) => (s.length > n ? s.slice(0, n - 1).trimEnd() + '…
 export const gradeOf = (n) => (n >= 90 ? 'a' : n >= 75 ? 'b' : n >= 60 ? 'c' : n >= 40 ? 'd' : 'f');
 export const hostOf = (u) => new URL(u).hostname;
 
+
 export function overallScore(overall) {
   let sum = 0, weight = 0;
   for (const [k, w] of Object.entries(WEIGHTS)) if (overall[k]) { sum += overall[k].score * w; weight += w; }
@@ -73,7 +74,7 @@ const NS = 'http://www.w3.org/2000/svg';
 const CATS = [['all', 'All'], ['seo', 'SEO'], ['aeo', 'AEO'], ['geo', 'GEO'], ['agentic', 'Agentic']];
 
 // Circular score gauge that draws in from empty.
-function ring(score, { size = 120, stroke = 10 } = {}) {
+export function ring(score, { size = 120, stroke = 10 } = {}) {
   const r = (size - stroke) / 2;
   const circ = 2 * Math.PI * r;
   const wrap = el('div', `ar-ring ar-ring--${gradeOf(score)}`);
@@ -146,7 +147,7 @@ function serpCard(data) {
 const catLabel = (c) => (c === 'agentic' ? 'Agentic' : c.toUpperCase());
 
 // A failing check. Locked ones show only the title (the server withholds the rest).
-function issueRow(issue) {
+export function issueRow(issue) {
   const li = el('li', `ar-issue${issue.locked ? ' is-locked' : ''}`);
   li.dataset.cat = issue.category;
   const row = el('div', 'ar-issue__row');
@@ -160,7 +161,7 @@ function issueRow(issue) {
   return li;
 }
 
-function passRow(c) {
+export function passRow(c) {
   const li = el('li', 'ar-pass');
   li.dataset.cat = c.category;
   li.append(el('i', 'ar-pass__tick', '✓'));

@@ -1,7 +1,9 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { api, setReadOnlyAccess } from './api.js';
-import { AccessProvider } from './lib/access.jsx';
+import { AccessProvider, isOpenWhileLocked } from './lib/access.jsx';
+import AccessBanner from './components/access/AccessBanner.jsx';
+import LockedPage from './components/access/LockedPage.jsx';
 import SuperRankLogin from './pages/SuperRankLogin.jsx';
 import SuperRankSignup from './pages/SuperRankSignup.jsx';
 import VerifyEmail from './pages/VerifyEmail.jsx';
@@ -49,6 +51,7 @@ export default function App() {
   const [sitesError, setSitesError] = useState(null); // why the project could not be loaded (suspended, removed, no access)
   const [sitesLoaded, setSitesLoaded] = useState(false);
   const [readOnly, setReadOnly] = useState(false); // read-only member of the active project
+  const [access, setAccess] = useState(null); // free-trial state of the active project (pending, demo, ended, client); null until loaded
   const [noProject, setNoProject] = useState(false); // signed in, but no project yet (a newly approved account)
   const [hasWorkspace, setHasWorkspace] = useState(null); // for a project-less account: null = still checking
   const [assistantOpen, setAssistantOpen] = useState(false);
@@ -107,6 +110,17 @@ export default function App() {
     }).catch((e) => setSitesError({ status: e.status || null, message: e.message || '' })).finally(() => setSitesLoaded(true));
   }, [authed, noProject]);
 
+  // Where the active project stands in the free-trial flow. Looked at again every minute while it is waiting or running,
+  // so an approval shows up without a refresh, and a demo that runs out locks itself.
+  useEffect(() => {
+    if (!authed || noProject || !siteId) { setAccess(null); return undefined; }
+    let live = true;
+    const load = () => api.access().then((a) => { if (live) setAccess(a); }).catch(() => {});
+    load();
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 60000);
+    return () => { live = false; clearInterval(timer); };
+  }, [authed, noProject, siteId]);
+
   // The setup banner reads the project's own connection columns, which change in the Add project
   // popup (on the Workspace page) without this list knowing. While a project is unfinished, look
   // again whenever the person moves to another page, so the banner goes the moment it is done.
@@ -114,6 +128,16 @@ export default function App() {
     if (!authed || noProject || !siteId || !setupGap(currentSiteOf(sites, siteId))) return;
     api.sites().then(setSites).catch(() => {});
   }, [location.pathname]);
+
+  // A person who just signed in to a project they made on /get-started lands on a half-set-up project: take them straight to
+  // the setup form (on the Workspace page) once, with the banner above it. Closing the form leaves the banner to reopen it.
+  useEffect(() => {
+    if (!authed || noProject || !siteId || !access || access.locked || access.source !== 'get-started') return;
+    if (location.pathname !== '/overview' || !setupGap(currentSiteOf(sites, siteId))) return;
+    const key = `sr-setup-opened-${siteId}`;
+    try { if (localStorage.getItem(key)) return; localStorage.setItem(key, '1'); } catch { return; }
+    navigate(`/workspace?finish=${siteId}`);
+  }, [authed, noProject, siteId, access, sites, location.pathname]);
 
   // A project-less account only gets the full app (sidebar and all) once it has a workspace;
   // before that it sees the guided first screen. The Workspace page announces a new workspace.
@@ -192,25 +216,28 @@ export default function App() {
   const isProduct = currentSiteOf(sites, siteId)?.property_type === 'product';
 
   return (
-    <AccessProvider value={{ readOnly }}>
-    <div className="min-h-screen flex text-sm">
+    <AccessProvider value={{ readOnly, access }}>
+    <div className="min-h-screen md:h-screen md:overflow-hidden flex text-sm">
       <Sidebar sites={sites} siteId={siteId} isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} onSwitchProject={switchProject} onLogout={logout}
         mobileOpen={mobileNavOpen} onCloseMobile={() => setMobileNavOpen(false)}
-        email={email} role={role} agentOpen={agentOpen} onAgent={setAssistantOpen} agentAvailable={agentAvailable} />
-      <div className="flex-1 min-w-0 flex flex-col bg-white md:my-2 md:mr-2 md:rounded-[14px] md:shadow-[0_0_0_1px_var(--panel-ring)] md:overflow-clip md:min-h-[calc(100vh-16px)]">
+        email={email} role={role} agentOpen={agentOpen} onAgent={setAssistantOpen} agentAvailable={agentAvailable} access={access} />
+      <div className="flex-1 min-w-0 flex flex-col bg-white md:my-2 md:mr-2 md:rounded-[14px] md:shadow-[0_0_0_1px_var(--panel-ring)] md:overflow-y-auto md:overscroll-contain md:h-[calc(100vh-16px)]">
         <TopBar isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} isProduct={isProduct}
           agentOpen={agentOpen} onAgent={setAssistantOpen} agentAvailable={agentAvailable}
           onOpenMenu={() => setMobileNavOpen(true)} />
         <ShellContext.Provider value={toolbarEl}>
           <div ref={setToolbarEl} className="page-toolbar flex flex-wrap items-center gap-2 px-4 md:px-6 py-2 bg-white border-b border-border-canvas" />
           <main className="flex-1 min-w-0">
+        {siteId && <AccessBanner access={access} />}
         {readOnly && siteId && (
           <div className="mx-4 md:mx-6 mt-4 rounded-card bg-muted px-4 py-2 text-xs text-text" role="status">
             You have read-only access to this project. You can look around, but not change anything.
           </div>
         )}
-        {siteId && !readOnly && location.pathname !== '/workspace' && <SetupBanner site={currentSiteOf(sites, siteId)} />}
-        {siteId ? (
+        {siteId && !readOnly && !access?.locked && location.pathname !== '/workspace' && <SetupBanner site={currentSiteOf(sites, siteId)} fromGetStarted={access?.source === 'get-started'} />}
+        {siteId && access?.locked && !isOpenWhileLocked(location.pathname) ? (
+          <LockedPage access={access} path={location.pathname} site={currentSiteOf(sites, siteId)} />
+        ) : siteId ? (
           <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>
             <Routes key={siteId}>
               {/* No standalone marketing homepage in the authenticated app — signing in lands on Overview, the first item in the sidebar. */}

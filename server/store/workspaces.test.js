@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   decideSiteAccess, isPlatformAdmin, decideMemberChange, effectiveWorkspaceRole, roleAtLeast, tenantRoleForWorkspaceRole,
   isBlockedForReadOnly, validateGoal, summarizeProjectHealth, describeActivity, strongerRole, siteRoleFromDecision, planProjectTransfer,
+  isAllowedWithoutProject,
 } from './workspaces.js';
 
 const COMPANY = 1; // the company (Zunkiree Labs) site
@@ -290,5 +291,18 @@ describe('planProjectTransfer', () => {
   test('people already in the target are not duplicated, and a same-workspace move is refused', () => {
     assert.deepEqual(planProjectTransfer({ site, source, target, sourceMembers, targetMemberIds: [20] }).alreadyInTarget, ['o@x.test']);
     assert.equal(planProjectTransfer({ site: { ...site, workspace_id: 2 }, source: target, target, sourceMembers, targetMemberIds: [] }).ok, false);
+  });
+});
+
+describe('isAllowedWithoutProject', () => {
+  test('lets a new account finish /get-started, which is what creates its first workspace and project', () => {
+    assert.equal(isAllowedWithoutProject({ method: 'POST', path: '/api/onboarding/complete' }), true);
+    assert.equal(isAllowedWithoutProject({ method: 'POST', path: '/api/onboarding/complete?x=1' }), true);
+    assert.equal(isAllowedWithoutProject({ method: 'GET', path: '/api/onboarding/complete' }), false);
+  });
+
+  test('still keeps a new account out of project data', () => {
+    assert.equal(isAllowedWithoutProject({ method: 'GET', path: '/api/overview' }), false);
+    assert.equal(isAllowedWithoutProject({ method: 'POST', path: '/api/onboarding/completely-other' }), false);
   });
 });

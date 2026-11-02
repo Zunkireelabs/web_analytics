@@ -11,7 +11,8 @@ import './superrank-login.css';
 // The same page is where the approval email's Sign in button lands (/login?token=…): the address is
 // filled in from the link and locked, and Sign in with the password chosen at sign-up also uses the link.
 const LAST = 'superrank:last-email';
-const SITE = 'https://superrank.si';
+// The marketing site. VITE_SITE_URL points it at a local copy (http://localhost:5191) when testing.
+const SITE = import.meta.env.VITE_SITE_URL || 'https://superrank.si';
 
 const validEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v);
 // The approval email links to /login?email=…, so someone signing in for the first
@@ -358,7 +359,7 @@ export default function SuperRankLogin({ onAuthed }) {
 
             {mode === 'password' && (
               <div className="sr-auth__switch">
-                Don't have an account? <a href="/signup" className="sr-auth__link">Sign up</a>
+                Don't have an account? <a href={`${SITE}/get-started`} className="sr-auth__link">Sign up</a>
               </div>
             )}
           </section>

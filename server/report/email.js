@@ -457,6 +457,121 @@ export function buildSignupStaffNotice({ companyName, websiteDomain, contactEmai
   };
 }
 
+// ───────── free-trial access (store/access.js) ─────────
+
+const fmtDate = (d) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+const stepRow = (n, text, last) => `<tr><td style="padding:0 10px ${last ? 0 : 7}px 0;color:${BRAND_ORANGE};font-weight:600;vertical-align:top">${n}</td><td style="padding-bottom:${last ? 0 : 7}px">${text}</td></tr>`;
+const stepsBox = (title, rows) => `<div style="background:#fbfaf8;border-radius:10px;box-shadow:inset 0 0 0 1px #f0f0f0;padding:14px 16px">
+      <p style="margin:0 0 8px;font-size:12px;font-weight:500;color:#171717">${title}</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="font-size:13px;line-height:19px;color:#525252">${rows.map((r, i) => stepRow(i + 1, r, i === rows.length - 1)).join('')}</table></div>`;
+
+// To a person staff approved as a REAL CLIENT: sign in to the app the usual way. Anything not connected yet (Search Console,
+// Analytics, GitHub) can be connected from the dashboard.
+export function buildAccessClientEmail({ companyName, contactEmail, signInUrl, upgraded = false }) {
+  return {
+    subject: upgraded ? 'You are now a SuperRank client' : 'Your SuperRank request is approved',
+    html: emailShell({
+      eyebrow: upgraded ? 'Welcome as a client' : 'Request approved',
+      title: upgraded ? `<span style="color:${BRAND_ORANGE}">You are now a client.</span> Welcome.` : `<span style="color:${BRAND_ORANGE}">Your request is approved.</span> Welcome.`,
+      intro: `<b>${escapeHtml(companyName)}</b> is ready. Sign in to the SuperRank app with <b>${escapeHtml(contactEmail)}</b>. We email you a 6-digit code, so there is no password to remember.`,
+      body: `<p style="margin:22px 0;text-align:center"><a href="${escapeHtml(signInUrl)}" style="${CARD_BUTTON}">Sign in</a></p>
+     ${stepsBox('What happens next', ['Sign in with your email.', 'Your dashboard already has the brand, topics and prompts you set up.', 'Connect Google Search Console, Analytics and GitHub from your dashboard if you have not already.'])}`,
+      footnote: `This is for ${escapeHtml(contactEmail)}. Did not ask for this? Tell us at superrank.si/talk-to-us and we will look into it.`,
+    }),
+  };
+}
+
+// To a person staff approved for a DEMO: the dashboard is unlocked until the date, and what happens after.
+export function buildAccessDemoEmail({ companyName, contactEmail, signInUrl, endsAt, renewed = false }) {
+  const until = fmtDate(endsAt);
+  return {
+    subject: renewed ? 'Your SuperRank demo has been extended' : 'Your SuperRank request is approved: enjoy your demo',
+    html: emailShell({
+      eyebrow: renewed ? 'Demo extended' : 'Request approved',
+      title: renewed ? `<span style="color:${BRAND_ORANGE}">Your demo is extended.</span>` : `<span style="color:${BRAND_ORANGE}">Your request is approved.</span> Enjoy your demo.`,
+      intro: `<b>${escapeHtml(companyName)}</b> has the full SuperRank dashboard until <b>${escapeHtml(until)}</b>. Sign in with <b>${escapeHtml(contactEmail)}</b>. We email you a 6-digit code.`,
+      body: `<p style="margin:22px 0;text-align:center"><a href="${escapeHtml(signInUrl)}" style="${CARD_BUTTON}">Sign in</a></p>
+     ${stepsBox('What you can do', ['Open Keywords and see the prompts we wrote for you.', 'Look through Settings, and connect Google Search Console and Analytics if you like. You can skip that too.', `On ${escapeHtml(until)} the demo ends: Google and GitHub are disconnected, your Overview stays and the rest locks. Want to keep going? Talk to us.`])}`,
+      footnote: 'Want to keep going after the demo? Tell us at superrank.si/talk-to-us.',
+    }),
+  };
+}
+
+// To the person who finished /get-started: the same "Thanks, we have your request" they see on screen. Staff decide next.
+export function buildAccessReceivedEmail({ companyName, contactEmail }) {
+  const step = (n, title, text, last) => `<tr><td style="padding:0 12px ${last ? 0 : 9}px 0;color:${BRAND_ORANGE};font-weight:600;vertical-align:top">${n}</td><td style="padding-bottom:${last ? 0 : 9}px"><b style="color:#171717">${title}</b><br>${text}</td></tr>`;
+  return {
+    subject: 'We received your SuperRank request',
+    html: emailShell({
+      eyebrow: 'Request received',
+      title: `<span style="color:${BRAND_ORANGE}">Thanks.</span> We have it.`,
+      intro: `A person at SuperRank checks every new account before it opens. We will email <b>${escapeHtml(contactEmail)}</b> as soon as <b>${escapeHtml(companyName)}</b> is approved.`,
+      body: `<div style="background:#fbfaf8;border-radius:10px;box-shadow:inset 0 0 0 1px #f0f0f0;padding:14px 16px;margin-top:18px">
+      <table role="presentation" cellpadding="0" cellspacing="0" style="font-size:13px;line-height:19px;color:#525252">
+       ${step(1, 'Request sent', escapeHtml(companyName))}${step(2, 'We review it', 'Usually within one working day')}${step(3, 'You get an email', 'With a button to sign in')}${step(4, 'Open your workspace', 'Your project, topics and prompts are waiting', true)}
+      </table></div>`,
+      footnote: 'Nothing is active until it is approved, so there is nothing to sign in to yet. Did not ask for this? Ignore this email.',
+    }),
+  };
+}
+
+// To SuperRank staff: an account whose projects were all deleted is asking to come back. No code was sent to them yet.
+export function buildReturnRequestStaffNotice({ email, name, reason, reviewUrl }) {
+  return {
+    subject: `Returning account needs approval: ${email}`,
+    html: emailShell({
+      eyebrow: 'Returning account',
+      title: escapeHtml(name || email),
+      intro: `<b>${escapeHtml(email)}</b> tried to sign in, but everything they had was deleted. We did not send them a code. Approve them and a new code goes out.`,
+      body: tint(`<b style="color:#171717">What happened:</b> ${escapeHtml(reason)}`) + `<p style="margin:22px 0 0;text-align:center"><a href="${escapeHtml(reviewUrl)}" style="${CARD_BUTTON}">Review the request</a></p>`,
+      footnote: 'They were told to wait for approval. Rejecting sends them nothing.',
+    }),
+  };
+}
+
+// To the person, once staff approved: their new sign-in code (when one could be made) and the way in.
+export function buildReturnApprovedEmail({ email, code = null, minutes = 10, signInUrl }) {
+  const spaced = code ? `${code.slice(0, 3)} ${code.slice(3)}` : null;
+  return {
+    subject: spaced ? `You are approved: your SuperRank sign-in code ${spaced}` : 'You are approved: sign in to SuperRank',
+    html: emailShell({
+      eyebrow: 'Welcome back',
+      title: `<span style="color:${BRAND_ORANGE}">You are approved.</span>`,
+      intro: spaced ? 'A SuperRank team member approved your return. Enter this code on the sign-in page to continue.' : 'A SuperRank team member approved your return. Open the sign-in page and ask for a code.',
+      body: (spaced ? `<div style="margin:22px 0;background:#fff4ed;border-radius:10px;box-shadow:inset 0 0 0 1px #ffe1cc;padding:18px;text-align:center;font-size:34px;letter-spacing:.32em;font-weight:600;color:#171717">${spaced}</div>
+       <p style="margin:0 0 14px;font-size:13px;line-height:19px;color:#525252">It works once and expires in <b>${minutes} minutes</b>.</p>` : '')
+        + `<p style="margin:18px 0;text-align:center"><a href="${escapeHtml(signInUrl)}" style="${CARD_BUTTON}">Sign in</a></p>`,
+      footnote: `This is for ${escapeHtml(email)}. Never share the code. SuperRank staff will never ask for it.`,
+    }),
+  };
+}
+
+// To SuperRank staff: someone finished /get-started and is waiting for a decision.
+export function buildAccessRequestStaffNotice({ companyName, websiteDomain, contactEmail, summary = {}, reviewUrl }) {
+  const row = (k, v) => (v ? `<tr><td style="padding:5px 14px 5px 0;color:#8a8a8a;vertical-align:top;white-space:nowrap">${k}</td><td style="padding:5px 0;color:#171717">${v}</td></tr>` : '');
+  const list = (a) => (Array.isArray(a) && a.length ? escapeHtml(a.join(', ')) : '');
+  return {
+    subject: `Free-trial request: ${companyName}`,
+    html: emailShell({
+      eyebrow: 'Free-trial request',
+      title: escapeHtml(companyName),
+      intro: 'Someone finished Get Started and is waiting for access. Their dashboard stays locked until you decide.',
+      body: `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:18px 0 0;font-size:13px;line-height:19px">
+       ${row('Email', `<a href="mailto:${escapeHtml(contactEmail)}" style="color:#171717">${escapeHtml(contactEmail)}</a>`)}
+       ${row('Website', websiteDomain ? escapeHtml(websiteDomain) : '')}
+       ${row('Category', summary.category ? escapeHtml(summary.category) : '')}
+       ${row('Goals', list(summary.goals))}
+       ${row('Markets', list(summary.markets))}
+       ${row('Topics', Array.isArray(summary.topics) && summary.topics.length ? `${summary.topics.length}: ${escapeHtml(summary.topics.slice(0, 5).join(', '))}${summary.topics.length > 5 ? '…' : ''}` : '')}
+       ${row('Prompts', summary.prompts ? String(summary.prompts) : '')}
+       ${row('Competitors', list(summary.competitors))}
+      </table>
+      <p style="margin:22px 0 0;text-align:center"><a href="${escapeHtml(reviewUrl)}" style="${CARD_BUTTON}">Review the request</a></p>`,
+      footnote: 'Approve it as a 15-day demo or as a real client. Either way they are emailed straight away.',
+    }),
+  };
+}
+
 // A plain-text twin of the HTML. Mail that is HTML only, with no text part, is one of the things spam filters
 // mark down; a real mail client shows the HTML and a filter sees both agree. Links keep their address.
 export function plainTextOf(html) {
@@ -501,6 +616,15 @@ export const sendLoginCodeEmail = (o) => sendBuilt({ to: o.email, built: buildLo
 // To SuperRank staff: a request is waiting. Internal, so it is NOT exempt — redirect
 // mode (a laptop, a staging box) must never send it to the real staff inbox.
 export const sendSignupStaffNotice = (o) => sendBuilt({ to: LEADS_EMAIL_TO, built: buildSignupStaffNotice(o), exempt: false, label: 'sign-up staff notice' });
+
+// Free-trial access. The two approvals go to the person (exempt from redirect mode: they are waiting for it); the staff
+// notice is internal, so redirect mode keeps it off the real staff inbox.
+export const sendAccessClientEmail = (o) => sendBuilt({ to: o.contactEmail, built: buildAccessClientEmail(o), exempt: true, label: 'access approval (client)' });
+export const sendAccessDemoEmail = (o) => sendBuilt({ to: o.contactEmail, built: buildAccessDemoEmail(o), exempt: true, label: 'access approval (demo)' });
+export const sendAccessReceivedEmail = (o) => sendBuilt({ to: o.contactEmail, built: buildAccessReceivedEmail(o), exempt: false, label: 'access request received' });
+export const sendReturnRequestStaffNotice = (o) => sendBuilt({ to: LEADS_EMAIL_TO, built: buildReturnRequestStaffNotice(o), exempt: false, label: 'returning account staff notice' });
+export const sendReturnApprovedEmail = (o) => sendBuilt({ to: o.email, built: buildReturnApprovedEmail(o), exempt: true, label: 'returning account approved' });
+export const sendAccessRequestStaffNotice = (o) => sendBuilt({ to: LEADS_EMAIL_TO, built: buildAccessRequestStaffNotice(o), exempt: false, label: 'access request staff notice' });
 
 // server/notifications/channels/email.js — the email delivery channel for
 // NotificationEvents (see server/notifications/types.js), including the

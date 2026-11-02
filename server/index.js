@@ -27,6 +27,7 @@ import keywordsRouter, { clientKeywordsRouter } from './routes/keywords.js';
 import growthReportRouter from './routes/growth-report.js';
 import siteAuditRouter from './routes/site-audit.js';
 import freeAuditRouter from './routes/free-audit.js';
+import accessRouter, { accessGate } from './routes/access.js';
 import onboardingRouter from './routes/onboarding.js';
 import commoncrawlBacklinksRouter, { clientBacklinksRouter } from './routes/commoncrawl-backlinks.js';
 import mcpTokensRouter from './routes/mcp-tokens.js';
@@ -106,6 +107,8 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 // hitting /api/growth-report was rejected by copilot.js's blanket internal
 // gate before ever reaching growth-report.js, despite growth-report.js
 // itself being correctly client-scoped).
+// A project waiting for approval (or whose demo ended) can only reach a short list of routes; see routes/access.js.
+app.use('/api', accessGate);
 app.use('/api', loginRouter);
 // Fully public (no session): the landing page's free website audit. Must precede every
 // blanket-requireAuth router below.
@@ -178,6 +181,7 @@ app.use('/api', usersRouter);
 // as usersRouter above, so its position is logical grouping only.
 app.use('/api', workspacesRouter);
 app.use('/api', projectsRouter);
+app.use('/api', accessRouter);
 app.use('/api', platformRouter);
 // requireAuth-gated (session cookie) — backs the OAuth consent screen
 // (web/src/pages/OAuthAuthorize.jsx). Same tier as mcpTokensRouter above;
@@ -222,6 +226,14 @@ app.get(['/page-fixer', '/page-fixer/'], (req, res, next) => {
   if (!existsSync(pageFixerHtml)) return next();
   res.set('Cache-Control', 'no-cache');
   res.sendFile(pageFixerHtml);
+});
+
+// The AI visibility audit (web/public/ai-visibility) is public in the same way, so it gets the same clean URL.
+const aiVisibilityHtml = join(here, '..', 'web', process.env.NODE_ENV === 'production' ? 'dist' : 'public', 'ai-visibility', 'index.html');
+app.get(['/ai-visibility', '/ai-visibility/'], (req, res, next) => {
+  if (!existsSync(aiVisibilityHtml)) return next();
+  res.set('Cache-Control', 'no-cache');
+  res.sendFile(aiVisibilityHtml);
 });
 
 if (process.env.NODE_ENV === 'production') {

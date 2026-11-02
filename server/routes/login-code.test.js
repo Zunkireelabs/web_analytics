@@ -52,13 +52,14 @@ describe('POST /login/code/send', () => {
     assert.equal(sent.length, 1);
     assert.deepEqual([sent[0].email, sent[0].code], ['owner@acme.test', '482913']);
   });
-  test('an unknown or disabled address gets the very same answer and no email', async () => {
-    const known = (await call('post', '/login/code/send', { body: { email: 'owner@acme.test' } })).res.body;
+  test('an unknown address is told it is not a client, a disabled one is refused, and neither gets an email', async () => {
     sent = [];
     const unknown = (await call('post', '/login/code/send', { body: { email: 'nobody@acme.test' } })).res;
     const disabled = (await call('post', '/login/code/send', { body: { email: 'off@acme.test' } })).res;
-    assert.deepEqual(unknown.body, known);
-    assert.deepEqual(disabled.body, known);
+    assert.equal(unknown.statusCode, 404);
+    assert.equal(unknown.body.code, 'NO_ACCOUNT');
+    assert.match(unknown.body.error, /not one of our clients/);
+    assert.equal(disabled.statusCode, 403);
     assert.equal(sent.length, 0);
   });
   test('asking too soon is answered the same and sends nothing more', async () => {

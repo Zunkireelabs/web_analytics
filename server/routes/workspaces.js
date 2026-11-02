@@ -17,7 +17,9 @@ import {
   addMember, updateMemberRole, removeMember, inviteHomeSiteId, createProject,
   createWorkspace, discardNewWorkspace, workspaceHasDomain, renameWorkspace, siteInWorkspace, validateGoal, setProjectGoal, listGoalsForSites, claimHomeSiteIfNone,
   summarizeProjectHealth, listWorkspaceSites, listWorkspaceActivity, describeActivity, listProjectMembersForWorkspace,
+  deleteWorkspaceAsPlatform, pickLoginSite,
 } from '../store/workspaces.js';
+import { query } from '../db.js';
 
 // Workspace management: projects, members, invitations, goals, tokens and
 // health. Every route is session-authenticated and then gated by the caller's
@@ -197,6 +199,30 @@ router.patch('/workspaces/:id', requireAuth, requireWorkspaceRole('admin'), asyn
 });
 
 // ───────── overview: projects, goals, health, activity ─────────
+
+// The owner removes their own workspace (a platform admin may too). The workspace name must be typed back. Every project in it is
+// soft-deleted and its people lose access; the data is kept so support can restore it. The session is moved off the removed project.
+router.delete('/workspaces/:id', requireAuth, requireWorkspaceRole('owner'), async (req, res, next) => {
+  try {
+    const { rows } = await query('SELECT name FROM workspaces WHERE id = $1 AND deleted_at IS NULL', [req.workspaceId]);
+    if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
+    if (String(req.body?.confirmName || '').trim() !== rows[0].name) return res.status(400).json({ error: 'Type the workspace name exactly to delete it.' });
+    const out = await deleteWorkspaceAsPlatform(req.workspaceId, { adminUserId: req.userId, companySiteId: companySiteId(), allowOwn: true });
+    if (!out.ok) return res.status(out.code === 'not_found' ? 404 : 409).json({ error: out.code === 'company' ? 'This workspace holds the SuperRank company site and cannot be deleted.' : 'Not found.' });
+    await recordAuditEvent(req, {
+      action: 'workspace.deleted', targetType: 'workspace', targetId: String(req.workspaceId), success: true,
+      metadata: { workspaceId: req.workspaceId, name: out.name, projects: out.projects },
+    });
+    // If they were looking at one of its projects, move them to another place they can reach (or to none).
+    try {
+      const user = await getUserById(req.userId);
+      const next = user ? await pickLoginSite(user, { companySiteId: companySiteId() }) : null;
+      req.session.siteId = next ?? null;
+      await new Promise((resolve) => req.session.save(() => resolve()));
+    } catch { /* the next request sorts the session out */ }
+    res.json({ ok: true, name: out.name, projects: out.projects });
+  } catch (e) { next(e); }
+});
 
 router.get('/workspaces/:id/overview', requireAuth, requireWorkspaceRole('member'), async (req, res, next) => {
   try {

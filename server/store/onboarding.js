@@ -25,6 +25,8 @@ export function cleanOnboarding(body) {
   const m = b.markets || {};
   return {
     brand: text(b.brand, 120),
+    workspaceName: text(b.workspaceName, 80),
+    projectName: text(b.projectName, 80),
     entityCountry: text(b.entityCountry, 2).toUpperCase(),
     run: { country: text(b.run?.country, 2).toUpperCase(), language: text(b.run?.language, 8), city: text(b.run?.city, 80), timeZone: text(b.run?.timeZone, 64) },
     profile: {
@@ -32,7 +34,11 @@ export function cleanOnboarding(body) {
       identity: list(p.identity, 20, 120), products: list(p.products, 30, 120), personas: list(p.personas, 20, 120), competitors: list(p.competitors, 20, 120),
     },
     goals: list(b.goals, 6, 20),
-    markets: { scope: ['global', 'region', 'country'].includes(m.scope) ? m.scope : 'global', items: list(m.items, 80, 80) },
+    markets: {
+      scope: ['global', 'continent', 'region', 'country', 'state', 'city', 'neighborhood'].includes(m.scope) ? m.scope : 'global', items: list(m.items, 80, 80),
+      levels: Object.fromEntries(['continent', 'country', 'state', 'city', 'neighborhood'].map((k) => [k, list(m.levels?.[k], 80, 80)])),
+    },
+    runs: (Array.isArray(b.runs) ? b.runs : []).slice(0, 5).map((r) => ({ country: text(r?.country, 2).toUpperCase(), language: text(r?.language, 8), city: text(r?.city, 80) })).filter((r) => r.country),
     topics: list(b.topics, 50, 120),
     focus: text(b.focus, 20),
     brandedShare: Math.min(100, Math.max(0, Math.round(Number(b.brandedShare) || 0))),
@@ -76,4 +82,37 @@ export async function markGetStartedVerified(email, userId, { via = 'email' } = 
     `INSERT INTO get_started_signups (email, via, user_id, verified_at) VALUES ($1, $2, $3, now())
      ON CONFLICT (email) DO UPDATE SET user_id = EXCLUDED.user_id, verified_at = COALESCE(get_started_signups.verified_at, now()), updated_at = now()`,
     [email, via, userId]);
+}
+
+// ───────── the draft, saved as the person goes (migration 220) ─────────
+
+const DRAFT_MAX_BYTES = 200 * 1024;
+const STEP_RE = /^[a-z]{2,20}$/;
+
+// What the browser holds while someone answers: kept whole so they can pick up exactly where they stopped. It is only ever
+// read back to the same person, and only ever as data, but it is still capped so nobody can park a large blob here.
+export function cleanDraft(input) {
+  const body = input && typeof input === 'object' ? input : {};
+  const data = body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? body.data : null;
+  if (!data) return null;
+  const json = JSON.stringify(data);
+  if (json.length > DRAFT_MAX_BYTES) return null;
+  const step = typeof body.step === 'string' && STEP_RE.test(body.step) ? body.step : null;
+  return { step, json };
+}
+
+export async function saveDraft(userId, draft) {
+  await query(
+    `INSERT INTO onboarding_drafts (user_id, step, data) VALUES ($1, $2, $3::jsonb)
+     ON CONFLICT (user_id) DO UPDATE SET step = EXCLUDED.step, data = EXCLUDED.data, updated_at = now()`,
+    [userId, draft.step, draft.json]);
+}
+
+export async function getDraft(userId) {
+  const { rows } = await query('SELECT step, data, updated_at FROM onboarding_drafts WHERE user_id = $1', [userId]);
+  return rows[0] ? { step: rows[0].step, data: rows[0].data, updatedAt: rows[0].updated_at } : null;
+}
+
+export async function deleteDraft(userId) {
+  await query('DELETE FROM onboarding_drafts WHERE user_id = $1', [userId]);
 }

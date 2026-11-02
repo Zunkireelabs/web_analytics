@@ -1,0 +1,13 @@
+/* AI visibility audit (app.superrank.si/ai-visibility). Builds on /free-audit/style.css (tokens, form, ar-* blocks). */
+.aiv-read { display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border-radius: var(--radius); background: var(--muted); }
+.aiv-read b { font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--fg); }
+.aiv-read span { font-size: 14px; line-height: 21px; color: var(--text); }
+.aiv-qs { margin: 0; padding: 0; list-style: none; }
+.aiv-q { padding: 14px 0; border-top: 1px solid var(--border); }
+.aiv-q:first-child { border-top: 0; padding-top: 4px; }
+.aiv-q__row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.aiv-q__row b { font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--fg); }
+.aiv-q__note { margin: 6px 0 0; font-size: 13px; line-height: 19px; color: var(--faint); }
+/* One centered column, with the Start free trial box under the results. */
+.audit-result { max-width: 740px; margin-left: auto; margin-right: auto; }
+.aiv-res { grid-template-columns: minmax(0, 1fr); }

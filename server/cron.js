@@ -862,4 +862,27 @@ export function startCron() {
     );
     console.log(`[cron] capability visibility snapshot scheduled "${capabilitySnapshot}" (${tz})`);
   }
+
+  // Free-trial demos that have run out: end them and remove the Google and GitHub connections they made (see
+  // store/access.js). Hourly, so a demo never outlives its last day by long. The first request after the deadline
+  // does the same work on its own, so a missed run locks nobody in.
+  const accessExpiry = process.env.ACCESS_EXPIRY_CRON_SCHEDULE || '10 * * * *';
+  if (!cron.validate(accessExpiry)) {
+    console.error(`[cron] invalid ACCESS_EXPIRY_CRON_SCHEDULE "${accessExpiry}" — demo expiry NOT scheduled.`);
+  } else {
+    cron.schedule(
+      accessExpiry,
+      () => locked('access-expiry', async () => {
+        try {
+          const { expireDueDemos } = await import('./store/access.js');
+          const ended = await expireDueDemos();
+          if (ended.length) console.log(`[cron] ended ${ended.length} demo(s): site ${ended.join(', ')}`);
+        } catch (err) {
+          console.error('[cron] demo expiry error:', err.message);
+        }
+      }),
+      { timezone: tz }
+    );
+    console.log(`[cron] demo expiry scheduled "${accessExpiry}" (${tz})`);
+  }
 }

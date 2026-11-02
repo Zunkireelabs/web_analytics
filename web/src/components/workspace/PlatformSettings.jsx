@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertTriangle, ArrowLeftRight, Building2, ChevronRight, Search, SlidersHorizontal } from 'lucide-react';
+import { AlertTriangle, ArrowLeftRight, Building2, ChevronRight, Search, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { api } from '../../api.js';
 import Badge from '../Badge.jsx';
 import Button from '../Button.jsx';
+import Modal from '../Modal.jsx';
+import Field from '../Field.jsx';
 import TransferProjectModal from './TransferProjectModal.jsx';
 import StaffProjectControls from './StaffProjectControls.jsx';
 import ApprovalRequests from './ApprovalRequests.jsx';
+import AccessRequests from './AccessRequests.jsx';
 import SettingsCard from '../settings/SettingsCard.jsx';
 import { plural } from '../../lib/workspace.js';
 import { siteDomain, siteInitials } from '../../lib/nav.js';
@@ -26,6 +29,17 @@ export default function PlatformSettings({ onSwitchProject }) {
   const [opening, setOpening] = useState(null);
   const [controlsFor, setControlsFor] = useState(null); // the project whose staff controls are open
   const [transferFor, setTransferFor] = useState(null); // the project whose transfer dialog is open
+  const [deleting, setDeleting] = useState(null); // the workspace whose delete dialog is open
+  const [typed, setTyped] = useState('');
+  const [delBusy, setDelBusy] = useState(false);
+  const [delError, setDelError] = useState(null);
+  const askDelete = (w) => { setDeleting(w); setTyped(''); setDelError(null); };
+  const doDelete = async () => {
+    setDelBusy(true); setDelError(null);
+    try { await api.platform.deleteWorkspace(deleting.id, typed.trim()); setDeleting(null); await loadAll(); }
+    catch (e) { setDelError(e.message || 'Could not delete the workspace.'); }
+    finally { setDelBusy(false); }
+  };
   const loadAll = () => api.platform.workspaces().then(setData).catch((e) => setError(e.message || 'Could not load the workspaces.'));
 
   useEffect(() => {
@@ -57,6 +71,7 @@ export default function PlatformSettings({ onSwitchProject }) {
 
   return (
     <div className="mt-5 space-y-3">
+      <AccessRequests />
       <ApprovalRequests />
       <SettingsCard icon={Building2} title="All workspaces"
         description={data ? `${plural(data.totals.workspaces, 'workspace', 'workspaces')} · ${plural(data.totals.projects, 'project', 'projects')}${data.totals.needsSetup ? ` · ${data.totals.needsSetup} still to set up` : ''}` : 'Every workspace on the platform.'}>
@@ -85,6 +100,8 @@ export default function PlatformSettings({ onSwitchProject }) {
               <span className="text-xs text-faint">{plural(w.projects.length, 'project', 'projects')} · {plural(w.memberCount, 'person', 'people')}</span>
               {w.needsSetup > 0 && <Badge tone="amber">{w.needsSetup} to set up</Badge>}
               <span className="text-xs text-faint sm:ml-auto truncate max-w-full">{w.owners.length ? `Owner: ${w.owners.join(', ')}` : 'No owner'}</span>
+              <button type="button" onClick={() => askDelete(w)} aria-label={`Delete workspace ${w.name}`} title="Delete workspace"
+                className="h-7 w-7 rounded-control grid place-items-center text-faint hover:text-[#b42318] hover:bg-[#fdecec]"><Trash2 size={14} /></button>
             </div>
             {w.projects.length > 0 && (
               <div className="mt-2.5 grid gap-1.5 sm:pl-9">
@@ -114,6 +131,14 @@ export default function PlatformSettings({ onSwitchProject }) {
           </div>
         ))}
       </SettingsCard>
+      <Modal isOpen={!!deleting} onClose={() => !delBusy && setDeleting(null)} icon={Trash2} title="Delete workspace"
+        subtitle={deleting ? <>This removes <span className="text-fg font-medium">{deleting.name}</span> and its {plural(deleting.projects.length, 'project', 'projects')}. Its people lose access. The data is kept, so we can restore it if asked.</> : null}
+        footer={<><Button variant="light" onClick={() => setDeleting(null)} disabled={delBusy}>Cancel</Button>
+          <button type="button" className="btn" style={{ background: '#d92d20', color: '#fff', opacity: typed.trim() === deleting?.name && !delBusy ? 1 : 0.5 }}
+            disabled={typed.trim() !== deleting?.name || delBusy} onClick={doDelete}>{delBusy ? 'Deleting…' : 'Delete workspace'}</button></>}>
+        <Field label={deleting ? `Type "${deleting.name}" to confirm` : 'Confirm'} value={typed} onChange={(e) => setTyped(e.target.value)} autoFocus />
+        {delError && <p className="mt-3 text-[13px]" style={{ color: '#b42318' }} role="alert">{delError}</p>}
+      </Modal>
       <StaffProjectControls project={controlsFor} isOpen={!!controlsFor} onClose={() => setControlsFor(null)} onChanged={loadAll} />
       <TransferProjectModal project={transferFor} isOpen={!!transferFor} onClose={() => setTransferFor(null)}
         onDone={async () => { setTransferFor(null); await loadAll(); }} />

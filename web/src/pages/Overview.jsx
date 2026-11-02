@@ -9,6 +9,9 @@ import { Tray } from '../components/layout/Tray.jsx';
 import PageToolbar from '../components/PageToolbar.jsx';
 import PageIntro from '../components/layout/PageIntro.jsx';
 import KpiStrip from '../components/layout/KpiStrip.jsx';
+import OnboardingSummaryCard from '../components/access/OnboardingSummaryCard.jsx';
+import LockedCard from '../components/access/LockedCard.jsx';
+import { useAccess } from '../lib/access.jsx';
 import { STATUS } from '../lib/palette.js';
 import { fmtDay, fmtRange, fmtSignedPct } from '../lib/format.js';
 
@@ -28,6 +31,11 @@ function pctDelta(cur, prev) {
 }
 
 export default function Overview({ siteId }) {
+  // A project still waiting for approval has no data to show yet: its setup and what is locked. A finished demo keeps the
+  // data it had (and the same lock cards beside it).
+  const access = useAccess();
+  const locked = Boolean(access?.locked);
+  const waiting = locked && access.state !== 'ended';
   const [range, setRange] = useState(null);
   const [start, setStart] = useState(daysAgo(33));
   const [end, setEnd] = useState(daysAgo(3));
@@ -194,6 +202,8 @@ export default function Overview({ siteId }) {
 
   return (
     <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12 fade-up">
+      {!waiting && (
+        <>
       <PageToolbar>
         <div className="toggle w-full md:w-auto [&>button]:flex-1 md:[&>button]:flex-none">
           {[3, 7, 14, 30].map((d) => (
@@ -221,8 +231,15 @@ export default function Overview({ siteId }) {
         </div>
       )}
 
-      <PageIntro title={introTitle} subtitle={introSubtitle} />
+        </>
+      )}
 
+      <PageIntro title={waiting ? 'Overview' : introTitle} subtitle={waiting ? 'Where your site starts, and what your agent works on next' : introSubtitle} />
+
+      <OnboardingSummaryCard />
+
+      {!waiting && (
+        <>
       <KpiStrip items={kpis} loading={loading} />
 
       <Tray className="mt-3">
@@ -238,6 +255,16 @@ export default function Overview({ siteId }) {
         <TopQueriesCard queries={rangeQueries} loading={loading} />
         <TrafficDistributionCard channels={channels} loading={loading} />
       </Tray>
+        </>
+      )}
+
+      {locked && (
+        <div className="mt-3 grid gap-3 md:grid-cols-3">
+          <LockedCard title="AI visibility" text="See whether ChatGPT and Perplexity mention you." cta />
+          <LockedCard title="Recommended actions" text="Exactly what to fix first, with a ready-to-ship fix." />
+          <LockedCard title="Competitor performance" text="Who AI engines recommend instead of you." />
+        </div>
+      )}
     </div>
   );
 }

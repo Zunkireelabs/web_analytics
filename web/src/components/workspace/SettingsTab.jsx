@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Settings as SettingsIcon, ShieldCheck, ArrowLeftRight } from 'lucide-react';
+import { Settings as SettingsIcon, ShieldCheck, ArrowLeftRight, Trash2 } from 'lucide-react';
 import { api } from '../../api.js';
 import Avatar from '../Avatar.jsx';
 import Badge from '../Badge.jsx';
 import Button from '../Button.jsx';
 import Field from '../Field.jsx';
+import Modal from '../Modal.jsx';
 import SettingsCard from '../settings/SettingsCard.jsx';
 import HandoverModal from './HandoverModal.jsx';
 import { plural } from '../../lib/workspace.js';
@@ -18,6 +19,15 @@ export default function SettingsTab({ workspace, role, onChanged }) {
   const [owner, setOwner] = useState(null);
   const [handOpen, setHandOpen] = useState(false);
   const isOwner = role === 'owner' || role === 'platform';
+  const [delOpen, setDelOpen] = useState(false);
+  const [typed, setTyped] = useState('');
+  const [delBusy, setDelBusy] = useState(false);
+  const [delError, setDelError] = useState(null);
+  const doDelete = async () => {
+    setDelBusy(true); setDelError(null);
+    try { await api.workspace.remove(workspace.id, typed.trim()); window.location.assign('/overview'); }
+    catch (err) { setDelError(err.message || 'Could not delete the workspace.'); setDelBusy(false); }
+  };
 
   useEffect(() => { setName(workspace.name); setState('idle'); setError(null); }, [workspace.id, workspace.name]);
   const loadOwner = () => api.workspace.members(workspace.id).then((d) => setOwner(d.members.find((m) => m.role === 'owner') || null)).catch(() => {});
@@ -72,12 +82,20 @@ export default function SettingsTab({ workspace, role, onChanged }) {
               <p className="text-[13px] text-text mt-0.5">Permanently delete {workspace.name}, its {plural(workspace.projects.length, 'project', 'projects')} and all their data. This cannot be undone.</p>
             </div>
             <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5">
-              <p className="text-[13px] text-faint">Deleting a workspace is not available yet. Contact support and we will do it for you.</p>
-              <button type="button" disabled aria-disabled className="btn" style={{ background: '#d92d20', color: '#fff' }}>Delete workspace</button>
+              <p className="text-[13px] text-faint">Everyone loses access at once. We keep the data for a while, so support can restore it if you ask.</p>
+              <button type="button" className="btn" style={{ background: '#d92d20', color: '#fff' }} onClick={() => { setTyped(''); setDelError(null); setDelOpen(true); }}>Delete workspace</button>
             </div>
           </div>
         </div>
       )}
+      <Modal isOpen={delOpen} onClose={() => !delBusy && setDelOpen(false)} icon={Trash2} title="Delete workspace"
+        subtitle={<>This removes <span className="text-fg font-medium">{workspace.name}</span> and its {plural(workspace.projects.length, 'project', 'projects')}. Everyone loses access.</>}
+        footer={<><Button variant="light" onClick={() => setDelOpen(false)} disabled={delBusy}>Cancel</Button>
+          <button type="button" className="btn" style={{ background: '#d92d20', color: '#fff', opacity: typed.trim() === workspace.name && !delBusy ? 1 : 0.5 }}
+            disabled={typed.trim() !== workspace.name || delBusy} onClick={doDelete}>{delBusy ? 'Deleting…' : 'Delete workspace'}</button></>}>
+        <Field label={`Type "${workspace.name}" to confirm`} value={typed} onChange={(e) => setTyped(e.target.value)} autoFocus />
+        {delError && <p className="mt-3 text-[13px]" style={{ color: '#b42318' }} role="alert">{delError}</p>}
+      </Modal>
       <HandoverModal workspace={workspace} workspaceRole={role} isOpen={handOpen} onClose={() => setHandOpen(false)} onDone={async () => { await loadOwner(); await onChanged?.(); }} />
     </div>
   );
