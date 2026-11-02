@@ -2,7 +2,7 @@
 // shows how visible the brand is to AI assistants. The score is the average of the AI answers (AEO) and AI citations
 // (GEO) scores, the same "AI" number the free audit's verdict uses. Below GOAL it says the site needs improvement and
 // offers Start free trial (the Get started flow). See audit-shared.js for the common pieces.
-import { reduceMotion, el, gradeOf, hostOf, ring, issueRow, LABELS } from '/free-audit/audit-shared.js';
+import { reduceMotion, el, gradeOf, hostOf, ring, issueRow, LABELS, attachFavicon } from '/free-audit/audit-shared.js';
 
 const GOAL = 90;
 const START_URL = 'https://superrank.si/get-started';
@@ -15,6 +15,7 @@ if (form) {
   const input = form.elements.website;
   const button = form.querySelector('button[type="submit"]');
   const field = input.closest('.audit-form__field');
+  attachFavicon(input, field);
   const title = document.querySelector('[data-audit-title]');
   const sub = document.querySelector('[data-audit-sub]');
   const validSite = (v) => /^(https?:\/\/)?[\w-]+(\.[\w-]+)+(\/.*)?$/i.test(v);
@@ -228,6 +229,7 @@ if (form) {
   const first = new URLSearchParams(location.search).get('site');
   if (first) {
     input.value = first;
+    input.dispatchEvent(new Event('input'));
     if (validSite(first.trim())) run(first.trim());
     else showError('Enter a valid website, like yourwebsite.com');
   }

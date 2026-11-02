@@ -110,6 +110,8 @@ ul { margin: 0; padding: 0; list-style: none; }
 .audit-form__field input { flex: 1; min-width: 0; height: 44px; border: 0; outline: 0; background: transparent; font: inherit; font-size: 16px; color: var(--fg); }
 .audit-form__field input::placeholder { color: #b3b3b3; }
 .audit-form:focus-within { box-shadow: 0 0 0 2px var(--primary-ring), 0 8px 24px rgba(0, 0, 0, .06); }
+.audit-fav { width: 18px; height: 18px; border-radius: 4px; object-fit: contain; flex: none; }
+.audit-fav[hidden] { display: none; }
 .audit-form__field.is-bad { box-shadow: inset 0 0 0 1px #d92d20; }
 .audit-form__err { margin-top: 10px; font-size: 13px; color: #d92d20; }
 /* Free audit page and report (/free-audit). Results classes are prefixed ar- so they cannot collide with the homepage. */
