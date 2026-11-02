@@ -80,6 +80,16 @@ function CodeBoxes({ value, onChange, onComplete, bad }) {
   );
 }
 
+// Where the server sends people back to this page after "Continue with Google" when it did not finish (?google=...).
+const GOOGLE_MESSAGES = {
+  'no-account': 'That Google account is not one of our clients yet. Start your free trial at superrank.si/get-started, or use another email.',
+  unavailable: 'Google sign-in is not set up on this server yet. Use the email code below.',
+  cancelled: 'Google sign-in was cancelled. Try again, or use the email code below.',
+  expired: 'That Google sign-in took too long. Try again.',
+  failed: 'Google sign-in did not finish. Try again, or use the email code below.',
+  disabled: 'This account has been disabled. Contact your workspace owner or SuperRank.',
+  approval: 'Welcome back. Your earlier workspace was removed, so a SuperRank team member needs to approve you before you sign in. We have told the team, and we email you as soon as they approve.',
+};
 export default function SuperRankLogin({ onAuthed }) {
   const token = new URLSearchParams(window.location.search).get('token') || '';
   const [last] = useState(readLast);
@@ -101,6 +111,18 @@ export default function SuperRankLogin({ onAuthed }) {
   const [usePw, setUsePw] = useState(false);
   const [code, setCode] = useState('');
   const [wait, setWait] = useState(0);
+
+  // "Continue with Google": the server's sign-in route sends the browser to Google and back. An account that already exists signs in;
+  // when it cannot, the server returns here with ?google=<reason>, which is shown once and then removed from the address.
+  const startGoogle = () => { window.location.href = '/api/auth/google?mode=signin&next=%2F'; };
+  useEffect(() => {
+    const why = new URLSearchParams(window.location.search).get('google');
+    if (!why) return;
+    setErr(GOOGLE_MESSAGES[why] || GOOGLE_MESSAGES.failed);
+    const url = new URL(window.location.href);
+    url.searchParams.delete('google');
+    window.history.replaceState(null, '', url.pathname + (url.search || '') + url.hash);
+  }, []);
 
   useEffect(() => {
     if (!token || isReset) return;
@@ -305,7 +327,7 @@ export default function SuperRankLogin({ onAuthed }) {
                 <h1><em>Welcome back.</em> Your agent kept working.</h1>
                 <p className="sr-auth__sub">Sign in to your workspace.</p>
 
-                <button type="button" className="sr-auth__google" onClick={() => setErr('Google sign-in is not available yet. Use your email and password.')}>
+                <button type="button" className="sr-auth__google" onClick={startGoogle}>
                   <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
                     <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z" />
                     <path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" />

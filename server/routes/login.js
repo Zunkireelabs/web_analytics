@@ -202,8 +202,11 @@ router.post('/get-started/code/verify', async (req, res, next) => {
 
 // "Continue with Google": send the browser to Google's own screen, which asks only who they are. The nonce
 // is kept in their session and has to come back unchanged, so a link copied to someone else is refused.
+// Two uses: Get Started (mode=signup, may create an account, returns to the marketing site) and the app's sign-in page
+// (mode=signin, only an account that already exists, returns to the sign-in page with a message when it cannot).
+const googleFailure = (res, mode) => (why) => res.redirect(mode === 'signin' ? `/login?google=${why}` : siteUrl(`/get-started?google=${why}`));
 router.get('/auth/google', (req, res) => {
-  const failed = (why) => res.redirect(siteUrl(`/get-started?google=${why}`));
+  const failed = googleFailure(res, req.query.mode === 'signin' ? 'signin' : 'signup');
   try {
     if (!googleConnectConfigured()) return failed('unavailable');
     const nonce = newConnectNonce();
@@ -221,7 +224,7 @@ router.get('/auth/google', (req, res) => {
 export async function googleSignInCallback(req, res) {
   const pending = req.session?.googleSignIn;
   if (req.session) delete req.session.googleSignIn; // single use, whatever happens next
-  const failed = (why) => res.redirect(siteUrl(`/get-started?google=${why}`));
+  const failed = googleFailure(res, pending?.mode === 'signin' ? 'signin' : 'signup');
   try {
     if (req.query.error) return failed('cancelled');
     const fresh = pending && Date.now() - pending.at < 10 * 60 * 1000;
@@ -234,9 +237,11 @@ export async function googleSignInCallback(req, res) {
       user = await createUser({ siteId: null, email, passwordHash: await bcrypt.hash(randomBytes(32).toString('hex'), 10) });
       await markGetStartedVerified(email, user.id, { via: 'google' });
     }
+    // Same rule as the emailed code: an account that lost everything waits for staff before it signs in again.
+    if (await returningGate(req, user)) return failed('approval');
     const refused = await openSession(req, user);
     if (refused) return failed('disabled');
-    res.redirect(siteUrl(pending.next));
+    res.redirect(pending.mode === 'signin' ? pending.next : siteUrl(pending.next));
   } catch (err) {
     console.error('[login] Google sign-in failed:', err.message);
     failed('failed');
