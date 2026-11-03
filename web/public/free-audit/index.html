@@ -2,20 +2,37 @@
 <html lang="en"><head><title>Free website audit | SuperRank</title><meta name="description" content="Check how your website shows up on Google and in AI answers, with a fix for every issue."><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..700&display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/free-audit/favicon.png"><link rel="stylesheet" href="/free-audit/style.css"></head>
 <body>
 <header class="header"><div class="header__inner"><a href="https://superrank.si/" class="logo" aria-label="SuperRank home"><img src="/free-audit/logo.png" alt="" class="logo__icon"><span>super<b>rank</b></span></a><div class="header__actions"><a class="btn btn--ghost" href="https://superrank.si/">Back to superrank.si</a><a class="btn btn--dark" href="https://superrank.si/book-demo">Book a demo</a></div></div></header>
-<main class="section section--flush audit-main">
-  <div class="container audit-page">
-    <h1 data-audit-title>Free website audit</h1>
-    <p class="audit-page__sub" data-audit-sub>See how Google and AI assistants read your site, and what to fix first.</p>
-
-    <form class="audit-form" data-audit-form novalidate>
-      <label class="audit-form__field">
-        <span class="sr-only">Your website</span>
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6.2"/><path d="M1.8 8h12.4M8 1.8c1.8 1.7 2.7 3.8 2.7 6.2S9.8 12.5 8 14.2C6.2 12.5 5.3 10.4 5.3 8S6.2 3.5 8 1.8Z"/></svg>
-        <input type="text" name="website" placeholder="yourwebsite.com" autocomplete="url" inputmode="url" required>
-      </label>
-      <button type="submit" class="btn btn--primary btn--lg">Get my free audit</button>
-    </form>
-    <p class="audit-form__err" data-audit-err role="alert" hidden></p>
+<main class="section section--flush audit-main lp-main">
+  <div class="container audit-page lp">
+    <div class="lp-split">
+      <div class="lp-copy">
+        <span class="lp-eyebrow"><i></i>Free · takes about 10 seconds</span>
+        <h1 data-audit-title>See what holds your site back in <em>AI search</em></h1>
+        <p class="audit-page__sub" data-audit-sub>Paste your address. In about 10 seconds you get a score, the problems ranked, and fixes you can paste.</p>
+        <form class="audit-form" data-audit-form novalidate>
+          <label class="audit-form__field">
+            <span class="sr-only">Your website</span>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6.2"/><path d="M1.8 8h12.4M8 1.8c1.8 1.7 2.7 3.8 2.7 6.2S9.8 12.5 8 14.2C6.2 12.5 5.3 10.4 5.3 8S6.2 3.5 8 1.8Z"/></svg>
+            <input type="text" name="website" placeholder="yourwebsite.com" autocomplete="url" inputmode="url" required>
+          </label>
+          <button type="submit" class="btn btn--primary btn--lg">Get my free audit</button>
+        </form>
+        <p class="audit-form__err" data-audit-err role="alert" hidden></p>
+        <ul class="lp-hints"><li>Free</li><li>No sign-up</li><li>About 10 seconds</li></ul>
+      </div>
+      <div class="lp-stack" aria-hidden="true">
+        <div class="lp-card-main">
+          <div class="lp-chrome"><i></i><i></i><i></i><span>app.superrank.si/free-audit</span><em>Sample</em></div>
+          <div class="lp-stats"><div class="lp-stat lp-stat--r"><b>48</b><span>AI readiness</span></div><div class="lp-stat lp-stat--a"><b>66</b><span>Technical SEO</span></div><div class="lp-stat lp-stat--g"><b>81</b><span>Speed</span></div></div>
+          <div class="lp-rows"><div class="lp-row"><i>1</i><div><b>Missing Organization schema</b><small>Tells AI who you are</small></div><span class="lp-tag lp-tag--r">High</span></div><div class="lp-row"><i>2</i><div><b>Pages with no meta description</b><small>Paste-ready text included</small></div><span class="lp-tag lp-tag--a">Medium</span></div><div class="lp-row"><i>3</i><div><b>robots.txt allows AI crawlers</b><small>Nothing to change</small></div><span class="lp-tag lp-tag--g">Passed</span></div></div>
+          <div class="lp-more"><span>+ more problems in the full audit</span></div>
+        </div>
+        <div class="lp-chip lp-chip--a"><span class="lp-dot lp-dot--g"></span>Fix ready to paste</div>
+        <div class="lp-chip lp-chip--b"><span class="lp-dot lp-dot--r"></span>Needs work</div>
+      </div>
+    </div>
+    <p class="lp-engines"><span>Checks how you show up in</span><b>Google</b><b>ChatGPT</b><b>Perplexity</b><b>Gemini</b><b>AI Overviews</b></p>
+    <div class="lp-cards"><div class="lp-card"><i>◎</i><div><b>Reads it like Google and AI</b><span>Structure, content and crawler access</span></div></div><div class="lp-card"><i>{ }</i><div><b>Fixes you can paste</b><span>Code and text for every problem</span></div></div><div class="lp-card"><i>✓</i><div><b>Free, no sign-up</b><span>Top results open, the rest on a free trial</span></div></div></div>
     <div class="audit-result frame" data-audit-result aria-live="polite" hidden></div>
   </div>
 </main>

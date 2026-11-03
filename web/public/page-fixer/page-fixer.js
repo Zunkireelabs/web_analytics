@@ -1,7 +1,7 @@
 // Page Fixer (/page-fixer): posts the website to /api/page-fixer (server/routes/free-audit.js, server/free-audit/siteScan.js),
 // reads the streamed progress (newline-delimited JSON), then shows the 10 pages with the most issues. The worst three come
 // with three fixes each; the other seven are locked rows (the server sends no fixes for them) that point to Start free trial / Book a demo.
-import { reduceMotion, el, gradeOf, fixBlock } from '/free-audit/audit-shared.js';
+import { reduceMotion, el, gradeOf, fixBlock, ring } from '/free-audit/audit-shared.js';
 
 const form = document.querySelector('[data-pf-form]');
 if (form) {
@@ -164,51 +164,74 @@ if (form) {
     return d;
   }
 
-  function ctaCard(site, lockedCount) {
-    const box = el('section', 'pf-card pf-unlock');
-    box.append(el('h3', '', lockedCount ? `See the fixes for the other ${lockedCount} page${lockedCount === 1 ? '' : 's'}` : 'Want these fixes shipped for you?'));
-    box.append(el('p', '', 'Start a free trial and SuperRank writes every fix in your site\'s own design and sends it for your approval. Or book a demo and we walk you through it.'));
-    box.append(ctaButtons(site));
+  // Right column: what is locked, and the two ways to see it.
+  function trialCard(site, lockedCount) {
+    const box = el('aside', 'rs-side');
+    const card = el('section', 'rs-trial');
+    card.append(
+      el('p', 'rs-trial__eye', 'Free trial'),
+      el('h3', '', lockedCount ? `${lockedCount} more page fix${lockedCount === 1 ? '' : 'es'} ready` : 'Want these fixes shipped for you?'),
+      el('p', '', 'SuperRank writes every fix in your site\'s own design and sends it for your approval.'),
+    );
+    const ul = el('ul'); ['All fixes, with paste-ready code', 'Checked every day, automatically', 'You approve every change'].forEach((t) => ul.append(el('li', '', t)));
+    const trial = el('a', 'btn btn--primary', 'Start free trial'); trial.href = `${SITE}/get-started`;
+    card.append(ul, trial, el('small', '', '14-day free trial · no credit card'));
+    const demo = el('section', 'rs-demo');
+    const book = el('a', 'btn', 'Book a demo'); book.href = `${SITE}/book-demo?website=${encodeURIComponent(site)}&intent=page-fixer`;
+    demo.append(el('h3', '', 'Prefer to talk it through?'), el('p', '', 'Book 30 minutes and we walk you through your pages.'), book);
+    box.append(card, demo);
     return box;
   }
 
   function resultView(r, site) {
-    const wrap = document.createDocumentFragment();
     const s = r.site;
-    const sum = el('section', 'pf-card');
-    const who = el('div', 'pf-who');
-    if (!fav.hidden) { const ic = el('img'); ic.src = fav.src; ic.alt = ''; who.append(ic); }
-    who.append(el('b', '', s.host));
-    const body = el('div', 'pf-sum');
+    const open = r.pages.filter((p) => !p.locked).length;
+    const locked = r.pages.length - open;
     const g = gradeOf(s.averageScore);
-    const left = el('div'); left.append(ringBadge(s.averageScore));
-    const right = el('div');
-    right.append(el('h2', '', r.pages.length
-      ? `${r.pages.length === 1 ? 'One page needs' : `${r.pages.length} pages need`} your attention first.`
-      : 'No page needs fixing.'));
-    right.append(el('p', '', r.pages.length
-      ? `Site average ${s.averageScore}/100 · ${GRADE[g]}. These are the pages with the most to fix, worst first. The fixes for the top three are open below.`
-      : 'Every page we checked passes our checks.'));
-    const stats = el('div', 'pf-stats');
-    const stat = (n, label) => { const x = el('span'); x.append(el('b', '', String(n)), ` ${label}`); return x; };
-    stats.append(stat(s.pagesAudited, `page${s.pagesAudited === 1 ? '' : 's'} checked`), stat(s.pagesWithIssues, 'with issues'), stat(s.pagesFound, 'found'));
-    right.append(stats);
-    body.append(left, right);
-    sum.append(who, body);
-    wrap.append(sum);
+    const wrap = el('div', 'rs');
 
+    // header: the site, and the two next steps
+    const bar = el('div', 'rs-bar');
+    const who = el('div', 'rs-who');
+    if (!fav.hidden) { const ic = el('img'); ic.src = fav.src; ic.alt = ''; who.append(ic); } else who.append(el('i', '', s.host.slice(0, 1).toUpperCase()));
+    const names = el('div');
+    names.append(el('b', '', s.host), el('small', '', `${s.pagesAudited} page${s.pagesAudited === 1 ? '' : 's'} checked · ${s.pagesFound} found`));
+    who.append(names);
+    const acts = el('div', 'rs-acts');
+    const again = el('button', 'btn btn--light', 'Check another site'); again.type = 'button';
+    again.addEventListener('click', () => { out.hidden = true; out.replaceChildren(); input.value = ''; setFav(''); window.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' }); input.focus({ preventScroll: true }); });
+    const start = el('a', 'btn btn--primary', 'Get started free'); start.href = `${SITE}/get-started`;
+    acts.append(again, start);
+    bar.append(who, acts);
+
+    // left: summary card
+    const grid = el('div', 'rs-grid');
+    const sum = el('aside', 'rs-sum');
+    const head = el('div', 'rs-sum__ring');
+    head.append(ring(s.averageScore, { size: 132, stroke: 11 }), el('span', `ar-grade ar-grade--${g}`, `${g.toUpperCase()} · ${GRADE[g]}`));
+    sum.append(head);
+    sum.append(el('p', 'rs-sum__txt', r.pages.length
+      ? `${r.pages.length === 1 ? 'One page needs' : `${r.pages.length} pages need`} attention first. The fixes for the worst ${open} ${open === 1 ? 'is' : 'are'} open.`
+      : 'Every page we checked passes our checks.'));
+    const rows = el('div', 'rs-sum__rows');
+    const row = (label, n) => { const d = el('div'); d.append(el('span', '', label), el('b', '', String(n))); return d; };
+    rows.append(row('Pages checked', s.pagesAudited), row('With issues', s.pagesWithIssues), row('Fixes open', open), row('Locked', locked));
+    sum.append(rows);
+
+    // right: the pages, then the unlock strip
+    const main = el('div', 'rs-main');
     if (r.pages.length) {
+      const h = el('div', 'rs-main__h');
+      h.append(el('h2', '', 'Pages with the most issues'), el('span', '', `${open} open · ${locked} locked`));
       const list = el('div', 'pf-list');
       r.pages.forEach((p, i) => list.append(pageCard(p, i, site)));
-      wrap.append(list);
+      main.append(h, list);
     }
-    if (r.morePages > 0) {
-      wrap.append(el('p', 'pf-more', `${r.morePages} more page${r.morePages === 1 ? '' : 's'} need work too. Start a free trial to see them all.`));
-    }
-    if (s.pagesFailed > 0) {
-      wrap.append(el('p', 'pf-more', `${s.pagesFailed} page${s.pagesFailed === 1 ? '' : 's'} could not be read and ${s.pagesFailed === 1 ? 'was' : 'were'} skipped.`));
-    }
-    wrap.append(ctaCard(site, r.pages.filter((p) => p.locked).length));
+    if (r.morePages > 0) main.append(el('p', 'pf-more', `${r.morePages} more page${r.morePages === 1 ? '' : 's'} need work too. Start a free trial to see them all.`));
+    if (s.pagesFailed > 0) main.append(el('p', 'pf-more', `${s.pagesFailed} page${s.pagesFailed === 1 ? '' : 's'} could not be read and ${s.pagesFailed === 1 ? 'was' : 'were'} skipped.`));
+
+    grid.append(sum, main, trialCard(site, locked));
+    wrap.append(bar, grid);
     return wrap;
   }
 
