@@ -885,4 +885,68 @@ export function startCron() {
     );
     console.log(`[cron] demo expiry scheduled "${accessExpiry}" (${tz})`);
   }
+  // Sign-up recovery (store/signup-recovery.js): the one reminder to people who stopped part-way through /get-started, the deletion
+  // of saved answers past their keep time, and the deletion of long-ended demos. Each has its own schedule.
+  const signupReminder = process.env.SIGNUP_REMINDER_CRON_SCHEDULE || '0 9 * * *';
+  if (!cron.validate(signupReminder)) {
+    console.error(`[cron] invalid SIGNUP_REMINDER_CRON_SCHEDULE "${signupReminder}" — sign-up reminders NOT scheduled.`);
+  } else {
+    cron.schedule(
+      signupReminder,
+      () => locked('signup-reminders', async () => {
+        try {
+          const { runSignupReminders } = await import('./store/signup-recovery.js');
+          const out = await runSignupReminders();
+          if (out.sent) console.log(`[cron] sent ${out.sent} sign-up reminder(s)`);
+        } catch (err) {
+          console.error('[cron] sign-up reminder error:', err.message);
+        }
+      }),
+      { timezone: tz }
+    );
+    console.log(`[cron] sign-up reminders scheduled "${signupReminder}" (${tz})`);
+  }
+
+  const draftPurge = process.env.SIGNUP_DRAFT_PURGE_CRON_SCHEDULE || '30 3 * * *';
+  if (!cron.validate(draftPurge)) {
+    console.error(`[cron] invalid SIGNUP_DRAFT_PURGE_CRON_SCHEDULE "${draftPurge}" — saved-answer purge NOT scheduled.`);
+  } else {
+    cron.schedule(
+      draftPurge,
+      () => locked('signup-draft-purge', async () => {
+        try {
+          const { purgeOldDrafts } = await import('./store/signup-recovery.js');
+          const out = await purgeOldDrafts();
+          if (out.deleted || out.emptied) console.log(`[cron] saved sign-up answers: deleted ${out.deleted}, emptied ${out.emptied}`);
+        } catch (err) {
+          console.error('[cron] saved-answer purge error:', err.message);
+        }
+      }),
+      { timezone: tz }
+    );
+    console.log(`[cron] saved-answer purge scheduled "${draftPurge}" (${tz})`);
+  }
+
+  // Destructive, so OFF unless SIGNUP_PURGE_ENDED_ENABLED=true. Off, it only logs which ended demos it would delete.
+  const endedPurge = process.env.SIGNUP_ENDED_PURGE_CRON_SCHEDULE || '0 4 * * *';
+  if (!cron.validate(endedPurge)) {
+    console.error(`[cron] invalid SIGNUP_ENDED_PURGE_CRON_SCHEDULE "${endedPurge}" — ended-demo purge NOT scheduled.`);
+  } else {
+    cron.schedule(
+      endedPurge,
+      () => locked('signup-ended-purge', async () => {
+        try {
+          const { purgeEndedDemos, purgeEndedEnabled } = await import('./store/signup-recovery.js');
+          const apply = purgeEndedEnabled();
+          const out = await purgeEndedDemos({ apply });
+          if (!apply) console.log(`[cron] ended-demo purge is off (dry run): would delete ${out.due.length} project(s) ended ${out.purgeDay}+ days${out.due.length ? `: site ${out.due.join(', ')}` : ''}`);
+          else if (out.due.length) console.log(`[cron] ended-demo purge: deleted ${out.deleted.length} of ${out.due.length}${out.skipped.length ? `, skipped ${out.skipped.map((x) => `${x.id} (${x.why})`).join('; ')}` : ''}`);
+        } catch (err) {
+          console.error('[cron] ended-demo purge error:', err.message);
+        }
+      }),
+      { timezone: tz }
+    );
+    console.log(`[cron] ended-demo purge scheduled "${endedPurge}" (${tz}), ${process.env.SIGNUP_PURGE_ENDED_ENABLED === 'true' ? 'ENABLED' : 'dry run only'}`);
+  }
 }

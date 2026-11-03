@@ -140,6 +140,15 @@ export const api = {
     deleteWorkspace: (id, confirmName) => req(`/platform/workspaces/${id}`, { method: 'DELETE', body: JSON.stringify({ confirmName }) }),
     // Records that support opened a client's project, before the page switches to it.
     supportView: (siteId) => req('/platform/support-view', { method: 'POST', body: JSON.stringify({ siteId }) }),
+    // People who started /get-started and have not finished: progress, the one reminder email, and its settings.
+    signupProgress: {
+      list: (days = 30) => req(`/platform/signup-progress?days=${days}`),
+      remind: (userId) => req(`/platform/signup-progress/${userId}/remind`, { method: 'POST' }),
+      mute: (userId, muted) => req(`/platform/signup-progress/${userId}/mute`, { method: 'POST', body: JSON.stringify({ muted }) }),
+      resumeLink: (userId) => req(`/platform/signup-progress/${userId}/resume-link`, { method: 'POST' }),
+      settings: () => req('/platform/signup-recovery/settings'),
+      saveSettings: (body) => req('/platform/signup-recovery/settings', { method: 'PUT', body: JSON.stringify(body) }),
+    },
   },
   // One project, for the people who manage or watch it. A project admin manages
   // just their project; a workspace admin reaches the same routes for any project

@@ -12,6 +12,7 @@ import { recordAuditEvent } from '../store/admin/audit-log.js';
 import { markPending, summarizeOnboarding, findResumeProject, getSiteAccess, describeAccess } from '../store/access.js';
 import { sendAccessRequestStaffNotice, sendAccessReceivedEmail } from '../report/email.js';
 import { appOrigin } from './lib/app-url.js';
+import { resumeContext } from '../store/signup-recovery.js';
 
 // Public (no session yet): the get-started page calls this as soon as a visitor types their
 // site, to pre-fill the brand profile. It fetches third-party sites and makes one model call,
@@ -50,11 +51,16 @@ router.post('/onboarding/site', async (req, res, next) => {
 router.get('/get-started/resume', requireAuth, async (req, res, next) => {
   try {
     const project = await findResumeProject(req.userId, { website: String(req.query.website || '') });
-    const draft = await getDraft(req.userId);
-    if (!project) return res.json({ state: 'new', project: null, draft });
+    const saved = await getDraft(req.userId);
+    // `draft` is null once the answers are gone (empty, or kept longer than staff allow); `returning` says how long they were away.
+    if (!project) {
+      const { draft, returning } = await resumeContext(req.userId, saved);
+      return res.json({ state: 'new', project: null, draft, returning });
+    }
+    const draft = saved;
     const access = describeAccess(await getSiteAccess(project.id));
     res.json({ state: access.state, requested: access.requested, daysLeft: access.daysLeft, endsAt: access.endsAt,
-      project: { id: project.id, name: project.name, domain: project.website_domain, current: Number(req.siteId) === project.id }, draft: access.state === 'client' ? null : draft });
+      project: { id: project.id, name: project.name, domain: project.website_domain, current: Number(req.siteId) === project.id }, draft: access.state === 'client' ? null : draft, returning: null });
   } catch (e) { next(e); }
 });
 

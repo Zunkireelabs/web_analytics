@@ -15,6 +15,7 @@ let audit;
 
 mock.module(resolve('../store/users.js'), {
   namedExports: {
+    createUser: async () => { throw new Error('not used in this test'); },
     getUserById: async (id) => ({
       [STAFF]: { id: STAFF, role: 'platform_admin', site_id: 1 },
       [CLIENT]: { id: CLIENT, role: 'tenant_admin', site_id: 8862 },

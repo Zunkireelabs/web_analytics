@@ -1,4 +1,5 @@
 import { query, pool, createClientSite } from '../db.js';
+import { effectiveState } from './access.js';
 
 // Workspace layer (migrations 191, 192). A workspace owns projects (sites) and
 // has members. sites.id stays the unit every route scopes by; this module
@@ -157,6 +158,26 @@ export async function deleteWorkspaceAsPlatform(workspaceId, { adminUserId, comp
   return { ok: true, name: ws[0].name, projects: sites.length };
 }
 
+// One project on the Platform list. `connections` and `missing` come from the same four checks, so the tiles
+// and the "still to do" list can never disagree. `access` is the free-trial state (server/store/access.js): 'client',
+// 'demo', 'ended', 'pending' (asked for access), 'rejected', or 'new' (made on /get-started, has not asked yet).
+export function platformProjectRow(s, now = new Date()) {
+  const connections = {
+    searchConsole: Boolean(s.gsc_property),
+    analytics: Boolean(s.ga4_property_id),
+    github: Boolean(s.repo_owner && s.repo_name),
+    baseline: Boolean(s.onboarded_at),
+  };
+  const labels = { searchConsole: 'Search Console', analytics: 'Analytics', github: 'GitHub', baseline: 'Baseline' };
+  const missing = Object.keys(labels).filter((k) => !connections[k]).map((k) => labels[k]);
+  let state = effectiveState(s, now);
+  if (state === 'pending' && !s.access_requested_at) state = 'new';
+  return {
+    id: s.id, name: s.name, domain: s.website_domain, missing, connections,
+    access: { state, endsAt: state === 'demo' || state === 'ended' ? s.access_ends_at ?? null : null },
+  };
+}
+
 // Every workspace on the platform, for the platform admin's own overview. Cheap
 // by design — one pass over workspaces, owners and sites, no per-project calls
 // out to Google or GitHub — because it is read whenever the admin opens the
@@ -173,18 +194,12 @@ export async function listAllWorkspacesForPlatform() {
            FROM workspaces w WHERE w.deleted_at IS NULL ORDER BY w.name`),
     query(`SELECT m.workspace_id, u.email FROM workspace_members m JOIN users u ON u.id = m.user_id
            WHERE m.role = 'owner' ORDER BY u.email`),
-    query(`SELECT id, name, website_domain, workspace_id, gsc_property, ga4_property_id, repo_owner, repo_name, onboarded_at
+    query(`SELECT id, name, website_domain, workspace_id, gsc_property, ga4_property_id, repo_owner, repo_name, onboarded_at,
+                  access_state, access_ends_at, access_requested_at
            FROM sites WHERE workspace_id IS NOT NULL AND status IS DISTINCT FROM 'soft_deleted' ORDER BY name`),
   ]);
   return workspaces.map((w) => {
-    const projects = sites.filter((s) => s.workspace_id === w.id).map((s) => {
-      const missing = [];
-      if (!s.gsc_property) missing.push('Search Console');
-      if (!s.ga4_property_id) missing.push('Analytics');
-      if (!(s.repo_owner && s.repo_name)) missing.push('GitHub');
-      if (!s.onboarded_at) missing.push('Baseline');
-      return { id: s.id, name: s.name, domain: s.website_domain, missing };
-    });
+    const projects = sites.filter((s) => s.workspace_id === w.id).map((s) => platformProjectRow(s));
     return {
       id: w.id, name: w.name, createdAt: w.created_at, memberCount: w.member_count,
       owners: owners.filter((o) => o.workspace_id === w.id).map((o) => o.email),

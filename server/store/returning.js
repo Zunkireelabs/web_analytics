@@ -45,12 +45,31 @@ export async function openReturnRequest(user, reason) {
   return { id: rows[0].id, created: true };
 }
 
+// Staff see, for each person: when the account was first made, and what was removed (the workspace and the projects in it, and when).
+// A person whose workspace history was not recorded still shows the project their account was last pointed at.
 export async function listReturnRequests() {
   const { rows } = await query(
-    `SELECT r.id, r.user_id, r.email, r.reason, r.status, r.created_at, r.decided_at, u.display_name
+    `SELECT r.id, r.user_id, r.email, r.reason, r.status, r.created_at, r.decided_at, u.display_name, u.created_at AS account_created_at
        FROM return_requests r JOIN users u ON u.id = r.user_id
       ORDER BY (r.status = 'pending') DESC, r.created_at DESC LIMIT 40`);
-  return rows.map((r) => ({ id: r.id, email: r.email, name: r.display_name || null, reason: r.reason, status: r.status, requestedAt: r.created_at, decidedAt: r.decided_at }));
+  const ids = [...new Set(rows.map((r) => r.user_id))];
+  const removed = new Map();
+  const lastProject = new Map();
+  if (ids.length) {
+    const gone = await query(
+      `SELECT u.id AS user_id, w.name AS workspace, w.deleted_at,
+              COALESCE((SELECT array_agg(s.name ORDER BY s.name) FROM sites s WHERE s.workspace_id = w.id), '{}') AS projects
+         FROM unnest($1::int[]) AS u(id)
+         JOIN workspaces w ON w.deleted_at IS NOT NULL AND w.deleted_members @> jsonb_build_array(jsonb_build_object('userId', u.id))
+        ORDER BY w.deleted_at DESC`, [ids]);
+    for (const g of gone.rows) removed.set(g.user_id, [...(removed.get(g.user_id) || []), { workspace: g.workspace, deletedAt: g.deleted_at, projects: g.projects || [] }]);
+    const last = await query(`SELECT u.id AS user_id, s.name FROM users u JOIN sites s ON s.id = u.site_id WHERE u.id = ANY($1::int[])`, [ids]);
+    for (const l of last.rows) lastProject.set(l.user_id, l.name);
+  }
+  return rows.map((r) => ({
+    id: r.id, email: r.email, name: r.display_name || null, reason: r.reason, status: r.status, requestedAt: r.created_at, decidedAt: r.decided_at,
+    accountCreatedAt: r.account_created_at, removed: removed.get(r.user_id) || [], lastProject: lastProject.get(r.user_id) || null,
+  }));
 }
 
 export async function decideReturnRequest(id, status, by) {

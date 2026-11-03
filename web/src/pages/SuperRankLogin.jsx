@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
+import { CONTACT_URL } from '../lib/access.jsx';
+import LoginNotice, { NOTICE_CODES } from './LoginNotice.jsx';
 import './superrank-login.css';
 
 // The app's sign-in: the SAME page as the superrank.si marketing site's /login
@@ -111,6 +113,9 @@ export default function SuperRankLogin({ onAuthed }) {
   const [usePw, setUsePw] = useState(false);
   const [code, setCode] = useState('');
   const [wait, setWait] = useState(0);
+  // Why no code was sent (NO_ACCOUNT, SETUP_NOT_FINISHED, ...): shown as a pop-up instead of red text.
+  const [notice, setNotice] = useState(null);
+  const emailRef = useRef(null);
 
   // "Continue with Google": the server's sign-in route sends the browser to Google and back. An account that already exists signs in;
   // when it cannot, the server returns here with ?google=<reason>, which is shown once and then removed from the address.
@@ -200,8 +205,16 @@ export default function SuperRankLogin({ onAuthed }) {
     try {
       await api.loginCode.send(clean);
       setCode(''); setWait(RESEND_SECONDS); setMode('code');
-    } catch (ex) { setErr(ex.message || 'Could not send a code. Try again.'); }
+    } catch (ex) {
+      if (NOTICE_CODES.includes(ex.code)) setNotice(ex.code);
+      else setErr(ex.message || 'Could not send a code. Try again.');
+    }
     setBusy(false);
+  };
+
+  const otherEmail = () => {
+    setNotice(null); setEmail(''); setMode('password'); setCode(''); setErr(''); setBad({});
+    setTimeout(() => emailRef.current?.focus(), 0);
   };
 
   const verifyCode = async (full) => {
@@ -343,7 +356,7 @@ export default function SuperRankLogin({ onAuthed }) {
             <form className="sr-auth__form" onSubmit={submit} noValidate>
               <label className="sr-fld">
                 <span>Work email {mode === 'invite' ? <em className="sr-auth__tag">From your invite</em> : last && email === last && <em className="sr-auth__tag">Last used</em>}</span>
-                <input type="email" name="email" autoComplete="username" autoFocus={mode === 'password'} placeholder="name@company.com" readOnly={mode === 'invite'}
+                <input type="email" name="email" ref={emailRef} autoComplete="username" autoFocus={mode === 'password'} placeholder="name@company.com" readOnly={mode === 'invite'}
                   value={email} className={bad.email ? 'is-bad' : ''} onChange={(e) => { setEmail(e.target.value); clear('email'); }} />
               </label>
               <label className="sr-fld">
@@ -389,6 +402,8 @@ export default function SuperRankLogin({ onAuthed }) {
 
         <p className="sr-auth__legal">By continuing, you agree to our <a href={`${SITE}/terms`}>Terms</a> and <a href={`${SITE}/terms`}>Privacy</a>.</p>
       </main>
+
+      {notice && <LoginNotice code={notice} email={email.trim()} siteUrl={SITE} contactUrl={CONTACT_URL} onClose={() => setNotice(null)} onOtherEmail={otherEmail} />}
 
       <section className="sr-proof">
         <p className="sr-proof__label">Built for marketing teams and SEO agencies</p>

@@ -546,6 +546,66 @@ export function buildReturnApprovedEmail({ email, code = null, minutes = 10, sig
   };
 }
 
+// To a person who stopped part-way through /get-started, once (store/signup-recovery.js decides who and when). The button is a
+// one-person link that signs them back in; the unsubscribe link is signed, so it works without an account session.
+export const SIGNUP_STEPS_TOTAL = 11;
+// Where-you-left-off rows: [title, last funnel step the row covers, what to say when it is ahead of them].
+const RECOVERY_GROUPS = [
+  ['Website and brand', 4, null], ['Where you sell', 6, null], ['Brand profile', 7, null], ['Goals', 8, 'Pick what matters most. About 1 minute.'],
+  ['Markets, topics and prompts', 11, 'We write the prompts for you'],
+];
+export function buildSignupReminderEmail({ brand, step = 1, lines = {}, resumeUrl, linkDays = 2, keepDays = 30, unsubscribeUrl, lastAnswered = null }) {
+  const name = escapeHtml(brand || 'Your brand');
+  const done = Math.min(SIGNUP_STEPS_TOTAL, Math.max(1, step));
+  const left = SIGNUP_STEPS_TOTAL - done;
+  const pct = Math.round((done / SIGNUP_STEPS_TOTAL) * 100);
+  const minutes = Math.max(1, Math.round(left * 0.5));
+  const groups = RECOVERY_GROUPS.map(([title, last, hint], i) => {
+    const first = i === 0 ? 1 : RECOVERY_GROUPS[i - 1][1] + 1;
+    const state = done > last ? 'done' : done >= first ? 'now' : 'todo';
+    const detail = state === 'done' ? (lines[title] || '') : hint || '';
+    const mark = state === 'done' ? '&#10003;' : state === 'now' ? '&rarr;' : '&middot;';
+    const color = state === 'now' ? BRAND_ORANGE : state === 'done' ? '#16a34a' : '#8a8a8a';
+    return `<tr><td style="padding:0 10px 9px 0;color:${color};font-weight:600;vertical-align:top">${mark}</td><td style="padding-bottom:9px"><b style="color:#171717">${escapeHtml(title)}</b>${detail ? `<br>${escapeHtml(detail)}` : ''}</td></tr>`;
+  }).join('');
+  const stoppedAt = RECOVERY_GROUPS.find(([, last]) => done <= last)?.[0] || 'the last step';
+  const when = lastAnswered ? ` on ${escapeHtml(fmtDate(lastAnswered))}` : '';
+  const unsub = unsubscribeUrl ? ` <a href="${escapeHtml(unsubscribeUrl)}" style="color:#8a8a8a">Unsubscribe</a>.` : '';
+  return {
+    subject: `${brand || 'Your brand'} is ${left} step${left === 1 ? '' : 's'} from its first AI search results`,
+    html: emailShell({
+      eyebrow: 'Setup saved',
+      title: `Your ${name} setup is <span style="color:${BRAND_ORANGE}">${pct}% done</span>`,
+      intro: `Hi there, you stopped at ${escapeHtml(stoppedAt.toLowerCase())}${when}. We kept every answer, so finishing takes about ${minutes} minute${minutes === 1 ? '' : 's'}.`,
+      body: `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:18px 0 0"><tr>
+       <td style="font-size:12px;color:#525252;padding-bottom:6px">${done} of ${SIGNUP_STEPS_TOTAL} steps</td><td align="right" style="font-size:12px;color:#8a8a8a;padding-bottom:6px">About ${minutes} minute${minutes === 1 ? '' : 's'} left</td></tr>
+       <tr><td colspan="2" style="background:#f0f0f0;border-radius:99px;height:6px;line-height:6px;font-size:0"><div style="width:${pct}%;background:${BRAND_ORANGE};border-radius:99px;height:6px;line-height:6px">&nbsp;</div></td></tr></table>
+     <p style="margin:22px 0 8px;text-align:center"><a href="${escapeHtml(resumeUrl)}" style="${CARD_BUTTON}">Finish my setup</a></p>
+     <p style="margin:0 0 20px;text-align:center;font-size:12px;line-height:18px;color:#8a8a8a">This link is just for you. It opens your saved setup, no code needed, and works for ${linkDays} day${linkDays === 1 ? '' : 's'}.</p>
+     <div style="background:#fbfaf8;border-radius:10px;box-shadow:inset 0 0 0 1px #f0f0f0;padding:14px 16px">
+      <p style="margin:0 0 8px;font-size:12px;font-weight:500;color:#171717">Where you left off</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="font-size:13px;line-height:19px;color:#525252">${groups}</table></div>
+     <div style="margin-top:14px">${stepsBox('When you finish, you get', ['A view of how AI describes ' + name + '. What ChatGPT, Gemini and Perplexity say, and who they recommend instead.', 'Prompts written for your brand and market.', 'Fixes for your site. Each one is prepared for you and waits for your approval.'])}</div>`,
+      footnote: `Not ready? No problem. Your answers stay saved for ${keepDays} days, so you can come back any time. You are receiving this because you started a SuperRank free trial with this email address.${unsub}`,
+    }),
+  };
+}
+
+// To a person whose sign-in was paused because they came back with nothing linked to their account. Sent once, when the
+// request is opened (the staff notice goes out at the same time).
+export function buildReturnWaitingEmail({ email }) {
+  return {
+    subject: 'We need to confirm you before you sign in',
+    html: emailShell({
+      eyebrow: 'Access on hold',
+      title: `We need to <span style="color:${BRAND_ORANGE}">confirm you</span>`,
+      intro: `We found your account for <b>${escapeHtml(email)}</b>, but it is no longer linked to a workspace, so we paused sign-in. Our team has been told and will confirm you, usually within one working day.`,
+      body: tint('<b style="color:#171717">You do not need to do anything.</b> We will email you again as soon as you are confirmed, and then you can sign in with a code.'),
+      footnote: 'Think this is a mistake? Just reply to this email. You are receiving this because someone asked to sign in to SuperRank with this email address.',
+    }),
+  };
+}
+
 // To SuperRank staff: someone finished /get-started and is waiting for a decision.
 export function buildAccessRequestStaffNotice({ companyName, websiteDomain, contactEmail, summary = {}, reviewUrl }) {
   const row = (k, v) => (v ? `<tr><td style="padding:5px 14px 5px 0;color:#8a8a8a;vertical-align:top;white-space:nowrap">${k}</td><td style="padding:5px 0;color:#171717">${v}</td></tr>` : '');
@@ -624,6 +684,10 @@ export const sendAccessDemoEmail = (o) => sendBuilt({ to: o.contactEmail, built:
 export const sendAccessReceivedEmail = (o) => sendBuilt({ to: o.contactEmail, built: buildAccessReceivedEmail(o), exempt: false, label: 'access request received' });
 export const sendReturnRequestStaffNotice = (o) => sendBuilt({ to: LEADS_EMAIL_TO, built: buildReturnRequestStaffNotice(o), exempt: false, label: 'returning account staff notice' });
 export const sendReturnApprovedEmail = (o) => sendBuilt({ to: o.email, built: buildReturnApprovedEmail(o), exempt: true, label: 'returning account approved' });
+// To the person. The waiting notice is exempt from redirect mode (they are waiting on it); the reminder is a nudge nobody asked for
+// that minute, so redirect mode keeps it off real inboxes.
+export const sendSignupReminderEmail = (o) => sendBuilt({ to: o.email, built: buildSignupReminderEmail(o), exempt: false, label: 'sign-up reminder' });
+export const sendReturnWaitingEmail = (o) => sendBuilt({ to: o.email, built: buildReturnWaitingEmail(o), exempt: true, label: 'returning account waiting' });
 export const sendAccessRequestStaffNotice = (o) => sendBuilt({ to: LEADS_EMAIL_TO, built: buildAccessRequestStaffNotice(o), exempt: false, label: 'access request staff notice' });
 
 // server/notifications/channels/email.js — the email delivery channel for
