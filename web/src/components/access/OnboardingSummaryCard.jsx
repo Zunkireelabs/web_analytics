@@ -9,6 +9,7 @@ const INTENT = { informational: 'Informational', commercial: 'Commercial', trans
 export default function OnboardingSummaryCard() {
   const [data, setData] = useState(null);
   const [all, setAll] = useState(false);
+  const [open, setOpen] = useState(false); // the prompt list is folded away until asked for, so the page stays calm
   useEffect(() => { api.onboardingSummary().then(setData).catch(() => setData(null)); }, []);
   if (!data || (!data.topics?.length && !data.promptList?.length)) return null;
   const prompts = data.promptList || [];
@@ -21,13 +22,16 @@ export default function OnboardingSummaryCard() {
           <h3 className="text-[15px] font-semibold text-fg">Your setup{data.brand ? `: ${data.brand}` : ''}</h3>
           <p className="text-[13px] text-text mt-px">{[data.category, `${data.topics?.length || 0} topics`, `${prompts.length || data.prompts || 0} prompts`, data.competitors?.length ? `${data.competitors.length} competitors` : null].filter(Boolean).join(' · ')}</p>
         </div>
+        {prompts.length > 0 && (
+          <button type="button" aria-expanded={open} onClick={() => setOpen((v) => !v)} className="btn btn--light btn--sm ml-auto shrink-0">{open ? 'Hide prompts' : 'View prompts'}</button>
+        )}
       </div>
       {data.topics?.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mt-3">
           {data.topics.map((t) => <span key={t} className="px-2.5 h-6 inline-flex items-center rounded-full bg-muted text-xs text-fg">{t}</span>)}
         </div>
       )}
-      {shown.length > 0 && (
+      {open && shown.length > 0 && (
         <ul className="mt-3 border-t border-border">
           {shown.map((p, i) => (
             <li key={`${p.text}-${i}`} className="flex items-center gap-3 py-2 border-b border-border last:border-0">
@@ -37,7 +41,7 @@ export default function OnboardingSummaryCard() {
           ))}
         </ul>
       )}
-      {prompts.length > 6 && (
+      {open && prompts.length > 6 && (
         <button type="button" onClick={() => setAll((v) => !v)} className="mt-2 text-[13px] text-primary underline underline-offset-2">{all ? 'Show fewer' : `Show all ${prompts.length}`}</button>
       )}
     </section>
