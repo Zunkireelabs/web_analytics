@@ -1,3 +1,4 @@
+import { safeErrorMessage } from './errors.js';
 // Pure logic for the Platform request lists (Get-started requests, Approvals, Access on hold) and the Details pop-up.
 // No React, no fetching: the components hand rows in and draw what comes out.
 
@@ -85,7 +86,7 @@ export async function runBulk(rows, fn, verb = 'approved') {
   let ok = 0;
   const failed = [];
   for (const r of rows) {
-    try { await fn(r); ok += 1; } catch (e) { failed.push(`${r.name || r.siteId}${e?.message ? ` (${e.message})` : ''}`); }
+    try { await fn(r); ok += 1; } catch (e) { const why = safeErrorMessage(e?.message, ''); failed.push(`${r.name || r.siteId}${why ? ` (${why})` : ''}`); }
   }
   return bulkNote(ok, failed, verb);
 }

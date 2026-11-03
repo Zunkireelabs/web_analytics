@@ -42,6 +42,9 @@ test('days left, ago, chips, status', () => {
 test('bulk keeps going after a failure and writes one note', async () => {
   const note = await runBulk([{ name: 'A' }, { name: 'B' }, { name: 'C' }, { name: 'D' }], async (r) => { if (r.name === 'C') throw new Error('nope'); });
   assert.equal(note.text, '3 approved, 1 failed: C (nope)');
+  // A raw upstream failure never reaches the staff note: the name stays, the technical text does not.
+  const leaky = await runBulk([{ name: 'E' }], async () => { throw new Error('Request failed with HTTP 500'); });
+  assert.equal(leaky.text, '0 approved, 1 failed: E'.replace('0 approved, ', ''));
   assert.equal(bulkNote(0, ['X'], 'approved').bad, true);
 });
 test('approvals merge the two lists', () => {
