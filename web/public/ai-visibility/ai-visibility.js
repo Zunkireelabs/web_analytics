@@ -114,38 +114,6 @@ if (form) {
     return card;
   }
 
-  // The score, what it means, and a bar per AI score.
-  function scoreCard(t, score, checks) {
-    const g = gradeOf(score);
-    const card = el('section', 'ar-card ar-summary');
-    card.append(ring(score));
-
-    const body = el('div', 'ar-summary__body');
-    const passed = checks.filter((c) => !c.failing).length;
-    const tag = el('p', 'ar-eyebrow');
-    tag.append('AI visibility · ', el('b', '', hostOf(t.finalUrl)));
-    const stats = el('p', 'ar-summary__stats');
-    stats.append(el('b', 'is-good', String(passed)), ' passed · ', el('b', 'is-bad', String(checks.length - passed)), ' need attention · ', el('b', '', String(checks.length)), ' AI checks run');
-    body.append(tag, el('h2', 'ar-summary__verdict', headline(score)), stats);
-
-    const metrics = el('div', 'ar-metrics');
-    for (const key of AI_CATS) {
-      const s = t.overall[key];
-      if (!s) continue;
-      const row = el('div', `ar-metric ar-metric--${gradeOf(s.score)}`);
-      const bar = el('div', 'ar-metric__bar');
-      const fill = el('i');
-      fill.style.width = reduceMotion ? `${s.score}%` : '0%';
-      bar.append(fill);
-      if (!reduceMotion) requestAnimationFrame(() => requestAnimationFrame(() => { fill.style.width = `${s.score}%`; }));
-      row.append(el('span', 'ar-metric__lbl', LABELS[key]), bar, el('b', 'ar-metric__num', String(s.score)), el('span', `ar-grade ar-grade--${s.grade.toLowerCase()}`, s.grade));
-      metrics.append(row);
-    }
-    body.append(metrics);
-    card.append(body);
-    return card;
-  }
-
   // Below the goal: say it needs fixing, then the Get started link right under it.
   function nextStep(score, issues) {
     const box = el('section', `ar-card ar-aside${score < GOAL ? '' : ' ar-aside--dark'}`);
@@ -166,27 +134,54 @@ if (form) {
     return box;
   }
 
+  function bookCard(host) {
+    const box = el('section', 'ar-card ar-aside ar-aside--dark');
+    box.append(el('h3', 'ar-aside__title', 'Prefer to talk it through?'), el('p', 'ar-aside__text', 'Book 30 minutes on your own site. We show you where AI assistants skip your brand, and what we would fix first.'));
+    const demo = el('a', 'btn btn--primary btn--lg', 'Book a demo');
+    demo.href = `https://superrank.si/book-demo?website=${encodeURIComponent(host)}&intent=ai-visibility`;
+    box.append(demo);
+    return box;
+  }
+
+  // Left column: the score and what it means.
+  function summaryAside(t, score, checks) {
+    const g = gradeOf(score);
+    const passed = checks.filter((c) => !c.failing).length;
+    const box = el('aside', 'rs-sum');
+    const head = el('div', 'rs-sum__ring');
+    head.append(ring(score, { size: 132, stroke: 11 }), el('span', `ar-grade ar-grade--${g}`, `${g.toUpperCase()}`));
+    box.append(head, el('p', 'rs-sum__txt', headline(score)));
+    const rows = el('div', 'rs-sum__rows');
+    const row = (label, value) => { const d = el('div'); d.append(el('span', '', label), el('b', '', value)); return d; };
+    for (const key of AI_CATS) if (t.overall[key]) rows.append(row(LABELS[key], String(t.overall[key].score)));
+    rows.append(row('Passed', String(passed)), row('Need attention', String(checks.length - passed)));
+    box.append(rows);
+    return box;
+  }
+
   function render(t) {
     const failing = t.issues.filter((i) => AI_CATS.includes(i.category));
     const passing = t.passed.filter((c) => AI_CATS.includes(c.category));
     const checks = [...failing.map((c) => ({ ...c, failing: true })), ...passing];
     const score = aiScore(t.overall);
 
-    const main = el('div', 'ar-res__main');
-    main.append(scoreCard(t, score, checks), readCard(t), questionsCard(checks));
-
+    const mid = el('div', 'rs-main');
+    mid.append(readCard(t), questionsCard(checks));
     if (failing.length) {
       const fix = el('section', 'ar-card');
       fix.append(el('h4', 'ar-card__title', 'What to fix first'));
       const list = el('ul', 'ar-issues');
       failing.forEach((i) => list.append(issueRow(i)));
       fix.append(list);
-      main.append(fix);
+      mid.append(fix);
     }
 
-    main.append(nextStep(score, failing.length));
-    const grid = el('div', 'ar-res aiv-res');
-    grid.append(main);
+    // Right column, sticky: the Start free trial card, then Book a demo.
+    const side = el('aside', 'rs-side');
+    side.append(nextStep(score, failing.length), bookCard(hostOf(t.finalUrl)));
+
+    const grid = el('div', 'ar-res3');
+    grid.append(summaryAside(t, score, checks), mid, side);
     out.replaceChildren(grid);
     out.hidden = false;
   }

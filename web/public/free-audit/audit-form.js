@@ -126,7 +126,7 @@ if (form) {
     }
     const side = el('ar-aside', 'ar-res__side');
     side.append(unlockBlock(t, site), ctaCard(site));
-    const grid = el('div', 'ar-res');
+    const grid = el('div', 'ar-res ar-res--3');
     grid.append(main, side);
     out.replaceChildren(grid);
     out.hidden = false;

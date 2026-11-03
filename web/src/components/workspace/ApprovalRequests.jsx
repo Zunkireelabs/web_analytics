@@ -1,9 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { UserCheck } from 'lucide-react';
-import { api, timeAgo } from '../../api.js';
-import Badge from '../Badge.jsx';
+import { api } from '../../api.js';
 import Button from '../Button.jsx';
 import SettingsCard from '../settings/SettingsCard.jsx';
+import { SummaryRow, FilterBar, Pager, usePaged } from '../platform/ListKit.jsx';
+import { Avatar, StatusPill, Note, LoadingRows, EmptyRow, ErrorRow, HeadRow } from '../platform/RequestsParts.jsx';
+import { APPROVAL_FILTERS, approvalRows, approvalCounts, filterApprovals, approvalStatus, ago } from '../../lib/requests-view.js';
+
+const PER_PAGE = 12;
+const COLS = 'minmax(0,1.6fr) 190px 130px 180px';
 
 // What staff are told after approving or resending: did the email go, and (laptop only) the link.
 const noteFor = (r) => (r.emailSent
@@ -23,10 +28,15 @@ export default function ApprovalRequests() {
   const [reviewError, setReviewError] = useState({});
   const [note, setNote] = useState(null); // { text, link? }
   const [resending, setResending] = useState(null);
+  const [failed, setFailed] = useState(false);
+  const [filter, setFilter] = useState('waiting');
+  const [query, setQuery] = useState('');
+  const [sort, setSort] = useState('oldest');
 
-  const loadRequests = () => api.clients.signupRequests.list().then(setRequests).catch(() => setRequests([]));
-  const loadAwaiting = () => api.clients.signupRequests.awaiting().then(setAwaiting).catch(() => setAwaiting([]));
-  useEffect(() => { loadRequests(); loadAwaiting(); }, []);
+  const loadRequests = () => api.clients.signupRequests.list().then(setRequests).catch(() => { setRequests([]); setFailed(true); });
+  const loadAwaiting = () => api.clients.signupRequests.awaiting().then(setAwaiting).catch(() => { setAwaiting([]); setFailed(true); });
+  const reload = () => { setFailed(false); loadRequests(); loadAwaiting(); };
+  useEffect(() => { reload(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const approve = async (request) => {
     setReviewState((s) => ({ ...s, [request.id]: 'approving' }));
@@ -59,56 +69,77 @@ export default function ApprovalRequests() {
   const resend = async (r) => {
     setResending(r.id);
     try { setNote(noteFor(await api.clients.signupRequests.resend(r.id))); await loadAwaiting(); }
-    catch (err) { setNote({ text: err.message || 'Could not resend.' }); }
+    catch (err) { setNote({ text: err.message || 'Could not resend.', bad: true }); }
     finally { setResending(null); }
   };
 
+  const all = useMemo(() => approvalRows(requests, awaiting), [requests, awaiting]);
+  const counts = useMemo(() => approvalCounts(all), [all]);
+  // Once, when the lists first arrive: an empty "Waiting" pill is a dead end, so open on All instead.
+  const settled = useRef(false);
+  useEffect(() => {
+    if (settled.current || requests === null) return;
+    settled.current = true;
+    if (!counts.waiting && counts.all) setFilter('all');
+  }, [requests, counts.waiting, counts.all]);
+  const list = useMemo(() => filterApprovals(all, { filter, query, sort }), [all, filter, query, sort]);
+  const paged = usePaged(list, PER_PAGE, `${filter}|${query}|${sort}`);
+  const loading = requests === null;
+
   return (
     <SettingsCard icon={UserCheck} title="Approval requests"
-      description="New sign-ups waiting for your approval, and approved people who have not confirmed their email yet."
-      action={requests && requests.length > 0 ? <Badge tone="primary">{requests.length} pending</Badge> : null}>
-      {note && (
-        <div className="mx-4 sm:mx-5 mt-3 rounded-control bg-muted px-3 py-2 text-[13px] text-text">
-          <p>{note.text}</p>
-          {note.link && <a href={note.link} className="mt-1 block break-all text-primary underline underline-offset-2">{note.link}</a>}
-        </div>
-      )}
-      {requests === null ? (
-        <p className="px-4 sm:px-5 py-4 text-[13px] text-faint">Loading…</p>
-      ) : requests.length === 0 ? (
-        <p className="px-4 sm:px-5 py-4 text-[13px] text-faint">No requests waiting for approval.</p>
-      ) : requests.map((r) => {
-        const state = reviewState[r.id];
-        const busy = state === 'approving' || state === 'rejecting';
-        return (
-          <div key={r.id} className="px-4 sm:px-5 py-3 border-b border-border last:border-0 flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0 flex-1">
-              <p className="text-[13px] font-medium text-fg truncate">{r.fullName ? `${r.fullName} · ${r.companyName}` : r.companyName}</p>
-              <p className="text-xs text-faint truncate">{r.contactEmail} {r.websiteDomain && `· ${r.websiteDomain}`} · requested {timeAgo(r.createdAt)}</p>
-              {(r.role || r.heardFrom) && <p className="text-xs text-faint truncate">{[r.role, r.heardFrom && `Heard about us: ${r.heardFrom}`].filter(Boolean).join(' · ')}</p>}
-              {reviewError[r.id] && <p className="text-xs text-[#b42318] mt-0.5">{reviewError[r.id]}</p>}
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <Button variant="primary" size="sm" onClick={() => approve(r)} disabled={busy}>{state === 'approving' ? 'Approving…' : 'Approve'}</Button>
-              <Button variant="light" size="sm" onClick={() => reject(r)} disabled={busy}>{state === 'rejecting' ? 'Rejecting…' : 'Reject'}</Button>
-            </div>
-          </div>
-        );
-      })}
-      {awaiting.length > 0 && (
-        <div className="border-t border-border">
-          <p className="px-4 sm:px-5 pt-3 pb-1 text-[11px] font-medium uppercase tracking-[.08em] text-faint">Approved, waiting for email confirmation · {awaiting.length}</p>
-          {awaiting.map((r) => (
-            <div key={r.id} className="px-4 sm:px-5 py-3 border-b border-border last:border-0 flex flex-wrap items-center justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <p className="text-[13px] font-medium text-fg truncate">{r.companyName}</p>
-                <p className="text-xs text-faint truncate">{r.contactEmail} · approved {timeAgo(r.approvedAt)}{r.expired ? ' · link expired' : ''}</p>
+      description="New sign-ups waiting for your approval, and approved people who have not confirmed their email yet.">
+      <Note note={note} onClose={() => setNote(null)} />
+      <SummaryRow cols={4} counts={[
+        { label: 'Waiting for you', value: counts.waiting, tone: 'warn', onClick: () => setFilter('waiting') },
+        { label: 'Email not confirmed yet', value: counts.unconfirmed, onClick: () => setFilter('unconfirmed') },
+        { label: 'Link expired', value: counts.expired, onClick: () => setFilter('expired') },
+        { label: 'Total', value: counts.all, onClick: () => setFilter('all') },
+      ]} />
+      <FilterBar query={query} onQuery={setQuery} placeholder="Search company or email"
+        filters={APPROVAL_FILTERS.map((f) => ({ ...f, count: counts[f.key] }))} filter={filter} onFilter={setFilter}
+        sorts={[{ key: 'oldest', label: 'Oldest first' }, { key: 'newest', label: 'Newest first' }]} sort={sort} onSort={setSort} />
+      {loading ? <LoadingRows /> : failed ? <ErrorRow onRetry={reload} /> : list.length === 0 ? (
+        <EmptyRow>{query ? 'Nothing matches that search.' : filter === 'waiting' ? 'No requests waiting for approval.' : 'Nothing in this list.'}</EmptyRow>
+      ) : (
+        <div>
+          <HeadRow cols={COLS} labels={['Company', 'Status', 'Asked', '']} />
+          {paged.rows.map((r) => {
+            const st = approvalStatus(r.status);
+            const state = r.kind === 'request' ? reviewState[r.id] : null;
+            const busy = state === 'approving' || state === 'rejecting';
+            const req = r.kind === 'request' ? requests.find((x) => x.id === r.id) : null;
+            const sub = [r.email, r.website].filter(Boolean).join(' \u00b7 ');
+            const extra = [r.role, r.heardFrom && `Heard about us: ${r.heardFrom}`].filter(Boolean).join(' \u00b7 ');
+            return (
+              <div key={r.key} className="grid lg:[grid-template-columns:var(--cols)] items-center gap-x-4 gap-y-2.5 px-4 sm:px-5 py-3 border-t border-border" style={{ '--cols': COLS }}>
+                <div className="flex items-center gap-3 min-w-0">
+                  <Avatar name={r.company} />
+                  <div className="min-w-0">
+                    <p className="text-[13.5px] font-medium text-fg truncate">{r.person ? `${r.person} \u00b7 ${r.company}` : r.company}</p>
+                    <p className="text-xs text-faint truncate">{sub}</p>
+                    {extra && <p className="text-xs text-faint truncate">{extra}</p>}
+                    {r.kind === 'request' && reviewError[r.id] && <p className="text-xs text-[#b42318] mt-0.5">{reviewError[r.id]}</p>}
+                  </div>
+                </div>
+                <div><StatusPill tone={st.tone}>{st.text}</StatusPill></div>
+                <span className="text-[13px] text-faint">{ago(r.at)}</span>
+                <div className="flex items-center gap-2 lg:justify-end">
+                  {req ? (
+                    <>
+                      <Button variant="primary" size="sm" onClick={() => approve(req)} disabled={busy}>{state === 'approving' ? 'Approving\u2026' : 'Approve'}</Button>
+                      <Button variant="light" size="sm" onClick={() => reject(req)} disabled={busy}>{state === 'rejecting' ? 'Rejecting\u2026' : 'Reject'}</Button>
+                    </>
+                  ) : (
+                    <Button variant="light" size="sm" onClick={() => resend({ id: r.id })} disabled={resending === r.id}>{resending === r.id ? 'Sending\u2026' : 'Resend email'}</Button>
+                  )}
+                </div>
               </div>
-              <Button variant="light" size="sm" onClick={() => resend(r)} disabled={resending === r.id}>{resending === r.id ? 'Sending…' : 'Resend email'}</Button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
+      {!loading && !failed && <Pager total={list.length} page={paged.page} per={PER_PAGE} onPage={paged.setPage} noun="people" />}
     </SettingsCard>
   );
 }

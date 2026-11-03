@@ -8,6 +8,3 @@
 .aiv-q__row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .aiv-q__row b { font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--fg); }
 .aiv-q__note { margin: 6px 0 0; font-size: 13px; line-height: 19px; color: var(--faint); }
-/* One centered column, with the Start free trial box under the results. */
-.audit-result { max-width: 740px; margin-left: auto; margin-right: auto; }
-.aiv-res { grid-template-columns: minmax(0, 1fr); }

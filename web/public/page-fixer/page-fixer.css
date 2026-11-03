@@ -2,7 +2,7 @@
 .pf-fav { width: 18px; height: 18px; border-radius: 4px; object-fit: contain; flex: none; }
 .pf-fav[hidden] { display: none; }
 .pf-hint { margin-top: 12px; text-align: center; font-size: 13px; color: var(--faint); }
-.pf-out { max-width: 780px; margin: 28px auto 0; text-align: left; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.pf-out { max-width: none; margin: 28px auto 0; text-align: left; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .pf-out > *, .pf-list, .pf-page, .pf-fixes, .pf-fix, .pf-fix__body, .pf-fix .ar-fix { min-width: 0; max-width: 100%; }
 .pf-out[hidden] { display: none; }
 
@@ -95,3 +95,17 @@
   .pf-unlock form { flex-direction: column; }
   .audit-form { flex-direction: column; align-items: stretch; }
 }
+
+/* Locked pages: blurred title and score, with a "Get started to unlock" pill. Click still opens Start free trial / Book a demo. */
+.pf-page--locked > summary { position: relative; }
+.pf-page--locked .pf-ptitle, .pf-page--locked .pf-score { filter: blur(5px); opacity: .7; user-select: none; }
+.pf-page--locked > summary::after {
+  content: '\1F512  Get started to unlock'; position: absolute; left: 58%; top: 50%; transform: translate(-50%, -50%);
+  padding: 7px 14px; border-radius: 999px; background: #fff; box-shadow: 0 0 0 1px var(--border-2), 0 6px 16px rgba(0, 0, 0, .1);
+  font-size: 13px; font-weight: 600; white-space: nowrap; color: var(--fg); pointer-events: none; transition: background-color .15s, color .15s;
+}
+.pf-page--locked > summary:hover::after { background: var(--fg); color: #fff; }
+.pf-page--locked[open] .pf-ptitle, .pf-page--locked[open] .pf-score { filter: none; opacity: 1; }
+.pf-page--locked[open] > summary::after { display: none; }
+
+.pf-page:not(.pf-page--locked)[open] { box-shadow: 0 0 0 1px var(--border-2), inset 3px 0 0 var(--primary), 0 18px 34px -28px rgba(0, 0, 0, .3); }

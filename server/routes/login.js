@@ -7,11 +7,12 @@ import { authRateLimit } from '../lib/rate-limit.js';
 import { createSignupRequest, hasOpenSignupRequest, peekVerificationToken, consumeVerificationToken, getActivationRequest, getCompanyNameForEmail } from '../store/signup-requests.js';
 import { issueLoginCode, checkLoginCode, CODE_MINUTES } from '../store/login-codes.js';
 import { googleConnectConfigured, redirectUriFor, newConnectNonce, buildSignInUrl, exchangeSignInCode } from '../integrations/google-connect.js';
-import { noteGetStartedSignup, markGetStartedVerified } from '../store/onboarding.js';
+import { noteGetStartedSignup, markGetStartedVerified, getDraft } from '../store/onboarding.js';
 import { createContactRequest } from '../store/contact-requests.js';
-import { sendContactLeadEmail, sendPasswordResetEmail, sendSignupReceivedEmail, sendSignupStaffNotice, sendLoginCodeEmail, sendReturnRequestStaffNotice } from '../report/email.js';
+import { sendContactLeadEmail, sendPasswordResetEmail, sendSignupReceivedEmail, sendSignupStaffNotice, sendLoginCodeEmail, sendReturnRequestStaffNotice, sendReturnWaitingEmail } from '../report/email.js';
 import { getSiteStatus } from '../store/read.js';
-import { getAccessContext, decideSiteAccess, listWorkspacesForUser, listSharedProjectsForUser, pickLoginSite, isBlockedForReadOnly, isAllowedWithoutProject } from '../store/workspaces.js';
+import { isPlatformAdmin, getAccessContext, decideSiteAccess, listWorkspacesForUser, listSharedProjectsForUser, pickLoginSite, isBlockedForReadOnly, isAllowedWithoutProject } from '../store/workspaces.js';
+import { decideCodeGate, getCodeGateFacts, redeemResumeLink } from '../store/signup-recovery.js';
 import { needsReturnApproval, openReturnRequest, markReturnUsed, RETURN_WAIT_MESSAGE } from '../store/returning.js';
 import { createPasswordReset, consumePasswordReset } from '../store/password-resets.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
@@ -103,8 +104,16 @@ async function returningGate(req, user) {
   if (opened.created) {
     sendReturnRequestStaffNotice({ email: user.email, name: user.display_name || null, reason: need.reason, reviewUrl: `${appOrigin(req)}/account?scope=platform` })
       .catch((err) => console.error('[returning] staff notice failed:', err.message));
+    // And tell the person once, in writing, what is happening (the screen says the same).
+    sendReturnWaitingEmail({ email: user.email }).catch((err) => console.error('[returning] waiting email failed:', err.message));
   }
   return { error: RETURN_WAIT_MESSAGE, code: 'APPROVAL_NEEDED' };
+}
+async function codeGate(user) {
+  const companySiteId = Number(process.env.COMPANY_SITE_ID);
+  if (isPlatformAdmin(user, companySiteId)) return null;
+  const facts = await getCodeGateFacts(user.id);
+  return decideCodeGate({ ...facts, isStaff: false });
 }
 router.post('/login/code/send', async (req, res, next) => {
   try {
@@ -117,6 +126,10 @@ router.post('/login/code/send', async (req, res, next) => {
     if ((await getUserStatus(user.id)) !== 'active') return res.status(403).json({ error: 'This account has been disabled. Contact your workspace owner or SuperRank.' });
     const wait = await returningGate(req, user);
     if (wait) return res.status(403).json(wait);
+    // A code is only sent when it leads somewhere: an unfinished sign-up, a request still waiting, or an ended trial gets a
+    // message instead (403, never 401: the app treats a 401 as "your session ended").
+    const blocked = await codeGate(user);
+    if (blocked) return res.status(403).json(blocked);
     const issued = await issueLoginCode(email);
     if (issued.code) {
       sendLoginCodeEmail({ email, code: issued.code, minutes: CODE_MINUTES })
@@ -197,6 +210,26 @@ router.post('/get-started/code/verify', async (req, res, next) => {
     const refused = await openSession(req, user);
     if (refused) return res.status(refused.status).json({ error: refused.error });
     res.json({ ok: true, isNew });
+  } catch (e) { next(e); }
+});
+
+// The button in the reminder email: a one-person link that signs the person in (the email reached their inbox) and says which
+// step to open. Single use; after it expires they sign in with email and code as before. 400, not 401, like the code check.
+const SAVED_STEPS = ['site', 'brand', 'entity', 'run', 'profile', 'goals', 'markets', 'topics', 'prompts', 'wsname'];
+router.post('/get-started/resume-link/redeem', async (req, res, next) => {
+  try {
+    const redeemed = await redeemResumeLink(req.body?.token);
+    if (!redeemed.ok) {
+      return redeemed.reason === 'expired'
+        ? res.status(410).json({ error: 'This link has expired. Sign in with your email and a code to carry on.', code: 'LINK_EXPIRED' })
+        : res.status(400).json({ error: 'This link is not valid, or it was already used.', code: 'LINK_INVALID' });
+    }
+    const user = await getUserById(redeemed.userId);
+    if (!user || (await getUserStatus(user.id)) !== 'active') return res.status(400).json({ error: 'This link is not valid, or it was already used.', code: 'LINK_INVALID' });
+    const refused = await openSession(req, user);
+    if (refused) return res.status(refused.status).json({ error: refused.error });
+    const draft = await getDraft(user.id).catch(() => null);
+    res.json({ ok: true, step: SAVED_STEPS.includes(draft?.step) ? draft.step : 'site', email: user.email });
   } catch (e) { next(e); }
 });
 

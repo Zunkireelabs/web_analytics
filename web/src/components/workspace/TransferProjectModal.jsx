@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeftRight, Check, ShieldCheck } from 'lucide-react';
+import { ArrowLeftRight, Check, ChevronRight } from 'lucide-react';
 import { api } from '../../api.js';
 import Modal from '../Modal.jsx';
 import Button from '../Button.jsx';
 import Field from '../Field.jsx';
 import ChoiceCard from './ChoiceCard.jsx';
-import { canManageWorkspace } from '../../lib/workspace.js';
+import { canManageWorkspace, plural } from '../../lib/workspace.js';
 
 // Move a project, with its goal, API tokens and history, to another workspace the
 // person manages (or to a brand-new one). By default everyone who can open it now
@@ -44,11 +44,16 @@ export default function TransferProjectModal({ project, isOpen, onClose, onDone 
       subtitle={<><span className="text-fg font-medium">{project?.name}</span>{project?.workspaceName ? ` · from ${project.workspaceName}` : ''}</>}
       footer={<><Button variant="light" onClick={close}>Cancel</Button>
         <Button variant="primary" onClick={submit} disabled={state === 'saving' || to == null || (to === 'new' && !newName.trim())}><ArrowLeftRight size={14} />{state === 'saving' ? 'Transferring…' : 'Transfer project'}</Button></>}>
+      <div className="flex items-center gap-3 rounded-card bg-[#fafaf9] px-3.5 py-3" style={{ boxShadow: 'inset 0 0 0 1px var(--border)' }}>
+        <div className="min-w-0 flex-1"><div className="text-[10.5px] font-medium tracking-[.06em] text-faint uppercase">From</div><div className="text-[13px] font-medium text-fg truncate">{project?.workspaceName || 'This workspace'}</div></div>
+        <ChevronRight size={14} className="text-faint shrink-0" />
+        <div className="min-w-0 flex-1"><div className="text-[10.5px] font-medium tracking-[.06em] text-faint uppercase">To</div><div className="text-[13px] font-medium text-fg truncate">{to === 'new' ? (newName.trim() || 'A new workspace') : (targets || []).find((w) => w.id === to)?.name || '…'}</div></div>
+      </div>
       <div>
         <div className="text-[13px] font-medium text-fg mb-2">Move it to</div>
         <div role="radiogroup" className="space-y-2">
           {targets === null && <div className="h-12 bg-muted rounded-card animate-pulse" />}
-          {(targets || []).map((w) => <ChoiceCard key={w.id} selected={to === w.id} onSelect={() => setTo(w.id)} title={w.name} description={w.role === 'platform' ? 'You can manage every workspace' : `You are ${w.role === 'owner' ? 'an owner' : 'an admin'} of this workspace`} />)}
+          {(targets || []).map((w) => <ChoiceCard key={w.id} selected={to === w.id} onSelect={() => setTo(w.id)} title={w.name} description={`${w.role === 'platform' ? 'You can manage every workspace' : `You are ${w.role === 'owner' ? 'an owner' : 'an admin'}`}${w.projects ? ` · ${plural(w.projects.length, 'project', 'projects')}` : ''}`} />)}
           {targets !== null && <ChoiceCard selected={to === 'new'} onSelect={() => setTo('new')} title="A new workspace…" description="Create a workspace and move the project into it">
             {to === 'new' && <span className="block mt-2.5" onClick={(e) => e.stopPropagation()}><Field label="Workspace name" value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Acme Corp" autoFocus /></span>}
           </ChoiceCard>}
@@ -60,9 +65,16 @@ export default function TransferProjectModal({ project, isOpen, onClose, onDone 
         <span><b className="font-medium text-fg">Keep access for people who can open it now.</b> They keep this project only, shown under “Shared with you”.</span>
       </label>
       {error && <div className="rounded-control bg-[#fdecec] text-[#b42318] text-[13px] px-3 py-2">{error}</div>}
-      <div className="flex items-start gap-2.5 rounded-control bg-muted px-3 py-2.5 text-[13px] leading-5 text-text">
-        <ShieldCheck size={15} className="text-faint shrink-0 mt-0.5" />
-        <span>The goal, API tokens and history move with the project. Zunkiree platform support keeps access.</span>
+      <div>
+        <div className="text-[13px] font-medium text-fg mb-2">What moves with it</div>
+        <div className="grid grid-cols-2 gap-2">
+          {['Goal and settings', 'API tokens', 'Reports and history', 'People keep access to this project only (when ticked above)'].map((t) => (
+            <span key={t} className="flex items-start gap-2 rounded-control bg-[#fafaf9] px-3 py-2 text-[13px] text-text" style={{ boxShadow: 'inset 0 0 0 1px var(--border)' }}>
+              <Check size={13} className="mt-1 shrink-0" style={{ color: 'var(--green)' }} />{t}
+            </span>
+          ))}
+        </div>
+        <p className="mt-2 text-xs text-faint">Zunkiree platform support keeps access.</p>
       </div>
     </Modal>
   );

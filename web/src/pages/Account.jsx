@@ -113,7 +113,7 @@ export default function Account({ email, role, sites, siteId, onLogout, onSwitch
             onPickProject={(id) => go({ proj: id, tab: null })} onChanged={load} />
         )}
 
-        {scope === 'platform' && <PlatformSettings onSwitchProject={onSwitchProject} />}
+        {scope === 'platform' && <PlatformSettings onSwitchProject={onSwitchProject} tab={tab} onTab={(t) => go({ tab: t })} />}
 
         {scope === 'account' && (
           <div className="space-y-3 mt-5">

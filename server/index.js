@@ -29,6 +29,7 @@ import siteAuditRouter from './routes/site-audit.js';
 import freeAuditRouter from './routes/free-audit.js';
 import accessRouter, { accessGate } from './routes/access.js';
 import onboardingRouter from './routes/onboarding.js';
+import signupRecoveryRouter from './routes/signup-recovery.js';
 import commoncrawlBacklinksRouter, { clientBacklinksRouter } from './routes/commoncrawl-backlinks.js';
 import mcpTokensRouter from './routes/mcp-tokens.js';
 import { apiBridgeRouter, rootBridgeRouter } from './routes/mcp-bridge.js';
@@ -115,6 +116,8 @@ app.use('/api', loginRouter);
 app.use('/api', freeAuditRouter);
 // Public too: reads a visitor's site to pre-fill the get-started brand profile.
 app.use('/api', onboardingRouter);
+// Per-route staff guards plus the public unsubscribe link, so it sits with the other get-started routes.
+app.use('/api', signupRecoveryRouter);
 // Fully public (no requireAuth at all, not even per-route) — parallel to
 // loginRouter's own public /signup-requests. Must be mounted before any
 // router with a blanket `router.use(requireAuth)` below (mcpTokensRouter,
