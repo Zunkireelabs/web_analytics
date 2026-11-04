@@ -300,3 +300,18 @@ export async function findResumeProject(userId, { website = '' } = {}) {
   // projects (a client, or staff) has nothing to resume here.
   return rows.find((r) => r.access_source === 'get-started') || null;
 }
+
+// Any live project this person belongs to, newest first, one made on /get-started first. Unlike
+// findResumeProject this does not care where the project came from: the /get-started email step uses it to
+// tell someone who already has a workspace to sign in, instead of letting them answer ten questions first
+// (SRANK-47). Only projects they are a member of are ever looked at.
+export async function findMemberProject(userId) {
+  const { rows } = await query(
+    `SELECT s.id, s.name, s.website_domain, s.access_state, s.access_source, s.access_requested_at,
+            s.access_ends_at, s.access_ended_at, s.access_github_optional
+       FROM sites s JOIN workspace_members m ON m.workspace_id = s.workspace_id
+      WHERE m.user_id = $1 AND s.status IS DISTINCT FROM 'soft_deleted'
+      ORDER BY (s.access_source = 'get-started') DESC, s.id DESC
+      LIMIT 1`, [userId]);
+  return rows[0] || null;
+}
