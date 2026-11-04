@@ -192,15 +192,13 @@ router.post('/get-started/code/send', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Before a code is sent: does this address already have a workspace they can simply sign in to? Someone who
-// already has one used to type their email, wait for a code, answer every onboarding question, and only be told at
-// the finish that their project exists (SRANK-47). Now the page says so at once and offers the app's sign-in.
-// Only a workspace they can actually sign in to counts ('client', 'demo'). A request still waiting, an ended demo
-// or a refused one answers `member: false`, because those are shown their own screen after the code, and sending
-// them to sign in would only be refused there.
+// Before a code is sent: does this address already have a project? Someone who already has one used to type their
+// email, wait for a code, answer every onboarding question, and only be told at the finish that their project
+// exists (SRANK-47). Now the page says so at once, whatever state the project is in: a client or a live demo is
+// offered the app's sign-in, a request still waiting or a refused one is told where it stands, and an ended demo
+// is pointed at the team. What they are offered is the page's business; this only says which it is.
 // This answers differently for an address that has an account and one that does not, unlike the code step above:
 // a deliberate trade for a product decision (Yukta, 4 Nov 2026), with the rate limits as the only guard.
-const SIGN_IN_STATES = new Set(['client', 'demo']);
 router.post('/get-started/email/check', async (req, res, next) => {
   try {
     const email = String(req.body?.email || '').trim().toLowerCase();
@@ -210,8 +208,8 @@ router.post('/get-started/email/check', async (req, res, next) => {
     const project = await findMemberProject(user.id);
     if (!project) return res.json({ member: false }); // a login but no workspace yet: they are mid-trial-setup, carry on
     const access = describeAccess(project);
-    if (!SIGN_IN_STATES.has(access?.state)) return res.json({ member: false });
-    res.json({ member: true, state: access.state, project: { name: project.name, domain: project.website_domain } });
+    if (!access?.state) return res.json({ member: false });
+    res.json({ member: true, state: access.state, daysLeft: access.daysLeft, project: { name: project.name, domain: project.website_domain } });
   } catch (e) { next(e); }
 });
 

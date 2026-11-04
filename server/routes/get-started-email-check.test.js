@@ -5,8 +5,9 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 
 // POST /get-started/email/check (SRANK-47): the email step of /get-started asks this before sending a code, so
 // someone who already has a workspace is offered the app's sign-in instead of ten onboarding questions.
-// What matters: only a workspace they can actually sign in to answers `member: true`; a waiting request, an
-// ended demo, a disabled account, an address with no account and an account with no workspace all answer false.
+// What matters: every state of a project they belong to answers `member: true` and says which state it is, so the
+// page can offer the right thing; a disabled account, an address with no account and an account with no workspace
+// all answer false and carry on with the trial.
 
 let users; let project; let access;
 mock.module(resolve('../store/users.js'), { namedExports: {
@@ -55,13 +56,19 @@ describe('POST /get-started/email/check', () => {
     assert.equal((await check('owner@acme.test')).body.member, true);
   });
 
-  test('a request still waiting, an ended demo and a refused one all carry on with the trial', async () => {
+  test('a request still waiting, an ended demo and a refused one are reported too, by state', async () => {
     for (const state of ['pending', 'ended', 'rejected']) {
       access = { state };
       const res = await check('owner@acme.test');
-      assert.equal(res.body.member, false, `state ${state}`);
-      assert.equal(res.body.project, undefined);
+      assert.equal(res.body.member, true, `state ${state}`);
+      assert.equal(res.body.state, state);
+      assert.deepEqual(res.body.project, { name: 'Acme', domain: 'acme.test' });
     }
+  });
+
+  test('a live demo passes on the days left, for the text on the page', async () => {
+    access = { state: 'demo', daysLeft: 9 };
+    assert.equal((await check('owner@acme.test')).body.daysLeft, 9);
   });
 
   test('no account, a disabled account, and an account with no workspace all answer false', async () => {
