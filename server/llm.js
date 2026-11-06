@@ -1,3 +1,4 @@
+import { activeModelFor } from './lib/model-override.js';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { withAgentMemory } from './agent-memory.js';
@@ -71,7 +72,7 @@ export const MODEL_DEFAULTS = {
 // calling generator's own meta.id. This is the automatic RETRIEVE step of
 // the platform-wide learning loop: every generator gets it for free just by
 // passing its own id, with no separate opt-in per generator.
-export async function callLLM(system, user, { model, maxTokens = 500, tier = 'daily', generatorId, siteId, pageUrl } = {}) {
+export async function callLLM(system, user, { model, maxTokens = 500, tier = 'daily', generatorId, siteId, pageUrl, modelRole } = {}) {
   system = await withAgentMemory(system, generatorId, siteId);
   // Shared design-intelligence layer (server/implementers/lib/design-drift.js) —
   // real site design/voice grounding for every website-facing generator, the
@@ -86,7 +87,10 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
   system = await withCompetitorContext(system, generatorId, siteId);
   const provider = pickProvider();
   const envVar = tier === 'monthly' ? 'REPORT_MODEL_MONTHLY' : 'REPORT_MODEL_DAILY';
-  const resolvedModel = model || process.env[envVar] || MODEL_DEFAULTS[provider][tier];
+  // A model promoted through the evaluated registry for this call's ROLE (only decision-engine calls pass one; a model tuned to
+  // decide is never used to write page content). Used only when it belongs to the provider in use and no model was forced.
+  const promoted = !model && modelRole ? await activeModelFor(modelRole) : null;
+  const resolvedModel = model || (promoted && promoted.provider === provider ? promoted.model : null) || process.env[envVar] || MODEL_DEFAULTS[provider][tier];
 
   if (provider === 'openai') {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });

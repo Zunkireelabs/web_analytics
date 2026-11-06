@@ -56,6 +56,11 @@ export const GENERATOR_SHARE_CAP = 1;
 export function buildDailyQueue({
   candidates = [], remaining = 0, pageMetrics = new Map(), learnedMap = new Map(),
   declines = new Map(), baselineBudget = remaining, analystBudget = null,
+  // Map<generatorId, industry item> of this project's industry knowledge (lib/industry-intelligence.js), or empty when the
+  // flag is off / nothing is validated. Only read by scoreRecommendation, which bounds and gates it.
+  industryMap = new Map(),
+  // The project's growth stage (lib/growth-stage.js growthStageFor), or null. Only read by scoreRecommendation, which bounds it.
+  growth = null,
   // Set<findingId> | null — when provided, restricts the analyst lane to
   // recommendations analyst-fusion.js actually fused and shipped as an 'act'
   // verdict (analyst_evidence.finding_id), rather than every recommendation
@@ -70,7 +75,7 @@ export function buildDailyQueue({
   const sizes = groupSizes(candidates);
   const scored = candidates.map((rec) => ({
     rec,
-    ...scoreRecommendation(rec, { pageMetrics, learnedMap, groupSizes: sizes, groupKeyFor, declines }),
+    ...scoreRecommendation(rec, { pageMetrics, learnedMap, groupSizes: sizes, groupKeyFor, declines, industryMap, growth }),
   })).sort((a, b) => b.score - a.score);
 
   if (remaining <= 0 || scored.length === 0) {
@@ -245,7 +250,7 @@ function buildReport({ scored, queue, deferred, remaining, generatorCap, groupNo
     topSelected: queue.slice(0, 10).map((i) => ({
       id: i.rec.id, type: i.rec.recommendation_type, score: i.score,
       tier: i.tierLabel, page: i.rec.params?.page || i.rec.page || null,
-      factors: i.factors,
+      factors: i.factors, evidenceBasis: i.evidenceBasis,
     })),
     topSkipped: deferred.slice(0, 5).map((i) => ({
       id: i.rec.id, type: i.rec.recommendation_type, score: i.score, tier: i.tierLabel,

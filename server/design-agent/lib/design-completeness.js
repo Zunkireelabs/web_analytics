@@ -145,16 +145,16 @@ export function assessDesignCompleteness(profile, {
   return { ok: blocks.length === 0, tier, missing, derived, blocks, repairable, artifacts };
 }
 
-// 'off' | 'log' | 'enforce'. Fail-closed gates hold a draft when they cannot
-// confirm it matches the site, which on a fleet with thin design data holds
-// nearly everything at once. 'log' runs the same gates and records what WOULD
-// have been held (design_gate_decisions) while shipping anyway — the way to
-// find out before flipping to 'enforce'. DESIGN_GATE_FAIL_CLOSED=true is the
-// original switch and means 'enforce'.
+// 'off' | 'log' | 'enforce'. Fail-closed gates hold a draft when they cannot confirm it matches the site. UNSET MEANS 'enforce':
+// a deployment that forgets the variable must not silently approve visual changes it has no design memory for. 'log' runs the
+// same gates and records what WOULD have been held (design_gate_decisions) while shipping anyway; 'off' disables them. Both
+// are honoured only when set explicitly, and startup logs loudly whenever the mode is not 'enforce'.
+// DESIGN_GATE_FAIL_CLOSED=true is the original switch and means 'enforce'.
 export function designGateMode(env = process.env) {
   if (env.DESIGN_GATE_FAIL_CLOSED === 'true') return 'enforce';
-  const m = String(env.DESIGN_GATE_MODE || '').toLowerCase();
-  return m === 'enforce' || m === 'log' ? m : 'off';
+  const m = String(env.DESIGN_GATE_MODE || '').trim().toLowerCase();
+  if (m === 'log' || m === 'off') return m;
+  return 'enforce';
 }
 
 export function isDesignGateFailClosed(env = process.env) {

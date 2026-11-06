@@ -99,6 +99,8 @@ from app.intelligence import impact_prediction as impact_prediction_engine
 from app.intelligence import opportunity_scoring as opportunity_scoring_engine
 from app.intelligence import prioritizer as prioritizer_engine
 from app.mcp_client.client import McpAuthError, McpClient, McpToolError
+from app.investigations.draft_switch import draft_trigger_enabled, log_state
+from app.metrics.direction import anomaly_is_worsening, is_worsening
 from app.mcp_client.tools import generate_draft
 
 logger = logging.getLogger(__name__)
@@ -128,10 +130,11 @@ class PriorityDecision:
 
 def _is_decline(insight: Insight) -> bool:
     e = insight.evidence or {}
+    # The metric's own direction decides (app/metrics/direction.py): for search position a HIGHER number is the decline.
     if insight.insight_type == "trend_shift":
-        return isinstance(e.get("pct_change"), (int, float)) and e["pct_change"] < 0
+        return is_worsening(insight.metric_key, e.get("pct_change"))
     if insight.insight_type == "anomaly":
-        return e.get("direction") == "low"
+        return anomaly_is_worsening(insight.metric_key, e.get("direction"))
     if insight.insight_type == "forecast_risk":
         return True
     if insight.insight_type == "milestone":
@@ -197,6 +200,11 @@ async def run_draft_trigger() -> None:
     SUBSEQUENT client in the same run too, with only "nightly analysis run
     failed" logged for the whole night. One bad/malformed row must only ever
     cost that one row's decision, never anyone else's."""
+    log_state("run_draft_trigger")
+    if not draft_trigger_enabled():
+        # Findings only: the investigations stay as they are for the analytics app to read and act on.
+        return
+
     async with SessionLocal() as session:
         clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
 

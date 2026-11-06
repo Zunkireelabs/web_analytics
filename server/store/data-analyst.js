@@ -229,6 +229,11 @@ export async function getKeywordGaps(siteId, status) {
             topic_cluster, cluster_role, search_volume, location_code,
             coverage_status, coverage_reason, coverage_checked_at, coverage_evidence, language_code,
             content_plan,
+            -- Competitor-evidence fields (migration 234). NULL for every gap that did not come from a rival's
+            -- measured footprint, which is what keeps gapDraftEligibility's existing answers unchanged for them.
+            opportunity_type, opportunity_score::float AS opportunity_score, competitor_evidence,
+            keyword_difficulty, our_position::float AS our_position, best_competitor_position,
+            lifecycle_state, lifecycle_changed_at,
             first_seen_at, last_seen_at, observation_count, evidence_snapshots, created_at,
             -- ::text deliberately. node-postgres parses a DATE into a JS Date at
             -- LOCAL midnight, so in any positive-offset timezone (this app runs
@@ -442,6 +447,44 @@ export async function proposeProductCapability(siteId, { name, category, descrip
       JSON.stringify(details && typeof details === 'object' ? details : {})]
   );
   return rows[0] || null;
+}
+
+// A person's decision on something an agent PROPOSED. Deliberately narrower than updateProductCapabilityStatus: it only
+// ever acts on a row that is still 'proposed', so a screen can never be used to flip an already-verified capability to
+// rejected (or resurrect a rejected one) by sending the wrong id — which is exactly the kind of quiet damage a review
+// button should be incapable of doing.
+export async function reviewProposedCapability(siteId, id, decision, { name = null, description = null } = {}) {
+  if (!['verified', 'rejected'].includes(decision)) throw new Error("decision must be 'verified' or 'rejected'.");
+  const { rows } = await query(
+    `UPDATE product_capabilities
+        SET status = $3,
+            -- Approving may come with a corrected name or sentence: the machine's wording is a draft, and a person
+            -- fixing "Teeth Whitening Services Offered" to "Teeth whitening" is the whole point of reviewing it.
+            name = COALESCE(NULLIF(btrim($4), ''), name),
+            description = COALESCE(NULLIF(btrim($5), ''), description),
+            updated_at = now()
+      WHERE site_id = $1 AND id = $2 AND status = 'proposed'
+      RETURNING id, name, category, description, status, source, updated_at`,
+    [siteId, id, decision, name, description]
+  );
+  return rows[0] || null;
+}
+
+// What the review screen needs in one read: what is waiting, and what is already confirmed. `evidence` is the sentence
+// from the client's own page that the proposal was grounded in, so reviewing is reading, not trusting.
+export async function listCapabilitiesForReview(siteId) {
+  const { rows } = await query(
+    `SELECT id, name, category, description, status, source,
+            details_json->>'evidence' AS evidence, details_json->>'source' AS source_page, created_at
+       FROM product_capabilities
+      WHERE site_id = $1 AND kind = 'capability' AND status IN ('proposed', 'verified')
+      ORDER BY (status = 'proposed') DESC, created_at DESC`,
+    [siteId]
+  );
+  return {
+    proposed: rows.filter((r) => r.status === 'proposed'),
+    verified: rows.filter((r) => r.status === 'verified'),
+  };
 }
 
 export async function updateProductCapabilityStatus(siteId, id, status) {

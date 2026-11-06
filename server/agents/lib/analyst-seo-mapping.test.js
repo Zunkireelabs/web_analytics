@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { seoDraftEligibility, opportunityDraftEligibility, gapDraftEligibility, requestedBlogEligibility, requestedLandingEligibility, recommendedActionForGap, groundingNote } from './analyst-seo-mapping.js';
+import { seoDraftEligibility, opportunityDraftEligibility, gapDraftEligibility, requestedBlogEligibility, requestedLandingEligibility, recommendedActionForGap, groundingNote, competitorGroundingNote, blockedPlacementForGap } from './analyst-seo-mapping.js';
 
 // Regression coverage for the audit finding this module had NO test file at
 // all — the one place a Node/Python drift in generator selection would
@@ -19,7 +19,9 @@ function decline({ metricKey = 'gsc_impressions', dimensionValue = 'https://exam
   return {
     metric_key: metricKey, insight_type: 'trend_shift', dimension_type: 'page',
     dimension_value: dimensionValue, period_start: '2026-08-18',
-    evidence: { pct_change: -30 },
+    // a DECLINE in this metric's own direction: for search position a higher number is a worse ranking, so its decline is a
+    // RISE (this helper used -30 for every metric, which for position was an improvement; see lib/metric-direction.js)
+    evidence: { pct_change: metricKey === 'gsc_position' ? 30 : -30 },
   };
 }
 
@@ -350,5 +352,147 @@ describe('coverage verdicts drive eligibility and the action shown to a human', 
   test('legacy rows with no coverage verdict behave exactly as before', () => {
     assert.equal(gapDraftEligibility(gap({ existing_page_match: 'https://example.com/a/' })), null);
     assert.equal(gapDraftEligibility(gap({})).generatorId, 'blog-outline');
+  });
+});
+
+// --- Phase 5: competitor evidence changes what to do about a gap (migration 234) ---
+// The existing answers for every gap WITHOUT competitor evidence must be byte-for-byte unchanged; that is what the
+// first test here protects. The rest protect the one new behaviour: an existing page plus measured rival evidence is
+// a page to strengthen, not a second page to write.
+describe('gapDraftEligibility with competitor evidence', () => {
+  const base = { id: 7, topic: 'teeth whitening cost', product_relevance: 'direct', search_intent: 'commercial' };
+  const evidence = { competitors: [{ domain: 'rival.com', position: 3 }], ourPosition: 18 };
+
+  test('a gap with an existing page and NO competitor evidence is still "nothing to draft"', () => {
+    assert.equal(gapDraftEligibility({ ...base, existing_page_match: 'https://ours.com/whitening' }), null);
+  });
+
+  test('an improve_page opportunity on an existing page routes to expand-content', () => {
+    const e = gapDraftEligibility({
+      ...base, existing_page_match: 'https://ours.com/whitening',
+      opportunity_type: 'improve_page', competitor_evidence: evidence,
+    });
+    assert.equal(e.generatorId, 'expand-content');
+    assert.equal(e.existingPage, 'https://ours.com/whitening');
+    assert.match(e.shapeHint, /rival\.com \(position 3\)/);
+  });
+
+  test('a position_gap on an existing page also strengthens that page', () => {
+    const e = gapDraftEligibility({
+      ...base, existing_page_match: 'https://ours.com/whitening',
+      opportunity_type: 'position_gap', competitor_evidence: evidence,
+    });
+    assert.equal(e.generatorId, 'expand-content');
+  });
+
+  test('a question-shaped topic on an existing page is still an FAQ, evidence or not', () => {
+    const e = gapDraftEligibility({
+      ...base, topic: 'how much does teeth whitening cost', existing_page_match: 'https://ours.com/whitening',
+      opportunity_type: 'improve_page', competitor_evidence: evidence,
+    });
+    assert.equal(e.generatorId, 'faq');
+  });
+
+  test('a service_location opportunity is a landing page even when the intent reads informational', () => {
+    const e = gapDraftEligibility({
+      ...base, topic: 'teeth whitening pokhara', search_intent: 'informational', product_relevance: 'supporting',
+      opportunity_type: 'service_location', competitor_evidence: evidence,
+    });
+    assert.equal(e.generatorId, 'landing-page');
+  });
+
+  test('the grounding note forbids copying rivals and repeating their claims', () => {
+    const e = gapDraftEligibility({ ...base, opportunity_type: 'missing', competitor_evidence: evidence });
+    assert.match(e.shapeHint, /Do not copy their structure or wording/);
+    assert.match(e.shapeHint, /do not repeat any claim/);
+    assert.match(e.shapeHint, /We currently rank 18/);
+  });
+
+  test('evidence with no usable competitor rows adds no note', () => {
+    for (const ev of [null, {}, { competitors: [] }, { competitors: [{ domain: null, position: 3 }] }]) {
+      assert.equal(competitorGroundingNote({ ...base, competitor_evidence: ev }), null);
+    }
+  });
+
+  test('a rival page is never quoted into the note, only its domain and position', () => {
+    const note = competitorGroundingNote({
+      competitor_evidence: { competitors: [{ domain: 'rival.com', position: 2, url: 'https://rival.com/secret-copy' }] },
+    });
+    assert.ok(!note.includes('secret-copy'));
+  });
+
+  test('the recommended action tells a human the same thing the backend will do', () => {
+    const gap = {
+      ...base, existing_page_match: 'https://ours.com/whitening',
+      opportunity_type: 'improve_page', competitor_evidence: evidence, reason: 'rivals rank for this',
+    };
+    const action = recommendedActionForGap(gap);
+    assert.equal(action.kind, 'improve-page');
+    assert.equal(action.page, 'https://ours.com/whitening');
+  });
+});
+
+describe('placement rules override competitor evidence', () => {
+  const evidence = { competitors: [{ domain: 'rival.com', position: 3 }], ourPosition: 18 };
+  const improveGap = (page, over = {}) => ({
+    id: 9, topic: 'teeth whitening cost', product_relevance: 'direct', search_intent: 'commercial',
+    existing_page_match: page, opportunity_type: 'improve_page', competitor_evidence: evidence, ...over,
+  });
+
+  test('a designed page is refused even with strong competitor evidence', () => {
+    for (const page of ['https://ours.com/', 'https://ours.com/blog/', 'https://ours.com/products/', 'https://ours.com/customers/']) {
+      assert.equal(gapDraftEligibility(improveGap(page)), null, page);
+    }
+  });
+
+  test('a prose page is still allowed', () => {
+    const e = gapDraftEligibility(improveGap('https://ours.com/blog/whitening-guide/'));
+    assert.equal(e.generatorId, 'expand-content');
+  });
+
+  test('the refusal tells a human it was the wrong kind of page, not "nothing to add"', () => {
+    const action = recommendedActionForGap(improveGap('https://ours.com/products/'));
+    assert.equal(action.label, 'No action: wrong kind of page');
+    assert.match(action.reason, /designed sections/);
+  });
+
+  test('an FAQ is not spliced into a designed page either', () => {
+    const gap = improveGap('https://ours.com/', { topic: 'how much does teeth whitening cost' });
+    assert.equal(gapDraftEligibility(gap), null);
+  });
+
+  test('the generator is told the fact rules along with the evidence', () => {
+    const e = gapDraftEligibility(improveGap('https://ours.com/blog/whitening-guide/'));
+    assert.match(e.shapeHint, /named source and a link/);
+    assert.match(e.shapeHint, /rival\.com/);
+  });
+
+  test('blockedPlacementForGap stays silent when placement was not the problem', () => {
+    assert.equal(blockedPlacementForGap({ id: 1, topic: 'x' }), null);
+    assert.equal(blockedPlacementForGap(improveGap('https://ours.com/blog/post/')), null);
+  });
+});
+
+describe('a comparison topic is never written into a page', () => {
+  const comparisonGap = (page, over = {}) => ({
+    id: 11, topic: 'zunkiree vs algolia', product_relevance: 'direct', search_intent: 'commercial',
+    existing_page_match: page, opportunity_type: 'improve_page',
+    competitor_evidence: { competitors: [{ domain: 'rival.com', position: 2 }] }, ...over,
+  });
+
+  test('a comparison topic with an existing page is refused, even with competitor evidence', () => {
+    for (const page of ['https://ours.com/products/', 'https://ours.com/products/widget/', 'https://ours.com/about/']) {
+      assert.equal(gapDraftEligibility(comparisonGap(page)), null, page);
+    }
+  });
+
+  test('the human is told a comparison belongs elsewhere, not that there is nothing to add', () => {
+    const action = recommendedActionForGap(comparisonGap('https://ours.com/products/'));
+    assert.match(action.reason, /comparison must not be written into it/);
+  });
+
+  test('a comparison topic with no existing page still reports the missing infrastructure honestly', () => {
+    const e = gapDraftEligibility({ id: 12, topic: 'zunkiree vs algolia', product_relevance: 'direct', search_intent: 'commercial' });
+    assert.equal(e.requiresFutureInfrastructure, true);
   });
 });

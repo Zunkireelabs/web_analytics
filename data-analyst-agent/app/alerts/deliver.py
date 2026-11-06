@@ -24,6 +24,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.metrics.direction import lower_is_better
 from app.db.models import Client, Insight, MetricCatalog, AnalystRecommendations
 from app.db.session import SessionLocal
 from app.mcp_client.client import McpAuthError, McpClient, McpToolError
@@ -75,6 +76,11 @@ async def _active_alerts(session: AsyncSession, client_id: int) -> list[dict]:
             continue
         e = insight.evidence
         default_body = (
+            # a ranking worsens by RISING (position 3 -> 8), so "decline N%" would read backwards for it; every other metric's
+            # wording is unchanged
+            f"Forecast to worsen by {abs(e.get('pct_projected_change', 0)):.1f}% (a higher position number is a lower ranking) by "
+            f"{e.get('predicted_date')} if the current trend continues."
+            if lower_is_better(insight.metric_key) else
             f"Forecast to decline {abs(e.get('pct_projected_change', 0)):.1f}% by "
             f"{e.get('predicted_date')} if the current trend continues."
         )

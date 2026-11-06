@@ -50,6 +50,17 @@ async def _generate(client_id: int, cadence: str) -> None:
     period_start = period_end - timedelta(days=window_days - 1)
     period_start_dt = datetime.combine(period_start, datetime.min.time(), tzinfo=timezone.utc)
 
+    # One briefing per client, cadence and day. The run that writes it can now be reached twice in a night (production's scheduler
+    # and a manual staging run share one database); a second run must not create a second briefing for the same day.
+    async with SessionLocal() as session:
+        already = (await session.execute(
+            select(ExecutiveBriefing.id).where(
+                ExecutiveBriefing.client_id == client_id, ExecutiveBriefing.cadence == cadence, ExecutiveBriefing.period_end == period_end,
+            ).limit(1)
+        )).scalar_one_or_none()
+    if already is not None:
+        return
+
     async with SessionLocal() as session:
         wins = (
             await session.execute(

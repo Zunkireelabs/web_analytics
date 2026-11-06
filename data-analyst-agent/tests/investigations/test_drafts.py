@@ -68,7 +68,9 @@ def _decline_insight(*, dimension_value="https://example.com/page", metric_key="
     return Insight(
         id=1, client_id=1, metric_key=metric_key, dimension_type="page", dimension_value=dimension_value,
         period_start=date(2026, 8, 1), insight_type="trend_shift", severity="high",
-        evidence={"pct_change": -30}, generated_at=datetime.now(timezone.utc),
+        # a DECLINE in this metric's own direction: for search position a higher number is a worse ranking, so its decline is a
+        # RISE (this helper used -30 for every metric, which for position was an improvement; app/metrics/direction.py)
+        evidence={"pct_change": 30 if metric_key == "gsc_position" else -30}, generated_at=datetime.now(timezone.utc),
     )
 
 

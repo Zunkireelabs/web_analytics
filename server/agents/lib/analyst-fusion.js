@@ -7,8 +7,9 @@ import { loadVerifiedCapabilities, mapPageToProduct, describeMapping } from './a
 import { getSearchDemandProvider } from '../../providers/search-demand/registry.js';
 import { scoreConclusion, dedupeConclusions } from './analyst-scoring.js';
 import { upsertAnalystEvidence } from '../../store/analyst-evidence.js';
-import { findOpenRecommendation, insertRecommendation } from '../../store/recommendations.js';
+import { findOpenRecommendation, insertRecommendation, corroborateRecommendation } from '../../store/recommendations.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
+import { isWorsening, anomalyIsWorsening } from '../../lib/metric-direction.js';
 import { riskTierForGenerator } from './risk-tiers.js';
 import { impactFromPriority } from './findings.js';
 import { createRecommendationGates } from './recommendation-gates.js';
@@ -91,10 +92,11 @@ export function familiesForDecliningPage(decline, pageInsights) {
   let topRootCause = null;
   for (const insight of pageInsights) {
     const e = insight.evidence || {};
+    // the metric's own direction decides (lib/metric-direction.js): a RISING position is a decline
     const isDeclineSignal =
-      (insight.insight_type === 'anomaly' && e.direction === 'low') ||
+      (insight.insight_type === 'anomaly' && anomalyIsWorsening(insight.metric_key, e.direction)) ||
       insight.insight_type === 'forecast_risk' ||
-      (insight.insight_type === 'trend_shift' && typeof e.pct_change === 'number' && e.pct_change < 0);
+      (insight.insight_type === 'trend_shift' && isWorsening(insight.metric_key, e.pct_change));
     if (!isDeclineSignal) continue;
     families.add(insight.insight_type);
     signals.push({
@@ -352,7 +354,12 @@ async function fuseGrowthOpportunities(site, { opportunities, pageInsights, capa
 export async function shipConclusion(siteId, gates, conclusion, activeGoals = []) {
   const page = recommendationPageKey({ generatorId: conclusion.generatorId, params: conclusion.params });
   const existing = await findOpenRecommendation(siteId, page, conclusion.generatorId);
-  if (existing) return { recommendationId: existing.id, created: false };
+  if (existing) {
+    // Same issue already open: record this conclusion as corroboration on it rather than dropping the evidence.
+    await corroborateRecommendation(existing.id, { findingId: conclusion.findingId, agentId: 'analyst-fusion' })
+      .catch((err) => console.error(`[analyst-fusion] could not corroborate recommendation ${existing.id}:`, err.message));
+    return { recommendationId: existing.id, created: false, corroborated: true };
+  }
 
   const gateResult = await gates.evaluate(conclusion.generatorId, conclusion.params).catch(() => ({ drop: null, blockedReason: null }));
   if (gateResult.drop) return { recommendationId: null, created: false, dropped: true };

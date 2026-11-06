@@ -19,6 +19,7 @@ from app.db.models import Anomaly, Client, Insight, MetricCatalog, MetricObserva
 # click). Page-dimension only — content decay is a per-page concept.
 CONTENT_DECAY_METRICS = ("gsc_clicks", "gsc_impressions")
 from app.db.session import SessionLocal
+from app.metrics.direction import forecast_breaches
 
 TREND_SHIFT_THRESHOLD_PCT = {"wow": 15.0, "mom": 20.0}
 FORECAST_RISK_DECLINE_PCT = 10.0
@@ -299,14 +300,15 @@ async def _forecast_risk_insights(session: AsyncSession, client_id: int) -> None
         earliest_breach = None
         for point in points:
             pct_projected_change = (float(point.point_estimate) - float(last_actual)) / float(last_actual) * 100
-            if pct_projected_change <= -FORECAST_RISK_DECLINE_PCT:
+            # worse in THIS metric's direction (a projected RISE in position is the decline; app/metrics/direction.py)
+            if forecast_breaches(run.metric_key, pct_projected_change, FORECAST_RISK_DECLINE_PCT):
                 earliest_breach = (point, pct_projected_change)
                 break
         if earliest_breach is None:
             continue
         breach_point, pct_projected_change = earliest_breach
         days_until_drop = (breach_point.target_period - date.today()).days
-        severity = "high" if pct_projected_change < -2 * FORECAST_RISK_DECLINE_PCT else "medium"
+        severity = "high" if abs(pct_projected_change) > 2 * FORECAST_RISK_DECLINE_PCT else "medium"
         await _replace_insight(
             session, client_id=client_id, metric_key=run.metric_key,
             dimension_type=run.dimension_type, dimension_value=run.dimension_value,
@@ -332,12 +334,18 @@ async def _milestone_insights(session: AsyncSession, client_id: int) -> None:
     ).scalars().all()
 
     for metric in score_metrics:
+        # The LATEST site-level week. metric_period_stats keeps one row per week (period_end is part of its unique key), and
+        # page/query dimensions can exist for the same metric, so a query without these filters matched every week ever
+        # stored and raised "Multiple rows were found" from the second week on (the investigating-stage failure in
+        # production from September 2026). The insight below is about the site and this week, so that is the row to read;
+        # same shape as root_cause.py's site-level lookup.
         stats = (
             await session.execute(
                 select(MetricPeriodStats).where(
                     MetricPeriodStats.client_id == client_id, MetricPeriodStats.metric_key == metric.metric_key,
+                    MetricPeriodStats.dimension_type == "site", MetricPeriodStats.dimension_value == "__site__",
                     MetricPeriodStats.period_type == "wow",
-                )
+                ).order_by(MetricPeriodStats.period_end.desc()).limit(1)
             )
         ).scalar_one_or_none()
         if stats is None or stats.current_value is None or stats.prior_value is None:

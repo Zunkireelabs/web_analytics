@@ -23,6 +23,8 @@ let openRecommendation;
 // The real page-key logic stays covered by recommendation-coordinator.test.js.
 mock.module(resolve('../../store/recommendations.js'), {
   namedExports: {
+    // the corroboration path (an issue already open gets the analyst recorded on it): a no-op stand-in here
+    corroborateRecommendation: async () => null,
     findOpenRecommendation: async () => openRecommendation,
     insertRecommendation: async (siteId, rec) => { inserted.push({ siteId, ...rec }); return { id: inserted.length }; },
     refreshRecommendationBlockState: async () => null,
@@ -97,7 +99,9 @@ describe('seoDraftEligibility — the mapping is no longer one-generator', () =>
   });
 
   test('worsening position -> qa-content (answer the query more directly)', () => {
-    assert.equal(seoDraftEligibility(SITE, insight({ metric_key: 'gsc_position' })).generatorId, 'qa-content');
+    // worsening = the position NUMBER rising (8 -> 15 is a decline; a negative change would be an improvement)
+    assert.equal(seoDraftEligibility(SITE, insight({ metric_key: 'gsc_position', evidence: { pct_change: 87.5 } })).generatorId, 'qa-content');
+    assert.equal(seoDraftEligibility(SITE, insight({ metric_key: 'gsc_position', evidence: { pct_change: -33 } })), null, 'position 3 -> 2 is an improvement');
   });
 
   test('a non-decline is still ineligible whatever the metric', () => {
@@ -183,7 +187,7 @@ describe('syncAnalystInsightsToActionCenter', () => {
   });
 
   test('an empty night is a no-op, not an error', async () => {
-    const empty = { created: 0, skipped: 0, ineligible: 0, dropped: 0, blocked: 0 };
+    const empty = { created: 0, skipped: 0, ineligible: 0, dropped: 0, droppedByReason: {}, blocked: 0, corroborated: 0 };
     assert.deepEqual(await syncAnalystInsightsToActionCenter(7, [], { site: SITE }), empty);
     assert.deepEqual(await syncAnalystInsightsToActionCenter(7, null, { site: SITE }), empty);
   });

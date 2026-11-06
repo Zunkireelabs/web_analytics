@@ -123,6 +123,31 @@ export async function getPageSearchTotals(siteId, page, start, end) {
   };
 }
 
+// The whole site's search totals for a window, from the daily series. This is the CONTROL for a page measurement: a
+// page's clicks rising 40% while the entire site rose 40% says the season or the algorithm moved, not the fix. Same
+// shape and same null-means-no-data rule as getPageSearchTotals, so the two are compared like for like.
+export async function getSiteSearchTotals(siteId, start, end) {
+  const { rows } = await query(
+    `SELECT SUM(clicks)::int AS clicks,
+            SUM(impressions)::int AS impressions,
+            CASE WHEN SUM(impressions) = 0 THEN NULL
+                 ELSE ROUND(SUM(clicks)::numeric / SUM(impressions), 5) END AS ctr,
+            CASE WHEN SUM(impressions) = 0 THEN NULL
+                 ELSE ROUND(SUM(position * impressions) / SUM(impressions), 2) END AS avg_position
+       FROM gsc_daily
+      WHERE site_id = $1 AND date BETWEEN $2 AND $3`,
+    [siteId, start, end]
+  );
+  const r = rows[0];
+  if (!r || !r.impressions) return null;
+  return {
+    clicks: r.clicks, impressions: r.impressions,
+    ctr: r.ctr == null ? null : Number(r.ctr),
+    avgPosition: r.avg_position == null ? null : Number(r.avg_position),
+    start, end,
+  };
+}
+
 // Measured outcomes for reporting. Only rows that actually produced a
 // measurement — 'pending'/'unmeasurable' rows would pad a report with entries
 // carrying no information.

@@ -45,10 +45,12 @@ import userInvitationsRouter from './routes/user-invitations.js';
 import mcpAdminRouter from './routes/mcp-admin.js';
 import systemHealthRouter from './routes/system-health.js';
 import auditLogRouter from './routes/audit-log.js';
+import learningAdminRouter from './routes/learning-admin.js';
 import opsCenterRouter from './routes/ops-center.js';
 import dataAgentRouter from './routes/data-agent.js';
 import demandRouter from './routes/demand.js';
 import { startCron } from './cron.js';
+import { runStartupChecks } from './lib/startup-checks.js';
 import { runStartupCatchup, reconcileBlockedRecommendationsOnStartup } from './job.js';
 import { reapStaleAuditRuns, countAuditRunsByTrigger } from './store/audit-runs.js';
 import { startFullSiteAudit } from './agents/lib/bulk-audit.js';
@@ -203,6 +205,7 @@ app.use('/api', commoncrawlBacklinksRouter);
 app.use('/api', mcpAdminRouter);
 app.use('/api', systemHealthRouter);
 app.use('/api', auditLogRouter);
+app.use('/api', learningAdminRouter);
 app.use('/api', opsCenterRouter);
 
 // Safety net: a request under /api that no router above matched should
@@ -304,6 +307,8 @@ process.on('unhandledRejection', (reason) => {
 
 httpServer.listen(port, () => {
   console.log(`[server] listening on :${port}`);
+  // Reports (never hides) anything the growth and learning system needs that is missing or switched off, with the fix.
+  runStartupChecks().catch((err) => console.error('[startup] checks could not run:', err.message));
   if (process.env.DISABLE_CRON !== 'true') startCron();
   // Catch up on anything missed while the machine was off/asleep (non-blocking).
   runStartupCatchup().catch((err) => console.error('[catchup] startup catch-up failed:', err.message));

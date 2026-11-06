@@ -1,3 +1,4 @@
+import { stageScore } from '../../lib/growth-stage.js';
 import { severityTierFor, severityTierLabel, SEVERITY_TIER } from './severity-tiers.js';
 import { ctrAtPosition, opportunityScore, estimatedTrafficGain, TARGET_POSITION } from './opportunity-scoring.js';
 
@@ -155,6 +156,30 @@ export function confidenceScore(rec, learned) {
   return { score, factors };
 }
 
+// INDUSTRY KNOWLEDGE (Phase 4). What has been observed across OTHER projects in this project's industry for this kind of
+// change, from lib/industry-intelligence.js. It only ever contributes when ALL of these hold, otherwise it is shown but scores 0:
+//   - the pattern is VALIDATED (enough distinct projects and workspaces agreed) and not stale;
+//   - this project has no evidence of its own for the generator yet. Once the project's own results exist
+//     (learned.impactConfidence is a number) they decide, not other projects';
+// and it is small and bounded, well under STEP, so it can re-order inside a tier but never lift an item over a more severe
+// tier, never bypass the autonomy/safety gates (those run elsewhere, on the recommendation, not the score), and never
+// outweigh real measured demand. Observed association, not proven cause.
+export const INDUSTRY_SWING = { medium: 30, high: 50 };
+export function industryScore(rec, industryItem, learned) {
+  if (!industryItem) return { score: 0, factors: [], basis: null };
+  const label = `industry (${industryItem.industry}${industryItem.subIndustry ? `/${industryItem.subIndustry}` : ''}) ${industryItem.polarity === 'works' ? 'positive' : 'negative'} in ${industryItem.evidence?.sites ?? '?'} projects`;
+  if (industryItem.status !== 'validated' || (industryItem.polarity !== 'works' && industryItem.polarity !== 'does-not-work')) {
+    return { score: 0, factors: [`${label} but ${industryItem.status}, not used (+0)`], basis: null };
+  }
+  if (learned && typeof learned.impactConfidence === 'number') {
+    return { score: 0, factors: [`${label}, not used: this project has its own measured results (+0)`], basis: null };
+  }
+  const swing = INDUSTRY_SWING[industryItem.confidence] || 0;
+  if (!swing) return { score: 0, factors: [`${label}, low confidence, not used (+0)`], basis: null };
+  const adj = industryItem.polarity === 'works' ? swing : -swing;
+  return { score: adj, factors: [`${label} (${adj >= 0 ? '+' : ''}${adj}; observed, not proven)`], basis: 'industry' };
+}
+
 // expected_impact.LABEL only — never .value. The label ('High'/'Medium'/'Low')
 // is the one part of that column every agent writes on the same scale; the
 // numeric value is unit-chaos across agents (see severity-tiers.js). Small,
@@ -170,7 +195,7 @@ const LABEL_BONUS = { High: 40, Medium: 20, Low: 0 };
  * @returns { score, tier, tierLabel, factors: string[] }
  */
 export function scoreRecommendation(rec, ctx = {}) {
-  const { pageMetrics, learnedMap, groupSizes, groupKeyFor, declines } = ctx;
+  const { pageMetrics, learnedMap, groupSizes, groupKeyFor, declines, industryMap, growth } = ctx;
   const tier = severityTierFor(rec.recommendation_type);
   const factors = [`tier ${tier} (${severityTierLabel(rec.recommendation_type)})`];
   let score = tierBase(tier);
@@ -188,6 +213,16 @@ export function scoreRecommendation(rec, ctx = {}) {
   const confidence = confidenceScore(rec, learnedMap?.get(rec.recommendation_type));
   score += confidence.score;
   factors.push(...confidence.factors);
+
+  const industry = industryScore(rec, industryMap?.get(rec.recommendation_type), learnedMap?.get(rec.recommendation_type));
+  score += industry.score;
+  factors.push(...industry.factors);
+
+  // GROWTH STAGE (lib/growth-stage.js): which kind of work this project's current stage favours. Small and bounded (well under
+  // STEP), so it re-orders inside a tier and can never lift an item over a more severe one or touch a safety gate.
+  const stagePrefers = stageScore(growth, tier, { declining: Boolean(page && declines?.get(page)) });
+  score += stagePrefers.score;
+  factors.push(...stagePrefers.factors);
 
   const label = rec.expected_impact?.label;
   if (LABEL_BONUS[label]) {
@@ -223,7 +258,16 @@ export function scoreRecommendation(rec, ctx = {}) {
     factors.push('no measured search demand for this page (-500)');
   }
 
-  return { score: Math.round(score), tier, tierLabel: severityTierLabel(rec.recommendation_type), factors, declining: Boolean(decline) };
+  // What the score actually rests on, so a ranking can be explained and thin evidence is recognised as thin rather than
+  // looking like a confident call. 'severity-only' = the tier alone decided it.
+  const learnedHere = learnedMap?.get(rec.recommendation_type);
+  const evidenceBasis = [
+    demand.score > 0 || decline ? 'search-demand' : null,
+    typeof learnedHere?.confidence === 'number' || typeof learnedHere?.impactConfidence === 'number' ? 'project-history' : null,
+    industry.basis,
+    stagePrefers.basis,
+  ].filter(Boolean);
+  return { score: Math.round(score), tier, tierLabel: severityTierLabel(rec.recommendation_type), factors, declining: Boolean(decline), evidenceBasis: evidenceBasis.length ? evidenceBasis : ['severity-only'] };
 }
 
 // Builds the page-keyed metric map scoreRecommendation reads. Kept here (not

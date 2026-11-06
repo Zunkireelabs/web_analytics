@@ -27,6 +27,60 @@ after(async () => {
   await pool.end();
 });
 
+// Phase 2: the technical and impact outcome families each keep their own window. Rows are inserted with explicit
+// timestamps so the ordering that used to crowd impact evidence out is exact, not a race.
+async function insertOutcome(siteId, generatorId, outcome, daysAgo) {
+  await query(
+    `INSERT INTO generator_outcomes (site_id, generator_id, outcome, created_at)
+     VALUES ($1, $2, $3, now() - make_interval(days => $4))`,
+    [siteId, generatorId, outcome, daysAgo]
+  );
+}
+
+describe('getLearnedConfidenceMap — separate windows per outcome family', () => {
+  test('old impact evidence is not pushed out by a long run of newer technical outcomes', async () => {
+    const siteId = await makeSite();
+    for (let i = 0; i < 40; i += 1) await insertOutcome(siteId, 'faq', 'shipped', 1 + (i % 20)); // 40 newer technical rows
+    for (let i = 0; i < 4; i += 1) await insertOutcome(siteId, 'faq', 'impact-positive', 60 + i); // 4 impact rows, all older
+
+    const entry = (await getLearnedConfidenceMap(siteId)).get('faq');
+    assert.equal(entry.impactPositive, 4, 'the four impact outcomes must all be seen');
+    assert.equal(entry.impactConfidence, 1, 'and be enough to trust: 4 >= the 3-sample minimum');
+    assert.equal(entry.successes, 30, 'the technical window is still its own 30 most recent rows');
+  });
+
+  test('a long run of newer impact outcomes does not hide older technical failures either', async () => {
+    const siteId = await makeSite();
+    for (let i = 0; i < 35; i += 1) await insertOutcome(siteId, 'schema', 'impact-neutral', 1 + (i % 20));
+    for (let i = 0; i < 4; i += 1) await insertOutcome(siteId, 'schema', 'failed', 40 + i); // item-defect failures, all older
+
+    const entry = (await getLearnedConfidenceMap(siteId)).get('schema');
+    assert.equal(entry.failures, 4, 'technical failures must still be counted');
+    assert.equal(entry.demote, true, '4 of 4 recent technical attempts failed: a real pattern');
+    assert.equal(entry.impactNeutral, 30, 'impact window is capped at 30 on its own');
+  });
+
+  test('each family is capped at 30 independently', async () => {
+    const siteId = await makeSite();
+    for (let i = 0; i < 45; i += 1) await insertOutcome(siteId, 'llms-txt', 'shipped', 1 + i);
+    for (let i = 0; i < 45; i += 1) await insertOutcome(siteId, 'llms-txt', 'impact-positive', 1 + i);
+
+    const entry = (await getLearnedConfidenceMap(siteId)).get('llms-txt');
+    assert.equal(entry.successes, 30);
+    assert.equal(entry.impactPositive, 30);
+    assert.equal(entry.total, 60);
+  });
+
+  test('a generator with no impact rows behaves exactly as before', async () => {
+    const siteId = await makeSite();
+    for (let i = 0; i < 5; i += 1) await insertOutcome(siteId, 'canonical', 'shipped', 1 + i);
+    const entry = (await getLearnedConfidenceMap(siteId)).get('canonical');
+    assert.equal(entry.confidence, 1);
+    assert.equal(entry.impactConfidence, null);
+    assert.equal(entry.demote, false);
+  });
+});
+
 describe('recordOutcome / getLearnedConfidenceMap', () => {
   test('with no history, a generator has no entry — never demoted on silence', async () => {
     const siteId = await makeSite();
