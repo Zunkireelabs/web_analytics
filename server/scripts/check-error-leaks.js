@@ -50,6 +50,10 @@ const ALLOWED_PATH_PATTERNS = [
   // shown to a customer. The model needs the real detail to self-correct;
   // sanitizing it here would just make the repair agent worse at its job.
   /^server\/design-agent\/native-repair\/agent-loop\.js$/,
+  // The DataForSEO adapter builds `detail` ("20000 status message" or "HTTP 502") for provider_spend_ledger, an admin-only table, so a
+  // billed-but-failed call can be matched to the invoice. Its callers branch on the result's `reason` and never show `error` to a
+  // customer (rank-tracking.js, competitor-footprint-collector.js, dataforseo-ai.js).
+  /^server\/providers\/dataforseo\/client\.js$/,
 ];
 
 // console.error/console.warn calls are logs, not customer content — the
@@ -72,7 +76,9 @@ const ALLOWED_PATH_PATTERNS = [
 // Confirmed false positive on pagination-adapter-discovery.js:212.
 function isLoggingLine(line) {
   return /console\.(error|warn)\(/.test(line) || /\blog\.(error|warn|log)\(/.test(line) || /\blogInternal\(/.test(line)
-    || /\)\.(error|warn|log)\(/.test(line);
+    || /\)\.(error|warn|log)\(/.test(line)
+    // An injected logger whose default is console.error (daily-pipeline/orchestrator.js: `logError = (...a) => console.error(...a)`).
+    || /\blogError\(/.test(line);
 }
 
 // `String(err.message || ...).includes('SOME_CODE')` is a content check
@@ -81,7 +87,8 @@ function isLoggingLine(line) {
 // `error: String(err.message || err)`, which assigns the raw text itself to
 // a field that flows onward.
 function isMessageContentCheck(line) {
-  return /String\([^)]*\.message[^)]*\)\.includes\(/.test(line);
+  // Also `PATTERN.test(String(err?.message || err))`: the same boolean decision made with a regex (daily-pipeline/prepare.js isOutage).
+  return /String\([^)]*\.message[^)]*\)\.includes\(/.test(line) || /\.test\(\s*String\([^)]*\.message[^)]*\)\s*\)/.test(line);
 }
 
 // baseRef is the full ref to diff against (e.g. "origin/main"), passed in
