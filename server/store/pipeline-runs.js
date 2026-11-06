@@ -1,4 +1,5 @@
 import { query } from '../db.js';
+import { operatorDetail } from '../lib/errors.js';
 
 // Checkpoints for the unified daily pipeline (migration 241). One row per (project, day, stage).
 //
@@ -40,7 +41,7 @@ export async function finishStage(siteId, runDate, stage, { details = {} } = {})
 export async function failStage(siteId, runDate, stage, error) {
   await query(
     `UPDATE daily_pipeline_runs SET status = 'failed', finished_at = now(), error = $4
-      WHERE site_id = $1 AND run_date = $2 AND stage = $3`, [siteId, runDate, stage, String(error?.message || error || 'failed').slice(0, 500)]);
+      WHERE site_id = $1 AND run_date = $2 AND stage = $3`, [siteId, runDate, stage, operatorDetail(error, 500)]);
 }
 
 // The stage did not start (the deadline had passed, or an earlier required stage failed). Its work stays queued.

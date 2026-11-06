@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { operatorDetail } from './errors.js';
 
 // PROJECT MEMORY: what the platform knows about ONE project (a `sites` row), in one consistent shape, with where each
 // fact came from and how fresh it is.
@@ -239,7 +240,7 @@ async function loadSection(section, siteId, site, d, now) {
     };
   } catch (err) {
     // The reason is for the operator reading this; it is never used to infer anything about the project.
-    return { status: 'error', data: null, reason: String(err?.message || err).slice(0, 200), provenance: { sources: [], asOf: null, freshness: 'unknown', loadedAt: now.toISOString() } };
+    return { status: 'error', data: null, reason: operatorDetail(err, 200), provenance: { sources: [], asOf: null, freshness: 'unknown', loadedAt: now.toISOString() } };
   }
 }
 

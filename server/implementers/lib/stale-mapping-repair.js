@@ -65,7 +65,8 @@ async function filesDeclaringPermalink(site, tree, pagePath, { fetchFile, branch
       const got = await fetchFile(site, file, branch);
       content = got?.content ?? null;
     } catch (err) {
-      failures.push(`${file}: ${err.message}`);
+      console.warn(`[stale-mapping] could not read ${file}: ${err.message}`);
+      failures.push(`${file}: could not be read`);
       return;
     }
     // null = a real 404 for a file the tree just listed: the repo moved under us mid-scan, so the scan is not a consistent picture.
@@ -125,7 +126,7 @@ export async function repairStaleFileMapping(site, pageUrl, staleFile, {
   try {
     return await withTimeout((async () => {
       let tree;
-      try { tree = await fetchTree(site, branch); } catch (err) { throw new Unverifiable(`could not read the repository tree: ${err.message}`); }
+      try { tree = await fetchTree(site, branch); } catch (err) { log.warn?.(`[stale-mapping] site #${site.id}: tree read failed: ${err.message}`); throw new Unverifiable('could not read the repository tree'); }
       if (!tree || !Array.isArray(tree.files)) throw new Unverifiable('the repository tree came back empty');
       if (tree.truncated) throw new Unverifiable('the repository tree is truncated, so the scan would be incomplete');
       // Conflicting evidence: the gate saw the file as missing but the tree lists it. Never "repair" a mapping that may be valid.
@@ -150,7 +151,7 @@ export async function repairStaleFileMapping(site, pageUrl, staleFile, {
 
       // Compare-and-set against the row as it is NOW.
       let current;
-      try { current = await loadSite(site.id); } catch (err) { throw new Unverifiable(`could not re-read the site before writing: ${err.message}`); }
+      try { current = await loadSite(site.id); } catch (err) { log.warn?.(`[stale-mapping] site #${site.id}: site re-read failed: ${err.message}`); throw new Unverifiable('could not re-read the site before writing'); }
       if (!current || current.id !== site.id || current.repo_owner !== site.repo_owner || current.repo_name !== site.repo_name) {
         throw new Unverifiable('the site row changed project or repository during the repair');
       }

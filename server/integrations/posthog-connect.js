@@ -191,7 +191,7 @@ async function tokenRequest(host, params, { fetchImpl = fetch } = {}) {
     // rate limit, a redirect) is transient and says nothing about the grant, so it must not mark the connection broken.
     const code = body?.error || `http_${res.status}`;
     const dead = ['invalid_grant', 'invalid_client', 'unauthorized_client'].includes(body?.error) || (res.status === 401 && !body?.error);
-    return { ok: false, reason: dead ? 'unauthorized' : 'failed', error: code, detail: body?.error_description || `HTTP ${res.status}` };
+    return { ok: false, reason: dead ? 'unauthorized' : 'failed', error: code, detail: body?.error_description || `PostHog answered with an error (status ${res.status}).` };
   }
   if (!body?.access_token) return { ok: false, reason: 'failed', detail: 'PostHog returned no access token.' };
   return { ok: true, body };
@@ -267,7 +267,7 @@ export async function listProjects({ host, accessToken, scopedTeams = null }, { 
     res = await fetchImpl(`${host}/api/projects/`, { ...NO_REDIRECTS, headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   } catch (err) { return { ok: false, reason: 'unreachable', detail: err.message }; }
   if (res.status === 401 || res.status === 403) return { ok: false, reason: 'unauthorized', detail: `PostHog rejected the sign-in (HTTP ${res.status}).` };
-  if (!res.ok) return { ok: false, reason: 'failed', detail: `HTTP ${res.status}` };
+  if (!res.ok) return { ok: false, reason: 'failed', detail: `PostHog answered with an error (status ${res.status}).` };
   let body = null;
   try { body = await res.json(); } catch { return { ok: false, reason: 'failed', detail: 'PostHog returned a response that was not JSON.' }; }
   const all = Array.isArray(body) ? body : (body?.results || []);

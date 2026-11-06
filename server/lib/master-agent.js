@@ -1,4 +1,5 @@
 import { query as dbQuery } from '../db.js';
+import { operatorDetail } from './errors.js';
 import { isSchedulable } from './instance-lifecycle.js';
 import { runSiteWithDeadline, SITE_RUN_TIMEOUT_MS, SITE_RUN_GRACE_MS } from './site-run.js';
 import { jobLockInfo, jobKeyFor } from './job-lock.js';
@@ -207,7 +208,7 @@ export async function runJob(job, { workerId, executor = defaultExecutor, resour
     const durationMs = Date.now() - started;
     if (run.ok) { await finish(job.id, workerId, { state: 'succeeded', result: { ok: true }, durationMs }, query); return { id: job.id, state: 'succeeded', durationMs }; }
     if (run.timedOut) { await finish(job.id, workerId, { state: 'timed_out', error: 'Ran past its time limit and was left behind.', durationMs }, query); return { id: job.id, state: 'timed_out', durationMs }; }
-    const msg = String(run.error?.message || run.error);
+    const msg = operatorDetail(run.error, 500);
     if (job.attempts < job.max_attempts) { await requeue(job.id, workerId, msg, backoffMs(job.attempts), query); return { id: job.id, state: 'queued', retry: true, error: msg }; }
     await finish(job.id, workerId, { state: 'failed', error: msg, durationMs }, query);
     return { id: job.id, state: 'failed', error: msg, durationMs };

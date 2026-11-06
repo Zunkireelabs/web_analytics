@@ -60,7 +60,7 @@ export async function runQuery(credentials, hogql, { fetchImpl = fetch, lookup }
   if (res.status === 404) {
     return { ok: false, reason: 'project_not_found', detail: `PostHog has no project ${credentials.projectId} on ${credentials.host}. Check the project ID, and that the host matches the region or self-hosted instance.` };
   }
-  if (!res.ok) return { ok: false, reason: 'failed', detail: `HTTP ${res.status}` };
+  if (!res.ok) return { ok: false, reason: 'failed', detail: `PostHog answered with an error (status ${res.status}).` };
 
   let body = null;
   try { body = await res.json(); } catch { return { ok: false, reason: 'failed', detail: 'PostHog returned a response that was not JSON.' }; }

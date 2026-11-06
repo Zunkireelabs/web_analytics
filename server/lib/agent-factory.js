@@ -1,4 +1,5 @@
 import { query as dbQuery } from '../db.js';
+import { operatorDetail } from './errors.js';
 import { deriveLifecycle, isSchedulable } from './instance-lifecycle.js';
 import { ensureAnalystRegistered, assessTenantReadiness } from './tenant-provisioning.js';
 import { snapshotProjectMemory } from './project-memory.js';
@@ -109,7 +110,7 @@ function defaultDeps(query) {
 // A step that throws is a failed step, recorded; it never takes the others down.
 async function runStep(key, ctx) {
   try { return await STEPS[key](ctx); }
-  catch (err) { return failed(String(err?.message || err).slice(0, 200)); }
+  catch (err) { return failed(operatorDetail(err, 200)); }
 }
 
 // Pure. Final lifecycle from the project and its steps. The stored state is a record; this is the rule.
