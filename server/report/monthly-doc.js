@@ -7,9 +7,10 @@ import { getFirstCompletedAuditRun, getLatestCompletedAuditRun, getAuditPageFind
 import { pageScoreSection } from './page-score.js';
 import { resolveBrand } from './brand.js';
 import { writeSection } from './doc-layout.js';
-import { periodStats, tilesFor, headlineFor, bettermentTable, topSearchesSection } from './doc-model.js';
+import { visitorBehaviourSections, periodStats, tilesFor, headlineFor, bettermentTable, topSearchesSection } from './doc-model.js';
 import { saveMonthlyReportNarrative } from '../store/upsert.js';
 import { previousMonth } from '../util/dates.js';
+import { getPosthogSummary } from '../store/project-posthog.js';
 
 const n = (v) => (v == null ? 0 : Number(v));
 const fmt = (v) => n(v).toLocaleString();
@@ -177,6 +178,7 @@ export async function runMonthlyDocReport(site, anchorYm) {
     const [baselineFindings, latestFindings] = await Promise.all([getAuditPageFindings(baselineRun.id, { limit: 5000 }), getAuditPageFindings(latestRun.id, { limit: 5000 })]);
     scoreSection = pageScoreSection({ baselineRun, latestRun, baselineFindings, latestFindings });
   }
+  const visitors = await getPosthogSummary(site.id, start, end).catch(() => null);
   const model = {
     marker: label,
     band: { kind: 'Monthly report', period: label, sub: brand.website || 'Search and AI visibility' },
@@ -192,6 +194,8 @@ export async function runMonthlyDocReport(site, anchorYm) {
       better && { title: better.title, sub: better.sub, table: better.table },
       scoreSection,
       topSearchesSection(topQueries),
+      // Only present when this project connected PostHog; a project without it gets no heading at all.
+      ...visitorBehaviourSections(visitors),
     ].filter(Boolean),
     footer: `Prepared for ${site.name}${brand.website ? ` (${brand.website})` : ''} · ${weekStats.length} weekly periods rolled up`,
   };

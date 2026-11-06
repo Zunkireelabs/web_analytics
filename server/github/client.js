@@ -595,16 +595,26 @@ export async function commitFilesAtomic(site, branch, files, message) {
 
 // Opens a PR from `branch` into the site's default branch. Never merges —
 // merging is always a human, on GitHub itself.
-export async function openPullRequest(site, { branch, title, body }) {
+export async function openPullRequest(site, { branch, title, body, base = null }) {
   const res = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/pulls`, {
     head: branch,
-    base: prTargetBranchName(site),
+    // An explicit base wins (the batch router, lib/pr-routing.js, and the stage -> main promotion PR); otherwise the site's own target.
+    base: base || prTargetBranchName(site),
     title,
     body,
   });
   if (!res.ok) throw new Error(`openPullRequest failed (${res.status}): ${await res.text()}`);
   const data = await res.json();
   return { number: data.number, url: data.html_url };
+}
+
+// Points an OPEN pull request at a different base branch (GitHub allows this while the PR is open). Used when a day that began as
+// light content edits (PR into main) gains a landing page, blog post or template fix, which must go through stage instead.
+export async function retargetPullRequest(site, prNumber, base) {
+  const res = await githubRequest(site, 'PATCH', `/repos/${repoPath(site)}/pulls/${prNumber}`, { base });
+  if (!res.ok) throw new Error(`retargetPullRequest failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  return { number: data.number, url: data.html_url, base: data.base?.ref ?? base };
 }
 
 // Real-evidence read for the "Check PR Status" action — reports GitHub's own

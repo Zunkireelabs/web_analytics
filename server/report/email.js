@@ -224,11 +224,27 @@ export async function sendDailyEmail(site, reportDate, day, narrative) {
   return true;
 }
 
-// Notifies the sales team of a new "Contact Us" lead from the landing page
-// (POST /contact-requests — server/routes/login.js). Fixed recipient, not a
-// per-client setting like REPORT_EMAIL_TO above — this is always the
-// company's own inbox, never configurable per site.
-const LEADS_EMAIL_TO = 'info@zunkireelabs.com';
+// Who is told when a request is waiting for staff: a sign-up (Get Started), a free-trial access request, a returning
+// account that needs approval, or a "Contact Us" lead. Always the company's own inboxes, never a per-client setting like
+// REPORT_EMAIL_TO above.
+//
+// A LIST, because one inbox was a single point of silence: the request is visible in platform admin, but only if someone
+// opens it, and the one address that was ever mailed is a shared inbox that not everyone reads. Both addresses are on
+// the same message, so whoever sees it first can act and the other can see that they did not need to.
+//
+// STAFF_NOTICE_EMAILS overrides it (comma or semicolon separated) for a deployment that wants someone else. A value with
+// no valid address in it falls back to the default rather than to nobody: an invalid override must never be the reason a
+// request goes unannounced.
+export const DEFAULT_STAFF_NOTICE_RECIPIENTS = Object.freeze(['info@zunkireelabs.com', 'yukta@zunkireelabs.com']);
+
+export function staffNoticeRecipients(env = process.env) {
+  const parsed = String(env.STAFF_NOTICE_EMAILS || '')
+    .split(/[,;]/)
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]{2,}$/.test(e));
+  const unique = [...new Set(parsed)];
+  return unique.length ? unique : [...DEFAULT_STAFF_NOTICE_RECIPIENTS];
+}
 
 // Contact form fields come straight from an unauthenticated public
 // endpoint — escape before interpolating into HTML so a submitted
@@ -265,11 +281,11 @@ export async function sendContactLeadEmail({ companyName, websiteDomain, contact
 
   await transporter.sendMail({
     from: process.env.REPORT_EMAIL_FROM || process.env.SMTP_USER,
-    to: LEADS_EMAIL_TO,
+    to: staffNoticeRecipients(),
     subject: `New Contact Us lead: ${safeCompany}`,
     html,
   });
-  console.log(`[email] contact lead notification sent to ${LEADS_EMAIL_TO}`);
+  console.log(`[email] contact lead notification sent to ${staffNoticeRecipients().join(', ')}`);
   return true;
 }
 
@@ -675,20 +691,20 @@ export const sendLoginCodeEmail = (o) => sendBuilt({ to: o.email, built: buildLo
 
 // To SuperRank staff: a request is waiting. Internal, so it is NOT exempt — redirect
 // mode (a laptop, a staging box) must never send it to the real staff inbox.
-export const sendSignupStaffNotice = (o) => sendBuilt({ to: LEADS_EMAIL_TO, built: buildSignupStaffNotice(o), exempt: false, label: 'sign-up staff notice' });
+export const sendSignupStaffNotice = (o) => sendBuilt({ to: staffNoticeRecipients(), built: buildSignupStaffNotice(o), exempt: false, label: 'sign-up staff notice' });
 
 // Free-trial access. The two approvals go to the person (exempt from redirect mode: they are waiting for it); the staff
 // notice is internal, so redirect mode keeps it off the real staff inbox.
 export const sendAccessClientEmail = (o) => sendBuilt({ to: o.contactEmail, built: buildAccessClientEmail(o), exempt: true, label: 'access approval (client)' });
 export const sendAccessDemoEmail = (o) => sendBuilt({ to: o.contactEmail, built: buildAccessDemoEmail(o), exempt: true, label: 'access approval (demo)' });
 export const sendAccessReceivedEmail = (o) => sendBuilt({ to: o.contactEmail, built: buildAccessReceivedEmail(o), exempt: false, label: 'access request received' });
-export const sendReturnRequestStaffNotice = (o) => sendBuilt({ to: LEADS_EMAIL_TO, built: buildReturnRequestStaffNotice(o), exempt: false, label: 'returning account staff notice' });
+export const sendReturnRequestStaffNotice = (o) => sendBuilt({ to: staffNoticeRecipients(), built: buildReturnRequestStaffNotice(o), exempt: false, label: 'returning account staff notice' });
 export const sendReturnApprovedEmail = (o) => sendBuilt({ to: o.email, built: buildReturnApprovedEmail(o), exempt: true, label: 'returning account approved' });
 // To the person. The waiting notice is exempt from redirect mode (they are waiting on it); the reminder is a nudge nobody asked for
 // that minute, so redirect mode keeps it off real inboxes.
 export const sendSignupReminderEmail = (o) => sendBuilt({ to: o.email, built: buildSignupReminderEmail(o), exempt: false, label: 'sign-up reminder' });
 export const sendReturnWaitingEmail = (o) => sendBuilt({ to: o.email, built: buildReturnWaitingEmail(o), exempt: true, label: 'returning account waiting' });
-export const sendAccessRequestStaffNotice = (o) => sendBuilt({ to: LEADS_EMAIL_TO, built: buildAccessRequestStaffNotice(o), exempt: false, label: 'access request staff notice' });
+export const sendAccessRequestStaffNotice = (o) => sendBuilt({ to: staffNoticeRecipients(), built: buildAccessRequestStaffNotice(o), exempt: false, label: 'access request staff notice' });
 
 // server/notifications/channels/email.js — the email delivery channel for
 // NotificationEvents (see server/notifications/types.js), including the
@@ -696,7 +712,7 @@ export const sendAccessRequestStaffNotice = (o) => sendBuilt({ to: LEADS_EMAIL_T
 // push_predictive_alert MCP tool. Same per-site recipient convention as
 // sendDailyEmail above (site.report_email_to, falling back to the global
 // REPORT_EMAIL_TO), since these are genuinely per-site events, unlike the
-// fixed internal LEADS_EMAIL_TO above.
+// fixed internal staff recipients above (staffNoticeRecipients).
 export async function sendNotificationEmail(site, events) {
   const recipient = site.report_email_to || process.env.REPORT_EMAIL_TO;
   const transporter = getTransporter();

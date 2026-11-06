@@ -289,7 +289,7 @@ export async function findResumeProject(userId, { website = '' } = {}) {
     `SELECT s.id, s.name, s.website_domain, s.access_state, s.access_source, s.access_requested_at, s.access_ends_at
        FROM sites s JOIN workspace_members m ON m.workspace_id = s.workspace_id
       WHERE m.user_id = $1 AND s.status IS DISTINCT FROM 'soft_deleted'
-      ORDER BY (s.access_source = 'get-started') DESC, s.id DESC`, [userId]);
+      ORDER BY CASE s.access_state WHEN 'client' THEN 0 WHEN 'demo' THEN 1 WHEN 'pending' THEN 2 WHEN 'ended' THEN 3 ELSE 4 END, (s.access_source = 'get-started') DESC, s.id DESC`, [userId]);
   if (!rows.length) return null;
   const wanted = website ? normalizeDomain(website) : null;
   if (wanted?.ok && wanted.domain) {
@@ -311,7 +311,7 @@ export async function findMemberProject(userId) {
             s.access_ends_at, s.access_ended_at, s.access_github_optional
        FROM sites s JOIN workspace_members m ON m.workspace_id = s.workspace_id
       WHERE m.user_id = $1 AND s.status IS DISTINCT FROM 'soft_deleted'
-      ORDER BY (s.access_source = 'get-started') DESC, s.id DESC
+      ORDER BY CASE s.access_state WHEN 'client' THEN 0 WHEN 'demo' THEN 1 WHEN 'pending' THEN 2 WHEN 'ended' THEN 3 ELSE 4 END, (s.access_source = 'get-started') DESC, s.id DESC
       LIMIT 1`, [userId]);
   return rows[0] || null;
 }

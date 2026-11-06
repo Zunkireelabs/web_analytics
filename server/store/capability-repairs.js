@@ -7,6 +7,8 @@ import { query } from '../db.js';
 // Never fatal to the caller: recording the audit row is secondary to the
 // repair attempt itself, so a DB hiccup here must not turn a real repair (or
 // a real refusal-to-guess) into a thrown error.
+// Returns true when the row was saved and false when it was not (still never throws), so a caller that must not act without an
+// audit record can check.
 export async function recordCapabilityRepair(siteId, { capabilityType, target, outcome, evidenceTier, detail }) {
   try {
     await query(
@@ -14,8 +16,10 @@ export async function recordCapabilityRepair(siteId, { capabilityType, target, o
        VALUES ($1, $2, $3, $4, $5, $6)`,
       [siteId, capabilityType, target, outcome, evidenceTier ?? null, JSON.stringify(detail || {})]
     );
+    return true;
   } catch (err) {
     console.warn(`[capability-repairs] site ${siteId}: failed to record ${capabilityType} attempt for ${target}: ${err.message}`);
+    return false;
   }
 }
 

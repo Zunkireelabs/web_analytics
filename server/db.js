@@ -133,10 +133,18 @@ export async function getOrCreateSite() {
 // (store/workspaces.js attachNewClientWorkspace).
 export async function createClientSite({ name, websiteDomain, timezone, propertyType, workspaceId }) {
   const inserted = await query(
-    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain, client_number, property_type, workspace_id)
-     VALUES ($1, NULL, NULL, $2, $3, nextval('sites_client_number_seq'), $4, $5) RETURNING *`,
+    // surge_mode_until: First-30-Day Surge Mode (lib/surge-mode.js, migration 242). Every NEW project, whether the platform
+    // admin onboarded it or the client created it (both come through here), starts with 30 days of raised daily capacity;
+    // it lapses by itself. Projects that already exist are never touched: their column stays NULL.
+    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain, client_number, property_type, workspace_id, surge_mode_until)
+     VALUES ($1, NULL, NULL, $2, $3, nextval('sites_client_number_seq'), $4, $5, now() + interval '30 days') RETURNING *`,
     [name, isValidTimezone(timezone) ? timezone : 'Asia/Kolkata', websiteDomain || null, propertyType === 'product' ? 'product' : 'website', workspaceId ?? null]
   );
+  // The Agent Factory (lib/agent-factory.js) records that this project's Growth Agent instance has been requested. No network and no
+  // side effects; written here, the one place every project is created, and never allowed to fail the creation (the table only
+  // exists once migration 243 is applied).
+  await query(`INSERT INTO agent_instances (site_id, lifecycle_state) VALUES ($1, 'requested') ON CONFLICT (site_id) DO NOTHING`, [inserted.rows[0].id])
+    .catch((err) => { if (err.code !== '42P01') console.warn(`[db] could not record the instance for site ${inserted.rows[0].id}: ${err.message}`); });
   return inserted.rows[0];
 }
 

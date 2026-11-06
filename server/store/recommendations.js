@@ -106,6 +106,35 @@ export async function insertRecommendation(siteId, {
   return rows[0];
 }
 
+// Records that a SECOND detector found the same issue (same site, page key and fix type) as an already-open recommendation:
+// appends its finding id and adds it to supporting_agents. Nothing else changes: not params, risk tier, block state, priority,
+// confidence or status, because the open row's own detector owns those. This is what lets Python-first and app-first findings
+// combine into ONE recommendation in either order (mergeIntoRecommendation covers the app's own detectors; the analyst paths used
+// to skip an existing row and drop the evidence).
+//
+// Idempotent: the same finding and agent twice change nothing. Only an OPEN row is touched; a closed one is left alone.
+// Appending the finding id also matters for "one recommendation, one fix": a draft is matched to a recommendation through ANY of its
+// finding ids, so a draft that already exists under the analyst's finding id is now seen, and the issue is not drafted twice.
+export async function corroborateRecommendation(id, { findingId, agentId }) {
+  if (!id || !agentId) throw new Error('corroborateRecommendation needs a recommendation id and an agent id');
+  const { rows } = await query(
+    `UPDATE recommendations SET
+       finding_ids = CASE WHEN $2::text IS NULL OR $2 = ANY(finding_ids) THEN finding_ids ELSE finding_ids || $2::text END,
+       supporting_agents = CASE
+         WHEN $3 = ANY(detecting_agents) OR $3 = ANY(supporting_agents) THEN supporting_agents
+         ELSE supporting_agents || $3::text
+       END,
+       updated_at = CASE
+         WHEN ($2::text IS NULL OR $2 = ANY(finding_ids)) AND ($3 = ANY(detecting_agents) OR $3 = ANY(supporting_agents)) THEN updated_at
+         ELSE now()
+       END
+     WHERE id = $1 AND status = 'open'
+     RETURNING id, finding_ids, detecting_agents, supporting_agents`,
+    [id, findingId ?? null, agentId]
+  );
+  return rows[0] || null;
+}
+
 // Merges a fresh grounded finding into an already-open recommendation row:
 // adds the finding id, and adds the agent to supporting_agents unless it's
 // already the original detector or already recorded; refreshes the evidence

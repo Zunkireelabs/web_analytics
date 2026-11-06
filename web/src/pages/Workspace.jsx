@@ -100,11 +100,12 @@ export default function Workspace({ siteId, onSwitchProject }) {
     const fromGithub = Boolean(github || params.get('gherror'));
     const error = gerror ? (fromGithub ? (GITHUB_ERRORS[gerror] || 'GitHub could not be connected.') : (GOOGLE_ERRORS[gerror] || 'Google could not be connected.')) : null;
     if (project) {
-      setReturning({ google, github, error, fromGithub, gbp, step: Number(params.get('step')) || null });
+      const posthog = params.get('posthog'); const pherror = params.get('pherror');
+      setReturning({ google, github, error, fromGithub, gbp, posthog, pherror, guide: Boolean(params.get('guide')), step: Number(params.get('step')) || (posthog || pherror ? 6 : null) });
       setResume({ id: project.id, name: project.name, domain: project.domain });
       setAddOpen(true);
     } else if (error) setPageError(error);
-    setParams((prev) => { const next = new URLSearchParams(prev); ['finish', 'step', 'google', 'gerror', 'github', 'gherror', 'gbp'].forEach((k) => next.delete(k)); return next; }, { replace: true });
+    setParams((prev) => { const next = new URLSearchParams(prev); ['finish', 'step', 'google', 'gerror', 'github', 'gherror', 'gbp', 'posthog', 'pherror', 'guide'].forEach((k) => next.delete(k)); return next; }, { replace: true });
   }, [workspaces, params]);
 
   const open = async (project) => { await onSwitchProject(project.id); navigate('/overview'); };

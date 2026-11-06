@@ -18,6 +18,8 @@ import { GrowthReportBody } from './GrowthReport.jsx';
 import ReportBand from '../components/report/ReportBand.jsx';
 import BrandTiles from '../components/report/BrandTiles.jsx';
 import ReportBody from '../components/report/ReportBody.jsx';
+import DataQualityNote from '../components/DataQualityNote.jsx';
+import ProductAnalyticsCard from '../components/ProductAnalyticsCard.jsx';
 
 const fmtInt = (v) => Number(v).toLocaleString();
 const fmtFloat = (v) => Number(v).toFixed(1);
@@ -41,6 +43,18 @@ const MONTH_NAMES = [
 // against the immediately preceding week/month.
 const MOVER_COMPARISON_LABEL = { weekly: 'the prior week', monthly: 'the prior month' };
 
+// The weekly payload carries start/end; the monthly one carries `ym` (YYYY-MM) instead. Both are turned into a real
+// range here so anything needing the report's own window gets the same one the report is showing.
+function reportRange(data) {
+  if (data?.start && data?.end) return { start: data.start, end: data.end };
+  if (data?.ym && /^\d{4}-\d{2}$/.test(data.ym)) {
+    const [y, m] = data.ym.split('-').map(Number);
+    const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    return { start: `${data.ym}-01`, end: `${data.ym}-${String(last).padStart(2, '0')}` };
+  }
+  return null;
+}
+
 function periodLabel(data) {
   if (!data) return '';
   if (data.period === 'weekly') return data.start && data.end ? fmtRange(data.start, data.end) : '';
@@ -52,6 +66,7 @@ function periodLabel(data) {
 }
 
 export default function Reports({ siteId, isInternal = false }) {
+  const [product, setProduct] = useState(null);
   const [period, setPeriod] = useState(() => {
     try { const t = new URLSearchParams(window.location.search).get('tab'); return TABS.some((x) => x.key === t) ? t : 'baseline'; } catch { return 'baseline'; }
   });
@@ -92,8 +107,23 @@ export default function Reports({ siteId, isInternal = false }) {
     let cancelled = false;
     setLoading(true);
     setError(false);
+    // PostHog, when the project connected it. A failure or an unconnected project both leave it null, and the card
+    // renders nothing — this must never block or degrade the report itself.
+    setProduct(null);
     api.reportSummary(siteId, period)
-      .then((res) => { if (!cancelled) setData(res); })
+      .then((res) => {
+        if (cancelled) return;
+        setData(res);
+        // Fetched only once the report's own window is known, so the two always describe the same period. The
+        // monthly payload carries `ym` rather than start/end, so the range is derived for it — without this the
+        // Monthly tab silently never fetched.
+        const range = reportRange(res);
+        if (range) {
+          api.product(range.start, range.end)
+            .then((p) => { if (!cancelled) setProduct(p?.summary || null); })
+            .catch(() => { /* not connected, or unreachable: the card renders nothing */ });
+        }
+      })
       .catch(() => { if (!cancelled) setError(true); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -166,7 +196,7 @@ export default function Reports({ siteId, isInternal = false }) {
               imply a freshness timestamp this page doesn't really have. */}
           <div className="mb-3"><ReportBand brand={brand} kind={data?.period === 'weekly' ? 'Weekly report' : data?.period === 'monthly' ? 'Monthly report' : 'Report'} period={label} /></div>
           {data?.body && brand ? (
-            <ReportBody body={data.body} brand={brand} narrative={data.narrative} />
+            <ReportBody body={data.body} brand={brand} narrative={data.narrative} period={label} />
           ) : (
             <>
               <Tray><ExecutiveSummaryPanel text={data?.narrative} /></Tray>
@@ -174,7 +204,23 @@ export default function Reports({ siteId, isInternal = false }) {
               <div className="mt-3">
                 {brand ? <BrandTiles items={kpis} brand={brand} loading={loading} /> : <KpiStrip items={kpis} loading={loading} cols={5} />}
               </div>
+
+              {/* Directly under the numbers it qualifies: a caveat placed anywhere else is a caveat nobody reads.
+                  Renders nothing at all when the period's data is clean. */}
+              {!loading && <DataQualityNote quality={data?.dataQuality} className="mt-3" />}
             </>
+          )}
+
+          {/* OUTSIDE the branch above on purpose. These two qualify the period's numbers, and a report that renders
+              its own body (data.body + brand) took the other arm of that ternary — so anything placed inside it was
+              invisible exactly when a real report existed, which is when it matters most. Both render nothing of
+              their own accord when there is nothing to say. */}
+          {!loading && data?.body && brand && <DataQualityNote quality={data?.dataQuality} className="mt-3" />}
+          {/* When the report body already carries the PostHog sections (it does for every project with a rendered
+              body, because the body and the PDF share one model), drawing this card too would show the same numbers
+              twice. It remains for the fallback layout, which has no body. */}
+          {!loading && !data?.body?.behaviour && (
+            <ProductAnalyticsCard summary={product} className="mt-3" />
           )}
 
           <Tray className="mt-3 lg:grid-cols-[1.6fr_1fr]">

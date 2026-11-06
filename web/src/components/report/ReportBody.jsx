@@ -1,5 +1,6 @@
 import { TrayCard } from '../layout/Tray.jsx';
 import BrandTiles from './BrandTiles.jsx';
+import BehaviourBlock from './BehaviourBlock.jsx';
 
 // The body of a weekly / monthly report: a one-line verdict, the plain summary, tiles with how each moved, the bars,
 // what went live, then the tables (day or week breakdown, since baseline, page scores, top searches). Everything
@@ -41,7 +42,7 @@ function Table({ head, rows }) {
   );
 }
 
-export default function ReportBody({ body, brand, narrative }) {
+export default function ReportBody({ body, brand, narrative, period }) {
   if (!body) return null;
   const tiles = body.tiles.map((t) => ({ label: t.label, value: t.value, delta: t.delta?.trim() ? t.delta : null, tone: t.tone }));
   return (
@@ -52,6 +53,7 @@ export default function ReportBody({ body, brand, narrative }) {
       </div></div>
       <div className="mt-3"><BrandTiles items={tiles} brand={brand} /></div>
       {body.bars?.length > 0 && <div className="tray mt-3"><TrayCard title={body.barsTitle}><Bars bars={body.bars} brand={brand} /></TrayCard></div>}
+      <BehaviourBlock model={body.behaviour} brand={brand} period={period} />
       {body.did?.length > 0 && (
         <div className="tray mt-3"><TrayCard title="What we did" subtitle="Went live in this period">
           <ul className="border-t border-border">

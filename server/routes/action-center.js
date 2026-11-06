@@ -896,7 +896,15 @@ router.post('/action-center/drafts/:id/request-revision', async (req, res, next)
 // this call itself failed with. Only a pre-approval rejection (bad
 // implementer resolution, a failed preview, or an uncertain render mode)
 // throws.
-export async function approveAndPublishDraft(siteId, draftId, { userId, renderMode, deferPr = false } = {}) {
+// Every check approveAndPublishDraft runs BEFORE approval, and nothing else: it never approves, pushes or opens a pull request.
+// Order (unchanged): Quality Gate -> resolve implementer -> preview with the bounded responsive repair loop -> persist repaired
+// content -> rendering gate -> technical check with its bounded repair loop -> persist. Throws exactly the errors the approval
+// path threw at each point. Returns { draft, site, resolved }: the draft with any repaired content already saved, and the
+// resolved implementer (null for a site without a repository).
+//
+// `afterQualityGate({ draft, siteId })` runs right after the Quality Gate passes, where approveAndPublishDraft has always recorded
+// its learning side effects; a caller that is only preparing work (the daily pipeline) passes nothing.
+export async function validateDraft(siteId, draftId, { renderMode, afterQualityGate = null } = {}) {
   const draft = await getDraft(siteId, draftId);
   if (!draft || draft.status !== 'submitted_for_approval') {
     throw httpError(404, 'Draft not found, or not submitted for approval');
@@ -931,65 +939,7 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
       `(${[...new Set(gateResult.issues.map((i) => i.patternId))].join(', ')}). Fix the content and resubmit.`, { issues: gateResult.issues });
   }
 
-  // Phase 4 — continuous learning: a human editing this draft before
-  // approving it (DraftModal.jsx -> updateDraft) is a real, verified
-  // correction, worth more than a recommendation nobody acts on twice. Best
-  // effort only — a lesson-writing failure must never block a real
-  // approval, same defensive convention as every other non-critical
-  // side-effect in this function (recordAuditEvent, etc.).
-  const humanEdited = draft.original_content && JSON.stringify(draft.original_content) !== JSON.stringify(draft.content);
-  if (humanEdited) {
-    const lesson = extractEditLesson(draft.action_type, draft.original_content, draft.content);
-    if (lesson) {
-      await recordFixOutcome({
-        category: topLevelCategoryForGenerator(draft.action_type), scope: 'client', siteId, generatorId: draft.action_type,
-        validationRuleId: lesson.validationRuleId, outcome: 'success', sourceType: 'human-edit',
-        problemSignature: lesson.validationRuleId || lesson.title,
-        symptoms: lesson.lesson, affectedPattern: `${draft.action_type} output requiring the same correction pattern.`,
-        fixStrategy: lesson.lesson,
-      }).catch((err) => console.error(`[action-center] failed to record edit lesson for draft ${draft.id}:`, err.message));
-    }
-  }
-
-  // Learning system, stage 2 — the outcome of a lesson recorded at
-  // generation time (see generateDraft's own comment). Reaching this exact
-  // point means the Quality Gate above already passed on the CURRENT
-  // content, so any pattern this draft's generation self-corrected really
-  // did hold through to real approval: re-recording the identical lesson
-  // hits recordFixOutcome's own dedup-by-validationRuleId path, which
-  // increments occurrence_count/confidence and promotes 'candidate' ->
-  // 'trusted' (and 'requires_approval' -> 'auto') after enough
-  // confirmations, instead of a fresh duplicate row.
-  if (draft.gate_resolved_patterns?.length) {
-    await Promise.all(draft.gate_resolved_patterns.map((patternId) => recordFixOutcome({
-      category: topLevelCategoryForGenerator(draft.action_type), scope: 'client', siteId, generatorId: draft.action_type,
-      validationRuleId: patternId, outcome: 'success', sourceType: 'runtime-auto',
-      problemSignature: patternId,
-      symptoms: `Past ${draft.action_type} drafts have hit "${patternId}" and needed a second attempt to fix it.`,
-      rootCause: rootCauseForPattern(patternId),
-      affectedPattern: `${draft.action_type} generation output matching Quality Gate pattern "${patternId}" (${categoryForPattern(patternId)}).`,
-      fixStrategy: `Avoid "${patternId}" on the first attempt` +
-        `${rootCauseForPattern(patternId) ? ` — ${rootCauseForPattern(patternId)}` : ''}.`,
-    }).catch((err) => console.error(`[action-center] failed to confirm auto-fix memory for draft ${draft.id}/${patternId}:`, err.message))));
-  }
-
-  // A human editing a draft from a generator that already has a trusted,
-  // auto-appliable memory behind it (execution_permission='auto') is a real
-  // signal that memory may no longer hold — this app can't semantically
-  // prove the edit undid THAT specific memory's effect, so this is
-  // deliberately a coarser, honestly-described signal ("humans keep editing
-  // this generator's output despite an active auto rule"), recorded as a
-  // failed reuse (recordFixOutcome's memoryRefId + outcome:'failure' path).
-  // Two such overrides in a row flips the memory to 'flagged_for_review'
-  // (see agent-memory.js's recordReuseOutcome) instead of it silently
-  // continuing to auto-apply unchanged.
-  if (humanEdited) {
-    const activeMemories = await getActiveAutoMemories(draft.action_type, siteId).catch(() => []);
-    await Promise.all(activeMemories.map((m) => recordFixOutcome({
-      memoryRefId: m.id, outcome: 'failure', generatorId: draft.action_type, siteId, agentId: 'human-edit-override',
-    }).catch((err) => console.error(`[action-center] failed to record override for memory ${m.id}:`, err.message))));
-  }
-
+  if (afterQualityGate) await afterQualityGate({ draft, siteId });
   let resolved = null;
   if (site.repo_owner && site.repo_name) {
     resolved = await resolveImplementerForApply(site, draft, renderMode);
@@ -1155,6 +1105,75 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
     }
   }
 
+  return { draft, site, resolved };
+}
+
+// The learning side effects of a real approval, recorded right after its Quality Gate passed (moved verbatim from
+// approveAndPublishDraft; same position in the sequence).
+async function recordApprovalLearning({ draft, siteId }) {
+  // Phase 4 — continuous learning: a human editing this draft before
+  // approving it (DraftModal.jsx -> updateDraft) is a real, verified
+  // correction, worth more than a recommendation nobody acts on twice. Best
+  // effort only — a lesson-writing failure must never block a real
+  // approval, same defensive convention as every other non-critical
+  // side-effect in this function (recordAuditEvent, etc.).
+  const humanEdited = draft.original_content && JSON.stringify(draft.original_content) !== JSON.stringify(draft.content);
+  if (humanEdited) {
+    const lesson = extractEditLesson(draft.action_type, draft.original_content, draft.content);
+    if (lesson) {
+      await recordFixOutcome({
+        category: topLevelCategoryForGenerator(draft.action_type), scope: 'client', siteId, generatorId: draft.action_type,
+        validationRuleId: lesson.validationRuleId, outcome: 'success', sourceType: 'human-edit',
+        problemSignature: lesson.validationRuleId || lesson.title,
+        symptoms: lesson.lesson, affectedPattern: `${draft.action_type} output requiring the same correction pattern.`,
+        fixStrategy: lesson.lesson,
+      }).catch((err) => console.error(`[action-center] failed to record edit lesson for draft ${draft.id}:`, err.message));
+    }
+  }
+
+  // Learning system, stage 2 — the outcome of a lesson recorded at
+  // generation time (see generateDraft's own comment). Reaching this exact
+  // point means the Quality Gate above already passed on the CURRENT
+  // content, so any pattern this draft's generation self-corrected really
+  // did hold through to real approval: re-recording the identical lesson
+  // hits recordFixOutcome's own dedup-by-validationRuleId path, which
+  // increments occurrence_count/confidence and promotes 'candidate' ->
+  // 'trusted' (and 'requires_approval' -> 'auto') after enough
+  // confirmations, instead of a fresh duplicate row.
+  if (draft.gate_resolved_patterns?.length) {
+    await Promise.all(draft.gate_resolved_patterns.map((patternId) => recordFixOutcome({
+      category: topLevelCategoryForGenerator(draft.action_type), scope: 'client', siteId, generatorId: draft.action_type,
+      validationRuleId: patternId, outcome: 'success', sourceType: 'runtime-auto',
+      problemSignature: patternId,
+      symptoms: `Past ${draft.action_type} drafts have hit "${patternId}" and needed a second attempt to fix it.`,
+      rootCause: rootCauseForPattern(patternId),
+      affectedPattern: `${draft.action_type} generation output matching Quality Gate pattern "${patternId}" (${categoryForPattern(patternId)}).`,
+      fixStrategy: `Avoid "${patternId}" on the first attempt` +
+        `${rootCauseForPattern(patternId) ? ` — ${rootCauseForPattern(patternId)}` : ''}.`,
+    }).catch((err) => console.error(`[action-center] failed to confirm auto-fix memory for draft ${draft.id}/${patternId}:`, err.message))));
+  }
+
+  // A human editing a draft from a generator that already has a trusted,
+  // auto-appliable memory behind it (execution_permission='auto') is a real
+  // signal that memory may no longer hold — this app can't semantically
+  // prove the edit undid THAT specific memory's effect, so this is
+  // deliberately a coarser, honestly-described signal ("humans keep editing
+  // this generator's output despite an active auto rule"), recorded as a
+  // failed reuse (recordFixOutcome's memoryRefId + outcome:'failure' path).
+  // Two such overrides in a row flips the memory to 'flagged_for_review'
+  // (see agent-memory.js's recordReuseOutcome) instead of it silently
+  // continuing to auto-apply unchanged.
+  if (humanEdited) {
+    const activeMemories = await getActiveAutoMemories(draft.action_type, siteId).catch(() => []);
+    await Promise.all(activeMemories.map((m) => recordFixOutcome({
+      memoryRefId: m.id, outcome: 'failure', generatorId: draft.action_type, siteId, agentId: 'human-edit-override',
+    }).catch((err) => console.error(`[action-center] failed to record override for memory ${m.id}:`, err.message))));
+  }
+
+}
+
+export async function approveAndPublishDraft(siteId, draftId, { userId, renderMode, deferPr = false } = {}) {
+  const { draft, site, resolved } = await validateDraft(siteId, draftId, { renderMode, afterQualityGate: recordApprovalLearning });
   const approvedDraft = await approveDraft(siteId, draft.id, userId);
   if (!approvedDraft) throw httpError(404, 'Draft not found, or not submitted for approval');
   if (!resolved) return approvedDraft;

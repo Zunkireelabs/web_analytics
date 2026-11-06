@@ -7,8 +7,9 @@ import { getFirstCompletedAuditRun, getLatestCompletedAuditRun, getAuditPageFind
 import { query } from '../db.js';
 import { buildWorkItems } from './work-catalogue.js';
 import { pageScoreSection } from './page-score.js';
-import { periodStats, tilesFor, headlineFor, bettermentTable, topSearchesSection, fmt } from './doc-model.js';
+import { periodStats, tilesFor, headlineFor, bettermentTable, topSearchesSection, behaviourModel, fmt } from './doc-model.js';
 import { previousWeek, previousMonth, monthBounds, shiftMonth } from '../util/dates.js';
+import { getPosthogSummary } from '../store/project-posthog.js';
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -65,6 +66,11 @@ export async function buildInAppModel(site, period) {
     getRangeTopQueries(site.id, start, end, weekly ? 5 : 10), getBaselineReport(site.id),
     getHealthScoreOnOrBefore(site.id, end), scoreSectionFor(site.id), didFor(site.id, start, end).catch(() => []),
   ]);
+  // PostHog is optional: no connection, or a failed read, simply means no section — never a broken report.
+  const [visitors, prevVisitors] = await Promise.all([
+    getPosthogSummary(site.id, start, end).catch(() => null),
+    getPosthogSummary(site.id, prevStart, prevEnd).catch(() => null),
+  ]);
   const cur = periodStats(series);
   const prev = prevSeries.length ? periodStats(prevSeries) : null;
   const vs = weekly ? 'prior week' : 'prior month';
@@ -90,13 +96,16 @@ export async function buildInAppModel(site, period) {
         ['Month', fmt(cur.impressions), fmt(cur.clicks), pos(cur.position), fmt(cur.users)]] };
   }
 
-  const toSection = (s) => (s?.table ? { title: s.title, sub: s.sub, head: s.table.head, rows: s.table.rows } : null);
+  const toSection = (s) => (s?.table ? { ...(s.key ? { key: s.key } : {}), title: s.title, sub: s.sub, head: s.table.head, rows: s.table.rows } : null);
   return {
     headline: headlineFor(cur, prev, weekly ? 'this week' : 'this month', `the ${vs}`),
     tiles: tilesFor(cur, prev, vs),
     barsTitle: weekly ? 'Clicks by day' : 'Clicks, week by week',
     bars,
     did,
+    // The on-screen report draws PostHog as its own block (tiles, ranked list, takeaway) rather than as tables; the
+    // Google Doc and PDF keep their table sections from the same summary. Null when there is no PostHog data.
+    behaviour: behaviourModel(visitors, prevVisitors, vs),
     sections: [breakdown, toSection(better), toSection(scoreSection), toSection(topSearchesSection(topQueries))].filter(Boolean),
   };
 }

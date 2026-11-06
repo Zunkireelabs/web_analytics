@@ -4,6 +4,7 @@ import { callDataAnalystAgent } from './lib/data-analyst-client.js';
 import { ensureAnalystRegistered } from './lib/tenant-provisioning.js';
 import { fetchGscForDate } from './ingest/gsc.js';
 import { fetchGa4ForDate } from './ingest/ga4.js';
+import { backfillGa4Pages } from './lib/ga4-pages-backfill.js';
 import { fetchCompetitorRankings } from './ingest/competitors.js';
 import { competitorProviderConfigured } from './ingest/competitor-providers/index.js';
 import { upsertGsc, upsertGa4, saveNarrative, saveCompetitorRankings, saveHealthScoreSnapshot, recordIntegrationCheck } from './store/upsert.js';
@@ -41,6 +42,7 @@ import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
 
 import { syncAnalystInsightsToActionCenter, syncGrowthOpportunitiesToActionCenter, refreshPendingKeywordGapObservations, qualifyAndShipContentGaps } from './agents/lib/analyst-seo-mapping.js';
 import { runKeywordDemandIfDue } from './agents/lib/keyword-demand.js';
+import { splitByFreshness, maxInsightAgeDays } from './lib/analyst-insight-freshness.js';
 import { runAnalystFusion } from './agents/lib/analyst-fusion.js';
 import { sweepAnalystOutcomes } from './agents/lib/analyst-outcome.js';
 import { checkFaqOnboardingCoverage } from './agents/lib/faq-onboarding-check.js';
@@ -179,6 +181,10 @@ export async function runDailyIngestForSite(site) {
     await upsertGa4(site.id, ga4);
     console.log(`[GA4] site ${site.id} ${date}: ${ga4.totals.users} users, ${ga4.totals.sessions} sessions`);
   }
+
+  // Top pages history for days that predate the page list (migration 245). Returns, never throws, and does one indexed
+  // query once everything is filled, so it cannot hold up or fail the ingest above.
+  await backfillGa4Pages(site);
 
   return { site, reportDate: gscEnd };
 }
@@ -1090,7 +1096,10 @@ export async function runAnalystSyncForAllSites() {
       const analyst = await ensureAnalystRegistered(site).catch((err) => ({ status: 'failed', error: err.message }));
       if (analyst.status === 'registered') { totals.registered++; console.log(`[job] analyst sync: site ${site.id} "${site.name}" was not registered with the Data Analyst — registered now.`); }
       else if (analyst.status === 'failed') console.error(`[job] analyst sync: could not register site ${site.id} "${site.name}" with the Data Analyst: ${analyst.error}`);
-      const insights = await fetchAnalystInsights(site.id);
+      const fetched = await fetchAnalystInsights(site.id);
+      // Only FRESH findings become recommendations (lib/analyst-insight-freshness.js): stale ones were being re-created nightly.
+      const { fresh: insights, stale } = splitByFreshness(fetched, { maxAgeDays: maxInsightAgeDays() });
+      if (stale.length) console.log(`[job] analyst sync: site ${site.id} "${site.name}" skipped ${stale.length} stale insight(s) older than ${maxInsightAgeDays()} day(s).`);
       if (!insights.length) continue;
       const result = await syncAnalystInsightsToActionCenter(site.id, insights, { site });
       totals.sites++;
@@ -1252,8 +1261,11 @@ export async function runKeywordGapShipCycleForAllSites({
 // get_active_client's require_admin_key dependency rejects on every
 // /clients/{client_id}/* route.
 export async function fetchAnalystInsights(siteId) {
-  const body = await callDataAnalystAgent(`/clients/${siteId}/insights`);
-  return Array.isArray(body) ? body : (body?.insights || []);
+  // Every fresh insight, paged (the plain endpoint is a 200-row dashboard cap that hides eligible findings on a noisy night).
+  const { fetchAllFreshInsights } = await import('./lib/analyst-insight-feed.js');
+  const { maxInsightAgeDays } = await import('./lib/analyst-insight-freshness.js');
+  const { insights } = await fetchAllFreshInsights(siteId, { call: callDataAnalystAgent, sinceDays: Math.max(1, Math.ceil(maxInsightAgeDays())) });
+  return insights;
 }
 
 // The SHIPPING half of the day, deliberately separated from the DETECTION
@@ -1469,8 +1481,8 @@ export async function refreshContentGapRecommendationsForAllSites() {
 // shipSiteWithLocks under a per-site time budget (see lib/site-run.js). Resolves { timedOut: true } when the
 // site overran, otherwise what shipSiteWithLocks returns. An abandoned run can still ship after we stop
 // waiting, so callers re-read the platform-wide remainder from the database rather than assuming zero.
-async function shipWithDeadline(site, globalRemaining) {
-  const run = await runSiteWithDeadline(site, ({ deadlineAt }) => shipSiteWithLocks(site, globalRemaining, { deadlineAt }),
+async function shipWithDeadline(site, globalRemaining, { drainOnly = false } = {}) {
+  const run = await runSiteWithDeadline(site, ({ deadlineAt }) => shipSiteWithLocks(site, globalRemaining, { deadlineAt, drainOnly }),
     { label: 'shipping run', timeoutMs: SHIP_SITE_TIMEOUT_MS, onTimeout: recordSiteRunTimeout });
   if (run.timedOut) return { timedOut: true };
   if (!run.ok) throw run.error;
@@ -1478,7 +1490,7 @@ async function shipWithDeadline(site, globalRemaining) {
 }
 
 const SHIP_SITE_TIMEOUT_MS = Number(process.env.SHIP_SITE_TIMEOUT_MS) || 30 * 60 * 1000;
-async function shipSiteWithLocks(site, globalRemaining, { deadlineAt = null } = {}) {
+async function shipSiteWithLocks(site, globalRemaining, { deadlineAt = null, drainOnly = false } = {}) {
   const { ran: credRan, result } = await withJobLock(
     jobKeyFor(GITHUB_CREDENTIAL_LOCK_JOB_NAME, rateLimitKey(site)),
     () => withJobLock(
@@ -1504,7 +1516,7 @@ async function shipSiteWithLocks(site, globalRemaining, { deadlineAt = null } = 
             console.log(`[approved] site ${site.id}: picks ${n(r.picks)}; design choices ${n(r.choices)}`);
           })
           .catch((err) => console.warn(`[approved] site ${site.id}: ${err.message}`));
-        return autoRemediateSafeRecommendations(site.id, { globalRemaining, deadlineAt });
+        return autoRemediateSafeRecommendations(site.id, { globalRemaining, deadlineAt, drainOnly });
       },
     ),
   );
@@ -1547,7 +1559,9 @@ async function alertIfShipStalled(site, shipped) {
     .catch((err) => console.error(`[job] ship-stall alert delivery failed for site ${site.id}:`, err.message));
 }
 
-export async function runAutoRemediationForAllSites({ windowEndsAt = null } = {}) {
+// drainOnly: ship only what the shared queues already hold (repairs, learned repairs); generate nothing new inline. Used by the
+// pipeline's 11:00 run, where new fixes come only from the PREPARE stage.
+export async function runAutoRemediationForAllSites({ windowEndsAt = null, drainOnly = false } = {}) {
   await resumeDueAutoRemediationPauses().catch((err) => console.error('[job] resumeDueAutoRemediationPauses failed:', err.message));
   const sites = rotateForToday((await listSites()).filter(isShippable));
   const results = [];
@@ -1575,7 +1589,7 @@ export async function runAutoRemediationForAllSites({ windowEndsAt = null } = {}
       // 2026-09-08 laptop-vs-VPS double-run) is unchanged: two processes
       // still cannot ship the same site, or spend the same credential's
       // budget, at the same time.
-      const outcome = await shipWithDeadline(site, globalRemaining);
+      const outcome = await shipWithDeadline(site, globalRemaining, { drainOnly });
       if (outcome.timedOut) { results.push({ siteId: site.id, error: 'timed-out' }); globalRemaining = await globalRemainingSeed(); continue; }
       const { ran, reason, result } = outcome;
       if (!ran) {
@@ -2080,4 +2094,254 @@ export async function runStartupCatchup() {
     return;
   }
   console.log('[catchup] done.');
+}
+
+// ── Competitor growth cycle (migrations 231-236) ────────────────────────────
+// Market discovery -> rival footprints -> scored opportunities in the EXISTING keyword_gaps queue, plus the outcome
+// learning that reads what actually happened. Nothing here ships anything: the weekly keyword-gap ship cycle, the
+// recommendation gates and a human merge remain the only path to a client's site.
+//
+// OFF for every site until `sites.competitor_growth_enabled` is set (migration 236 defaults it to false), so deploying
+// this changes nothing for any existing client and a pilot is one UPDATE on one site.
+//
+// Two cadences, both decided per site so a cadence change needs no cron change:
+//   - the full cycle runs at most every COMPETITOR_GROWTH_INTERVAL_DAYS, because its paid stages (discovery,
+//     footprints) have their own freshness windows and buying them more often would spend money for the same answer;
+//   - outcome learning runs every day, because it is free, reads only what already happened, and a measured result
+//     should reach the scorer close to when it was measured rather than waiting for the next paid cycle.
+const COMPETITOR_GROWTH_INTERVAL_DAYS = Number(process.env.COMPETITOR_GROWTH_INTERVAL_DAYS || 7);
+
+export async function listCompetitorGrowthSites({ runQuery = query } = {}) {
+  const { rows } = await runQuery(
+    `SELECT id, name, timezone, country_code, language_code, target_scope, target_markets,
+            website_domain, additional_own_domains, gsc_property, property_type, url_file_map,
+            competitor_growth_last_done
+       FROM sites
+      WHERE competitor_growth_enabled = true
+      ORDER BY competitor_growth_last_done ASC NULLS FIRST, id`
+  );
+  return rows;
+}
+
+export function competitorGrowthDue(site, { now = new Date(), intervalDays = COMPETITOR_GROWTH_INTERVAL_DAYS } = {}) {
+  if (!site?.competitor_growth_last_done) return true; // never run: due
+  const elapsedDays = (now.getTime() - new Date(site.competitor_growth_last_done).getTime()) / 86400000;
+  return elapsedDays >= intervalDays;
+}
+
+// Per-site isolation is the point of the loop, same as every other *ForAllSites runner here: one tenant's provider
+// outage, budget refusal or bad config must never stop another tenant's cycle. Deps are injectable so this is testable
+// with plain fakes (job.js's import graph reaches openai's formdata-node, which fails under node:test's module-mocking
+// loader — the same reason runKeywordGapShipCycleForAllSites takes its deps this way).
+export async function runCompetitorGrowthCycleForAllSites({
+  listSitesFn = listCompetitorGrowthSites,
+  runCycle = null,
+  markDone = (siteId) => query('UPDATE sites SET competitor_growth_last_done = now() WHERE id = $1', [siteId]),
+  now = new Date(),
+  intervalDays = COMPETITOR_GROWTH_INTERVAL_DAYS,
+} = {}) {
+  const sites = await listSitesFn();
+  const totals = { sites: 0, ran: 0, skipped: 0, costUsd: 0, opportunities: 0 };
+  if (!sites.length) return totals;
+
+  const cycle = runCycle
+    || (await import('./agents/lib/competitor-growth-cycle.js')).runCompetitorGrowthCycle;
+
+  for (const site of sites) {
+    totals.sites += 1;
+    if (!competitorGrowthDue(site, { now, intervalDays })) {
+      totals.skipped += 1;
+      continue;
+    }
+    try {
+      const report = await cycle(site, { save: true });
+      // Stamped even when a stage was skipped or refused: the cadence is "we looked", not "we succeeded". Without
+      // this a site whose provider is down would be retried every single night and pay for the retry each time.
+      await markDone(site.id);
+      totals.ran += 1;
+      totals.costUsd += report.costUsd || 0;
+      totals.opportunities += report.opportunities?.written?.inserted || 0;
+      console.log(
+        `[job] competitor growth: site ${site.id} "${site.name}" — `
+        + `${report.opportunities?.ran ? `${report.opportunities.built} built, ${report.opportunities.written.inserted} new` : `opportunities skipped (${report.opportunities?.reason})`}`
+        + `, cost ${(report.costUsd || 0).toFixed(4)} USD`
+      );
+    } catch (err) {
+      console.error(`[job] competitor growth failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return totals;
+}
+
+// Free, daily: advance each opted-in site's opportunity lifecycle from the records the pipeline already wrote, and
+// count any outcome that has newly reached a measured result. Makes no provider call and ships nothing.
+export async function runCompetitorOutcomeLearningForAllSites({
+  listSitesFn = listCompetitorGrowthSites,
+  learn = null,
+} = {}) {
+  const sites = await listSitesFn();
+  const totals = { sites: 0, advanced: 0, counted: 0 };
+  if (!sites.length) return totals;
+
+  const learnFn = learn
+    || (await import('./agents/lib/competitor-outcome-learning.js')).learnFromCompetitorOutcomes;
+
+  for (const site of sites) {
+    totals.sites += 1;
+    try {
+      const out = await learnFn(site.id);
+      totals.advanced += out.advanced?.length || 0;
+      totals.counted += out.counted?.length || 0;
+      if (out.advanced?.length || out.counted?.length) {
+        console.log(`[job] competitor outcomes: site ${site.id} "${site.name}" — ${out.advanced.length} lifecycle change(s), ${out.counted.length} verified outcome(s) counted.`);
+      }
+    } catch (err) {
+      console.error(`[job] competitor outcome learning failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return totals;
+}
+
+// ── Rank tracking (migration 237) ───────────────────────────────────────────
+// Where this site actually ranks for the keywords it deliberately chose to watch. OFF for every site until
+// `sites.rank_tracking_enabled` is set, and bounded by that site's own `rank_tracking_max_keywords` ceiling, so the
+// worst case for a misconfigured site is (ceiling x one SERP call) per cadence, not an open-ended bill.
+const RANK_TRACKING_INTERVAL_DAYS = Number(process.env.RANK_TRACKING_INTERVAL_DAYS || 7);
+
+export async function listRankTrackingSites({ runQuery = query } = {}) {
+  const { rows } = await runQuery(
+    `SELECT id, name, timezone, website_domain, additional_own_domains, gsc_property,
+            rank_tracking_max_keywords, rank_tracking_last_done
+       FROM sites
+      WHERE rank_tracking_enabled = true
+      ORDER BY rank_tracking_last_done ASC NULLS FIRST, id`
+  );
+  return rows;
+}
+
+export function rankTrackingDue(site, { now = new Date(), intervalDays = RANK_TRACKING_INTERVAL_DAYS } = {}) {
+  if (!site?.rank_tracking_last_done) return true;
+  return (now.getTime() - new Date(site.rank_tracking_last_done).getTime()) / 86400000 >= intervalDays;
+}
+
+export async function runRankTrackingForAllSites({
+  listSitesFn = listRankTrackingSites,
+  check = null,
+  markDone = (siteId) => query('UPDATE sites SET rank_tracking_last_done = now() WHERE id = $1', [siteId]),
+  now = new Date(),
+  intervalDays = RANK_TRACKING_INTERVAL_DAYS,
+} = {}) {
+  const sites = await listSitesFn();
+  const totals = { sites: 0, ran: 0, skipped: 0, keywords: 0, costUsd: 0 };
+  if (!sites.length) return totals;
+
+  const runCheck = check || (await import('./agents/lib/rank-tracking.js')).runRankCheck;
+
+  for (const site of sites) {
+    totals.sites += 1;
+    if (!rankTrackingDue(site, { now, intervalDays })) {
+      totals.skipped += 1;
+      continue;
+    }
+    try {
+      // The site's own ceiling is the run limit: the store clamps it again in SQL, so a wrong value here cannot
+      // overspend, but passing it keeps the intent visible at the call site.
+      const out = await runCheck(site, { limit: site.rank_tracking_max_keywords ?? 25 });
+      await markDone(site.id);
+      totals.ran += 1;
+      totals.keywords += out.checked.length;
+      totals.costUsd += out.costUsd || 0;
+      const ranked = out.checked.filter((c) => c.position != null).length;
+      console.log(
+        `[job] rank tracking: site ${site.id} "${site.name}" — ${out.checked.length} keyword(s) checked, `
+        + `${ranked} ranking in the top 10, cost ${(out.costUsd || 0).toFixed(4)} USD`
+        + `${out.stoppedEarly ? ` (stopped early: ${out.stoppedEarly})` : ''}`
+      );
+    } catch (err) {
+      console.error(`[job] rank tracking failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return totals;
+}
+
+// ── PostHog daily ingest (migrations 239/240) ───────────────────────────────
+// Optional per project: only a site that deliberately connected PostHog is fetched, so a platform where nobody uses
+// it does one indexed query a night and stops. Costs nothing — it reads the client's OWN PostHog with the client's
+// own key, so there is no provider bill to cap, unlike the DataForSEO lanes.
+//
+// GSC lags by a day and so does this, for the same reason and with the same helper: asking PostHog for today returns
+// a partial day that would then be stored as if it were final.
+const POSTHOG_LAG_DAYS = Number(process.env.POSTHOG_LAG_DAYS || 1);
+
+export async function runPosthogIngestForAllSites({
+  listSitesFn = null,
+  credentialsFor = null,
+  fetchDay = null,
+  fetchDrops = null,
+  fetchActions = null,
+  saveDay = null,
+  recordStatus = null,
+  now = new Date(),
+} = {}) {
+  const store = await import('./store/project-posthog.js');
+  const listSites = listSitesFn || store.listPosthogConnectedSites;
+  const getCredentials = credentialsFor || store.getPosthogCredentials;
+  const save = saveDay || store.upsertPosthogDay;
+  const status = recordStatus || store.recordPosthogStatus;
+
+  const sites = await listSites();
+  const totals = { sites: 0, ingested: 0, failed: 0 };
+  if (!sites.length) return totals;
+
+  const posthog = (fetchDay && fetchDrops && fetchActions) ? null : await import('./ingest/posthog.js');
+  const day = fetchDay || posthog.fetchPosthogForDate;
+  const drops = fetchDrops || posthog.fetchDropOffs;
+  const actions = fetchActions || posthog.fetchTopActions;
+
+  for (const site of sites) {
+    totals.sites += 1;
+    const date = daysAgoInTz(site.timezone || process.env.TZ || 'Asia/Kolkata', POSTHOG_LAG_DAYS, now);
+    try {
+      const credentials = await getCredentials(site.id);
+      if (!credentials) { totals.failed += 1; continue; } // disconnected between listing and fetching
+
+      const metrics = await day(credentials, date);
+      if (!metrics.ok) {
+        // A refused key or grant, a project that is gone or an unusable address marks THEIR connection and stops there; the
+        // nightly job then skips it until it is reconnected. A timeout, an HTTP 5xx or a rate limit says nothing about the
+        // connection and must NOT: the status stays as it was and tomorrow's run retries. Either way it never throws: this
+        // loop also serves every other project.
+        const permanent = store.isPermanentPosthogFailure(metrics.reason);
+        if (permanent) await status(site.id, false, metrics.detail || metrics.reason);
+        totals.failed += 1;
+        console.warn(`[job] posthog: site ${site.id} "${site.name}" — ${metrics.reason}: ${metrics.detail || ''}${permanent ? ' (connection marked as needing attention)' : ' (will retry tomorrow)'}`);
+        continue;
+      }
+
+      // Drop-offs are the reason PostHog is worth connecting, but a failure here must not lose the day's totals,
+      // which already succeeded. Stored as none; the upsert keeps any earlier good result for the same date.
+      const dropResult = await drops(credentials, date).catch(() => ({ ok: false }));
+
+      // Same for the clicks and form steps behind "What visitors did".
+      const actionResult = await actions(credentials, date).catch(() => ({ ok: false }));
+
+      await save(site.id, {
+        date, totals: metrics.totals,
+        dropOffs: dropResult.ok ? dropResult.dropOffs : [],
+        topActions: actionResult.ok ? actionResult.topActions : [],
+      });
+      await status(site.id, true);
+      totals.ingested += 1;
+      console.log(
+        `[job] posthog: site ${site.id} "${site.name}" ${date} — `
+        + `${metrics.totals.events ?? 'no'} event(s), ${metrics.totals.sessions ?? 'no'} session(s)`
+        + `${dropResult.ok ? `, ${dropResult.dropOffs.length} drop-off point(s)` : ', drop-offs unavailable'}`
+        + `${actionResult.ok ? `, ${actionResult.topActions.length} action(s)` : ', actions unavailable'}`
+      );
+    } catch (err) {
+      totals.failed += 1;
+      console.error(`[job] posthog ingest failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return totals;
 }

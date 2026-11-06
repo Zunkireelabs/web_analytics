@@ -16,6 +16,7 @@ import { configured as pagespeedConfigured } from '../ingest/pagespeed.js';
 import { callLLM } from '../llm.js';
 import { getGscBreakdownRange } from '../store/read.js';
 import { detectSpamUrlPatterns, detectForeignScriptQueries } from './lib/index-bloat.js';
+import { detectRedirectLoop, detectHeadingOrderSkips, detectNoOutgoingLinks, detectDuplicateMetaDescriptions } from './lib/audit-gap-checks.js';
 
 export const meta = {
   id: 'technical-seo',
@@ -560,6 +561,65 @@ export async function run({ siteId, start, end, pageCache, params, dryRun = fals
     verification: c.verification,
   }));
 
+  // A redirect LOOP is reported separately from a chain, because the fix is different: a chain arrives somewhere
+  // eventually, a loop never does, so the page is permanently unreachable and raising a hop limit cannot help.
+  // Detected from the same chain data already collected — no extra fetch (agents/lib/audit-gap-checks.js).
+  const loopFindings = crawl.redirectChains
+    .map((c) => ({ c, loop: detectRedirectLoop((c.chain || []).map((h) => h.url)) }))
+    .filter(({ loop }) => loop.loop)
+    .map(({ c, loop }) => makeFinding({
+      id: `technical-seo:redirect-loop:${c.sourcePages[0]}:${c.href}`,
+      evidence: { sourcePages: c.sourcePages, href: c.href, repeatedUrl: loop.repeatedUrl, cycle: loop.cycle },
+      whyItMatters: `A link to ${c.href} redirects in a loop (${loop.cycle.join(' -> ')}) and never arrives, so neither a visitor nor a crawler can reach it.`,
+      priority: 'high',
+      // No generator can safely guess the intended destination of a loop: the right target is a decision about what
+      // that page is for, which is a person's call.
+      recommendedAction: null,
+      expectedImpact: { label: 'High', basis: 'computed', value: sourceImpressions(c.sourcePages) },
+    }));
+
+  // A heading level skipped on the way down breaks the outline screen readers and search engines read the page by.
+  const headingSkipFindings = rows
+    .map((r) => ({ r, skips: detectHeadingOrderSkips(r.analysis?.headingOutline) }))
+    .filter(({ skips }) => skips.skips.length)
+    .slice(0, 10)
+    .map(({ r, skips }) => makeFinding({
+      id: `technical-seo:heading-order:${r.page}`,
+      evidence: { page: r.page, skips: skips.skips },
+      whyItMatters: `${r.page} skips a heading level (${skips.skips.map((x) => `${x.from} to ${x.to}`).join(', ')}), so its outline reads as if a section is missing.`,
+      priority: 'low',
+      recommendedAction: null,
+      expectedImpact: { label: 'Low', basis: 'estimate', value: null },
+    }));
+
+  // A page with no internal links out is a dead end: a crawler reaching it finds nowhere to go next.
+  const deadEndFindings = rows
+    .map((r) => ({ r, out: detectNoOutgoingLinks(r.page, r.analysis?.internalLinks) }))
+    .filter(({ out }) => out.deadEnd)
+    .slice(0, 10)
+    .map(({ r }) => makeFinding({
+      id: `technical-seo:no-outgoing-links:${r.page}`,
+      evidence: { page: r.page },
+      whyItMatters: `${r.page} has no links to any other page on this site, so whatever authority it earns flows nowhere and a crawler reaching it stops there.`,
+      priority: 'medium',
+      recommendedAction: { label: 'Add internal links', generatorId: 'internal-links', params: { page: r.page }, effort: effortForGenerator('internal-links') },
+      expectedImpact: { label: 'Medium', basis: 'computed', value: r.impressions ?? null },
+    }));
+
+  // Two pages sharing a meta description compete for the same snippet. The duplicate-TITLE check already existed;
+  // this is the same check for descriptions.
+  const duplicateMeta = detectDuplicateMetaDescriptions(
+    rows.map((r) => ({ url: r.page, metaDescription: r.analysis?.metaDescription }))
+  );
+  const duplicateMetaFindings = duplicateMeta.duplicates.slice(0, 10).map((d) => makeFinding({
+    id: `technical-seo:duplicate-meta-description:${d.urls[0]}`,
+    evidence: { urls: d.urls, description: d.description, count: d.count },
+    whyItMatters: `${d.count} pages share the same meta description, so they compete for one search snippet and tell Google they cover the same thing.`,
+    priority: 'medium',
+    recommendedAction: { label: 'Write a distinct description', generatorId: 'meta-title', params: { page: d.urls[0] }, effort: effortForGenerator('meta-title') },
+    expectedImpact: { label: 'Medium', basis: 'estimate', value: null },
+  }));
+
   const chainCandidates = [...crawl.redirectChains].sort((a, b) => sourceImpressions(b.sourcePages) - sourceImpressions(a.sourcePages) || b.hops - a.hops);
   const chainPriorities = priorityByRank(chainCandidates);
   const chainFindings = chainCandidates.map((c, i) => {
@@ -719,6 +779,8 @@ export async function run({ siteId, start, end, pageCache, params, dryRun = fals
   const findings = [
     ...deindexedFindings, ...cwvFindings, ...duplicateFindings, ...canonicalFindings,
     ...schemaFindings, ...brokenFindings, ...citationFindings, ...chainFindings, ...sitemapFindings, ...orphanedFindings,
+    // The four checks this agent was missing against a general-purpose crawler's issue list (audit-gap-checks.js).
+    ...loopFindings, ...headingSkipFindings, ...deadEndFindings, ...duplicateMetaFindings,
     ...crossDomainSitemapFindings, ...robotsBlockedFindings, ...compressionFindings, ...httpsFindings,
     ...inlineStylesFindings, ...largeHtmlFindings, ...robotsMissingFindings, ...legacySpamFindings,
   ];

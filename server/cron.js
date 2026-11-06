@@ -1,5 +1,8 @@
 import cron from 'node-cron';
+import { masterTick } from './lib/master-agent.js';
+import { getMasterMode, recordPlanError } from './lib/master-agent-control.js';
 import { RUN_WINDOW_MS } from './lib/site-run.js';
+import { runCompetitorGrowthCycleForAllSites, runCompetitorOutcomeLearningForAllSites, runRankTrackingForAllSites, runPosthogIngestForAllSites } from './job.js';
 import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, runAiVisibilityShipForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, checkDesignChangesForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites, runTrendRadarIfDueForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
@@ -7,7 +10,9 @@ import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-se
 import { reapStaleAuditRuns } from './store/audit-runs.js';
 import { reconcileAllSites } from './lib/action-center-reconciler.js';
 import { withJobLock, jobKeyFor } from './lib/job-lock.js';
+import { runLearningUpdateAfterOutcomes, runDailyLearningUpdate } from './lib/learning-cycle.js';
 import { expireStaleClaims } from './agents/lib/work-claims.js';
+import { schedulePipelineCron, pipelineOwnsMorning } from './lib/daily-pipeline/cron.js';
 
 // Every scheduled lane runs under a database-backed lease keyed by its name, so two app instances (staging
 // and production sharing a database, a second worker, a laptop left running) can never run the same lane at
@@ -57,6 +62,9 @@ export function startCron() {
   );
 
   async function runDailyJobBody() {
+      // The unified daily pipeline (DAILY_PIPELINE_ENABLED) owns the morning: research, repair, analyst, generate, prepare, then the
+      // single 11:00 ship. The legacy chain stands down so nothing runs twice or ships before preparation.
+      if (pipelineOwnsMorning()) { console.log('[cron] legacy morning run not started: the daily pipeline owns the morning'); return; }
       let runStartedAt = null;
       const startedAt = new Date().toISOString();
       console.log(`[cron] daily job started ${startedAt}`);
@@ -73,8 +81,15 @@ export function startCron() {
         } catch (err) {
           console.error('[cron] site discovery before the daily run failed:', err.message);
         }
-        const results = await runDailyJobForAllSites({ windowEndsAt: runStartedAt + RUN_WINDOW_MS / 2 });
-        console.log(`[cron] daily job finished — ${results.length} site(s) processed`);
+        // Master Agent mode 'on' (chosen on the Platform page, read fresh now): the per-project detection pipeline is run by the Master
+        // Agent's queue (lib/master-agent.js), scheduled earlier in the morning, so it is not run a second time here. Everything after
+        // this step (repair, shipping) is unchanged. With the default mode (off) or shadow this is exactly the existing call.
+        if ((await getMasterMode()) === 'on') {
+          console.log('[cron] daily detection is run by the Master Agent queue (mode on) — not repeated here');
+        } else {
+          const results = await runDailyJobForAllSites({ windowEndsAt: runStartedAt + RUN_WINDOW_MS / 2 });
+          console.log(`[cron] daily job finished — ${results.length} site(s) processed`);
+        }
       } catch (err) {
         console.error('[cron] daily job error:', err.message);
       }
@@ -194,9 +209,19 @@ export function startCron() {
           console.error('[cron] autonomous shipping run error:', err.message);
         }
       }
+
+      // UPDATE LEARNING (Phase 5), last step of the morning pass: record any project-memory change from today's run and
+      // re-evaluate shared industry knowledge from measured outcomes. Runs after shipping so it can never delay a PR.
+      try {
+        const l = await runDailyLearningUpdate();
+        console.log(`[cron] daily learning update — ${l.sites} project(s), ${l.changed} memory section(s) changed${l.failed ? `, ${l.failed} failed` : ''}`);
+      } catch (err) {
+        console.error('[cron] daily learning update error:', err.message);
+      }
   }
 
   console.log(`[cron] daily job scheduled "${schedule}" (${tz})`);
+  schedulePipelineCron({ cron, locked });
 
   // Weekly Google Doc report — default Thursday 08:00, covering the previous Mon–Sun week.
   const weekly = process.env.WEEKLY_CRON_SCHEDULE || '0 8 * * 4';
@@ -382,6 +407,7 @@ export function startCron() {
   // the report is still missing. This recovers from sleep-induced missed
   // cron jobs without needing a server restart — independently per site.
   cron.schedule('5 * * * *', async () => {
+    if (pipelineOwnsMorning()) return; // the pipeline has its own resume guard
     try {
       const now = new Date();
       const nowInTz = new Date(now.toLocaleString('en-US', { timeZone: tz }));
@@ -399,6 +425,38 @@ export function startCron() {
   }, { timezone: tz });
   console.log('[cron] hourly catch-up guard scheduled (fires at :05 each hour)');
 
+  // MASTER AGENT (lib/master-agent.js). The schedules are ALWAYS registered and each pass reads the mode when it runs
+  // (lib/master-agent-control.js getMasterMode: the Platform page's choice, clamped by the MASTER_AGENT_MODE ceiling), so switching
+  // the mode needs no restart. While the mode is 'off' a pass returns at once and does nothing.
+  //   shadow: plans the day and records what it would run, runs nothing, so the queue can be compared with the existing loop.
+  //   on:     keeps instances provisioned, plans, and runs the queued per-project detection jobs; the 07:00 run above then skips
+  //           its own detection step. Scheduled BEFORE 07:00 so the day's detection is done when shipping starts.
+  // The hourly pass only resumes jobs a previous pass could not finish (a retry, a project that overran, a pass cut off by the 07:00 run);
+  // it does nothing unless the mode is 'on'.
+  const masterSchedule = process.env.MASTER_AGENT_CRON_SCHEDULE || '0 5 * * *';
+  if (!cron.validate(masterSchedule)) {
+    console.error(`[cron] invalid MASTER_AGENT_CRON_SCHEDULE "${masterSchedule}" — Master Agent NOT scheduled.`);
+  } else {
+    // Runs inside a job lock at the schedule lines below. The mode is read first, so an 'off' system does nothing.
+    const tick = async (label, { onlyWhenOn = false } = {}) => {
+      try {
+        const mode = await getMasterMode();
+        if (mode === 'off' || (onlyWhenOn && mode !== 'on')) return;
+        const out = await masterTick({ mode });
+        console.log(`[cron] master agent ${label} (${out.mode}): planned ${out.plan?.planned ?? 0}, ran ${out.drain?.ran ?? 0}${out.drain?.stoppedReason ? `, stopped: ${out.drain.stoppedReason}` : ''}`);
+      } catch (err) {
+        console.error('[cron] master agent error:', err.message);
+        // A failed plan is remembered, so "no failed plans" (the bar for switching On) is a fact and not a hope.
+        await recordPlanError({ day: new Date().toISOString().slice(0, 10), message: err.message });
+      }
+    };
+    // Two lanes with their own lock names (the repo's rule is one name per lane). Their jobs are claimed from the queue with SKIP LOCKED,
+    // so a catch-up pass that starts while the daily pass is still running only takes jobs nobody holds.
+    cron.schedule(masterSchedule, () => locked('master-agent-daily', () => tick('daily pass')), { timezone: tz });
+    cron.schedule('50 * * * *', () => locked('master-agent-catchup', () => tick('catch-up pass', { onlyWhenOn: true })), { timezone: tz });
+    console.log(`[cron] Master Agent scheduled "${masterSchedule}" (${tz}); its mode is read at each run (off until a platform admin switches it)`);
+  }
+
   // OPT-IN SEPARATE SHIPPING HOUR. By default shipping is chained onto the
   // morning detection run above, so the day is one pass: gather, open the
   // PRs, send the mail. Setting SHIP_CRON_SCHEDULE moves shipping back out to
@@ -413,6 +471,7 @@ export function startCron() {
     console.error(`[cron] invalid SHIP_CRON_SCHEDULE "${shipSchedule}" — autonomous shipping NOT scheduled.`);
   } else {
     cron.schedule(shipSchedule, () => locked('autonomous-shipping-run', async () => {
+      if (pipelineOwnsMorning()) return; // the pipeline's 11:00 run is the only shipper
       // Per-site locking lives in runAutoRemediationForAllSites — see the
       // chained call above for why there is no platform-wide key here.
       console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
@@ -469,10 +528,18 @@ export function startCron() {
   // rather than daily for the same reason as the verification sweep: a merge
   // can land at any hour, so nothing should wait for a fixed morning gate.
   cron.schedule('40 * * * *', () => locked('fix-impact-sweep', async () => {
+    let impactResults = [];
     try {
-      await runFixImpactMeasurementsForAllSites();
+      impactResults = await runFixImpactMeasurementsForAllSites();
     } catch (err) {
       console.error('[cron] fix impact measurement error:', err.message);
+    }
+    // UPDATE LEARNING (Phase 5): only for projects that just got a real measured outcome. Best-effort; never blocks the sweep.
+    try {
+      const l = await runLearningUpdateAfterOutcomes(impactResults);
+      if (l.sites) console.log(`[cron] learning updated after ${l.sites} measured project(s) — ${l.changed} memory section(s) changed`);
+    } catch (err) {
+      console.error('[cron] learning update after outcomes error:', err.message);
     }
     // Same hour, right after: carries any measurement fix-impact.js just
     // wrote back onto the analyst_evidence row that produced it (see
@@ -556,6 +623,7 @@ export function startCron() {
     console.error(`[cron] invalid ANALYST_SYNC_CRON_SCHEDULE "${analystSync}" — analyst sync NOT scheduled.`);
   } else {
     cron.schedule(analystSync, async () => {
+      if (pipelineOwnsMorning()) return; // the pipeline's analyst stage runs fusion and the sync after the Python findings_complete marker
       // The fusion pass runs first, same slot: it reads the exact same
       // 03:00 UTC nightly pipeline output as the sync below, combines it
       // with decline-detection's own signals, and ships only corroborated,
@@ -678,6 +746,122 @@ export function startCron() {
       }
     }), { timezone: tz });
     console.log(`[cron] trend radar scheduled "${trendRadarSchedule}" (${tz})`);
+  }
+
+  // Competitor growth cycle — market discovery, rival footprints, and scored opportunities into the EXISTING
+  // keyword_gaps queue. OFF for every site until sites.competitor_growth_enabled is set (migration 236 defaults it
+  // to false), so this entry costs one indexed query a night until a site is deliberately opted in.
+  //
+  // Fires every morning and asks each opted-in site whether COMPETITOR_GROWTH_INTERVAL_DAYS have passed, the same
+  // shape as trend radar above and for the same reasons: a night that fails (provider outage, budget reached) is
+  // retried the next morning instead of costing a whole interval, and a newly opted-in site is picked up without
+  // waiting for a particular weekday. Scheduled at 05:15, before the morning detection run, so opportunities found
+  // today are in the queue for today's work rather than tomorrow's.
+  //
+  // It creates no draft, no PR and no recommendation: the weekly keyword-gap ship cycle, the recommendation gates
+  // and a human merge remain the only path from an opportunity to a client's site.
+  const competitorGrowthSchedule = process.env.COMPETITOR_GROWTH_CRON_SCHEDULE || '15 5 * * *';
+  if (!cron.validate(competitorGrowthSchedule)) {
+    console.error(`[cron] invalid COMPETITOR_GROWTH_CRON_SCHEDULE "${competitorGrowthSchedule}" — competitor growth NOT scheduled.`);
+  } else {
+    cron.schedule(competitorGrowthSchedule, () => locked('competitor-growth', async () => {
+      try {
+        const totals = await runCompetitorGrowthCycleForAllSites();
+        if (totals.sites) {
+          console.log(`[cron] competitor growth finished — ${totals.ran} site(s) ran, ${totals.skipped} not due, ${totals.opportunities} new opportunity(ies), $${totals.costUsd.toFixed(4)} spent`);
+        }
+      } catch (err) {
+        console.error('[cron] competitor growth error:', err.message);
+      }
+    }), { timezone: tz });
+    console.log(`[cron] competitor growth scheduled "${competitorGrowthSchedule}" (${tz})`);
+  }
+
+  // Stage -> main promotion for clients that review on a stage branch: once a person has merged a batch PR on stage, the agent
+  // opens the promotion PR (never merges it). Hourly, one cheap query when no client uses a stage branch.
+  const stagePromotionSchedule = process.env.STAGE_PROMOTION_CRON_SCHEDULE || '25 * * * *';
+  if (!cron.validate(stagePromotionSchedule)) {
+    console.error(`[cron] invalid STAGE_PROMOTION_CRON_SCHEDULE "${stagePromotionSchedule}" — stage promotion NOT scheduled.`);
+  } else {
+    cron.schedule(stagePromotionSchedule, () => locked('stage-promotion', async () => {
+      try {
+        const { runStagePromotionForAllSites } = await import('./lib/stage-promotion.js');
+        const totals = await runStagePromotionForAllSites();
+        if (totals.opened || totals.blocked || totals.failed) console.log(`[cron] stage promotion — ${totals.opened} promotion PR(s) opened, ${totals.waiting} waiting on stage checks, ${totals.blocked} blocked, ${totals.failed} failed, of ${totals.sites} client(s)`);
+      } catch (err) {
+        console.error('[cron] stage promotion error:', err.message);
+      }
+    }), { timezone: tz });
+    console.log(`[cron] stage promotion scheduled "${stagePromotionSchedule}" (${tz})`);
+  }
+
+  // PostHog daily ingest — only for projects that connected it. Costs nothing: it reads the client's own PostHog
+  // with the client's own key, so unlike the DataForSEO lanes there is no provider bill and no budget to respect.
+  // A platform where nobody uses PostHog does one indexed query a night and stops.
+  //
+  // 03:40, after the day has fully closed in most timezones and before the morning analysis, so a fresh day of
+  // product data is available to the same morning's work.
+  const posthogSchedule = process.env.POSTHOG_CRON_SCHEDULE || '40 3 * * *';
+  if (!cron.validate(posthogSchedule)) {
+    console.error(`[cron] invalid POSTHOG_CRON_SCHEDULE "${posthogSchedule}" — PostHog ingest NOT scheduled.`);
+  } else {
+    cron.schedule(posthogSchedule, () => locked('posthog-ingest', async () => {
+      try {
+        const totals = await runPosthogIngestForAllSites();
+        if (totals.sites) {
+          console.log(`[cron] posthog ingest finished — ${totals.ingested} site(s) ingested, ${totals.failed} failed, of ${totals.sites} connected`);
+        }
+      } catch (err) {
+        console.error('[cron] posthog ingest error:', err.message);
+      }
+    }), { timezone: tz });
+    console.log(`[cron] posthog ingest scheduled "${posthogSchedule}" (${tz})`);
+  }
+
+  // Rank tracking — where each opted-in site actually ranks for the keywords it chose to watch. OFF until
+  // sites.rank_tracking_enabled is set, and each site's own rank_tracking_max_keywords ceiling bounds the spend, so
+  // this entry costs one indexed query a night until a site is deliberately switched on.
+  //
+  // Fires daily and asks each site whether RANK_TRACKING_INTERVAL_DAYS have passed, for the same reason as the
+  // entries above: a night that fails is retried tomorrow rather than costing a whole interval. Scheduled at 04:30,
+  // before the competitor cycle, so a fresh position is available to the opportunity scorer the same morning.
+  const rankTrackingSchedule = process.env.RANK_TRACKING_CRON_SCHEDULE || '30 4 * * *';
+  if (!cron.validate(rankTrackingSchedule)) {
+    console.error(`[cron] invalid RANK_TRACKING_CRON_SCHEDULE "${rankTrackingSchedule}" — rank tracking NOT scheduled.`);
+  } else {
+    cron.schedule(rankTrackingSchedule, () => locked('rank-tracking', async () => {
+      try {
+        const totals = await runRankTrackingForAllSites();
+        if (totals.sites) {
+          console.log(`[cron] rank tracking finished — ${totals.ran} site(s) ran, ${totals.skipped} not due, ${totals.keywords} keyword(s) checked, $${totals.costUsd.toFixed(4)} spent`);
+        }
+      } catch (err) {
+        console.error('[cron] rank tracking error:', err.message);
+      }
+    }), { timezone: tz });
+    console.log(`[cron] rank tracking scheduled "${rankTrackingSchedule}" (${tz})`);
+  }
+
+  // Competitor outcome learning — DAILY and free: advances each opted-in site's opportunity lifecycle from the
+  // records the pipeline already wrote (drafts, deployments, fix_impact) and counts any outcome that has newly
+  // reached a MEASURED result. Separate from the cycle above because it makes no provider call: a measured result
+  // should reach the scorer close to when it was measured, not wait for the next paid interval. Runs after the
+  // evening impact measurements have landed.
+  const competitorOutcomeSchedule = process.env.COMPETITOR_OUTCOME_CRON_SCHEDULE || '45 23 * * *';
+  if (!cron.validate(competitorOutcomeSchedule)) {
+    console.error(`[cron] invalid COMPETITOR_OUTCOME_CRON_SCHEDULE "${competitorOutcomeSchedule}" — competitor outcome learning NOT scheduled.`);
+  } else {
+    cron.schedule(competitorOutcomeSchedule, () => locked('competitor-outcomes', async () => {
+      try {
+        const totals = await runCompetitorOutcomeLearningForAllSites();
+        if (totals.advanced || totals.counted) {
+          console.log(`[cron] competitor outcomes finished — ${totals.advanced} lifecycle change(s), ${totals.counted} verified outcome(s) counted across ${totals.sites} site(s)`);
+        }
+      } catch (err) {
+        console.error('[cron] competitor outcome learning error:', err.message);
+      }
+    }), { timezone: tz });
+    console.log(`[cron] competitor outcome learning scheduled "${competitorOutcomeSchedule}" (${tz})`);
   }
 
   // MONTHLY (was weekly): the design captured when a project first connects is

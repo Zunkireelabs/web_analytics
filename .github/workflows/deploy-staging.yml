@@ -459,6 +459,8 @@ jobs:
             # which is the log the Aug-23 collector-outage post-mortem reads.
             INGEST_SCHEDULE_ENABLED=false
             ANALYSIS_SCHEDULE_ENABLED=false
+            # Findings only: the Data Analyst never asks the app to generate drafts; the app's generator owns every fix.
+            ANALYST_DRAFT_TRIGGER=off
             DAAENVEOF
 
       - name: Build, deploy, and install cron
@@ -628,10 +630,17 @@ jobs:
             # an empty/no-match input) makes "nothing to carry over" a normal
             # outcome instead of a fatal one.
             echo "Installing Data Analyst nightly pipeline cron..."
-            NIGHTLY_CMD="cd $DIR && docker compose -f data-analyst-agent/docker-compose.dev.yml exec -T app python -m scripts.run_nightly_pipeline >> /var/log/analyst-nightly.log 2>&1"
-            ((crontab -l 2>/dev/null || true) | (grep -v -e 'run_nightly_pipeline' -e '^CRON_TZ=UTC$' || true); echo "CRON_TZ=UTC"; echo "0 22 * * * $NIGHTLY_CMD") | crontab -
-            echo "Data Analyst nightly pipeline scheduled (22:00 UTC daily, ahead of the 01:30 UTC morning run):"
-            crontab -l | grep run_nightly_pipeline
+            # NOT SCHEDULED ON STAGING ANY MORE. Staging and production share one analyst database
+            # (STAGING_DATA_ANALYST_DATABASE_URL), so two schedulers meant two runs a night writing the same rows. Production's
+            # in-container scheduler (deploy.yml: ingest 20:00 UTC, analysis 22:00 UTC) is now the ONLY scheduled owner.
+            # This step REMOVES any nightly line an earlier deploy installed, and keeps CRON_TZ=UTC because the monthly Common Crawl
+            # entry below relies on it. Staging stays available for MANUAL runs:
+            #   docker compose -f data-analyst-agent/docker-compose.dev.yml exec -T app python -m scripts.run_nightly_pipeline
+            # A manual run writes the SHARED database: never start one inside production's 20:00-04:00 UTC window.
+            echo "Removing the staging Data Analyst nightly cron (production's scheduler owns the shared database)..."
+            ((crontab -l 2>/dev/null || true) | (grep -v -e 'run_nightly_pipeline' -e '^CRON_TZ=UTC$' || true); echo "CRON_TZ=UTC") | crontab -
+            if crontab -l | grep -q run_nightly_pipeline; then echo "ERROR: the staging nightly cron is still installed" >&2; exit 1; fi
+            echo "Staging nightly cron: not installed (manual runs only)."
 
             # ── Common Crawl referring-domains ETL (monthly) ─────────────────
             # server/scripts/refresh-commoncrawl-graph.js populates the

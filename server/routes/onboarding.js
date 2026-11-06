@@ -7,12 +7,13 @@ import { getUserById } from '../store/users.js';
 import { isValidTimezone } from '../util/timezone.js';
 import { normalizeDomain } from '../util/domain.js';
 import { createWorkspace, createProject, addMember, discardNewWorkspace, setProjectGoal, validateGoal, claimHomeSiteIfNone } from '../store/workspaces.js';
-import { mapGoals, cleanOnboarding, findExistingProject, saveOnboarding, cleanDraft, saveDraft, getDraft, deleteDraft } from '../store/onboarding.js';
+import { mapGoals, cleanOnboarding, findExistingProject, saveOnboarding, cleanDraft, saveDraft, getDraft, deleteDraft, findAddTarget, discardNewProject } from '../store/onboarding.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
 import { markPending, summarizeOnboarding, findResumeProject, getSiteAccess, describeAccess } from '../store/access.js';
 import { sendAccessRequestStaffNotice, sendAccessReceivedEmail } from '../report/email.js';
 import { appOrigin } from './lib/app-url.js';
 import { resumeContext } from '../store/signup-recovery.js';
+import { endedBeyondGrace } from '../lib/ended-grace.js';
 
 // Public (no session yet): the get-started page calls this as soon as a visitor types their
 // site, to pre-fill the brand profile. It fetches third-party sites and makes one model call,
@@ -50,15 +51,17 @@ router.post('/onboarding/site', async (req, res, next) => {
 // on the page; it only ever finds one of THEIR projects. The draft saved so far comes back with it.
 router.get('/get-started/resume', requireAuth, async (req, res, next) => {
   try {
-    const project = await findResumeProject(req.userId, { website: String(req.query.website || '') });
+    let project = await findResumeProject(req.userId, { website: String(req.query.website || '') });
     const saved = await getDraft(req.userId);
+    // A trial that ended more than 30 days ago is treated as new: nothing to go back to, so the questions start again.
+    let access = project ? describeAccess(await getSiteAccess(project.id)) : null;
+    if (access && endedBeyondGrace(access)) { project = null; access = null; }
     // `draft` is null once the answers are gone (empty, or kept longer than staff allow); `returning` says how long they were away.
     if (!project) {
       const { draft, returning } = await resumeContext(req.userId, saved);
       return res.json({ state: 'new', project: null, draft, returning });
     }
     const draft = saved;
-    const access = describeAccess(await getSiteAccess(project.id));
     res.json({ state: access.state, requested: access.requested, daysLeft: access.daysLeft, endsAt: access.endsAt,
       project: { id: project.id, name: project.name, domain: project.website_domain, current: Number(req.siteId) === project.id }, draft: access.state === 'client' ? null : draft, returning: null });
   } catch (e) { next(e); }
@@ -90,7 +93,9 @@ router.post('/onboarding/complete', requireAuth, async (req, res, next) => {
     const data = cleanOnboarding(req.body);
     if (!data.brand) return res.status(400).json({ error: 'A brand name is required.' });
 
-    const existing = await findExistingProject(req.userId, domain.domain);
+    let existing = await findExistingProject(req.userId, domain.domain);
+    // Their old trial ended more than 30 days ago: this is a new trial, not a return to that project.
+    if (existing && endedBeyondGrace(describeAccess(await getSiteAccess(existing.id)))) existing = null;
     if (existing) {
       await saveOnboarding(existing.id, data, req.userId);
       await deleteDraft(req.userId).catch(() => {});
@@ -103,6 +108,37 @@ router.post('/onboarding/complete', requireAuth, async (req, res, next) => {
     const goalCheck = goals.length
       ? validateGoal({ goals, growth: 'steady', months: 6, customText: goals.includes('custom') ? 'Report to clients' : undefined })
       : null;
+
+    // "Add another project": the website goes into the workspace they already have, as one more project, not a second workspace.
+    // It is a different project, so it is a request like any other: pending until staff approve it, and the approval email sends
+    // them to sign in with an emailed code as always.
+    if (req.body?.addToExisting === true) {
+      const target = await findAddTarget(req.userId);
+      if (!target) return res.status(409).json({ error: 'You can add another project once your workspace is active.', code: 'CANNOT_ADD' });
+      let added = null;
+      try {
+        added = await createProject({ workspaceId: target.workspace_id, name: data.projectName || data.brand, websiteDomain: domain.domain, timezone });
+        await markPending(added.id, { source: 'get-started', requested: true });
+        if (goalCheck?.ok) await setProjectGoal({ siteId: added.id, ...goalCheck.goal, userId: req.userId });
+        await saveOnboarding(added.id, data, req.userId);
+      } catch (err) {
+        if (added) await discardNewProject({ siteId: added.id, workspaceId: target.workspace_id }).catch((e) => console.error('[onboarding] could not take back the new project:', e.message));
+        throw err;
+      }
+      req.workspaceId = target.workspace_id;
+      await recordAuditEvent(req, {
+        action: 'project.created', targetType: 'site', targetId: String(added.id), tenantSiteId: added.id, tenantName: added.name,
+        metadata: { workspaceId: target.workspace_id, name: added.name, websiteDomain: added.website_domain, via: 'get-started', added: true }, success: true,
+      });
+      sendAccessRequestStaffNotice({
+        companyName: added.name, websiteDomain: added.website_domain, contactEmail: req.session?.email || (await getUserById(req.userId))?.email || '',
+        summary: summarizeOnboarding(data), reviewUrl: `${appOrigin(req)}/account?scope=platform`,
+      }).catch((err) => console.error('[onboarding] staff notice failed:', err.message));
+      const to = req.session?.email || (await getUserById(req.userId))?.email;
+      if (to) sendAccessReceivedEmail({ companyName: added.name, contactEmail: to }).catch((err) => console.error('[onboarding] received email failed:', err.message));
+      await deleteDraft(req.userId).catch(() => {});
+      return res.status(201).json({ ok: true, existing: false, added: true, workspaceId: target.workspace_id, project: { id: added.id, name: added.name, domain: added.website_domain } });
+    }
 
     // Same all-or-nothing shape as POST /workspaces: a failure part-way takes back what was made here.
     const workspace = await createWorkspace({ name: data.workspaceName || data.brand });

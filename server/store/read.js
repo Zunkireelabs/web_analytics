@@ -706,3 +706,85 @@ export async function saveAiCompareCache(siteId, compareType, paramsKey, dataSig
   );
   return rows[0];
 }
+
+// How much a date range's GA4 figures can be trusted (migration 238), for display beside them.
+//
+// Returns the WORST verdict in the range plus the days behind it, because a week containing one sampled day is not a
+// clean week — showing its total without a word would overstate what GA4 actually returned. Days ingested before the
+// verdict existed are counted as `unassessed` and deliberately NOT treated as clean: we do not know, and saying
+// "complete" about a day we never assessed would be a claim we cannot support.
+//
+// `worst` is null only when nothing in the range was assessed at all, which readers render as no badge rather than a
+// reassuring one.
+export async function getGa4DataQuality(siteId, start, end) {
+  const { rows } = await query(
+    `SELECT date, data_confidence, data_quality
+       FROM ga4_daily
+      WHERE site_id = $1 AND date BETWEEN $2 AND $3
+      ORDER BY date`,
+    [siteId, start, end]
+  );
+  if (!rows.length) return { worst: null, days: 0, unassessed: 0, counts: {}, affectedDays: [], notes: [] };
+
+  const RANK = { complete: 0, partial: 1, estimated: 2 };
+  const counts = { complete: 0, partial: 0, estimated: 0 };
+  let unassessed = 0;
+  let worst = null;
+  const affectedDays = [];
+  const notes = new Set();
+
+  // Notes are rebuilt from the stored FLAGS, not from each day's stored note text. The text contains that day's own
+  // percentage, so de-duplicating the strings keeps one line per distinct number — which is how a 30-day period ended
+  // up telling someone "the city breakdown accounts for 93%…" and "…73%…" as if they were two separate problems. One
+  // cause is one sentence, however many days it ran for.
+  const sampled = { days: 0, lowestRatio: null };
+  let thresholdedDays = 0;
+  let otherRowDays = 0;
+  const incompleteByDimension = new Map(); // dimension -> { days, worstMissingShare }
+
+  for (const r of rows) {
+    const verdict = r.data_confidence;
+    if (!verdict) { unassessed += 1; continue; }
+    counts[verdict] = (counts[verdict] || 0) + 1;
+    if (worst == null || RANK[verdict] > RANK[worst]) worst = verdict;
+    if (verdict === 'complete') continue;
+
+    affectedDays.push({ date: r.date, confidence: verdict });
+    const flags = r.data_quality?.flags || {};
+    if (verdict === 'estimated') {
+      sampled.days += 1;
+      const ratio = r.data_quality?.samplingRatio;
+      if (typeof ratio === 'number' && (sampled.lowestRatio == null || ratio < sampled.lowestRatio)) sampled.lowestRatio = ratio;
+    }
+    if (flags.thresholded) thresholdedDays += 1;
+    if (flags.otherRowPresent) otherRowDays += 1;
+    for (const b of flags.incompleteBreakdowns || []) {
+      const current = incompleteByDimension.get(b.dimension) || { days: 0, worstMissingShare: 0 };
+      current.days += 1;
+      current.worstMissingShare = Math.max(current.worstMissingShare, Number(b.missingShare) || 0);
+      incompleteByDimension.set(b.dimension, current);
+    }
+  }
+
+  const dayWord = (n) => (n === 1 ? 'day' : 'days');
+  if (sampled.days) {
+    const share = sampled.lowestRatio != null ? ` (as little as ${Math.round(sampled.lowestRatio * 100)}% of events on one day)` : '';
+    notes.add(`Google returned sampled data on ${sampled.days} ${dayWord(sampled.days)}${share}, so those figures are estimates rather than exact counts.`);
+  }
+  if (thresholdedDays) {
+    notes.add(`Google withheld some rows on ${thresholdedDays} ${dayWord(thresholdedDays)} to protect individual privacy, which happens when traffic is low or when demographics and signals are enabled. Totals are still Google's own; some breakdown rows are missing.`);
+  }
+  if (otherRowDays) {
+    notes.add(`On ${otherRowDays} ${dayWord(otherRowDays)} some rows were grouped into "(other)" by Google because the dimension had too many distinct values, so that list is not complete.`);
+  }
+  for (const [dimension, info] of [...incompleteByDimension].sort((a, b) => b[1].worstMissingShare - a[1].worstMissingShare)) {
+    const lowest = Math.round((1 - info.worstMissingShare) * 100);
+    notes.add(`The ${dimension} breakdown was incomplete on ${info.days} ${dayWord(info.days)} — as little as ${lowest}% of the day's total was returned.`);
+  }
+
+  return {
+    worst, days: rows.length, unassessed, counts, affectedDays,
+    // De-duplicated across the range: the same cause repeated for 30 days is one thing to tell someone, not thirty.
+    notes: [...notes],
+  };
+}

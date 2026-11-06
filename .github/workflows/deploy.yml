@@ -256,7 +256,17 @@ jobs:
             # that this workflow never installed — without this the Analyst
             # page's early-warning section has no data to render.
             ANALYSIS_SCHEDULE_ENABLED=true
-            ANALYSIS_SCHEDULE_HOUR_UTC=4
+            # Findings must be complete before the app's 05:30 Asia/Kathmandu daily orchestrator, which waits for this run's
+            # findings_complete marker and refuses to use findings without it. 22:00 UTC is 03:45 Kathmandu, the same hour as
+            # staging. Ingestion runs two hours earlier (20:00 UTC, 01:45 Kathmandu) so analysis reads a finished ingest; it was
+            # 03:00/04:00 UTC, which delivered findings at 09:45 Kathmandu, after the orchestrator had already run.
+            # This scheduler is the ONLY scheduled owner of the shared analyst database: deploy-staging.yml no longer installs its
+            # 22:00 UTC crontab (and removes an old one), so the two cannot collide.
+            INGEST_SCHEDULE_HOUR_UTC=20
+            ANALYSIS_SCHEDULE_HOUR_UTC=22
+            # Findings only: the Data Analyst never asks the app to generate drafts (both entry points check this). The app's
+            # unified generator owns every fix. Python->app parity was verified end to end before this was set.
+            ANALYST_DRAFT_TRIGGER=off
             ENVEOF
 
             docker compose build

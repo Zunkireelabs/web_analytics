@@ -7,6 +7,7 @@ import Button from '../Button.jsx';
 import Badge from '../Badge.jsx';
 import GoalFields from './GoalFields.jsx';
 import BusinessProfileFields, { gbpReady, gbpSource } from './BusinessProfileFields.jsx';
+import PosthogFields from './PosthogFields.jsx';
 import { DEFAULT_GOAL, goalComplete } from '../../lib/workspace.js';
 import { useAccess } from '../../lib/access.jsx';
 
@@ -32,7 +33,8 @@ import { useAccess } from '../../lib/access.jsx';
 //
 // Closing part-way is safe: the project already exists, and the Projects page
 // shows "Finish setting up" on it, which reopens this at the step still owed.
-const STEPS = ['Details', 'Goal', 'Google', 'Business', 'GitHub', 'Baseline'];
+// 'Product' is the optional PostHog step: most clients skip it, and the Baseline step runs whether they did or not.
+const STEPS = ['Details', 'Goal', 'Google', 'Business', 'GitHub', 'PostHog', 'Baseline'];
 
 const CARD = { boxShadow: '0 0 0 1px var(--input), 0 1px 2px rgba(0,0,0,.03)' };
 const CARD_ON = { boxShadow: '0 0 0 1px var(--primary), 0 0 0 4px var(--primary-tint)' };
@@ -696,7 +698,7 @@ export default function NewProjectModal({ workspace, first = false, project: exi
                   <label className="flex items-center gap-3 cursor-pointer">
                     <span className="min-w-0 flex-1">
                       <span className="block text-[13px] font-medium text-fg">Review on a stage branch first</span>
-                      <span className="block text-xs text-faint">Pull requests open into the stage branch; you promote it to main yourself.</span>
+                      <span className="block text-xs text-faint">Light content edits still go straight to main. Landing pages, blog posts and template fixes open into the stage branch; once you merge that, we open the stage-to-main pull request for you to review.</span>
                     </span>
                     <input type="checkbox" role="switch" checked={useStage} onChange={(e) => setUseStage(e.target.checked)} className="shrink-0 w-4 h-4" />
                   </label>
@@ -812,6 +814,30 @@ export default function NewProjectModal({ workspace, first = false, project: exi
   }
 
   if (step === 6) {
+    icon = BarChart3;
+    title = 'Connect PostHog';
+    subtitle = 'Optional. See where people drop out before they convert.';
+    body = (
+      <div className="space-y-4">
+        {project?.id
+          ? <PosthogFields siteId={project.id} notice={notice} initialGuide={Boolean(notice?.guide)} />
+          : <div className="text-sm text-faint">Finish the earlier steps first.</div>}
+        {errorBox}
+      </div>
+    );
+    footer = (
+      <>
+        <Button variant="light" onClick={() => setStep(5)} disabled={busy}>Back</Button>
+        {/* Same shape as every other optional step (Back / Skip for now / primary), so someone who has read
+            "optional" has the word they are looking for. Both buttons advance: nothing on this step is saved by the
+            footer — connecting happens through the form's own button. */}
+        <Button variant="light" onClick={() => setStep(7)} disabled={busy}>Skip for now</Button>
+        <Button variant="primary" onClick={() => setStep(7)} disabled={busy}>Continue</Button>
+      </>
+    );
+  }
+
+  if (step === 7) {
     icon = baseline === 'done' ? Check : Loader2;
     title = baseline === 'done' ? `${project?.name} is ready` : baseline === 'waiting' ? `${project?.name} is created` : 'Building your baseline';
     subtitle = baseline === 'done' ? 'Here is where things stand.' : baseline === 'waiting' ? 'Here is what is left before it starts collecting data.' : 'This takes a few minutes. You can close this and it keeps going.';

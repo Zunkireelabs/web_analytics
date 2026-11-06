@@ -319,7 +319,7 @@ mock.module(resolve('../../routes/action-center.js'), {
   },
 });
 
-const { autoRemediateSafeRecommendations, shipDraftForRecommendation } = await import('./auto-remediation.js');
+const { autoRemediateSafeRecommendations, shipDraftForRecommendation, selectRemediationCandidates } = await import('./auto-remediation.js');
 
 describe('auto-remediation — opt-in gate', () => {
   beforeEach(reset);
@@ -1687,5 +1687,70 @@ describe('impactConfidence (measured business impact) tempers ranking within a t
     await autoRemediateSafeRecommendations(1);
 
     assert.deepEqual(calls.generated, ['f2', 'f1']);
+  });
+});
+
+// The pipeline's preparation stage chooses its candidates with the SAME selection the shipping loop uses, without shipping.
+describe('selectRemediationCandidates — selection without shipping', () => {
+  beforeEach(reset);
+
+  test('returns the day\'s ranked queue and ships/drafts nothing', async () => {
+    recommendations = [rec(1), rec(2), rec(3)];
+    const out = await selectRemediationCandidates(site, 1, {});
+    assert.equal(out.done, undefined);
+    assert.deepEqual(out.ctx.budgeted.map((r) => r.id).sort(), [1, 2, 3]);
+    assert.equal(calls.generated.length, 0, 'selecting must not generate a draft');
+  });
+
+  test('picks exactly the items the shipping loop would ship (same selection)', async () => {
+    site.auto_remediation_daily_limit = 3; spentToday = 1;
+    recommendations = [rec(1), rec(2), rec(3), rec(4), rec(5)];
+    const picked = (await selectRemediationCandidates(site, 1, {})).ctx.budgeted.map((r) => r.id).sort();
+    calls.generated.length = 0;
+    await autoRemediateSafeRecommendations(1);
+    assert.deepEqual(calls.generated.map((g) => g.id ?? g.recommendationId ?? g).length, picked.length);
+    assert.equal(picked.length, 2);
+  });
+
+  test('a site that never opted in ends with the same reason and no selection', async () => {
+    site.auto_remediation_enabled = false; recommendations = [rec(1)];
+    const out = await selectRemediationCandidates(site, 1, {});
+    assert.equal(out.done.stoppedReason, 'disabled');
+    assert.equal(out.ctx, undefined);
+  });
+
+  test('onboarding pending ends with its reason; an exhausted budget ends with budget-exhausted', async () => {
+    recommendations = [rec(1)];
+    assert.equal((await selectRemediationCandidates(site, 1, { onboardingAnalysisPending: async () => true })).done.stoppedReason, 'onboarding-analysis-pending');
+    site.auto_remediation_daily_limit = 2; spentToday = 2; recommendations = [rec(1), rec(2)];
+    assert.equal((await selectRemediationCandidates(site, 1, {})).done.stoppedReason, 'budget-exhausted');
+  });
+});
+
+// The pipeline's 11:00 run: new fixes come only from the PREPARE stage, but the repair queues still ship exactly as before.
+describe('autoRemediateSafeRecommendations — drainOnly (pipeline 11:00 run)', () => {
+  beforeEach(reset);
+
+  test('open recommendations are NOT drafted or shipped inline', async () => {
+    recommendations = [rec(1), rec(2), rec(3)];
+    const result = await autoRemediateSafeRecommendations(1, { drainOnly: true });
+    assert.equal(calls.generated.length, 0, 'unprepared work must not be generated at ship time');
+    assert.equal(result.shipped, 0);
+  });
+
+  test('the content-repair queue still drains into its one PR', async () => {
+    recommendations = [rec(1), rec(2)];
+    contentRepairQueueItems = [{ id: 701, params: { edits: [{ path: 'src/a.njk', content: 'x' }] } }];
+    const result = await autoRemediateSafeRecommendations(1, { drainOnly: true });
+    assert.equal(calls.generated.length, 0);
+    assert.deepEqual(calls.queueShipped, [701]);
+    assert.equal(calls.batchFinalizeCalls.length, 1);
+    assert.equal(result.shipped, 1);
+  });
+
+  test('without drainOnly the very same state still drafts inline (default behaviour unchanged)', async () => {
+    recommendations = [rec(1)];
+    await autoRemediateSafeRecommendations(1);
+    assert.equal(calls.generated.length, 1);
   });
 });

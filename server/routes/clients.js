@@ -388,6 +388,19 @@ async function runBaselineSequenceUnlocked(siteId, site) {
     return null;
   });
 
+  // What this client actually sells, read from their own site and PROPOSED for review. Everything downstream of it —
+  // market research, gap relevance, competitor footprints — is grounded in this list, and until now it was typed in by
+  // hand, so a client onboarded quickly simply had none and paid research refused to run for them. Best-effort and
+  // never fatal: a vague homepage or a model outage means no proposals, not a failed onboarding. Skipped entirely when
+  // any capability already exists, so re-running a baseline never adds to a list a person has curated.
+  const proposedCaps = await import('../lib/capability-discovery.js')
+    .then((m) => m.discoverCapabilitiesIfNone(site))
+    .catch((err) => {
+      console.error(`[clients] site ${siteId} capability discovery failed:`, err.message);
+      return null;
+    });
+  if (proposedCaps?.proposed) console.log(`[clients] site ${siteId}: proposed ${proposedCaps.proposed} capability(ies) for review.`);
+
   // Real historical GSC/GA4 data — if the platform's Google account
   // hasn't actually been granted access yet, this fails honestly here
   // rather than silently proceeding to a baseline with no real data.
@@ -431,6 +444,14 @@ async function runBaselineSequenceUnlocked(siteId, site) {
     console.error(`[clients] site ${siteId} baseline report generation failed:`, err.message);
     return null;
   });
+
+  // Phase 1 project memory: write this project's first memory versions now that the baseline report exists, so it
+  // starts life with a recorded starting point instead of waiting for the next job to notice it. Best-effort like every
+  // step here: it only reads existing tables and a failure must never fail onboarding. Sections that are not ready yet
+  // (the design capture above is queued, not finished) are simply skipped and picked up by a later snapshot.
+  await import('../lib/project-memory.js')
+    .then((m) => m.snapshotProjectMemory(siteId, { reason: 'onboarding' }))
+    .catch((err) => { console.error(`[clients] site ${siteId} project-memory init failed:`, err.message); });
 
   // Real "where you stand today" findings for Milestones — fire-and-forget
   // like the manual /site-audit trigger: resolves once the audit_runs row

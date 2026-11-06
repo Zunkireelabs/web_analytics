@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { shiftYmd, daysBetween, presetRange, rangeKeyFor, compareRange, isYmd, compact, pctDelta, paginate, buildInsights, seriesTotals } from './overview-view.js';
+import { shiftYmd, daysBetween, presetRange, rangeKeyFor, compareRange, isYmd, compact, pctDelta, paginate, buildInsights, seriesTotals, buildVisitorInsights, behaviorTotals, denseSeries } from './overview-view.js';
 
 describe('date ranges', () => {
   test('shiftYmd goes back by days in UTC', () => {
@@ -9,20 +9,26 @@ describe('date ranges', () => {
   });
   test('presets count back from the newest day', () => {
     assert.deepEqual(presetRange('2026-11-03', '28'), { start: '2026-10-06', end: '2026-11-03' });
-    assert.deepEqual(presetRange('2026-11-03', 'all', '2025-01-01'), { start: '2025-01-01', end: '2026-11-03' });
-    assert.equal(presetRange('2026-11-03', 'all', null), null);
+    assert.deepEqual(presetRange('2026-11-03', '1'), { start: '2026-11-03', end: '2026-11-03' }); // 24 hours: the newest day
+    assert.deepEqual(presetRange('2026-11-03', '545'), { start: '2025-05-07', end: '2026-11-03' }); // 18 months
+    assert.equal(presetRange('2026-11-03', 'all', '2025-01-01'), null); // no "All time" any more
     assert.equal(presetRange('2026-11-03', 'nope'), null);
   });
   test('rangeKeyFor finds the preset or says custom', () => {
     assert.equal(rangeKeyFor('2026-10-06', '2026-11-03', '2026-11-03', null), '28');
     assert.equal(rangeKeyFor('2026-10-07', '2026-11-03', '2026-11-03', null), 'custom');
     assert.equal(rangeKeyFor('2026-10-06', '2026-11-02', '2026-11-03', null), 'custom');
-    assert.equal(rangeKeyFor('2025-01-01', '2026-11-03', '2026-11-03', '2025-01-01'), 'all');
+    assert.equal(rangeKeyFor('2026-11-03', '2026-11-03', '2026-11-03', null), '1');
+    assert.equal(rangeKeyFor('2025-05-07', '2026-11-03', '2026-11-03', null), '545');
+    assert.equal(rangeKeyFor('2026-10-31', '2026-11-03', '2026-11-03', null), 'custom'); // 3 days is no longer a preset
   });
   test('compare: previous period has the same length and ends the day before', () => {
     const r = compareRange('prev', '2026-10-06', '2026-11-03');
     assert.equal(r.end, '2026-10-05');
     assert.equal(daysBetween(r.start, r.end), daysBetween('2026-10-06', '2026-11-03'));
+  });
+  test('compare: the previous period of one day is the day before', () => {
+    assert.deepEqual(compareRange('prev', '2026-11-03', '2026-11-03'), { start: '2026-11-02', end: '2026-11-02' });
   });
   test('compare: same period last year, none, and custom', () => {
     assert.deepEqual(compareRange('year', '2026-10-06', '2026-11-03'), { start: '2025-10-06', end: '2025-11-03' });
@@ -121,3 +127,59 @@ describe('buildInsights', () => {
     for (let i = 1; i < r.length; i++) assert.ok(order[r[i - 1].impact] <= order[r[i].impact]);
   });
 });
+
+describe('visitor insights (Visitors tab)', () => {
+  const ch = (...pairs) => pairs.map(([channel, sessions]) => ({ channel, sessions }));
+  test('no sessions, no notes', () => {
+    assert.deepEqual(buildVisitorInsights({ channels: [] }), []);
+    assert.deepEqual(buildVisitorInsights({ channels: ch(['Direct', 0]) }), []);
+  });
+  test('search-led month: search and direct notes, plus the small-channels note', () => {
+    const out = buildVisitorInsights({ channels: ch(['Organic Search', 1950], ['Direct', 1265], ['Referral', 100], ['Organic Social', 35], ['Other', 70]) });
+    assert.deepEqual(out.map((i) => i.key), ['organic-main', 'direct-high', 'referral-social-small']);
+    assert.equal(out[0].parts[0].t, '57%');
+    assert.equal(out[1].parts[0].t, '37%');
+  });
+  test('every note needs its own condition: a balanced month gives none of them', () => {
+    const out = buildVisitorInsights({ channels: ch(['Organic Search', 400], ['Direct', 250], ['Referral', 200], ['Organic Social', 150]) });
+    assert.deepEqual(out, []);
+  });
+  test('the small-channels note is not made up for a tiny sample', () => {
+    assert.deepEqual(buildVisitorInsights({ channels: ch(['Organic Search', 30], ['Direct', 5]) }).filter((i) => i.key === 'referral-social-small'), []);
+  });
+});
+
+describe('behavior totals (Behavior tab)', () => {
+  test('sums views, visits and actions; people are the busiest day, never a sum', () => {
+    const t = behaviorTotals([
+      { date: '2026-10-01', pageviews: 100, sessions: 40, events: 300, people: 30 },
+      { date: '2026-10-02', pageviews: 120, sessions: 50, events: 320, people: 45 },
+    ]);
+    assert.deepEqual(t, { pageviews: 220, sessions: 90, events: 620, people: 45 });
+  });
+  test('a metric PostHog did not return stays null, not 0', () => {
+    assert.deepEqual(behaviorTotals([{ date: '2026-10-01', pageviews: 10, sessions: null, events: null, people: null }]),
+      { pageviews: 10, sessions: null, events: null, people: null });
+    assert.deepEqual(behaviorTotals([]), { pageviews: null, sessions: null, events: null, people: null });
+  });
+});
+
+describe('denseSeries', () => {
+  test('one row per day, missing days are empty rows, not zeros', () => {
+    const out = denseSeries('2026-10-01', 4, [{ date: '2026-10-01', pageviews: 5 }, { date: '2026-10-03', pageviews: 7 }]);
+    assert.deepEqual(out.map((r) => r.date), ['2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04']);
+    assert.equal(out[0].pageviews, 5);
+    assert.equal(out[1].pageviews, undefined);
+    assert.equal(out[2].pageviews, 7);
+  });
+  test('a comparison period with different missing days still lines up by position in the period', () => {
+    const cur = denseSeries('2026-10-08', 3, [{ date: '2026-10-08', pageviews: 1 }, { date: '2026-10-10', pageviews: 3 }]);
+    const prev = denseSeries('2026-10-01', 3, [{ date: '2026-10-02', pageviews: 20 }]);
+    assert.equal(cur[0].pageviews, 1); assert.equal(prev[0].pageviews, undefined);
+    assert.equal(prev[1].pageviews, 20); assert.equal(cur[1].pageviews, undefined); // day 2 of each period, not row 2 of each list
+  });
+  test('no rows at all gives all-empty days', () => {
+    assert.ok(denseSeries('2026-10-01', 3).every((r) => Object.keys(r).length === 1));
+  });
+});
+

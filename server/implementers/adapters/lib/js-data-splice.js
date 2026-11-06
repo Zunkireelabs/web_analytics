@@ -98,10 +98,31 @@ export function findRootArrayBounds(content, format) {
   const pattern = ROOT_ARRAY_PATTERN_BY_FORMAT[format];
   if (!pattern) return null;
   const m = pattern.exec(content);
-  if (!m) return null;
+  if (!m) return format === 'js-export-array' ? findNamedExportArrayBounds(content) : null;
   const start = m.index + m[0].length;
   const end = scanBalanced(content, start, '[', ']');
   if (end === -1) return null;
+  return { start, end };
+}
+
+// The other common shape of a JS data file: the array is declared under a name and the default export is that name, optionally
+// passed through a transform:
+//     const cities = [ { id: "kathmandu", ... }, ... ];
+//     export default cities.map((c) => ({ ...c, extra }));      // or: export default cities;
+// zunkireelabs-web's src/_data/locations.js moved to this shape on 2 Oct 2026, after which no location entry could be found and
+// every location-page fix was silently dropped as 'adapter-data-not-ready'. The bounds returned are the DECLARED array's, so a
+// splice writes into the source data. Accepted only when the name is declared exactly once, as an array literal; anything less
+// certain returns null exactly as before (never a guess).
+function findNamedExportArrayBounds(content) {
+  const exp = /export\s+default\s+([A-Za-z_$][\w$]*)\s*(?:;|\.|$|\n)/m.exec(content);
+  if (!exp) return null;
+  const name = exp[1].replace(/[$]/g, '\\$&');
+  const decl = new RegExp(`(?:^|[\\s;])(?:const|let|var)\\s+${name}\\s*=\\s*\\[`, 'g');
+  const found = [...content.matchAll(decl)];
+  if (found.length !== 1) return null;
+  const start = found[0].index + found[0][0].length;
+  const end = scanBalanced(content, start, '[', ']');
+  if (end === -1 || end > exp.index) return null; // the declaration must be a complete array before the export
   return { start, end };
 }
 

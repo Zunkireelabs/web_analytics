@@ -2,6 +2,7 @@ import { useEffect, useState, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { api, setReadOnlyAccess } from './api.js';
 import { AccessProvider, isOpenWhileLocked } from './lib/access.jsx';
+import { PosthogProvider } from './lib/posthog-state.jsx';
 import AccessBanner from './components/access/AccessBanner.jsx';
 import LockedPage from './components/access/LockedPage.jsx';
 import SuperRankLogin from './pages/SuperRankLogin.jsx';
@@ -217,6 +218,7 @@ export default function App() {
 
   return (
     <AccessProvider value={{ readOnly, access }}>
+    <PosthogProvider siteId={siteId}>
     <div className="min-h-screen md:h-screen md:overflow-hidden flex text-sm">
       <Sidebar sites={sites} siteId={siteId} isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} onSwitchProject={switchProject} onLogout={logout}
         mobileOpen={mobileNavOpen} onCloseMobile={() => setMobileNavOpen(false)}
@@ -344,6 +346,7 @@ export default function App() {
           staff-only Admin Assistant on /analyst has. */}
       <ClientAssistantPanel open={agentOpen} onClose={() => setAssistantOpen(false)} />
     </div>
+    </PosthogProvider>
     </AccessProvider>
   );
 }

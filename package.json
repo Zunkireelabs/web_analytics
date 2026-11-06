@@ -11,6 +11,10 @@
     "ingest": "node server/scripts/ingest.js",
     "create-client": "node server/scripts/create-client.js",
     "connect-site": "node server/scripts/connect-site.js",
+    "model-adaptation": "node server/scripts/model-adaptation.js",
+    "learning-governance": "node server/scripts/learning-governance.js",
+    "project-memory": "node server/scripts/project-memory.js",
+    "industry-intelligence": "node server/scripts/industry-intelligence.js",
     "connect-repo": "node server/scripts/connect-repo.js",
     "onboard-client": "node server/scripts/onboard-client.js",
     "onboard-product-client": "node server/scripts/onboard-product-client.js",
@@ -22,6 +26,7 @@
     "bootstrap-structural-markers": "node server/scripts/bootstrap-structural-markers.js",
     "install-rendering-workflow": "node server/scripts/install-rendering-workflow.js",
     "check-env-parity": "node server/scripts/check-env-parity.js",
+    "master-agent-plan": "node server/scripts/master-agent-plan.js",
     "refresh-commoncrawl-graph": "node server/scripts/refresh-commoncrawl-graph.js",
     "weekly": "node server/scripts/weekly.js",
     "executive-report": "node server/scripts/executive-report.js",
@@ -35,7 +40,10 @@
     "dev:web": "vite",
     "build:web": "vite build",
     "preview:web": "vite preview",
-    "check-error-leaks": "node server/scripts/check-error-leaks.js"
+    "check-error-leaks": "node server/scripts/check-error-leaks.js",
+    "competitor-market": "node server/scripts/competitor-market.js",
+    "discover-capabilities": "node server/scripts/discover-capabilities.js",
+    "set-target-places": "node server/scripts/set-target-places.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.102.0",

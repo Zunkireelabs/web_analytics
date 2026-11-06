@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Building2, Rocket, Trash2, UserCheck } from 'lucide-react';
+import { Bot, Building2, Rocket, Trash2, UserCheck } from 'lucide-react';
 import { api } from '../../api.js';
 import Button from '../Button.jsx';
 import Modal from '../Modal.jsx';
@@ -15,6 +15,7 @@ import UnderlineTabs from '../settings/UnderlineTabs.jsx';
 import SegmentedTabs from '../SegmentedTabs.jsx';
 import { plural } from '../../lib/workspace.js';
 import WorkspacesView from '../platform/WorkspacesView.jsx';
+import InstancesView from '../platform/InstancesView.jsx';
 
 // Account settings → Platform: every workspace on app.superrank.si, for the
 // SuperRank team only. Search by workspace, owner, project or domain; filter to
@@ -26,6 +27,7 @@ const TABS = [
   { key: 'getstarted', label: 'Get-started requests', icon: Rocket },
   { key: 'approvals', label: 'Approvals', icon: UserCheck },
   { key: 'workspaces', label: 'All workspaces', icon: Building2 },
+  { key: 'instances', label: 'Agent instances', icon: Bot },
 ];
 
 export default function PlatformSettings({ onSwitchProject, tab, onTab }) {
@@ -99,6 +101,7 @@ export default function PlatformSettings({ onSwitchProject, tab, onTab }) {
         {!error && data === null && <div className="px-5 py-8"><div className="h-5 bg-muted rounded-control animate-pulse" /></div>}
         {data && <WorkspacesView workspaces={data.workspaces} actions={actions} />}
       </SettingsCard>}
+      {active === 'instances' && <InstancesView actions={actions} />}
       <Modal isOpen={!!deleting} onClose={() => !delBusy && setDeleting(null)} icon={Trash2} title="Delete workspace"
         subtitle={deleting ? <>This removes <span className="text-fg font-medium">{deleting.name}</span> and its {plural(deleting.projects.length, 'project', 'projects')}. Its people lose access. The data is kept, so we can restore it if asked.</> : null}
         footer={<><Button variant="light" onClick={() => setDeleting(null)} disabled={delBusy}>Cancel</Button>

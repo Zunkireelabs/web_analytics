@@ -5,6 +5,10 @@ import { recordAuditEvent } from '../store/admin/audit-log.js';
 import { callDataAnalystAgent } from '../lib/data-analyst-client.js';
 import { impactByGeneratorAllSites } from '../store/analyst-outlook.js';
 import { fixLabel } from '../agents/lib/analyst-outlook.js';
+import { loadInstanceList, loadInstanceDetail } from '../lib/instance-view.js';
+import { health as masterHealth, shadowReport } from '../lib/master-agent.js';
+import { loadMasterControl, setMasterMode, shadowPlanDetail, MasterControlError } from '../lib/master-agent-control.js';
+import { setAutonomy, loadAutonomy, AutonomyError } from '../lib/autonomy-control.js';
 import { isPlatformAdmin, listAllWorkspacesForPlatform, getProject, deleteWorkspaceAsPlatform } from '../store/workspaces.js';
 
 // The platform admin's own view across every client workspace. Everything here
@@ -32,6 +36,75 @@ router.get('/platform/workspaces', requireAuth, requirePlatformAdmin, async (req
         needsSetup: workspaces.reduce((n, w) => n + w.needsSetup, 0),
       },
     });
+  } catch (e) { next(e); }
+});
+
+// Agent instances: each project's Growth Agent seen as one thing, READ ONLY (lib/instance-view.js). Counts, dates and states only;
+// no page, query, draft or memory text is ever returned. Nothing here writes, and nothing here is reachable by a non-admin.
+router.get('/platform/instances', requireAuth, requirePlatformAdmin, async (req, res, next) => {
+  try { res.json(await loadInstanceList()); } catch (e) { next(e); }
+});
+
+router.get('/platform/instances/:siteId', requireAuth, requirePlatformAdmin, async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.siteId);
+    if (!Number.isInteger(siteId) || siteId <= 0) return res.status(404).json({ error: 'Not found.' });
+    const detail = await loadInstanceDetail(siteId);
+    if (!detail) return res.status(404).json({ error: 'Not found.' });
+    res.json(detail);
+  } catch (e) { next(e); }
+});
+
+// The Master Agent: its mode (off / shadow / on), whether it may be switched, what today's queue did, and, while it is planning, how its
+// plan compares with what the existing loop did. The mode is chosen here (PUT below), not by editing server settings; the MASTER_AGENT_MODE
+// environment variable is only a ceiling on that choice. Job errors are cut to 160 characters and carry project ids, never project content.
+async function masterAgentPayload() {
+  const control = await loadMasterControl({});
+  const h = await masterHealth({ mode: control.mode });
+  const shadow = control.mode === 'off' ? null : { ...(await shadowReport()), ...(await shadowPlanDetail()) };
+  return { ...h, ...control, shadow };
+}
+
+router.get('/platform/master-agent', requireAuth, requirePlatformAdmin, async (req, res, next) => {
+  try { res.json(await masterAgentPayload()); } catch (e) { next(e); }
+});
+
+// Switch the Master Agent. 400 BAD_MODE, 409 CEILING (the server setting forbids it), 409 NOT_READY (On needs 3 clean Shadow days).
+router.put('/platform/master-agent/mode', requireAuth, requirePlatformAdmin, async (req, res, next) => {
+  try {
+    const user = await getUserById(req.userId);
+    let out;
+    try { out = await setMasterMode(req.body?.mode, { by: user?.id ?? null, email: user?.email ?? null }); }
+    catch (e) { if (e instanceof MasterControlError) return res.status(e.status).json({ error: e.message, code: e.code }); throw e; }
+    if (out.changed) {
+      await recordAuditEvent(req, {
+        action: 'platform.master_agent_mode_changed', targetType: 'platform', targetId: 'master_agent',
+        metadata: { from: out.from, to: out.to }, success: true,
+      });
+    }
+    res.json(await masterAgentPayload());
+  } catch (e) { next(e); }
+});
+
+// A project's auto-fixes switch, from the Agent instances page. It writes the same column and obeys the same rule as the staff Controls
+// dialog (lib/autonomy-control.js); turning it on needs a connected GitHub repository (400 NEEDS_GITHUB). The agent never merges.
+router.put('/platform/projects/:siteId/autonomy', requireAuth, requirePlatformAdmin, async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.siteId);
+    if (!Number.isInteger(siteId) || siteId <= 0) return res.status(404).json({ error: 'Not found.' });
+    const user = await getUserById(req.userId);
+    let out;
+    try { out = await setAutonomy(siteId, req.body?.enabled, { by: user?.id ?? null, email: user?.email ?? null }); }
+    catch (e) { if (e instanceof AutonomyError) return res.status(e.status).json({ error: e.message, code: e.code }); throw e; }
+    if (out.changed) {
+      await recordAuditEvent(req, {
+        action: out.to ? 'tenant.auto_remediation_enabled' : 'tenant.auto_remediation_disabled',
+        targetType: 'site', targetId: String(siteId), tenantSiteId: siteId, tenantName: out.site.name,
+        metadata: { enabled: out.to, dailyLimit: out.dailyLimit, repo: `${out.site.repo_owner}/${out.site.repo_name}`, via: 'platform-instances' },
+        success: true,
+      });
+    }
+    res.json(await loadAutonomy(siteId, { site: out.site }));
   } catch (e) { next(e); }
 });
 

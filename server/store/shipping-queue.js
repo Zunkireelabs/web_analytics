@@ -130,18 +130,19 @@ export async function getQueueItem(id) {
  * real 2026-09-08 pairing that motivated job_locks) can never both claim the
  * same row: the second one's UPDATE simply matches nothing.
  */
-export async function claimForPreparation(siteId, { limit = 25, workerId = 'preparation' } = {}) {
+// `sources` (optional) restricts the claim to those producers' items; omitted = every queued item, exactly as before.
+export async function claimForPreparation(siteId, { limit = 25, workerId = 'preparation', sources = null } = {}) {
   const { rows } = await query(
     `UPDATE shipping_queue SET state = $4, claimed_at = now(), claimed_by = $5, attempts = attempts + 1, updated_at = now()
       WHERE id IN (
         SELECT id FROM shipping_queue
-         WHERE site_id = $1 AND state = $2
+         WHERE site_id = $1 AND state = $2 AND ($6::text[] IS NULL OR source = ANY($6))
          ORDER BY score DESC NULLS LAST, id ASC
          LIMIT $3
          FOR UPDATE SKIP LOCKED
       )
       RETURNING *`,
-    [siteId, QUEUE_STATES.QUEUED, limit, QUEUE_STATES.PREPARING, workerId]
+    [siteId, QUEUE_STATES.QUEUED, limit, QUEUE_STATES.PREPARING, workerId, sources]
   );
   return rows;
 }

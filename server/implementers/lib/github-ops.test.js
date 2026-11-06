@@ -40,6 +40,7 @@ mock.module(resolve('../../github/client.js'), {
     mergeBranchFromBase: (...a) => defaults.mergeBranchFromBase(...a),
     compareCommits: (...a) => defaults.compareCommits(...a),
     openPullRequest: (...a) => defaults.openPullRequest(...a),
+    retargetPullRequest: async () => ({}),
     listOpenPullRequestsForBranch: (...a) => defaults.listOpenPullRequestsForBranch(...a),
     getPullRequest: async () => ({}),
     getCheckRunsForRef: async () => [],
@@ -50,6 +51,8 @@ mock.module(resolve('../../github/client.js'), {
     putFile: async () => ({}),
   },
 });
+
+mock.module(resolve('../../store/drafts.js'), { namedExports: { listBatchActionTypes: async () => [], setBatchPrBase: async () => 0 } });
 
 const {
   pushDraftBranch, openPrForBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush,

@@ -81,7 +81,7 @@ function DateRangeDialog({ isOpen, onClose, start, end, anchor, earliest, compar
         <div role="radiogroup" aria-label="Date range">
           {moreOptions.map((p) => (
             <Radio key={p.key} on={pick === p.key} onClick={() => { setPick(p.key); setTouched(true); }}>
-              {p.key === 'all' ? 'All time' : `Last ${p.label}`}
+              {`Last ${p.label}`}
             </Radio>
           ))}
           <Radio on={pick === 'custom'} onClick={() => { setPick('custom'); setTouched(true); }}>Custom</Radio>
@@ -116,7 +116,7 @@ export default function DateRangeBar({ start, end, anchor, earliest, compareMode
 
   return (
     <>
-      <div className="inline-flex max-w-full rounded-[10px] bg-white" style={ring} role="group" aria-label="Date range">
+      <div className="inline-flex max-w-full overflow-x-auto no-scrollbar rounded-[10px] bg-white" style={ring} role="group" aria-label="Date range">
         {BAR_KEYS.map((k) => (
           <button key={k} type="button" aria-pressed={key === k}
             onClick={() => { const r = presetRange(anchor, k, earliest); if (r) onRange(r); }}

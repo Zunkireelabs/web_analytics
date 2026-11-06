@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import { Activity, ArrowLeftRight, Check, ChevronsUpDown, Globe, KeyRound, MapPin, PlugZap, Search, Settings as SettingsIcon, Target, Users, UserPlus, X } from 'lucide-react';
+import { Activity, BarChart3, ArrowLeftRight, Check, ChevronsUpDown, Globe, KeyRound, MapPin, PlugZap, Search, Settings as SettingsIcon, Target, Users, UserPlus, X } from 'lucide-react';
 import { api, timeAgo } from '../../api.js';
 import Avatar from '../Avatar.jsx';
 import Badge from '../Badge.jsx';
@@ -11,6 +11,9 @@ import SettingsCard from '../settings/SettingsCard.jsx';
 import UnderlineTabs from '../settings/UnderlineTabs.jsx';
 import GoalModal from './GoalModal.jsx';
 import BusinessProfileModal from './BusinessProfileModal.jsx';
+import PosthogFields from './PosthogFields.jsx';
+import CapabilityReview from './CapabilityReview.jsx';
+import PlacesFields from './PlacesFields.jsx';
 import { GBP_LABELS } from './BusinessProfileFields.jsx';
 import GiveAccessModal from './GiveAccessModal.jsx';
 import MonitoringTab from './MonitoringTab.jsx';
@@ -217,6 +220,29 @@ export default function ProjectSettings({ projects, project, email, tab, onTab, 
                 </div>
               </div>
             </SettingsCard>
+            {/* Where a local business works. Optional; empty changes nothing. */}
+            {manage && (
+              <SettingsCard icon={MapPin} title="Where you work"
+                description="Optional. For a local business: the town you are based in and the places around it.">
+                <PlacesFields siteId={project.id} />
+              </SettingsCard>
+            )}
+            {/* The list research and recommendations are built around. Discovery proposes from the client's own site;
+                nothing proposed is used until a person approves it here. */}
+            {manage && (
+              <SettingsCard icon={Target} title="What you offer"
+                description="Confirm what your business sells. Research and recommendations are built around this.">
+                <CapabilityReview siteId={project.id} />
+              </SettingsCard>
+            )}
+            {/* Reachable for an EXISTING project, not only during setup: the connect step used to live solely in the
+                new-project flow, so a client who started using PostHog later had no way to add it. */}
+            {manage && (
+              <SettingsCard icon={BarChart3} title="PostHog"
+                description="Optional. See where people drop out before they convert.">
+                <div className="px-5 py-4"><PosthogFields siteId={project.id} /></div>
+              </SettingsCard>
+            )}
             <SettingsCard icon={Globe} title="Details" description="What this project tracks.">
               <dl className="px-5 py-1">
                 {[['Name', project.name], ['Website address', siteDomain({ website_domain: project.domain }) || 'Not set'], ...(project.workspaceName && !project.shared ? [['Workspace', project.workspaceName]] : [])].map(([l, v]) => (

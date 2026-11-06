@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { STATUS } from './work-catalogue.js';
+import { humanStep } from './doc-model.js';
 
 // The standard MONTHLY PROGRESS REPORT PDF, one design for every client:
 // light, plain language, accent colour = the client's own brand colour (see
@@ -167,6 +168,14 @@ function glancePage(d, P) {
     cards.push(`<div class="dc"><div class="tl">Times you appeared on Google</div><div class="row"><span class="to">${num(d.google.impressions)}</span></div><p>${since}</p></div>`);
     cards.push(`<div class="dc"><div class="tl">Clicks from Google</div><div class="row"><span class="to">${num(d.google.clicks)}</span></div><p>${since}</p></div>`);
   } else cards.push(`<div class="dc"><div class="tl">Google visibility</div><div class="row"><span class="to">—</span></div><p>Not measured yet. Connect Google Search Console to see how often you appear.</p></div>`);
+  // PostHog, only for a client who connected it. Same card classes as the cards above, so nothing about the page's
+  // design changes. People are the busiest day, never a sum: a returning visitor is one person.
+  if (d.visitors?.days) {
+    const v = d.visitors;
+    cards.push(`<div class="dc"><div class="tl">Visits to your site</div><div class="row"><span class="to">${v.sessions == null ? '—' : num(v.sessions)}</span></div><p>Last 30 days, from your PostHog.${v.pageviews == null ? '' : ` ${num(v.pageviews)} pages viewed.`}</p></div>`);
+    const top = (v.topDropOffs || []).find((x) => x?.event);
+    if (top) cards.push(`<div class="dc"><div class="tl">Where most visits end</div><div class="row"><span class="to" style="font-size:20px">${e(humanStep(top.event))}</span></div><p>${num(top.sessions_ending_here)} visits ended here in the last 30 days. This is the place to look first.</p></div>`);
+  }
 
   const summary = `<div class="summary"><b>In short:</b> ${d.ai && d.ai.now > d.ai.base ? 'your site is now far easier for Google and AI to understand' : 'here is where your site stands today'}${d.pages?.base != null && d.pages.now > d.pages.base ? ' and much bigger' : ''}.${lowTraffic(d) ? ` Visits from Google are still small. New pages take weeks to months to rank${d.previousSite ? `, and Google is still clearing out old pages left by your previous website (see pages ${P.progressNext.join(' and ')})` : ''}.` : ''}</div>`;
 

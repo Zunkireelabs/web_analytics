@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ChevronDown, ChevronsUpDown, Lock, LogOut, Settings as SettingsIcon } from 'lucide-react';
+import { Activity, ChevronDown, ChevronsUpDown, Lock, LogOut, Settings as SettingsIcon } from 'lucide-react';
+import { usePosthogState, connectPosthogPath } from '../lib/posthog-state.jsx';
 import { isOpenWhileLocked } from '../lib/access.jsx';
 import Logo from './Logo.jsx';
 import WorkspaceSwitcher from './WorkspaceSwitcher.jsx';
@@ -46,7 +47,15 @@ export default function Sidebar({
   const menuRef = useRef(null);
 
   const currentSite = currentSiteOf(sites, siteId);
-  const groups = visibleGroups({ isPlatformAdmin, isProduct: currentSite?.property_type === 'product' });
+  const baseGroups = visibleGroups({ isPlatformAdmin, isProduct: currentSite?.property_type === 'product' });
+  // Someone who skipped PostHog at setup gets a way back to it, right above Overview, until they connect it (and only if
+  // they are allowed to). Not shown while the project is locked, or while the state is still unknown.
+  const ph = usePosthogState().state;
+  const phBroken = Boolean(ph?.connected && ph.status === 'error');
+  const showConnectPosthog = Boolean(siteId && ph && (!ph.connected || phBroken) && ph.canConnect && !access?.locked);
+  const groups = showConnectPosthog
+    ? baseGroups.map((g, i) => (i === 0 ? { ...g, items: [{ to: connectPosthogPath(siteId), label: phBroken ? 'Reconnect PostHog' : 'Connect PostHog', icon: Activity, attention: true }, ...g.items] } : g))
+    : baseGroups;
 
   const toggleSection = (id) => {
     setCollapsed((prev) => {
@@ -221,7 +230,7 @@ function SidebarGroup({ group, first, isActive, open, onToggle, locked }) {
   );
 }
 
-function SidebarLink({ to, label, icon: Icon, active, locked }) {
+function SidebarLink({ to, label, icon: Icon, active, locked, attention }) {
   return (
     <Link to={to} aria-current={active ? 'page' : undefined}
       className={`flex items-center gap-2 h-[30px] px-2.5 rounded-control text-sm ${
@@ -229,8 +238,9 @@ function SidebarLink({ to, label, icon: Icon, active, locked }) {
       }`}
       style={active ? { boxShadow: 'var(--ring)' } : undefined}
     >
-      <Icon size={15} strokeWidth={1.75} className={active ? 'text-primary' : 'text-[#5c5c5c]'} />
-      {label}
+      <Icon size={15} strokeWidth={1.75} className={active || attention ? 'text-primary' : 'text-[#5c5c5c]'} />
+      <span className={attention ? 'text-primary-strong' : undefined}>{label}</span>
+      {attention && <span aria-label="Not connected yet" className="ml-auto w-[7px] h-[7px] rounded-full bg-primary" />}
       {locked && <Lock size={12} className="ml-auto text-faint" aria-label="Locked" />}
     </Link>
   );

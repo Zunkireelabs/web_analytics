@@ -12,7 +12,18 @@ import {
 } from './lib/project-connect.js';
 import { getSiteById } from '../store/read.js';
 import { jobLockInfo, jobKeyFor } from '../lib/job-lock.js';
+import { getTargetPlaces, setTargetPlaces } from '../store/target-places.js';
+import { listCapabilitiesForReview, reviewProposedCapability, createProductCapability } from '../store/data-analyst.js';
 import { getGoogleConnection, saveGoogleConnection, deleteGoogleConnection, clearSiteGoogleProperties } from '../store/project-google.js';
+import {
+  getPosthogConnection, savePosthogConnection, getPosthogCredentials, recordPosthogStatus, deletePosthogConnection,
+  saveOauthSignIn, selectOauthProject, getFreshPosthogAccess, getPosthogRevokeInfo, recordPosthogFailure,
+} from '../store/project-posthog.js';
+import {
+  posthogConnectConfigured, clientIdFor as posthogClientIdFor, redirectUriFor as posthogRedirectUriFor, clientMetadataDocument as posthogClientMetadata,
+  resolveHost as resolvePosthogHost, newConnectNonce as newPosthogNonce, newCodeVerifier as newPosthogVerifier, buildConsentUrl as buildPosthogConsentUrl,
+  exchangeCode as exchangePosthogCode, listProjects as listPosthogProjects, revokeToken as revokePosthogToken, PosthogConnectError, POSTHOG_ERRORS, validatePosthogHost,
+} from '../integrations/posthog-connect.js';
 import {
   googleConnectConfigured, redirectUriFor, newConnectNonce, buildConsentUrl, exchangeCode, GoogleConnectError,
 } from '../integrations/google-connect.js';
@@ -350,6 +361,323 @@ router.get('/projects/:siteId/connect/google/start', requireAuth, requireProject
 // Step 2: Google sends the browser back here. This is a plain page navigation, not an
 // API call, so every outcome ends in a redirect to the Workspace page (which reopens the
 // New project popup on the Google step), never a JSON error the person would stare at.
+// ── Where this project works (local places) ────────────────────────────────
+// For a LOCAL business: the town it is based in, then the places around it, in priority order. Market research, the
+// questions asked of AI assistants, the keywords worth tracking and the guidance given to content generators are all
+// built from it. Empty means "no declared places" and changes nothing.
+router.get('/projects/:siteId/places', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const places = (await getTargetPlaces(req.projectId)) || [];
+    res.json({
+      primary: places.find((p) => p.tier === 'primary')?.name || '',
+      nearby: places.filter((p) => p.tier !== 'primary').map((p) => p.name),
+    });
+  } catch (err) { next(err); }
+});
+
+router.put('/projects/:siteId/places', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const { primary, nearby } = req.body || {};
+    const saved = await setTargetPlaces(req.projectId, { primary, nearby });
+    if (!saved) return res.status(404).json({ error: 'Project not found.' });
+    res.json({
+      primary: saved.find((p) => p.tier === 'primary')?.name || '',
+      nearby: saved.filter((p) => p.tier !== 'primary').map((p) => p.name),
+    });
+  } catch (err) {
+    if (/Name the place/.test(err.message)) return res.status(400).json({ error: err.message });
+    next(err);
+  }
+});
+
+// ── What this project offers (capability review) ───────────────────────────
+// The list that paid research, gap relevance and competitor work are all grounded in. Discovery PROPOSES from the
+// client's own site; nothing proposed steers a single call until a person approves it here. Same admin gate as every
+// other connection on this router.
+router.get('/projects/:siteId/capabilities', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    res.json(await listCapabilitiesForReview(req.projectId));
+  } catch (err) { next(err); }
+});
+
+router.post('/projects/:siteId/capabilities/:id/review', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const { decision, name, description } = req.body || {};
+    if (!['approve', 'reject'].includes(decision)) return res.status(400).json({ error: 'decision must be "approve" or "reject".' });
+    const updated = await reviewProposedCapability(req.projectId, Number(req.params.id), decision === 'approve' ? 'verified' : 'rejected',
+      { name: typeof name === 'string' ? name.slice(0, 80) : null, description: typeof description === 'string' ? description.slice(0, 300) : null });
+    // Null means it was not a proposal of THIS project (or was already decided): the screen is stale, not the server wrong.
+    if (!updated) return res.status(404).json({ error: 'That item is no longer waiting for review.' });
+    res.json(updated);
+  } catch (err) { next(err); }
+});
+
+router.post('/projects/:siteId/capabilities', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    if (name.length < 3 || name.length > 80) return res.status(400).json({ error: 'Give it a short name, between 3 and 80 characters.' });
+    // A person adding their own is verified immediately: it is their statement about their own business.
+    res.status(201).json(await createProductCapability(req.projectId, {
+      name, category: null, description: String(req.body?.description || '').slice(0, 300) || null, industries: [], kind: 'capability', details: { addedBy: 'project-admin' },
+    }));
+  } catch (err) { next(err); }
+});
+
+// Read the site again. A cooldown per project: it is one page fetch and one model call, cheap, but a button that can be
+// held down is a button that can be scripted.
+const discoverCooldown = new Map();
+router.post('/projects/:siteId/capabilities/discover', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const last = discoverCooldown.get(req.projectId) || 0;
+    if (Date.now() - last < 60_000) return res.status(429).json({ error: 'That was just run. Give it a minute.' });
+    discoverCooldown.set(req.projectId, Date.now());
+    const { discoverCapabilities } = await import('../lib/capability-discovery.js');
+    const site = await getSiteById(req.projectId);
+    const out = await discoverCapabilities(site);
+    res.json({ proposed: out.proposed, skipped: out.skipped || null, found: out.candidates?.length || 0 });
+  } catch (err) { next(err); }
+});
+
+// ── PostHog (optional) ──────────────────────────────────────────────────────
+// A client who uses PostHog can connect it to see where people drop out of a flow — the one thing GA4 cannot show.
+// A project that never connects it is complete and correct; nothing here is required, and nothing degrades without it.
+//
+// Same role gate as every other connection route, and the key is encrypted before it is stored. The key is never
+// returned by any of these endpoints, including to the admin who set it.
+// What the connection screen may see. Built field by field so a column added to the table later can never leak through.
+const publicPosthogConnection = (c) => (c ? {
+  status: c.status, status_error: c.status_error, status_at: c.status_at,
+  project_id: c.project_id, project_name: c.project_name, host: c.host,
+  connected_as: c.connected_email || null, method: c.method,
+} : null);
+
+const originOf = (req) => `${req.protocol}://${req.get('host')}`;
+
+router.get('/projects/:siteId/connect/posthog', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const connection = await getPosthogConnection(req.projectId);
+    res.json({
+      // "connected" means a PostHog project is chosen; signed in but not yet chosen is `pending`, which the screen turns
+      // into the project picker.
+      connected: !!connection && !connection.pending,
+      pending: !!connection?.pending,
+      connection: publicPosthogConnection(connection), // no key or token: getPosthogConnection deliberately does not select them
+      // Can this server start "Connect with PostHog"? False on localhost / without a public https address / without the
+      // encryption key. The screen then offers only the paste-a-key form.
+      canConnect: posthogConnectConfigured(originOf(req)) && secretBoxConfigured(),
+      guide: posthogGuide(),
+    });
+  } catch (err) { next(err); }
+});
+
+router.post('/projects/:siteId/connect/posthog', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const { projectId, host, apiKey } = req.body || {};
+    if (!projectId || !apiKey) {
+      return res.status(400).json({ error: 'A PostHog project ID and personal API key are both required.' });
+    }
+    // The address receives the key, so it gets the same checks as a sign-in's: https only, nothing on this server's own network.
+    // Blank means the US cloud, which needs no check.
+    let safeHost = null;
+    if (String(host || '').trim()) {
+      try { safeHost = await validatePosthogHost(host); } catch (e) {
+        if (e instanceof PosthogConnectError) return res.status(400).json({ error: e.message, code: 'BAD_HOST' });
+        throw e;
+      }
+    }
+    await savePosthogConnection(req.projectId, { projectId, host: safeHost, apiKey, connectedBy: req.userId ?? null });
+
+    // Verified immediately, with the cheapest possible query, so the person who just pasted a key finds out now
+    // rather than discovering empty charts in a week. A failure is reported AND, when it is about the key or project
+    // themselves, recorded; the connection is kept so they can correct the host or the project ID without re-pasting the
+    // key. A momentary PostHog outage is reported but not recorded, so it cannot switch the nightly job off.
+    const { verifyConnection } = await import('../ingest/posthog.js');
+    const credentials = await getPosthogCredentials(req.projectId);
+    const check = await verifyConnection(credentials);
+    if (check.ok) await recordPosthogStatus(req.projectId, true, null);
+    else await recordPosthogFailure(req.projectId, check.reason, check.detail);
+
+    if (!check.ok) {
+      return res.status(400).json({ connected: true, verified: false, reason: check.reason, error: check.detail });
+    }
+    // History is imported in the background so the card has real data straight away instead of after a week of daily
+    // fetches. Not awaited: it is two PostHog queries and the person is watching a button. backfillPosthog never
+    // throws, so an unhandled rejection cannot come out of this.
+    import('../lib/posthog-backfill.js').then((m) => m.backfillPosthog(req.projectId)).then((r) => {
+      console.log(`[posthog] backfill site ${req.projectId}: ${r.ok ? `${r.imported} day(s) imported` : `not imported (${r.reason})`}`);
+    });
+    res.json({ connected: true, verified: true, backfilling: true, connection: await getPosthogConnection(req.projectId) });
+  } catch (err) {
+    // savePosthogConnection throws when the server has no encryption key — a real misconfiguration the caller
+    // should see as such, not as a generic failure.
+    if (/SECRETS_ENCRYPTION_KEY/.test(err.message)) return res.status(503).json({ error: err.message });
+    if (/required/.test(err.message)) return res.status(400).json({ error: err.message });
+    next(err);
+  }
+});
+
+router.delete('/projects/:siteId/connect/posthog', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    // Read what revoking needs BEFORE the row goes, then tell PostHog to forget the grant. Best effort: a PostHog that is
+    // down must never stop someone disconnecting.
+    const revoke = await getPosthogRevokeInfo(req.projectId);
+    const removed = await deletePosthogConnection(req.projectId);
+    if (removed && revoke) await revokePosthogToken(revoke);
+    if (removed) {
+      await recordAuditEvent(req, {
+        action: 'project.posthog_disconnected', targetType: 'site', targetId: String(req.projectId), tenantSiteId: req.projectId, tenantName: req.project.name,
+        metadata: { workspaceId: req.project.workspace_id }, success: true,
+      });
+    }
+    res.json({ removed });
+  } catch (err) { next(err); }
+});
+
+// ── "Connect with PostHog" (OAuth) ──────────────────────────────────────────
+// Same three steps as Google: start (mint a one-time nonce + PKCE verifier, remember them in THIS session, hand back
+// PostHog's consent address), callback (PostHog sends the browser back), then — because one PostHog login can own several
+// projects — pick which one is this website.
+
+// The document PostHog fetches to learn who we are (Client ID Metadata Document). Public by necessity: PostHog fetches it
+// with no session. It holds nothing secret — a name, and the one address people are sent back to.
+router.get('/posthog/oauth-client', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=300').json(posthogClientMetadata(originOf(req)));
+});
+
+router.get('/projects/:siteId/connect/posthog/start', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const origin = originOf(req);
+    if (!posthogConnectConfigured(origin)) return res.status(503).json({ error: POSTHOG_ERRORS.not_configured, code: 'NOT_CONFIGURED' });
+    if (!secretBoxConfigured()) return res.status(503).json({ error: 'Storing a PostHog sign-in safely is not set up on this server yet.', code: 'NO_ENCRYPTION_KEY' });
+    let host;
+    try { host = await resolvePosthogHost({ region: req.query.region, host: req.query.host }); } catch (e) {
+      if (e instanceof PosthogConnectError) return res.status(400).json({ error: e.message, code: 'BAD_HOST' });
+      throw e;
+    }
+    const nonce = newPosthogNonce();
+    const codeVerifier = newPosthogVerifier();
+    const redirectUri = posthogRedirectUriFor(origin);
+    const clientId = posthogClientIdFor(origin);
+    req.session.posthogConnect = { nonce, siteId: req.projectId, userId: req.userId, redirectUri, clientId, host, codeVerifier, at: Date.now() };
+    res.json({ url: buildPosthogConsentUrl({ host, clientId, redirectUri, state: nonce, codeVerifier }) });
+  } catch (e) { next(e); }
+});
+
+// Verify the chosen project with the cheapest possible query, record the verdict, and import history in the background.
+// Shared by the picker and by the automatic pick when the sign-in can only see one project.
+async function finishPosthogProject(siteId, { projectId, projectName }) {
+  const chosen = await selectOauthProject(siteId, { projectId, projectName });
+  if (!chosen) return { ok: false, reason: 'not_signed_in', detail: 'Sign in to PostHog first.' };
+  const { verifyConnection } = await import('../ingest/posthog.js');
+  const check = await verifyConnection(await getPosthogCredentials(siteId));
+  if (check.ok) await recordPosthogStatus(siteId, true, null);
+  else await recordPosthogFailure(siteId, check.reason, check.detail); // a momentary outage is reported, not recorded
+  if (check.ok) {
+    import('../lib/posthog-backfill.js').then((m) => m.backfillPosthog(siteId)).then((r) => {
+      console.log(`[posthog] backfill site ${siteId}: ${r.ok ? `${r.imported} day(s) imported` : `not imported (${r.reason})`}`);
+    });
+  }
+  return check.ok ? { ok: true } : { ok: false, reason: check.reason, detail: check.detail };
+}
+
+router.get('/posthog/callback', async (req, res) => {
+  const back = (params) => res.redirect(`/workspace?${new URLSearchParams(params)}`);
+  const pending = req.session?.posthogConnect;
+  if (req.session) delete req.session.posthogConnect; // single use, whatever happens next
+  try {
+    if (!req.session?.userId) return res.redirect('/');
+    if (req.query.error) return back({ finish: pending?.siteId ?? '', pherror: 'cancelled' });
+    // Minted for this session, this user and this project, and good for ten minutes: a link copied to someone else,
+    // replayed, or left open for a day is refused.
+    const fresh = pending && Date.now() - pending.at < 10 * 60 * 1000;
+    if (!fresh || !req.query.state || req.query.state !== pending.nonce || pending.userId !== req.session.userId) return back({ pherror: 'expired' });
+
+    if ((await getUserStatus(req.session.userId)) !== 'active') return back({ pherror: 'denied' });
+    const ctx = await getAccessContext(req.session.userId, pending.siteId);
+    const role = ctx && siteRoleFromDecision(decideSiteAccess({ ...ctx, companySiteId: companySiteId() }));
+    if (!role || !roleAtLeast(role, 'admin')) return back({ pherror: 'denied' });
+    const project = await getProject(pending.siteId);
+    if (!project) return back({ pherror: 'denied' });
+
+    const tokens = await exchangePosthogCode({
+      code: String(req.query.code || ''), redirectUri: pending.redirectUri, clientId: pending.clientId, host: pending.host, codeVerifier: pending.codeVerifier,
+    });
+    await saveOauthSignIn(project.id, { host: pending.host, clientId: pending.clientId, tokens, email: tokens.email, connectedBy: req.session.userId });
+    await recordAuditEvent(asSessionActor(req), {
+      action: 'project.posthog_connected', targetType: 'site', targetId: String(project.id), tenantSiteId: project.id, tenantName: project.name,
+      metadata: { workspaceId: project.workspace_id, posthogAccount: tokens.email, host: pending.host }, success: true,
+    });
+
+    // Exactly one project on this sign-in: nothing to choose, so connect it now and say so. Otherwise the popup reopens
+    // on the project picker.
+    let saved = false;
+    const listed = await listPosthogProjects({ host: pending.host, accessToken: tokens.accessToken, scopedTeams: tokens.scopedTeams });
+    if (listed.ok && listed.projects.length === 1) {
+      const done = await finishPosthogProject(project.id, { projectId: listed.projects[0].id, projectName: listed.projects[0].name });
+      saved = done.ok;
+    }
+    return back({ ws: project.workspace_id ?? '', finish: project.id, posthog: saved ? 'saved' : 'connected' });
+  } catch (err) {
+    const code = err instanceof PosthogConnectError ? err.code : 'exchange_failed';
+    if (!(err instanceof PosthogConnectError)) console.error('[projects] PostHog callback failed:', err.message);
+    return back({ finish: pending?.siteId ?? '', pherror: code });
+  }
+});
+
+// The PostHog projects this sign-in can read, for the picker.
+router.get('/projects/:siteId/connect/posthog/projects', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const access = await getFreshPosthogAccess(req.projectId);
+    if (!access.ok) {
+      const signedOut = access.reason === 'not_connected';
+      return res.status(signedOut ? 409 : 502).json({ error: signedOut ? 'Sign in to PostHog first.' : access.detail, code: signedOut ? 'NOT_SIGNED_IN' : 'POSTHOG_UNAVAILABLE' });
+    }
+    const listed = await listPosthogProjects({ host: access.host, accessToken: access.accessToken });
+    if (!listed.ok) return res.status(502).json({ error: listed.detail || 'PostHog could not be reached.', code: 'POSTHOG_UNAVAILABLE' });
+    res.json({ projects: listed.projects, selected: access.projectId ?? null });
+  } catch (err) { next(err); }
+});
+
+router.post('/projects/:siteId/connect/posthog/select', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const projectId = String(req.body?.projectId ?? '').trim();
+    if (!projectId) return res.status(400).json({ error: 'Choose which PostHog project is this website.' });
+    const access = await getFreshPosthogAccess(req.projectId);
+    if (!access.ok) return res.status(access.reason === 'not_connected' ? 409 : 502).json({ error: access.reason === 'not_connected' ? 'Sign in to PostHog first.' : access.detail });
+    // Only a project this sign-in can actually read: the list is PostHog's own answer, not something the browser supplies.
+    const listed = await listPosthogProjects({ host: access.host, accessToken: access.accessToken });
+    if (!listed.ok) return res.status(502).json({ error: listed.detail || 'PostHog could not be reached.' });
+    const chosen = listed.projects.find((p) => p.id === projectId);
+    if (!chosen) return res.status(400).json({ error: 'That PostHog project is not available to this sign-in.' });
+
+    const done = await finishPosthogProject(req.projectId, { projectId: chosen.id, projectName: chosen.name });
+    if (!done.ok) return res.status(400).json({ connected: true, verified: false, reason: done.reason, error: done.detail });
+    res.json({ connected: true, verified: true, backfilling: true, connection: publicPosthogConnection(await getPosthogConnection(req.projectId)) });
+  } catch (err) { next(err); }
+});
+
+// Written here rather than in the UI so the steps stay correct for self-hosted and EU clients too, and so the same
+// words are available to the API, the app and a support reply.
+function posthogGuide() {
+  return {
+    optional: true,
+    whyBother: 'PostHog shows where people drop out of a flow, what an individual visitor did, and whether they came back. Google Analytics can tell you how many people arrived and from where, but not those things.',
+    needed: ['A PostHog account with a project already receiving events', 'That project\'s numeric project ID', 'A personal API key with read access to the project'],
+    steps: [
+      'In PostHog, open Settings, then Project, and copy the Project ID (a number).',
+      'Open your own avatar menu, then Personal API keys, and create a key. Give it read access to the project — it never needs write access.',
+      'If your PostHog is on the EU cloud or self-hosted, note its address (for example https://eu.posthog.com, or your own domain). Leave the host as-is for the US cloud.',
+      'Paste the project ID and the key here. We check them straight away and tell you if either is wrong.',
+    ],
+    notes: [
+      'The key is encrypted before it is stored and is never shown again, not even to you.',
+      'We only ever read from PostHog. Nothing is written to your project.',
+      'You can disconnect at any time, and nothing else about your reports changes.',
+    ],
+    ifYouDoNotHaveIt: 'Skip this. Everything else works exactly the same, and you can connect it later if you ever start using PostHog.',
+  };
+}
+
 router.get('/google/callback', async (req, res) => {
   if (req.session?.googleSignIn) return googleSignInCallback(req, res);
   if (req.session?.gbpConnect) return businessProfileCallback(req, res);

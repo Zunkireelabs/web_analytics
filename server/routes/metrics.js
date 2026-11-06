@@ -9,6 +9,7 @@ import {
   getAiCompareCache, saveAiCompareCache,
 } from '../store/read.js';
 import { requireAuth } from './login.js';
+import { ga4PagesHandler } from './ga4-pages-handler.js';
 import { countryName } from '../util/countries.js';
 import { previousWeek } from '../util/dates.js';
 import { callLLM } from '../llm.js';
@@ -103,6 +104,51 @@ router.get('/channels', async (req, res, next) => {
     res.json(await getChannelsRange(req.siteId, start, end));
   } catch (e) { next(e); }
 });
+
+// PostHog product metrics for a range, for the project that connected it. ?start&end
+//
+// Readable by ANY member of the project (a read-only client sees the Overview too), so everything here is non-secret: the
+// numbers, whether PostHog is connected and working, and whether THIS person may connect it (so the page can offer a
+// Connect button to an admin and a plain explanation to everyone else, without ever 403ing the request).
+//
+//   summary    null when there is no data in range — a normal state; `connected` tells "connected, still importing"
+//              apart from "not connected". Also works for any other range, so the previous period is the same call.
+//   connected  a PostHog project is chosen (signed in but not yet chosen is not connected)
+//   status     'pending' | 'ok' | 'error' | null
+//   canConnect project admin or platform admin
+//   series     per-day points for the chart (also inside summary)
+//   behaviour  the same labels, shares and takeaway the reports use (report/doc-model.js behaviourModel), so the Overview
+//              card can never disagree with a report
+router.get('/product', async (req, res, next) => {
+  try {
+    const { start, end } = req.query;
+    const { getPosthogSummary, getPosthogConnectionState } = await import('../store/project-posthog.js');
+    const { behaviourModel } = await import('../report/doc-model.js');
+    const [summary, state, canConnect] = await Promise.all([
+      getPosthogSummary(req.siteId, start, end),
+      getPosthogConnectionState(req.siteId),
+      canConnectPosthog(req),
+    ]);
+    res.json({
+      summary,
+      connected: state.connected,
+      status: state.status,
+      canConnect,
+      series: summary?.series || [],
+      behaviour: behaviourModel(summary, null, ''),
+    });
+  } catch (e) { next(e); }
+});
+
+// The same role check requireProjectRole('admin') uses on the connect routes, but answering yes/no instead of refusing.
+async function canConnectPosthog(req) {
+  try {
+    const ws = await import('../store/workspaces.js');
+    const ctx = await ws.getAccessContext(req.userId, req.siteId);
+    const role = ctx && ws.siteRoleFromDecision(ws.decideSiteAccess({ ...ctx, companySiteId: Number(process.env.COMPANY_SITE_ID) }));
+    return Boolean(role && ws.roleAtLeast(role, 'admin'));
+  } catch { return false; }
+}
 
 // GSC breakdown (query/page/etc) aggregated over a range. ?start&end&dim&limit
 router.get('/breakdown-range', async (req, res, next) => {
@@ -275,4 +321,6 @@ router.get('/compare', async (req, res, next) => {
     res.json({ a: { month: req.query.a, ...a }, b: { month: req.query.b, ...b } });
   } catch (e) { next(e); }
 });
+// GA4 "Views by page title" for the Overview's Visitors tab ("Top pages"). Contract and validation: ga4-pages-handler.js.
+router.get('/ga4-pages', ga4PagesHandler());
 export default router;
