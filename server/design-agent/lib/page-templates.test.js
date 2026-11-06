@@ -2,12 +2,12 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveOrCreateCanonicalPageTemplate, pageTemplateGuidanceText, PAGE_TEMPLATE_TYPES_FOR_GENERATOR, PAGE_TEMPLATE_VERSION } from './page-templates.js';
 
-function siteWith({ patterns, pageTemplates, derivedAt = '2026-09-01T00:00:00.000Z' } = {}) {
+function siteWith({ patterns, pageTemplates, approvedPagePatterns, derivedAt = '2026-09-01T00:00:00.000Z' } = {}) {
   return {
     id: 1,
     url_file_map: {
       siteRoot: {
-        designProfile: patterns ? { derivedAt, pageTypePatterns: patterns } : null,
+        designProfile: patterns ? { derivedAt, pageTypePatterns: patterns, ...(approvedPagePatterns ? { approvedPagePatterns } : {}) } : null,
         pageTemplates: pageTemplates || undefined,
       },
     },
@@ -194,7 +194,7 @@ describe('PAGE_TEMPLATE_TYPES_FOR_GENERATOR', () => {
 // site. A site that has never published a blog still HAS a design language;
 // the first blog should be built out of it, and then BECOME the canonical
 // blog template every later blog reuses.
-describe('resolveOrCreateCanonicalPageTemplate — no pattern for this type yet, infer from the site itself', () => {
+describe('resolveOrCreateCanonicalPageTemplate — no page of this type yet: a pattern must be APPROVED, never silently borrowed', () => {
   const ESTABLISHED = {
     patterns: {
       service: {
@@ -204,62 +204,47 @@ describe('resolveOrCreateCanonicalPageTemplate — no pattern for this type yet,
       homepage: { sectionOrder: ['hero', 'cta'], textHierarchy: [{ role: 'heading' }] },
     },
   };
+  const approved = (pattern) => ({ ...ESTABLISHED, approvedPagePatterns: { 'blog-article': { ...pattern, approvedBy: 'Reviewer', approvedAt: '2026-11-07T00:00:00Z' } } });
 
-  test('composes a blog template from the site\'s own most-established page shape, and persists it', async () => {
-    const site = siteWith(ESTABLISHED);
+  test('without an approved pattern it does NOT borrow: it returns a SUGGESTION grounded in the site\'s own richest pattern, and persists nothing', async () => {
     const saved = [];
-    const result = await resolveOrCreateCanonicalPageTemplate(site, ['blog-article', 'blog-listing'], {
-      saveConfig: async (a) => saved.push(a),
-    });
+    const result = await resolveOrCreateCanonicalPageTemplate(siteWith(ESTABLISHED), ['blog-article', 'blog-listing'], { saveConfig: async (a) => saved.push(a) });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'needs-approved-pattern');
+    assert.equal(result.pageType, 'blog-article');
+    assert.deepEqual(result.suggestion.pattern.sectionOrder, ['hero', 'problem', 'capabilities', 'proof', 'cta']);
+    assert.equal(result.suggestion.inferredFrom, 'service', 'provenance stays honest');
+    assert.equal(saved.length, 0, 'nothing is persisted from an unapproved suggestion');
+  });
 
-    assert.equal(result.ok, true);
-    assert.equal(result.source, 'composed');
-    assert.equal(result.pageType, 'blog-article', 'the template is stored under the type that was actually requested');
-    // Grounded in the site's OWN richest real pattern, not the thin one and
-    // not an invented shape.
-    assert.deepEqual(result.template.sectionOrder, ['hero', 'problem', 'capabilities', 'proof', 'cta']);
-    assert.deepEqual(result.template.textRoles, ['heading', 'body', 'cta']);
-    assert.equal(result.template.inferredFromPageType, 'service', 'provenance is recorded honestly, never passed off as a real observation of this type');
-
-    // PERSISTED — this is what makes the first blog establish the convention
-    // every later blog reuses, instead of each one re-deciding.
+  test('once a person approves a pattern for the type, it is used, persisted, and REUSED by later pages', async () => {
+    const pattern = { sectionOrder: ['hero', 'body', 'cta'], textHierarchy: [{ role: 'heading' }, { role: 'body' }] };
+    const saved = [];
+    const a = await resolveOrCreateCanonicalPageTemplate(siteWith(approved(pattern)), ['blog-article'], { saveConfig: async (x) => saved.push(x) });
+    assert.equal(a.ok, true); assert.equal(a.source, 'composed');
+    assert.deepEqual(a.template.sectionOrder, ['hero', 'body', 'cta']);
+    assert.equal(a.template.approvedBy, 'Reviewer');
     assert.equal(saved.length, 1);
-    assert.ok(saved[0].urlFileMap.siteRoot.pageTemplates['blog-article']);
-  });
-
-  test('a later blog REUSES that established template rather than re-inferring', async () => {
-    const first = siteWith(ESTABLISHED);
-    const saved = [];
-    const a = await resolveOrCreateCanonicalPageTemplate(first, ['blog-article'], { saveConfig: async (x) => saved.push(x) });
-
-    const second = siteWith({ ...ESTABLISHED, pageTemplates: { 'blog-article': a.template } });
-    const savedAgain = [];
-    const b = await resolveOrCreateCanonicalPageTemplate(second, ['blog-article'], { saveConfig: async (x) => savedAgain.push(x) });
-
+    const b = await resolveOrCreateCanonicalPageTemplate(siteWith({ ...approved(pattern), pageTemplates: { 'blog-article': a.template } }), ['blog-article'], { saveConfig: async () => assert.fail('reuse must not rewrite') });
     assert.equal(b.source, 'existing');
-    assert.deepEqual(b.template, a.template);
-    assert.equal(savedAgain.length, 0, 'reuse must not rewrite the stored template');
   });
 
-  test('a real observed pattern for the type always wins over inference', async () => {
-    const site = siteWith({
-      patterns: {
-        ...ESTABLISHED.patterns,
-        'blog-article': { sectionOrder: ['title', 'body', 'author'], textHierarchy: [{ role: 'heading' }] },
-      },
-    });
+  test('a real observed pattern for the type always wins (no approval needed for what the site already has)', async () => {
+    const site = siteWith({ patterns: { ...ESTABLISHED.patterns, 'blog-article': { sectionOrder: ['title', 'body', 'author'], textHierarchy: [{ role: 'heading' }] } } });
     const result = await resolveOrCreateCanonicalPageTemplate(site, ['blog-article'], { saveConfig: async () => {} });
     assert.deepEqual(result.template.sectionOrder, ['title', 'body', 'author']);
-    assert.equal(result.template.inferredFromPageType, undefined, 'a directly observed pattern is never marked inferred');
+    assert.equal(result.template.inferredFromPageType, undefined);
   });
 
-  test('the guidance text tells the generator to BUILD the first one in the site\'s language, not to copy a type that does not exist', async () => {
-    const site = siteWith(ESTABLISHED);
-    const result = await resolveOrCreateCanonicalPageTemplate(site, ['blog-article'], { saveConfig: async () => {} });
-    const text = pageTemplateGuidanceText(result.template);
-    assert.match(text, /has no published "blog-article" page yet/);
-    assert.match(text, /its own "service" pages/);
-    assert.match(text, /rather than inventing a generic layout/);
-    assert.match(text, /hero -> problem -> capabilities -> proof -> cta/);
+  test('a template persisted earlier by the OLD silent-borrowing path is not trusted any more', async () => {
+    const legacy = { version: 1, pageType: 'blog-article', sectionOrder: ['hero', 'problem', 'capabilities', 'proof', 'cta'], textRoles: ['heading'], inferredFromPageType: 'service', derivedFromProfileVersion: 'x' };
+    const result = await resolveOrCreateCanonicalPageTemplate(siteWith({ ...ESTABLISHED, pageTemplates: { 'blog-article': legacy } }), ['blog-article'], { saveConfig: async () => assert.fail('must not persist') });
+    assert.equal(result.reason, 'needs-approved-pattern');
+  });
+
+  test('the approved pattern\'s guidance text describes it as this site\'s own structure', async () => {
+    const pattern = { sectionOrder: ['hero', 'body', 'cta'], textHierarchy: [{ role: 'heading' }] };
+    const result = await resolveOrCreateCanonicalPageTemplate(siteWith(approved(pattern)), ['blog-article'], { saveConfig: async () => {} });
+    assert.match(pageTemplateGuidanceText(result.template), /hero -> body -> cta/);
   });
 });

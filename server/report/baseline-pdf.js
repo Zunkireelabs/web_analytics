@@ -852,7 +852,8 @@ export const reportCss = (t) => `
 `;
 
 export async function renderBaselineReportPdf(html) {
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+  const { launchWithSlot } = await import('../lib/browser-slots.js');
+  const browser = await launchWithSlot(() => chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] }));
   try {
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: 'networkidle' });

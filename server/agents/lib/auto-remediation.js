@@ -542,6 +542,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // `shipped`/`failed`: nothing was drafted, and unlike `resolved` this
   // recommendation stays open (blocked, not closed) for a human.
   let conflicted = 0;
+  let designPending = 0; // items skipped because their page's current design could not be confirmed (neither refused nor failed)
   let consecutiveSystemicFailures = 0;
   let consecutiveRefusals = 0;
   let stoppedReason = null;
@@ -822,6 +823,23 @@ export async function autoRemediateSafeRecommendations(siteId, {
       consecutiveSystemicFailures = 0;
       consecutiveRefusals = 0;
     } catch (err) {
+      // DESIGN VALIDATION PENDING (design-agent/lib/design-validation-stage.js): this page's
+      // current design could not be confirmed against the live site right now — the site or
+      // a browser was unavailable, or the page is parked for a design review. That is NOT a
+      // refusal (no-fabrication policy), NOT a failure (systemic breaker), and not an
+      // outage of the whole site: so it counts nothing, releases its slot of the budget,
+      // moves on to the next item, and leaves this one open. The stage remembers the page
+      // and backs off, so the next run does not repeat the work.
+      if (err?.designPending === true) {
+        attempted--;
+        designPending++;
+        console.warn(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) skipped for now — ${err.pendingReason || 'design not confirmed'}${err.exhausted ? ' (waiting for a design review)' : ''}; nothing counted against it.`);
+        if (attempted < remaining) {
+          const backfill = nextBackfillCandidate();
+          if (backfill) workQueue.push(backfill);
+        }
+        continue;
+      }
       // A RATE LIMIT is neither a fault nor a refusal — it is a statement
       // about timing, and the identical attempt succeeds once the budget
       // refills. Checked before everything else below, and it stops the run
@@ -1193,7 +1211,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
   }
   console.log(
     `[auto-remediation] ${clientLabel}: run complete — attempted ${attempted}, shipped ${shipped}, failed ${failed}, `
-    + `refused ${refused}, quarantined ${quarantined}, resolved ${resolved}, conflicted ${conflicted}${stoppedReason ? `, stopped: ${stoppedReason}` : ''}.`
+    + `refused ${refused}, quarantined ${quarantined}, resolved ${resolved}, conflicted ${conflicted}${designPending ? `, design-pending ${designPending}` : ''}${stoppedReason ? `, stopped: ${stoppedReason}` : ''}.`
   );
 
   return finish({
@@ -1418,6 +1436,12 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
       // not trip the breaker either.
       err.refusal = true;
       err.reason = 'unverified-placeholder-field';
+    } else if (/edit would extend this page's design instead of preserving it/.test(message)) {
+      // live-design-validation.js's checkEditDesignIntegrity (via backend.js):
+      // THIS edit introduced a class/style the page never had. A per-item
+      // refusal, not a systemic fault — it must not trip the breaker.
+      err.refusal = true;
+      err.reason = 'page-design-integrity-failed';
     } else if (/uses classes this site only ever uses for its/.test(message)) {
       // design-drift.js's checkDesignIntegrityGate: THIS recommendation's
       // styled markup failed automated role verification (a confirmed

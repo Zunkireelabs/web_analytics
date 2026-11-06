@@ -174,6 +174,78 @@ export async function updateSiteConnection({ siteId, gscProperty, ga4PropertyId,
   return rows[0];
 }
 
+// ── url_file_map concurrency (migration 249) ────────────────────────────────
+
+export class UrlFileMapConflictError extends Error {
+  constructor(message, { siteId, conflicts = [] } = {}) {
+    super(message);
+    this.name = 'UrlFileMapConflictError';
+    this.siteId = siteId;
+    this.conflicts = conflicts;
+  }
+}
+
+export const isStaleUrlFileMapError = (err) => err?.code === '40001' && /stale url_file_map write/.test(err?.message || '');
+
+async function recoverStaleUrlFileMapWrite(siteId, ours, fields, values) {
+  const { merge3 } = await import('./lib/json-merge3.js');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const cur = (await client.query('SELECT url_file_map FROM sites WHERE id = $1 FOR UPDATE', [siteId])).rows[0];
+    if (!cur) throw new Error(`No site found with id ${siteId}.`);
+    const baseRev = ours?._rev;
+    const base = baseRev == null ? null
+      : (await client.query('SELECT data FROM url_file_map_versions WHERE site_id = $1 AND rev = $2', [siteId, baseRev])).rows[0]?.data;
+    if (!base) {
+      throw new UrlFileMapConflictError(`url_file_map for site ${siteId} changed since it was read and the version it was read from (${baseRev ?? 'unknown'}) is no longer retained; the write was refused rather than overwrite newer data.`, { siteId });
+    }
+    const { merged, conflicts } = merge3(base, cur.url_file_map, ours);
+    if (conflicts.length) {
+      throw new UrlFileMapConflictError(`url_file_map for site ${siteId} was changed by another writer at the same place(s): ${conflicts.slice(0, 8).join(', ')}. Refused rather than overwrite it.`, { siteId, conflicts });
+    }
+    // Re-run the same UPDATE with the merged map in place of the caller's.
+    const idx = fields.findIndex((f) => f.startsWith('url_file_map ='));
+    const vals = [...values];
+    vals[idx] = JSON.stringify(merged);
+    const { rows } = await client.query(`UPDATE sites SET ${fields.join(', ')} WHERE id = $${vals.length} RETURNING *`, vals);
+    await client.query('COMMIT');
+    return rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Row-locked read-modify-write of sites.url_file_map: `mutator` receives the CURRENT map (a copy)
+ * and returns the new one (or null for no change). Nothing written between the read and the write
+ * can be lost, because both happen under the row lock on the fresh row. Prefer this to building a
+ * map from an earlier snapshot.
+ */
+export async function patchUrlFileMap(siteId, mutator) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const cur = (await client.query('SELECT url_file_map FROM sites WHERE id = $1 FOR UPDATE', [siteId])).rows[0];
+    if (!cur) throw new Error(`No site found with id ${siteId}.`);
+    const current = cur.url_file_map || {};
+    const next = await mutator(JSON.parse(JSON.stringify(current)));
+    if (next == null) { await client.query('COMMIT'); return { changed: false, urlFileMap: current }; }
+    if (current._rev !== undefined) next._rev = current._rev;
+    const { rows } = await client.query('UPDATE sites SET url_file_map = $2 WHERE id = $1 RETURNING url_file_map', [siteId, JSON.stringify(next)]);
+    await client.query('COMMIT');
+    return { changed: true, urlFileMap: rows[0].url_file_map };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // Google Business Profile answer from the New project flow (see parseBusinessProfile). Callers pass an
 // already-validated { status, url }.
 export async function setSiteBusinessProfile(siteId, { status, url }) {
@@ -228,10 +300,21 @@ export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUr
   if (!fields.length) throw new Error('updateSiteRepoConfig: nothing to update.');
 
   values.push(siteId);
-  const { rows } = await query(
-    `UPDATE sites SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`,
-    values
-  );
+  let rows;
+  try {
+    ({ rows } = await query(
+      `UPDATE sites SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`,
+      values
+    ));
+  } catch (err) {
+    // Migration 249 refuses a url_file_map write made from an out-of-date read (another writer
+    // changed the row in between). Recover by a three-way merge so NEITHER change is lost; a
+    // genuine conflict on the same value fails loudly instead of silently overwriting.
+    if (urlFileMap !== undefined && isStaleUrlFileMapError(err)) {
+      return recoverStaleUrlFileMapWrite(siteId, urlFileMap, fields, values);
+    }
+    throw err;
+  }
   if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
   return rows[0];
 }

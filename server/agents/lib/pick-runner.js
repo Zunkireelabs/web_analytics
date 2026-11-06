@@ -46,7 +46,7 @@ export async function buildSavedContentPicks(site, deps = {}) {
       await d.setPickStatus(site.id, id, 'shipped', ['building']);
       out.built += 1;
     } catch (err) {
-      const retry = RETRY_LATER.test(err?.message ?? '');
+      const retry = err?.designPending === true || RETRY_LATER.test(err?.message ?? '');
       await d.setPickStatus(site.id, id, retry ? 'saved' : 'withdrawn', ['building', 'saved']).catch(() => {});
       if (retry) out.retryLater += 1; else out.withdrawn += 1;
       console.warn(`[pick-runner] site ${site.id} pick ${id}: ${retry ? 'will retry next run' : 'withdrawn'}: ${String(err?.message || err).slice(0, 200)}`);
