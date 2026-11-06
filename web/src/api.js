@@ -140,6 +140,10 @@ export const api = {
     instances: () => req('/platform/instances'),
     instance: (siteId) => req(`/platform/instances/${siteId}`),
     masterAgent: () => req('/platform/master-agent'),
+    // Industry sets (what the platform knows up front about each industry). A saved set replaces the built-in default; reset restores it.
+    industrySets: () => req('/platform/industry-sets'),
+    saveIndustrySet: (industry, set) => req(`/platform/industry-sets/${industry}`, { method: 'PUT', body: JSON.stringify({ set }) }),
+    resetIndustrySet: (industry) => req(`/platform/industry-sets/${industry}`, { method: 'DELETE' }),
     // Switch the Master Agent between off / shadow / on. The server enforces the readiness rule and the server-setting ceiling.
     setMasterMode: (mode) => req('/platform/master-agent/mode', { method: 'PUT', body: JSON.stringify({ mode }) }),
     // Auto-fixes (autonomous shipping) for one project. Needs a connected GitHub repository to turn on.
@@ -230,6 +234,8 @@ export const api = {
   // PostHog product metrics, when the project connected it. { summary: null } means not connected — a normal state.
   // The metrics router takes the site from the authenticated session (req.siteId), like every other route on it —
   // passing a siteId here would be ignored and would imply a per-site switch that does not exist.
+  // The client's Industry page. { available: false } until the industry is confirmed from two signals.
+  industry: (siteId) => req(`/projects/${siteId}/industry`),
   product: (start, end) => req(`/product?start=${start}&end=${end}`),
   // Google Analytics views by page title for a range, with the previous period alongside (the Visitors tab's Top pages).
   ga4Pages: (start, end, compareStart, compareEnd) => req(`/ga4-pages?start=${start}&end=${end}${compareStart && compareEnd ? `&compareStart=${compareStart}&compareEnd=${compareEnd}` : ''}`),

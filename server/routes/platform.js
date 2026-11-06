@@ -9,6 +9,8 @@ import { loadInstanceList, loadInstanceDetail } from '../lib/instance-view.js';
 import { health as masterHealth, shadowReport } from '../lib/master-agent.js';
 import { loadMasterControl, setMasterMode, shadowPlanDetail, MasterControlError } from '../lib/master-agent-control.js';
 import { setAutonomy, loadAutonomy, AutonomyError } from '../lib/autonomy-control.js';
+import { listIndustrySets, saveIndustrySet, resetIndustrySet, industrySetHistory } from '../lib/industry-sets.js';
+import { listAgentMeta } from '../agents/registry.js';
 import { isPlatformAdmin, listAllWorkspacesForPlatform, getProject, deleteWorkspaceAsPlatform } from '../store/workspaces.js';
 
 // The platform admin's own view across every client workspace. Everything here
@@ -64,6 +66,38 @@ async function masterAgentPayload() {
   const shadow = control.mode === 'off' ? null : { ...(await shadowReport()), ...(await shadowPlanDetail()) };
   return { ...h, ...control, shadow };
 }
+
+// Industry sets: what the platform knows up front about each industry (stages, typical key dates, extra agents, a brief).
+// Edits are recorded with who made them (platform_setting_changes). A saved set replaces the built-in default; reset restores it.
+router.get('/platform/industry-sets', requireAuth, requirePlatformAdmin, async (req, res, next) => {
+  try {
+    const [sets, agents] = await Promise.all([listIndustrySets(), listAgentMeta().catch(() => [])]);
+    const history = {};
+    for (const set of sets) history[set.industry] = await industrySetHistory(set.industry, { limit: 5 });
+    res.json({ sets, history, agents: agents.map((a) => ({ id: a.id, name: a.name || a.id })) });
+  } catch (e) { next(e); }
+});
+
+router.put('/platform/industry-sets/:industry', requireAuth, requirePlatformAdmin, async (req, res, next) => {
+  try {
+    const user = await getUserById(req.userId);
+    const agents = await listAgentMeta().catch(() => null);
+    const out = await saveIndustrySet(req.params.industry, req.body?.set, { by: user?.id ?? null, email: user?.email ?? null, knownAgents: agents ? agents.map((a) => a.id) : null });
+    if (!out.ok) return res.status(400).json({ error: out.error });
+    await recordAuditEvent(req, { action: 'platform.industry_set_changed', targetType: 'platform', targetId: `industry_set:${req.params.industry}`, metadata: {}, success: true });
+    res.json({ set: out.set });
+  } catch (e) { next(e); }
+});
+
+router.delete('/platform/industry-sets/:industry', requireAuth, requirePlatformAdmin, async (req, res, next) => {
+  try {
+    const user = await getUserById(req.userId);
+    const out = await resetIndustrySet(req.params.industry, { by: user?.id ?? null, email: user?.email ?? null });
+    if (!out.ok) return res.status(400).json({ error: out.error });
+    await recordAuditEvent(req, { action: 'platform.industry_set_reset', targetType: 'platform', targetId: `industry_set:${req.params.industry}`, metadata: {}, success: true });
+    res.json({ set: out.set });
+  } catch (e) { next(e); }
+});
 
 router.get('/platform/master-agent', requireAuth, requirePlatformAdmin, async (req, res, next) => {
   try { res.json(await masterAgentPayload()); } catch (e) { next(e); }

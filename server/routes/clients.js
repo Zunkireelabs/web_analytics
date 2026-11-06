@@ -30,7 +30,7 @@ import { callLLMForJson } from '../llm.js';
 import { setOnboardingBaseline } from '../store/upsert.js';
 import { safeMessage } from '../lib/errors.js';
 import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
-import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite, queueDesignAgentDerivationForSite, queueDesignProfileDerivationForOnboarding, runGeoAuditIfDue } from '../job.js';
+import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite, queueDesignAgentDerivationForSite, queueDesignProfileDerivationForOnboarding, runGeoAuditIfDue, runAiRecommendationIfDue } from '../job.js';
 import { buildReviewReport } from '../agents/lib/review-report.js';
 import { buildBaselineReport } from '../agents/lib/baseline-report.js';
 import { buildDesignReviewReport } from '../agents/lib/design-review.js';
@@ -415,6 +415,16 @@ async function runBaselineSequenceUnlocked(siteId, site) {
     };
   }
 
+  // Does the client's repository have a stage branch? If so, record it so the routing rule (light edits to main; new pages, blogs and
+  // site-wide fixes to stage) works for this client without anyone configuring it. Never overwrites a person's setting.
+  await import('../lib/stage-branch.js')
+    .then((m) => m.detectStageBranch(site))
+    .catch((err) => console.error(`[clients] site ${siteId} stage-branch detection failed:`, err.message));
+
+  // Which industry is this project in? Decided here, from the data just ingested, with nobody clicking anything: applied only
+  // when two signals agree (server/lib/industry-detect.js). The agents below and the baseline report read the result.
+  const industry = await import('../lib/industry-detect.js').then((m) => m.runIndustryDetection(site));
+
   const analysis = await runDailyAgentAnalysisForSite(site);
   const [execRun] = await getLatestAgentRuns(siteId, ['executive-report']);
   if (execRun) await setOnboardingBaseline(siteId, execRun.id);
@@ -433,6 +443,14 @@ async function runBaselineSequenceUnlocked(siteId, site) {
   // "must never fail onboarding itself" discipline as every step here.
   await runGeoAuditIfDue(site).catch((err) => {
     console.error(`[clients] site ${siteId} onboarding GEO audit failed:`, err.message);
+  });
+
+  // The first AI-answer check, so a new client starts with a real "do AI assistants name you?" reading instead of waiting for the
+  // monthly run. runAiRecommendationIfDue skips a site that already has a recent check, and does nothing unless the server has the
+  // AI_RECOMMENDATION_ENABLED switch and a provider key (the agent says "insufficient data" then). Awaited so the Industry page and
+  // the baseline report see it; best-effort like every step here.
+  await runAiRecommendationIfDue(site).catch((err) => {
+    console.error(`[clients] site ${siteId} onboarding AI-answer check failed:`, err.message);
   });
 
   // The client-facing "day 0" document (server/migrations/150_baseline_reports.sql) —
@@ -468,7 +486,7 @@ async function runBaselineSequenceUnlocked(siteId, site) {
 
   return {
     site: { id: finalSite.id, name: finalSite.name, onboardedAt: finalSite.onboarded_at, baselineRunId: finalSite.baseline_run_id },
-    discovery, ingestion, analysis, healthScore, baselineReport, analyst,
+    discovery, ingestion, industry, analysis, healthScore, baselineReport, analyst,
     // What this tenant still needs before it runs end to end, in the same
     // response that reports onboarding "succeeded" — so a half-provisioned
     // tenant is visible at the moment it is created, not weeks later when

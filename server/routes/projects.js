@@ -117,6 +117,15 @@ router.get('/projects/:siteId/overview', requireAuth, requireProjectRole('member
   } catch (e) { next(e); }
 });
 
+// The client's Industry page. {available:false} until the baseline (or the weekly re-check) has confirmed the industry from two
+// signals; the app then hides the page entirely. Every figure is computed from the project's own data (lib/industry-page.js).
+router.get('/projects/:siteId/industry', requireAuth, requireProjectRole('member'), async (req, res, next) => {
+  try {
+    const { buildIndustryPage } = await import('../lib/industry-page.js');
+    res.json(await buildIndustryPage(req.projectId));
+  } catch (e) { next(e); }
+});
+
 router.put('/projects/:siteId/goal', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
   try {
     const check = validateGoal(req.body);

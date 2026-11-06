@@ -493,18 +493,31 @@ export function startCron() {
   // :35 to stay clear of the other four hourly sweeps. Per-site gating (has
   // this site's own ship hour passed, did it already produce work today) lives
   // in the job, not here, because it depends on each site's timezone.
-  cron.schedule('35 * * * *', async () => {
-    try {
-      // Takes the same per-site shipping lock the scheduled run takes, inside
-      // its own loop — so this guard can never open a second batch alongside
-      // a run already in flight for that site, while still being free to
-      // recover a DIFFERENT site whose morning run was missed.
-      await runAutoRemediationCatchupForAllSites(tz);
-    } catch (err) {
-      console.error('[cron] autonomous shipping catch-up error:', err.message);
-    }
-  }, { timezone: tz });
-  console.log('[cron] autonomous shipping catch-up scheduled (fires at :35 each hour)');
+  // ONE catch-up pass a day at 12:00, an hour after the 11:00 run (owner decision 2026-11-06), instead of an hourly one. If a project
+  // has not shipped by then (the server was down at 11:00, the run was cut short) this ships it; a project that already shipped today,
+  // or that has Auto-fixes off, is left alone. The hourly version also wrote an empty 'disabled' row per project per hour. The window
+  // in which a pass may ship is SHIP_HOUR_LOCAL to SHIP_CATCHUP_END_HOUR_LOCAL (11 to 13 in the deploy file), so 12:00 is inside it.
+  // SHIP_CATCHUP_CRON_SCHEDULE moves it; 'off' removes it.
+  const shipCatchupSchedule = process.env.SHIP_CATCHUP_CRON_SCHEDULE || '0 12 * * *';
+  if (shipCatchupSchedule === 'off') {
+    console.log('[cron] autonomous shipping catch-up: off (SHIP_CATCHUP_CRON_SCHEDULE=off)');
+  } else if (!cron.validate(shipCatchupSchedule)) {
+    console.error(`[cron] invalid SHIP_CATCHUP_CRON_SCHEDULE "${shipCatchupSchedule}" — autonomous shipping catch-up NOT scheduled.`);
+  } else {
+    cron.schedule(shipCatchupSchedule, async () => {
+      try {
+        // Takes the same per-site shipping lock the scheduled run takes, inside
+        // its own loop — so this guard can never open a second batch alongside
+        // a run already in flight for that site, while still being free to
+        // recover a DIFFERENT site whose morning run was missed.
+        await runAutoRemediationCatchupForAllSites(tz);
+      } catch (err) {
+        console.error('[cron] autonomous shipping catch-up error:', err.message);
+      }
+    }, { timezone: tz });
+    console.log(`[cron] autonomous shipping catch-up scheduled "${shipCatchupSchedule}" (${tz}), once a day`);
+  }
+
 
   // Verify stage — independent of the hourly catch-up guard above (that one
   // is a per-site "has today's report run" check; this is a per-row
@@ -778,8 +791,8 @@ export function startCron() {
   }
 
   // Stage -> main promotion for clients that review on a stage branch: once a person has merged a batch PR on stage, the agent
-  // opens the promotion PR (never merges it). Hourly, one cheap query when no client uses a stage branch.
-  const stagePromotionSchedule = process.env.STAGE_PROMOTION_CRON_SCHEDULE || '25 * * * *';
+  // opens the promotion PR (never merges it). Once a day at 16:00, one cheap query when no client uses a stage branch.
+  const stagePromotionSchedule = process.env.STAGE_PROMOTION_CRON_SCHEDULE || '0 16 * * *'; // once a day at 16:00 (owner decision 2026-11-06), not hourly
   if (!cron.validate(stagePromotionSchedule)) {
     console.error(`[cron] invalid STAGE_PROMOTION_CRON_SCHEDULE "${stagePromotionSchedule}" — stage promotion NOT scheduled.`);
   } else {
@@ -793,6 +806,24 @@ export function startCron() {
       }
     }), { timezone: tz });
     console.log(`[cron] stage promotion scheduled "${stagePromotionSchedule}" (${tz})`);
+  }
+
+  // Industry re-check: a project whose industry is not confirmed yet (two signals did not agree, or there was too little search
+  // data at baseline) is looked at again once a week. Cheap, and it never overrides a person's choice.
+  const industrySchedule = process.env.INDUSTRY_RECHECK_CRON_SCHEDULE || '10 4 * * 1';
+  if (!cron.validate(industrySchedule)) {
+    console.error(`[cron] invalid INDUSTRY_RECHECK_CRON_SCHEDULE "${industrySchedule}" — industry re-check NOT scheduled.`);
+  } else {
+    cron.schedule(industrySchedule, () => locked('industry-recheck', async () => {
+      try {
+        const { recheckIndustries } = await import('./lib/industry-detect.js');
+        const r = await recheckIndustries();
+        if (r.checked) console.log(`[cron] industry re-check — ${r.applied} confirmed of ${r.checked} checked`);
+      } catch (err) {
+        console.error('[cron] industry re-check error:', err.message);
+      }
+    }), { timezone: tz });
+    console.log(`[cron] industry re-check scheduled "${industrySchedule}" (${tz})`);
   }
 
   // PostHog daily ingest — only for projects that connected it. Costs nothing: it reads the client's own PostHog

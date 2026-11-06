@@ -582,7 +582,10 @@ async function runAgentIfDue(site, agentId, { start, end, cadence = 'month' } = 
     ? previousWeek(site.timezone).start
     : monthBounds(previousMonth(site.timezone).year, previousMonth(site.timezone).month).start;
   const [lastRun] = await getLatestAgentRuns(site.id, [agentId]);
-  if (lastRun && new Date(lastRun.created_at) >= new Date(threshold)) {
+  // A check that could not run at all ("no provider configured") is not a check. Without this, the failed run of 21 Oct / 4 Nov would
+  // count as this month's analysis and keep the AI-answer check from retrying until the month after the switch was fixed.
+  const couldNotRun = agentId === 'ai-recommendation' && lastRun?.status === 'insufficient-data';
+  if (lastRun && !couldNotRun && new Date(lastRun.created_at) >= new Date(threshold)) {
     console.log(`[${agentId}] site ${site.id} already analyzed this ${cadence} — skipping.`);
     return null;
   }

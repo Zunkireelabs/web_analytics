@@ -87,6 +87,23 @@ jobs:
             REPORT_PROVIDER=${{ vars.REPORT_PROVIDER }}
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+
+            # ── AI Recommendation Agent (opt-in, real costed OpenAI probes) ──
+            # Needs this separate flag as well as OPENAI_API_KEY (server/agents/ai-recommendation.js), so a key alone never starts
+            # spending. It was set on staging only, so on production every scheduled check answered "no provider configured" from
+            # 21 Oct. Being a server-wide switch, it also covers every client onboarded from now on: the baseline runs this agent, and
+            # the agent seeds that client's tracked prompts on its first run.
+            AI_RECOMMENDATION_ENABLED=true
+
+            # ── Shipping time (owner decision 2026-11-06) ───────────────────
+            # Fixes are drafted and pull requests opened ONCE a day at 11:00 (server time, TZ above), after the 07:00 detection run.
+            # SHIP_CRON_SCHEDULE moves shipping out of the 07:00 pass; SHIP_HOUR_LOCAL tells the "was today's run missed" checks the
+            # same hour. If a project has not shipped by 12:00, ONE catch-up pass at 12:00 ships it (SHIP_CATCHUP_CRON_SCHEDULE default;
+            # SHIP_CATCHUP_END_HOUR_LOCAL=13 makes 12:00 fall inside the window). No hourly checks. The stage -> main promotion check
+            # runs once a day at 16:00 (STAGE_PROMOTION_CRON_SCHEDULE default).
+            SHIP_CRON_SCHEDULE=0 11 * * *
+            SHIP_HOUR_LOCAL=11
+            SHIP_CATCHUP_END_HOUR_LOCAL=13
             REPORT_MODEL_DAILY=${{ vars.REPORT_MODEL_DAILY }}
             REPORT_MODEL_MONTHLY=${{ vars.REPORT_MODEL_MONTHLY }}
 

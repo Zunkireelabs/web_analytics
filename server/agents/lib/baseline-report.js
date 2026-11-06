@@ -274,11 +274,24 @@ export async function buildBaselineReport(siteId) {
   };
   const issuesSnapshot = summarizeIssuesSnapshot(recommendations, auditRun, auditFindings, geoRuns?.[0] || null, competitorProfiles, competitorScores);
 
-  const narrativeMd = await generateNarrative(site, kpiSnapshot, issuesSnapshot);
+  // The industry was detected earlier in the baseline. Null when it is not confirmed: the section is then left out, not guessed.
+  const industryPage = await import('../../lib/industry-page.js')
+    .then((m) => m.buildIndustryPage(siteId))
+    .then((p) => (p?.available ? {
+      industry: p.label, subIndustry: p.subIndustry || null,
+      pagesRead: p.pagesRead ?? null,
+      questionsAnsweredPercent: p.questions?.percent ?? null, questionsFound: p.questions?.total ?? null,
+      currentStage: p.stages?.find((x) => x.state === 'now')?.title || null,
+      strongestArea: p.strongestArea, biggestGap: p.biggestGap,
+      firstMoves: (p.moves || []).map((m) => m.title),
+    } : null))
+    .catch(() => null);
+
+  const narrativeMd = await generateNarrative(site, kpiSnapshot, issuesSnapshot, industryPage);
   return saveBaselineReport(siteId, { kpiSnapshot, issuesSnapshot, narrativeMd });
 }
 
-async function generateNarrative(site, kpiSnapshot, issuesSnapshot) {
+async function generateNarrative(site, kpiSnapshot, issuesSnapshot, industryPage = null) {
   const system = 'You are a growth strategist writing a CLIENT-FACING Baseline Report — the very first document a ' +
     'new client sees, capturing exactly what their website looked like and what issues existed on the day they ' +
     'were onboarded. This document gets compared against later reports to show real growth, so accuracy matters ' +
@@ -290,7 +303,7 @@ async function generateNarrative(site, kpiSnapshot, issuesSnapshot) {
     'a completed audit that has not finished). Never invent a number not present in the data given to you.\n\n' +
     'This is a FINDINGS-ONLY document: report what is missing and why it matters. Never promise a fix, a ' +
     'timeline, or a result, and never say who will do the work.\n\n' +
-    'Return ONLY a markdown document (no JSON, no code fences) with exactly these headings, in this order:\n' +
+    'Return ONLY a markdown document (no JSON, no code fences) with exactly these headings, in this order (a heading marked as conditional below is left out when its data is null):\n' +
     '# Baseline Report — <site name> — <today\'s date>\n' +
     '## Where Your Website Stood\n' +
     '2-4 sentences on the real KPI starting point (clicks/impressions/sessions/health score), honest about how ' +
@@ -312,6 +325,12 @@ async function generateNarrative(site, kpiSnapshot, issuesSnapshot) {
     'columns Issue | Pages affected | Priority, using topDefects verbatim — these are real defect labels, do not ' +
     'reword them into something the data does not say. Then one short paragraph naming the 2-3 defects that ' +
     'affect the most pages and why each matters for being found.\n' +
+    '## Your Industry and Growth Path\n' +
+    'Use `industryPage`. If it is null, OMIT this heading and section entirely — never guess an industry. Otherwise: one sentence ' +
+    'naming the industry, then 3-5 sentences on where this site stands on the way to growing in it, using ONLY the fields given ' +
+    '(questionsAnsweredPercent is the share of the questions people search that this site already ranks on page one for; ' +
+    'currentStage is the stage of growth it is at; strongestArea and biggestGap may be null — skip what is null). Name the ' +
+    'firstMoves as findings, not promises. Do not state a trend, a benchmark against other businesses, or a number not in industryPage.\n' +
     '## Issues We Found\n' +
     'A short intro sentence, then a bullet list of the real issues from openRecommendations (group by priority, ' +
     'most important first; mention the full-site-audit status honestly if it was not yet available). Write each ' +
@@ -321,7 +340,7 @@ async function generateNarrative(site, kpiSnapshot, issuesSnapshot) {
     '## Your Starting Point\n' +
     '2-3 sentences: this is the measured state of the site today, and every future report is compared against ' +
     'these exact numbers. State it as a baseline for measurement — do not promise improvements.';
-  const user = `site: ${site.name}\ndate: ${new Date().toISOString().slice(0, 10)}\nkpiSnapshot: ${JSON.stringify(kpiSnapshot)}\nissuesSnapshot: ${JSON.stringify(issuesSnapshot)}`;
+  const user = `site: ${site.name}\ndate: ${new Date().toISOString().slice(0, 10)}\nkpiSnapshot: ${JSON.stringify(kpiSnapshot)}\nissuesSnapshot: ${JSON.stringify(issuesSnapshot)}\nindustryPage: ${JSON.stringify(industryPage)}`;
   const raw = await callLLM(system, user, { maxTokens: 1800 })
     .catch((err) => { console.warn('[baseline-report] narrative failed:', err.message); return null; });
   return raw?.trim() || `# Baseline Report — ${site.name}\n\nReport generation failed — please retry.`;

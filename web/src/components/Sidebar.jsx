@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Activity, ChevronDown, ChevronsUpDown, Lock, LogOut, Settings as SettingsIcon } from 'lucide-react';
+import { Activity, Target, ChevronDown, ChevronsUpDown, Lock, LogOut, Settings as SettingsIcon } from 'lucide-react';
 import { usePosthogState, connectPosthogPath } from '../lib/posthog-state.jsx';
+import { useIndustry } from '../lib/industry-state.jsx';
 import { isOpenWhileLocked } from '../lib/access.jsx';
 import Logo from './Logo.jsx';
 import WorkspaceSwitcher from './WorkspaceSwitcher.jsx';
@@ -53,9 +54,14 @@ export default function Sidebar({
   const ph = usePosthogState().state;
   const phBroken = Boolean(ph?.connected && ph.status === 'error');
   const showConnectPosthog = Boolean(siteId && ph && (!ph.connected || phBroken) && ph.canConnect && !access?.locked);
-  const groups = showConnectPosthog
-    ? baseGroups.map((g, i) => (i === 0 ? { ...g, items: [{ to: connectPosthogPath(siteId), label: phBroken ? 'Reconnect PostHog' : 'Connect PostHog', icon: Activity, attention: true }, ...g.items] } : g))
+  // The Industry page exists only once the project's industry is confirmed (two signals agree). Until then it is not in the menu.
+  const industryShown = Boolean(useIndustry()?.available) && !access?.locked;
+  const withIndustry = industryShown
+    ? baseGroups.map((g) => (g.id === 'performance' ? { ...g, items: [...g.items, { to: '/industry', label: 'Industry', icon: Target }] } : g))
     : baseGroups;
+  const groups = showConnectPosthog
+    ? withIndustry.map((g, i) => (i === 0 ? { ...g, items: [{ to: connectPosthogPath(siteId), label: phBroken ? 'Reconnect PostHog' : 'Connect PostHog', icon: Activity, attention: true }, ...g.items] } : g))
+    : withIndustry;
 
   const toggleSection = (id) => {
     setCollapsed((prev) => {
