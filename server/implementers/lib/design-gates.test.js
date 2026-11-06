@@ -32,7 +32,8 @@ const setEnv = (env) => { for (const [k, v] of Object.entries(env)) { if (v == n
 afterEach(() => setEnv({ DESIGN_GATE_MODE: null, DESIGN_GATE_FAIL_CLOSED: null, NEWPAGE_RENDER_GATE_ENABLED: null }));
 
 describe('runDesignGates — modes', () => {
-  test('off runs nothing and records nothing', async () => {
+  test('explicitly off runs nothing and records nothing', async () => {
+    setEnv({ DESIGN_GATE_MODE: 'off' });
     const h = harness();
     const r = await runDesignGates(site(null), draft, resolved, h.deps);
     assert.deepEqual([r.ok, r.skipped], [true, 'off']);
@@ -47,6 +48,15 @@ describe('runDesignGates — modes', () => {
     assert.equal(h.records[0].blocked, true);
     assert.equal(h.records[0].mode, 'log');
     assert.equal(h.records[0].reason, 'no-design-profile');
+  });
+
+  test('with the variable unset a draft with no design profile is HELD, never silently approved', async () => {
+    setEnv({});
+    const h = harness();
+    const r = await runDesignGates(site(null), draft, resolved, h.deps);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'design-incomplete');
+    assert.equal(h.records[0].mode, 'enforce');
   });
 
   test('enforce mode holds the same draft, with the reason and the assessment', async () => {

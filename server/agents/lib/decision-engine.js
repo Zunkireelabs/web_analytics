@@ -19,11 +19,10 @@ import { insertDecision } from '../../store/decisions.js';
 // today doesn't exist anywhere: turning a bundle of evidence into ONE
 // action decision with a stated rationale and stated alternatives rejected.
 //
-// UNWIRED as of this commit — no cron job, generator, or route calls
-// decide() yet. That wiring is a later phase (Phase 4 for the keyword-gap
-// ship cycle specifically, Phase 7 more broadly), each behind its own
-// feature flag per the plan's rollout section, so this module can be
-// reviewed and tested in isolation first.
+// WIRED (this header was written before it was): called from default-bucket-decision.js, work-arbiter.js,
+// gap-action-resolver.js, capability-gap-detector.js and failure-recovery-router.js, each behind its own flag and budget.
+// Evidence comes from decision-evidence.js, which also supplies project memory, behaviour learning and industry knowledge
+// when LEARNING_EVIDENCE_IN_DECISIONS=on (lib/learning-evidence.js).
 
 export const DECISION_ACTIONS = Object.freeze([
   'improve_page', 'new_page', 'fix_technical', 'fix_metadata',
@@ -111,6 +110,12 @@ function isValidDecisionShape(parsed) {
 // Dependency-injection factory (same shape as recommendation-gates.js's
 // createRecommendationGates) so decide() is testable without a real DB or a
 // real LLM call — tests pass a stub callLLMForJsonFn/insertDecisionFn.
+// The exact prompt and shape check the engine uses, exported so a candidate model is EVALUATED on the same task it would serve
+// (lib/model-adaptation.js liveDecisionPredictor). No second prompt to drift from the real one.
+export function decisionPromptFor(situation, evidence) {
+  return { system: SYSTEM_PROMPT, user: `Situation: ${situation}\n\nEvidence:\n${JSON.stringify(evidence)}`, validate: isValidDecisionShape };
+}
+
 export function createDecisionEngine({
   callLLMForJsonFn = callLLMForJson,
   insertDecisionFn = insertDecision,
@@ -145,6 +150,7 @@ export function createDecisionEngine({
     const user = `Situation: ${situation}\n\nEvidence:\n${JSON.stringify(evidence)}`;
     const parsed = await callLLMForJsonFn(SYSTEM_PROMPT, user, {
       maxTokens: 900,
+      modelRole: 'decision', // lets a model promoted through the evaluated registry serve decisions (lib/model-override.js); null/unchanged until one is
       tier: 'monthly', // a decision is a higher-stakes, lower-frequency call than a per-page daily narrative — same tier choice as competitor discovery in llm.js
       validate: isValidDecisionShape,
     });

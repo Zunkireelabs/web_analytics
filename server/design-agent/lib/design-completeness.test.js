@@ -110,7 +110,10 @@ describe('assessDesignCompleteness', () => {
 });
 
 test('flag and description helpers', () => {
-  assert.equal(isDesignGateFailClosed({}), false);
+  assert.equal(isDesignGateFailClosed({}), true, 'a missing variable must fail closed, never open');
+  assert.equal(isDesignGateFailClosed({ DESIGN_GATE_MODE: 'log' }), false, 'log is honoured only when set');
+  assert.equal(isDesignGateFailClosed({ DESIGN_GATE_MODE: 'off' }), false, 'off is honoured only when set');
+  assert.equal(isDesignGateFailClosed({ DESIGN_GATE_MODE: 'garbage' }), true, 'an unrecognised value fails closed');
   assert.equal(isDesignGateFailClosed({ DESIGN_GATE_FAIL_CLOSED: 'true' }), true);
   assert.match(describeBlocks({ blocks: [{ field: 'a', reason: 'r', detail: 'd' }] }), /a: r \(d\)/);
 });

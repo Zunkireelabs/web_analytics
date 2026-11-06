@@ -11,6 +11,8 @@ function neutralDeps(overrides = {}) {
     fetchInvestigationEvidenceFn: async () => [],
     listFindingsFn: async () => [],
     listDecisionsForSiteFn: async () => [],
+    // These tests are about the five original sources; learning evidence (on by default now) has its own tests below.
+    learningEnabledFn: () => false,
     ...overrides,
   };
 }
@@ -130,5 +132,28 @@ describe('gatherCorrelatedEvidence — mapping and isolation', () => {
 describe('SITUATION_TYPES', () => {
   test('includes the four planned situation types', () => {
     assert.deepEqual(SITUATION_TYPES, ['keyword_opportunity', 'traffic_decline', 'technical_issue', 'generic']);
+  });
+});
+
+describe('learning evidence is part of every decision by default', () => {
+  const loaders = {
+    projectMemory: async (id) => [{ source: 'project-memory', summary: `memory for ${id}`, ref: 'pm:1' }],
+    behaviour: async () => [{ source: 'behaviour-learning', summary: 'history', ref: 'b:1' }],
+    industry: async () => [{ source: 'industry-intelligence', summary: 'industry', ref: 'i:1' }],
+  };
+  test('with nothing configured, all three layers reach the decision engine', async () => {
+    const gatherer = createEvidenceGatherer({ ...neutralDeps(), learningEnabledFn: undefined, learningLoaders: loaders });
+    const sources = (await gatherer.gatherCorrelatedEvidence('technical_issue', 42)).map((e) => e.source);
+    for (const s of ['project-memory', 'behaviour-learning', 'industry-intelligence']) assert.ok(sources.includes(s), `${s} missing`);
+  });
+  test('one failing layer never removes the others', async () => {
+    const gatherer = createEvidenceGatherer({ ...neutralDeps(), learningEnabledFn: undefined, learningLoaders: { ...loaders, behaviour: async () => { throw new Error('boom'); } } });
+    const sources = (await gatherer.gatherCorrelatedEvidence('technical_issue', 42)).map((e) => e.source);
+    assert.ok(sources.includes('project-memory') && sources.includes('industry-intelligence'));
+    assert.ok(!sources.includes('behaviour-learning'));
+  });
+  test('an explicit off really turns it off', async () => {
+    const gatherer = createEvidenceGatherer({ ...neutralDeps(), learningEnabledFn: () => false, learningLoaders: loaders });
+    assert.equal((await gatherer.gatherCorrelatedEvidence('technical_issue', 42)).length, 0);
   });
 });

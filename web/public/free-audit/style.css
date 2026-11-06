@@ -338,6 +338,44 @@ body { background: #fbfaf8; }
 .lp:has(.audit-result:not([hidden]), .pf-out:not([hidden])) ~ * { }
 .lp-main:has(.audit-result:not([hidden]), .pf-out:not([hidden])) { justify-content: flex-start; padding-top: 90px; }
 
+/* The free audit leads with the box: one centred column, the three cards under it, no sample report beside it.
+   The AI visibility and page fixer pages share this stylesheet and keep their split, so this is a class of its own. */
+.lp--center .lp-split { grid-template-columns: minmax(0, 1fr); justify-items: center; }
+.lp--center .lp-copy { max-width: 720px; text-align: center; }
+/* .lp sets these left for the split layout, so they have to be turned back here. */
+.lp--center .audit-page h1, .lp--center h1 { text-align: center; margin-top: 14px; font-size: 46px; text-wrap: balance; }
+.lp--center .audit-page__sub, .lp--center .audit-form__err { margin-left: auto; margin-right: auto; text-align: center; }
+/* The box is the page: one white panel holding the address field and the button, so what to do is obvious. */
+.lp--center .audit-form { display: block; max-width: 760px; margin: 30px auto 0; padding: 14px; border-radius: 22px; background: #fff;
+  box-shadow: 0 0 0 1px var(--border-2), 0 24px 48px -26px rgba(120, 50, 0, .3); }
+.lp--center .audit-form:focus-within { box-shadow: 0 0 0 1px var(--primary-ring), 0 24px 48px -26px rgba(213, 78, 0, .34); }
+.lp--center .audit-form__row { display: flex; align-items: center; gap: 12px; }
+.lp--center .audit-form__field { flex: 1; height: 58px; gap: 12px; padding: 0 16px; border-radius: 14px; background: var(--muted); color: var(--faint); }
+.lp--center .audit-form__field:focus-within { background: #fff; box-shadow: inset 0 0 0 1.5px var(--primary-ring); color: var(--primary); }
+.lp--center .audit-form__field.is-bad, .lp--center .audit-form__field.is-bad:focus-within { background: #fff; box-shadow: inset 0 0 0 1.5px #d92d20; color: #d92d20; }
+.lp--center .audit-form__err { margin-top: 12px; }
+.lp--center .audit-form__field input { height: 58px; font-size: 17px; }
+.lp--center .audit-form .btn { flex: none; height: 58px; gap: 10px; padding: 0 26px; border-radius: 14px; font-size: 16px; font-weight: 600; }
+.lp--center .audit-form .lp-hints { margin: 13px 6px 3px; justify-content: flex-start; gap: 6px 14px; font-size: 13px; }
+.lp--center .lp-hints, .lp--center .lp-engines { justify-content: center; }
+.lp--center .lp-engines { margin-top: 26px; }
+/* Option A: the white panel holds only the field and the button; the checkmarks sit under it, centred. */
+.lp--center .audit-form, .lp--center .audit-form:focus-within { padding: 0; background: none; box-shadow: none; border-radius: 0; }
+.lp--center .audit-form__row { padding: 16px; border-radius: 24px; background: #fff; box-shadow: 0 0 0 1px var(--border-2), 0 24px 48px -26px rgba(120, 50, 0, .3); }
+.lp--center .audit-form:focus-within .audit-form__row { box-shadow: 0 0 0 1px var(--primary-ring), 0 24px 48px -26px rgba(213, 78, 0, .34); }
+.lp--center .audit-form .lp-hints { margin: 16px 0 0; justify-content: center; gap: 6px 18px; }
+/* The three cards are square tiles: icon on top, title and line under it. */
+.lp--center .lp-cards { grid-template-columns: repeat(3, 210px); justify-content: center; gap: 16px; max-width: none; margin: 24px auto 0; }
+.lp--center .lp-card { aspect-ratio: 1; flex-direction: column; align-items: flex-start; justify-content: flex-start; gap: 14px; padding: 22px; border-radius: 18px; text-align: left; }
+.lp--center .lp-card i { width: 44px; height: 44px; border-radius: 12px; font-size: 18px; }
+.lp--center .lp-card b { font-size: 15.5px; line-height: 20px; }
+.lp--center .lp-card span { margin-top: 4px; font-size: 13.5px; line-height: 19px; }
+/* Start the page higher: the pill, headline and line sit nearer the top instead of centred in the screen. */
+.lp-main:has(.lp--center) { justify-content: flex-start; padding-top: 96px; }
+@media (max-width: 760px) { .lp--center .lp-cards { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); } .lp-main:has(.lp--center) { padding-top: 84px; } }
+/* The glow sat behind the sample card on the right; with one column it belongs behind the box. */
+.lp-main:has(.lp--center)::before { background: radial-gradient(760px 440px at 50% 26%, rgba(213, 78, 0, .09), transparent 70%); }
+
 @media (max-width: 900px) {
   .lp-split { grid-template-columns: minmax(0, 1fr); gap: 34px; }
   .lp .audit-page h1, .lp h1 { font-size: 36px; }
@@ -345,6 +383,8 @@ body { background: #fbfaf8; }
   .lp-card-main { transform: none; }
   .lp-cards { grid-template-columns: minmax(0, 1fr); }
   .lp .audit-form { flex-direction: column; align-items: stretch; }
+  .lp--center .audit-form__row { flex-direction: column; align-items: stretch; }
+  .lp--center .audit-form .lp-hints { justify-content: center; }
 }
 
 /* Locked checks in the free audit: the title is blurred, the "We'll fix this for you" label stays readable. */

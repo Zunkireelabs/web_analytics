@@ -1,9 +1,9 @@
 import {
-  getDueImpactMeasurements, recordImpactOutcome, getPageSearchTotals, IMPACT_WINDOW_DAYS,
+  getDueImpactMeasurements, recordImpactOutcome, getPageSearchTotals, getSiteSearchTotals, IMPACT_WINDOW_DAYS,
 } from '../../store/fix-impact.js';
 import { recordOutcome } from './generator-learning.js';
 import { getDeploymentById, deploymentGraceElapsed } from '../../store/deployments.js';
-import { suppressFix, isMaterialRegression } from '../../store/fix-suppressions.js';
+import { suppressFix, isMaterialRegression, MIN_REGRESSION_CLICKS, MIN_REGRESSION_SHARE } from '../../store/fix-suppressions.js';
 
 // Measures what a merged fix actually did to real Search Console numbers, which
 // is the one thing this system has never checked about its own work. Every
@@ -97,6 +97,62 @@ export function classifyImpact(delta) {
   return 'impact-neutral';
 }
 
+// WHAT THE LEARNING LOOP IS ALLOWED TO CONCLUDE (Phase 2).
+//
+// classifyImpact above calls any change in clicks a result. That is fine for showing a human the numbers and wrong for
+// teaching the system, because these labels are averaged into impactConfidence, which moves a generator's ranking
+// score and can withhold a keyword-gap boost. A page going 12 -> 13 clicks, or 400 -> 320 in the same week the whole
+// site dropped 20%, would have been recorded as a lesson about the generator.
+//
+// A label is only given when the evidence supports it:
+//   1. the change is material: at least MIN_REGRESSION_CLICKS clicks and MIN_REGRESSION_SHARE of the page's own
+//      baseline (the floors fix-suppressions.js already uses, not new numbers);
+//   2. it is outside ordinary noise: two equal windows of counts b and a differ by more than 2*sqrt(a+b) about 95% of
+//      the time by chance alone under a Poisson null, so a smaller gap says nothing;
+//   3. it is not just the site moving: the page's relative change, minus the whole site's relative change over the SAME
+//      two windows, still clears MIN_REGRESSION_SHARE in the same direction.
+// Anything else is 'impact-inconclusive' with the reason that stopped it, and records no positive or negative lesson.
+// This still shows correlation, not cause: another change shipped in the same weeks cannot be ruled out here.
+export const NOISE_Z = 2;
+
+export function classifyImpactEvidence(delta, before, control = null) {
+  const out = (verdict, reason, extra = {}) => ({
+    verdict, reason,
+    evidence: {
+      pageClicksBefore: before?.clicks ?? null,
+      pageClicksAfter: before && delta ? before.clicks + delta.clicks : null,
+      pageChangePct: extra.pageChange == null ? null : Number((extra.pageChange * 100).toFixed(1)),
+      siteChangePct: extra.siteChange == null ? null : Number((extra.siteChange * 100).toFixed(1)),
+      adjustedChangePct: extra.adjusted == null ? null : Number((extra.adjusted * 100).toFixed(1)),
+      noiseBandClicks: extra.noiseBand == null ? null : Number(extra.noiseBand.toFixed(1)),
+      minClicks: MIN_REGRESSION_CLICKS, minShare: MIN_REGRESSION_SHARE,
+    },
+  });
+
+  if (!delta || !before) return out('impact-inconclusive', 'no-measurement');
+  const b = Number(before.clicks ?? 0);
+  const change = Number(delta.clicks ?? 0);
+  const a = b + change;
+  if (!(b > 0)) return out('impact-inconclusive', 'no-baseline-clicks');
+
+  const pageChange = change / b;
+  const noiseBand = NOISE_Z * Math.sqrt(a + b);
+  const material = Math.abs(change) >= MIN_REGRESSION_CLICKS && Math.abs(pageChange) >= MIN_REGRESSION_SHARE;
+  if (!material) return out('impact-inconclusive', 'below-material-change', { pageChange, noiseBand });
+  if (Math.abs(change) < noiseBand) return out('impact-inconclusive', 'within-noise', { pageChange, noiseBand });
+
+  const cb = Number(control?.before?.clicks ?? 0);
+  const ca = Number(control?.after?.clicks ?? NaN);
+  if (!(cb > 0) || Number.isNaN(ca)) return out('impact-inconclusive', 'no-site-control', { pageChange, noiseBand });
+  const siteChange = (ca - cb) / cb;
+  const adjusted = pageChange - siteChange;
+  const sameDirection = Math.sign(adjusted) === Math.sign(change);
+  if (!sameDirection || Math.abs(adjusted) < MIN_REGRESSION_SHARE) {
+    return out('impact-inconclusive', 'moved-with-site', { pageChange, siteChange, adjusted, noiseBand });
+  }
+  return out(change > 0 ? 'impact-positive' : 'impact-negative', 'supported', { pageChange, siteChange, adjusted, noiseBand });
+}
+
 // Deployment → production-verification gap (2026-09 lifecycle-gap audit,
 // finding #2): scheduleImpactMeasurement used to assume a human's merge WAS
 // a live deploy — "the merge is the only moment we know a fix is genuinely
@@ -161,7 +217,17 @@ export async function measureOne(row) {
     });
   }
 
-  const delta = computeDelta(before, after);
+  // The control: the whole site over the same two windows. A failed or empty read is just "no control", which the
+  // classifier treats as inconclusive rather than guessing.
+  const [siteBefore, siteAfter] = await Promise.all([
+    getSiteSearchTotals(row.site_id, windows.before.start, windows.before.end).catch(() => null),
+    getSiteSearchTotals(row.site_id, windows.after.start, windows.after.end).catch(() => null),
+  ]);
+  const baseDelta = computeDelta(before, after);
+  const assessment = classifyImpactEvidence(baseDelta, before, siteBefore && siteAfter ? { before: siteBefore, after: siteAfter } : null);
+  // Kept inside the existing delta jsonb, so the evidence behind every label is stored with the measurement itself and
+  // no schema change is needed. Rows measured before this carry no `verdict` and are read as legacy.
+  const delta = { ...baseDelta, verdict: assessment.verdict, verdictReason: assessment.reason, evidence: assessment.evidence };
   const updated = await recordImpactOutcome(row.id, { status: 'measured', beforeWindow: before, afterWindow: after, delta });
 
   // The design lessons that came from this draft get the page's real before
@@ -181,9 +247,21 @@ export async function measureOne(row) {
   // (generator-learning.js keeps them in separate buckets) — this is
   // "did the fix move the metric", logged into the same existing
   // outcome/confidence mechanism rather than a new one.
-  await recordOutcome(row.site_id, row.generator_id, classifyImpact(delta), {
-    draftId: row.draft_id, detail: `clicks ${delta.clicks >= 0 ? '+' : ''}${delta.clicks} over ${IMPACT_WINDOW_DAYS}d post-merge`,
-  });
+  //
+  // Phase 2: only an evidence-supported verdict becomes a positive or negative lesson. An inconclusive one is logged
+  // as 'impact-neutral', which the scorer already leaves out of the ratio, with the reason in the detail: it must not
+  // count for or against the generator, and it must not vanish either.
+  const clicksText = `clicks ${delta.clicks >= 0 ? '+' : ''}${delta.clicks} over ${IMPACT_WINDOW_DAYS}d post-merge`;
+  if (assessment.verdict === 'impact-inconclusive') {
+    await recordOutcome(row.site_id, row.generator_id, 'impact-neutral', {
+      draftId: row.draft_id, detail: `inconclusive (${assessment.reason}): ${clicksText}`,
+    });
+  } else {
+    const e = assessment.evidence;
+    await recordOutcome(row.site_id, row.generator_id, assessment.verdict, {
+      draftId: row.draft_id, detail: `${clicksText}; ${e.adjustedChangePct >= 0 ? '+' : ''}${e.adjustedChangePct}% relative to the site's own trend`,
+    });
+  }
 
   // recordOutcome above moves this generator's confidence for the whole
   // SITE, which is the right granularity for "this generator is unreliable"

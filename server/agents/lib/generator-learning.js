@@ -140,7 +140,7 @@ export async function countRefusalsByRecommendation(siteId, { windowDays = 30 } 
 // How many samples before a score is trusted at all. Below this, one bad
 // early attempt could swing a raw ratio to 0% — not evidence of anything yet,
 // just noise from a small sample.
-const MIN_SAMPLES = 3;
+export const MIN_SAMPLES = 3;
 // Demote to human review once failures/rejections meaningfully outnumber
 // successes within the trailing window — not on the first failure (that is
 // what the circuit breaker and refusal handling already cover per-run) but
@@ -175,11 +175,16 @@ export const PROBATION_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 // take as an optional parameter, so a caller acting on many recommendations
 // at once (the common case) never issues one query per item.
 export async function getLearnedConfidenceMap(siteId) {
+  // Two windows per generator, not one. Technical outcomes (shipped, merged, failed...) arrive within days; impact
+  // outcomes arrive 31+ days after a merge. In one shared 30-row window a generator with a normal technical history
+  // pushed every impact row out, so its measured impact always read as "insufficient data" however many fixes had
+  // really been measured (the limitation the comment below used to describe as the correct fail-safe). Each family now
+  // keeps its own most recent WINDOW_SIZE rows; the technical window is unchanged for a generator with no impact rows.
   const [{ rows }, magnitudeRows, analystAccuracyRows] = await Promise.all([
     query(
       `SELECT generator_id, outcome, created_at FROM (
          SELECT generator_id, outcome, created_at,
-                row_number() OVER (PARTITION BY generator_id ORDER BY created_at DESC) AS rn
+                row_number() OVER (PARTITION BY generator_id, (outcome LIKE 'impact-%') ORDER BY created_at DESC) AS rn
          FROM generator_outcomes WHERE site_id = $1
        ) windowed WHERE rn <= $2`,
       [siteId, WINDOW_SIZE]
@@ -263,12 +268,12 @@ export async function getLearnedConfidenceMap(siteId) {
     // never demotes/blocks a generator on its own (see auto-remediation.js,
     // the one place it is actually consumed, where it only tempers a
     // ranking score, the same non-blocking role `confidence` already
-    // plays there). Note the shared 30-row window above is partitioned by
-    // generator_id across BOTH outcome families, not separately per family
-    // — a generator with many technical outcomes and few (slower-arriving,
-    // 28-day-delayed) impact outcomes may often show insufficient-data here
-    // even with a long history; that's the correct fail-safe default, not a
-    // bug to work around with a second query.
+    // plays there). The window above is kept separately per outcome family
+    // (technical vs impact), so a generator with a long technical history no
+    // longer pushes its slower-arriving, 28-day-delayed impact outcomes out
+    // of view. Insufficient-data here now means fewer than MIN_SAMPLES
+    // evidence-qualified impact outcomes actually exist, not that they were
+    // crowded out.
     const impactScored = b.impactPositive + b.impactNegative;
     const hasEnoughImpactSamples = impactScored >= MIN_SAMPLES;
 

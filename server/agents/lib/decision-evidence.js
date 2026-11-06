@@ -3,6 +3,7 @@ import { findRelevantMemory } from '../../agent-memory.js';
 import { fetchInvestigationEvidence } from './investigation-evidence.js';
 import { listFindings } from '../../store/site-understanding.js';
 import { listDecisionsForSite } from '../../store/decisions.js';
+import { loadProjectMemoryEvidence, loadBehaviourEvidence, loadIndustryEvidence, learningEvidenceEnabled } from '../../lib/learning-evidence.js';
 
 // Phase 2 of the "one intelligence" consolidation plan (fix/system) —
 // proactive cross-domain evidence gathering for decision-engine.js. This is
@@ -125,6 +126,9 @@ export function createEvidenceGatherer({
   fetchInvestigationEvidenceFn = fetchInvestigationEvidence,
   listFindingsFn = listFindings,
   listDecisionsForSiteFn = listDecisionsForSite,
+  // Phase 4: the three learning layers as evidence. Off unless LEARNING_EVIDENCE_IN_DECISIONS=on (or forced by a test).
+  learningLoaders = { projectMemory: loadProjectMemoryEvidence, behaviour: loadBehaviourEvidence, industry: loadIndustryEvidence },
+  learningEnabledFn = learningEvidenceEnabled,
 } = {}) {
   async function gatherCorrelatedEvidence(situationType, siteId, { symptoms = null, problemSignature = null } = {}) {
     const sources = SOURCES_BY_SITUATION[situationType] || SOURCES_BY_SITUATION.generic;
@@ -179,6 +183,18 @@ export function createEvidenceGatherer({
         evidence.push(...pastDecisionsToEvidence(rows));
       } catch (err) {
         console.warn(`[decision-evidence] past-decisions source failed for site ${siteId}: ${err.message}`);
+      }
+    }
+
+    // Phase 4: project memory, behaviour learning and industry knowledge. Same isolation as every source above: a layer
+    // that fails contributes nothing and never blocks the decision. Added last so the decision-specific evidence leads.
+    if (learningEnabledFn()) {
+      for (const [name, load] of Object.entries(learningLoaders)) {
+        try {
+          evidence.push(...await load(siteId));
+        } catch (err) {
+          console.warn(`[decision-evidence] ${name} learning layer failed for site ${siteId}: ${err.message}`);
+        }
       }
     }
 
