@@ -56,6 +56,9 @@ function dataStatements(sql) {
   const re = /\b(UPDATE|DELETE\s+FROM)\s+([a-z_][a-z0-9_]*)/gi;
   let m;
   while ((m = re.exec(clean))) {
+    // Not data statements: a trigger's event clause (BEFORE UPDATE OF col ON t / AFTER UPDATE ON t) and an
+    // upsert's ON CONFLICT ... DO UPDATE SET, which touches only the conflicting row being inserted.
+    if (/^(SET|OF|ON)$/i.test(m[2])) continue;
     // Take the statement up to its terminating semicolon so the guard check
     // below sees the whole WHERE clause, not just the verb.
     const end = clean.indexOf(';', m.index);
@@ -136,5 +139,16 @@ describe('migrations — data statements must converge, not backfill', () => {
     assert.match(sql, /CHECK \(blocked_reason IS NULL OR risk_tier = 'manual'\)/i);
     assert.match(sql, /DROP CONSTRAINT IF EXISTS recommendations_blocked_is_manual/i,
       'must drop before adding, or the second deploy fails on a duplicate constraint');
+  });
+});
+
+describe('migrations lint — trigger and upsert syntax are not data statements', () => {
+  test('BEFORE UPDATE OF / UPDATE ON (trigger events) and DO UPDATE SET (upsert) are ignored; a real unguarded UPDATE is still caught', () => {
+    const sql = `CREATE TRIGGER t BEFORE UPDATE OF url_file_map ON sites FOR EACH ROW EXECUTE FUNCTION f();
+      CREATE TRIGGER t2 AFTER UPDATE ON sites FOR EACH ROW EXECUTE FUNCTION f();
+      INSERT INTO v (a) VALUES (1) ON CONFLICT (a) DO UPDATE SET a = EXCLUDED.a;
+      UPDATE sites SET x = 1;`;
+    const found = dataStatements(sql).map((st) => `${st.verb} ${st.table}`);
+    assert.deepEqual(found, ['UPDATE sites']);
   });
 });

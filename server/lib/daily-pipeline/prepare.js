@@ -17,7 +17,7 @@
 // existing bounded ones inside generateDraft and validateDraft; across passes the queue's own attempt count is the bound.
 
 const OUTAGE = /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|rate limit|secondary rate|5\d\d|GitHub App is not configured|timed out/i;
-export const isOutage = (err) => OUTAGE.test(String(err?.message || err || '')) && !(err?.status >= 400 && err?.status < 500);
+export const isOutage = (err) => err?.designPending === true || (OUTAGE.test(String(err?.message || err || '')) && !(err?.status >= 400 && err?.status < 500));
 
 export async function prepareItem(site, item, deps) {
   const { generateDraft, submitDraftForApproval, validateDraft, markPrepared, releaseItem, abandonDraft, hasUsableDesignProfile, queueDesignDerivation } = deps;

@@ -43,7 +43,10 @@ import {
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds,
 } from '../store/drafts.js';
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
-import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor } from '../implementers/lib/design-drift.js';
+import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor, sitePageUrl as siteBasePageUrl } from '../implementers/lib/design-drift.js';
+import { validatePageDesign } from '../design-agent/lib/live-design-validation.js';
+import { runDesignValidationStage } from '../design-agent/lib/design-validation-stage.js';
+import { runWithDesignContexts } from '../design-agent/lib/design-context-scope.js';
 import { resolveOrCreateCanonicalPageTemplate, PAGE_TEMPLATE_TYPES_FOR_GENERATOR } from '../design-agent/lib/page-templates.js';
 import { buildCorrectionFeedback, canonicalTemplateForFeedback } from '../generators/lib/design-repair-feedback.js';
 import { pageFamilyOf, formatDesignKnowledge } from '../design-agent/lib/design-knowledge.js';
@@ -300,7 +303,26 @@ router.get('/action-center/generators', async (req, res, next) => {
 // wait budget in ms — dataAnalyst.js's "Generate Content Draft" button uses a
 // short one so a mid-derivation click gets a real result instead of an
 // immediate "come back later", without hanging the request for minutes.
-export async function generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId: presetMemoryRefId = null, waitForDesignAgent = false, enforceDesignIntegrity = true } = {}) {
+// Runs a generator call for an existing draft's page inside the validated-design scope. Used
+// by the approval-time repair loops, which call generators directly (not via generateDraft).
+// A page whose design cannot be confirmed throws DesignValidationPending, which those loops
+// already treat as "no repair available" — they never regenerate from a stale design.
+async function withValidatedDesign(siteId, draft, thunk) {
+  const page = draft?.input?.page || draft?.content?.page || null;
+  let contexts = [];
+  if (page) {
+    const site = await getSiteById(siteId);
+    let abs = null;
+    try { abs = site ? new URL(page, siteBasePageUrl(site)).href : null; } catch { abs = null; }
+    if (site && abs) {
+      const stage = await runDesignValidationStage({ site, generatorId: draft.action_type, pageUrl: abs });
+      if (stage.context) contexts = [stage.context];
+    }
+  }
+  return runWithDesignContexts(contexts, thunk);
+}
+
+export async function generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId: presetMemoryRefId = null, waitForDesignAgent = false, enforceDesignIntegrity = true, validateDesignFn = validatePageDesign } = {}) {
   if (!generatorId) { const err = new Error('generatorId is required'); err.status = 400; throw err; }
   const generator = await getGenerator(generatorId);
   if (!generator) { const err = new Error(`Unknown generator "${generatorId}"`); err.status = 404; throw err; }
@@ -356,6 +378,27 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   // re-fetching from the DB) so the render step right below sees it
   // immediately, even on the very same call that just derived+saved it.
   let effectiveSite = await getSiteById(siteId);
+  // LIVE DESIGN VALIDATION (design-agent/lib/design-validation-stage.js) — for edits that
+  // change what a visitor sees on an EXISTING page, confirm the design the agent will
+  // follow is that page's CURRENT design. The stage decides scope (net-new pages and
+  // non-visual edits are skipped), reuses remembered answers, records evidence, and
+  // throws DesignValidationPending when the page cannot be confirmed — a "skip this item
+  // for now" signal, deliberately NOT a refusal and NOT a failure (see that module).
+  // Nothing here changes the saved group map; proposals wait for a person.
+  const validationPageUrl = (() => {
+    const raw = [params?.pageUrl, params?.url, params?.page, params?.permalink].find((v) => typeof v === 'string' && v);
+    const base = effectiveSite ? siteBasePageUrl(effectiveSite) : null;
+    if (!raw || !base) return null;
+    try { return new URL(raw, base).href; } catch { return null; }
+  })();
+  let validatedContexts = [];
+  if (effectiveSite && validationPageUrl) {
+    const stage = await runDesignValidationStage({
+      site: effectiveSite, generatorId, pageUrl: validationPageUrl, validate: validateDesignFn,
+    });
+    effectiveSite = stage.site || effectiveSite;
+    if (stage.context) validatedContexts = [stage.context];
+  }
   if (effectiveSite) {
     const templateResult = await resolveOrCreateComponentTemplate(effectiveSite, componentTemplateActionTypeFor(generatorId), {
       waitForCompletion: Boolean(waitForDesignAgent),
@@ -430,8 +473,23 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     // generates with no structural guidance, same as before this existed.
     const pageTemplateTypes = PAGE_TEMPLATE_TYPES_FOR_GENERATOR[generatorId];
     if (pageTemplateTypes) {
-      const pageTemplateResult = await resolveOrCreateCanonicalPageTemplate(effectiveSite, pageTemplateTypes)
+      const pageTemplateResult = await resolveOrCreateCanonicalPageTemplate(effectiveSite, pageTemplateTypes, { pageUrl: validationPageUrl })
         .catch((err) => { console.error(`[action-center] canonical page-template resolution failed for ${generatorId}:`, err.message); return null; });
+      // A NEW page type with no page of its own and no approved pattern: the suggested pattern goes to a
+      // person (design review) and this draft waits — it is never generated on a silently borrowed layout.
+      if (pageTemplateResult?.reason === 'needs-approved-pattern') {
+        const { createReviewStore } = await import('../design-agent/lib/design-review-store.js');
+        const { DesignValidationPending } = await import('../design-agent/lib/design-validation-stage.js');
+        const pageType = pageTemplateResult.pageType;
+        await createReviewStore().addProposal(siteId, {
+          kind: 'new-page-pattern', pagePath: `pattern:${pageType}`,
+          payload: { pageType, pattern: pageTemplateResult.suggestion.pattern, source: `suggested from this site's own "${pageTemplateResult.suggestion.inferredFrom}" pages`, generatorId },
+        }).catch((err) => console.error(`[action-center] could not record the page-pattern proposal for site ${siteId}:`, err.message));
+        throw new DesignValidationPending(
+          `${generatorId} is waiting for a design decision: this site has no "${pageType}" page yet, so the layout for the first one needs approval (suggested: the site's own "${pageTemplateResult.suggestion.inferredFrom}" pattern).`,
+          { reason: 'needs-approved-pattern', transient: false, exhausted: true },
+        );
+      }
       if (pageTemplateResult?.ok && pageTemplateResult.template) {
         effectiveSite = {
           ...effectiveSite,
@@ -487,10 +545,12 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     // The repair channel. A generator that doesn't read designCorrections
     // simply ignores it and the attempt behaves exactly as it always did —
     // this is additive, not a contract every generator must now satisfy.
-    ({ content, summary } = await generator.generate({
+    // Inside the design-context scope: generators re-fetch the site row themselves, so the
+    // validated context reaches their composer / page-template builder through the scope.
+    ({ content, summary } = await runWithDesignContexts(validatedContexts, () => generator.generate({
       siteId,
       params: { ...(params || {}), ...(designCorrections ? { designCorrections } : {}) },
-    }));
+    })));
     gateResult = await runQualityGate(content, generatorId, siteId, { site: effectiveSite, enforceDesignIntegrity });
     if (attempt === 1 && !gateResult.clean) firstAttemptIssues = gateResult.issues;
     if (gateResult.clean) break;
@@ -521,6 +581,7 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
         // keeping the canonical page template this call may have composed.
         effectiveSite = {
           ...refreshedSite,
+          validatedDesignContext: effectiveSite?.validatedDesignContext,
           url_file_map: {
             ...refreshedSite.url_file_map,
             siteRoot: {
@@ -980,7 +1041,7 @@ export async function validateDraft(siteId, draftId, { renderMode, afterQualityG
         // eslint-disable-next-line no-await-in-loop
         const generator = await getGenerator(draft.action_type);
         if (!generator) break; // nothing that can regenerate this action type — fall through to the honest failure below
-        const repaired = await generator.generate({
+        const repaired = await withValidatedDesign(siteId, draft, () => generator.generate({
           siteId,
           params: {
             ...(draft.input || {}),
@@ -988,7 +1049,7 @@ export async function validateDraft(siteId, draftId, { renderMode, afterQualityG
               + `device widths against the actual live page it publishes to, and it broke the layout: ${regressionSummary}. Fix `
               + 'exactly this problem (the content itself, not the page around it) and keep everything else you already wrote.',
           },
-        }).catch((err) => { console.error(`[action-center] design-validate repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
+        })).catch((err) => { console.error(`[action-center] design-validate repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
         if (!repaired?.content) break;
 
         // The repaired content is a fresh, machine-written attempt — it must
@@ -1074,7 +1135,7 @@ export async function validateDraft(siteId, draftId, { renderMode, afterQualityG
         // eslint-disable-next-line no-await-in-loop
         const generator = await getGenerator(draft.action_type);
         if (!generator) break;
-        const repaired = await generator.generate({
+        const repaired = await withValidatedDesign(siteId, draft, () => generator.generate({
           siteId,
           params: {
             ...(draft.input || {}),
@@ -1082,7 +1143,7 @@ export async function validateDraft(siteId, draftId, { renderMode, afterQualityG
               + `output and does not actually do what it claims to fix: ${JSON.stringify(techCheck.evidence)}. Fix exactly this `
               + 'problem and keep everything else you already wrote.',
           },
-        }).catch((err) => { console.error(`[action-center] seo/tech-validate repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
+        })).catch((err) => { console.error(`[action-center] seo/tech-validate repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
         if (!repaired?.content) break;
         // eslint-disable-next-line no-await-in-loop
         const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site });

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { correctBodyTypography, bodySamples, correctHeadingTypography, headingSamplesByLevel, headingPageSamplesByContext, correctLinkTypography, correctPageTypeTextHierarchy, correctSpacing } from './profile-extract.js';
+import { correctBodyTypography, bodySamples, correctHeadingTypography, headingSamplesByLevel, headingPageSamplesByContext, correctLinkTypography, correctPageTypeTextHierarchy, correctSpacing, backfillPageTypePatterns } from './profile-extract.js';
 
 // The real classes and computed styles captured from zunkireelabs.com on
 // 2026-08-31. The eyebrow is the site's most consistent body-role paragraph —
@@ -393,5 +393,37 @@ describe('buildPromptPages keeps the extraction prompt under the model rate limi
     assert.ok(JSON.stringify(out).length <= 6000 + 200 * out.length);
     const { PROMPT_PAGES_CHAR_BUDGET } = await import('./profile-extract.js');
     assert.ok(JSON.stringify(buildPromptPages(pages)).length <= PROMPT_PAGES_CHAR_BUDGET);
+  });
+});
+
+describe('backfillPageTypePatterns', () => {
+  const sec = (role, items = []) => ({ role, textHierarchy: items });
+  const sub = (classes) => ({ role: 'subheading', classes, style: { fontSize: '24px', textTransform: 'none', letterSpacing: 'normal', fontWeight: '600' } });
+  const pages = [
+    { url: 'https://x.test/', pageType: 'homepage', sections: [sec('hero')] },
+    { url: 'https://x.test/blog/a', pageType: 'blog-article', sections: [sec('nav'), sec('content', [sub('post-h2'), sub('post-h2'), sub('other-h2')]), sec('footer')] },
+    { url: 'https://x.test/contact', pageType: 'other', sections: [sec('content', [sub('c-h2')])] },
+  ];
+
+  test('fills a captured page type the model left out, from observed classes only', () => {
+    const { pageTypePatterns, filled } = backfillPageTypePatterns({ homepage: { sectionOrder: ['hero'], textHierarchy: [], notes: '' } }, pages);
+    assert.deepEqual(filled, ['blog-article']);
+    const article = pageTypePatterns['blog-article'];
+    assert.equal(article.textHierarchy.find((t) => t.role === 'subheading').classes, 'post-h2');
+    assert.deepEqual(article.sectionOrder, ['nav', 'content', 'footer']);
+  });
+
+  test('never replaces a pattern the model returned, and skips the catch-all "other"', () => {
+    const model = { homepage: { sectionOrder: ['hero'], textHierarchy: [], notes: 'm' }, 'blog-article': { sectionOrder: ['x'], textHierarchy: [], notes: 'keep' } };
+    const { pageTypePatterns, filled } = backfillPageTypePatterns(model, pages);
+    assert.equal(pageTypePatterns['blog-article'].notes, 'keep');
+    assert.equal(pageTypePatterns.other, undefined);
+    assert.deepEqual(filled, []);
+  });
+
+  test('a role with no observed class is left out, not invented', () => {
+    const only = [{ url: 'https://x.test/faq', pageType: 'faq', sections: [sec('content', [])] }];
+    const { pageTypePatterns } = backfillPageTypePatterns({}, only);
+    assert.deepEqual(pageTypePatterns.faq.textHierarchy, []);
   });
 });

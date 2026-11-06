@@ -1,4 +1,5 @@
 import { pageTemplateGuidanceText } from '../../design-agent/lib/page-templates.js';
+import { validatedContextFor } from '../../design-agent/lib/live-design-validation.js';
 
 // THE SHARED DESIGN-AWARE COMPOSER.
 //
@@ -50,16 +51,11 @@ import { pageTemplateGuidanceText } from '../../design-agent/lib/page-templates.
 const pathOf = (u) => {
   try { return new URL(u, 'https://placeholder.invalid').pathname.replace(/\/+$/, '') || '/'; } catch { return null; }
 };
-export function ownPageGuidance(site, pageUrl) {
-  if (!pageUrl) return null;
-  const want = pathOf(pageUrl);
-  const pages = site?.url_file_map?.siteRoot?.designProfile?.pages;
-  if (!want || !Array.isArray(pages)) return null;
-  const page = pages.find((p) => p?.url && pathOf(p.url) === want && Array.isArray(p.sections) && p.sections.length);
-  if (!page) return null;
-  const body = page.sections.filter((sec) => sec.role !== 'nav' && sec.role !== 'footer');
+// "hero full-width centred with cards/cta, 24px below -> …" for a list of captured sections.
+function describeSections(sections) {
+  const body = (sections || []).filter((sec) => sec.role !== 'nav' && sec.role !== 'footer');
   if (!body.length) return null;
-  const parts = body.map((sec) => {
+  return body.map((sec) => {
     const bits = [sec.role];
     if (sec.width) bits.push(sec.width);
     if (sec.alignment) bits.push(sec.alignment);
@@ -68,8 +64,33 @@ export function ownPageGuidance(site, pageUrl) {
     const gap = sec.spacing?.after;
     if (Number.isFinite(gap) && gap > 0) bits.push(`${gap}px below`); // 0 is "no measured gap", not a rule to follow
     return bits.join(' ');
-  });
-  return `This exact page (${want}) was captured on its own, and its design is not assumed to match other pages. Its sections, in order: ${parts.join(' -> ')}. Match THIS page's structure, widths and spacing rhythm for anything added to it.`;
+  }).join(' -> ');
+}
+
+// The design the agent validated against the LIVE page just before generating
+// (live-design-validation.js). This is the one source both this composer and
+// the page-template builder read, so they can never disagree about the page.
+export function validatedGuidanceText(context) {
+  const parts = describeSections(context?.sections);
+  if (!parts) return null;
+  const how = context.source === 'group-sample'
+    ? `matches layout group ${context.groupId} (sample ${context.sampleUrl})`
+    : 'was captured on its own just now';
+  return `This page's current design was checked against the live site on ${String(context.validatedAt).slice(0, 10)} and ${how}. Its sections, in order: ${parts}. Keep exactly this structure, widths and spacing rhythm: reuse only sections, spacing, typography, colours and components this page already shows, and do not add new ones.`;
+}
+
+export function ownPageGuidance(site, pageUrl) {
+  if (!pageUrl) return null;
+  const validated = validatedContextFor(site, pageUrl);
+  if (validated) return validatedGuidanceText(validated);
+  const want = pathOf(pageUrl);
+  const pages = site?.url_file_map?.siteRoot?.designProfile?.pages;
+  if (!want || !Array.isArray(pages)) return null;
+  const page = pages.find((p) => p?.url && pathOf(p.url) === want && Array.isArray(p.sections) && p.sections.length);
+  if (!page) return null;
+  const parts = describeSections(page.sections);
+  if (!parts) return null;
+  return `This exact page (${want}) was captured on its own, and its design is not assumed to match other pages. Its sections, in order: ${parts}. Match THIS page's structure, widths and spacing rhythm for anything added to it.`;
 }
 
 export function pageStructureGuidance(site, pageType, { fallbackPageTypes = [], pageUrl = null } = {}) {
@@ -80,14 +101,17 @@ export function pageStructureGuidance(site, pageType, { fallbackPageTypes = [], 
   if (canonicalTemplates && typeof canonicalTemplates === 'object') {
     for (const type of candidates) {
       const canonical = canonicalTemplates[type];
+      // Never follow a template that was silently borrowed from an unrelated page type.
+      if (canonical?.inferredFromPageType && !canonical.approvedBy && !canonical.approvedPattern) continue;
       if (canonical && (canonical.sectionOrder?.length || canonical.textRoles?.length)) {
         return pageTemplateGuidanceText(canonical);
       }
     }
   }
 
-  const patterns = site?.url_file_map?.siteRoot?.designProfile?.pageTypePatterns;
-  if (!patterns || typeof patterns !== 'object') return null;
+  const profile = site?.url_file_map?.siteRoot?.designProfile;
+  const patterns = { ...(profile?.approvedPagePatterns || {}), ...(profile?.pageTypePatterns || {}) };
+  if (!Object.keys(patterns).length) return null;
 
   let matched = null;
   let matchedType = null;

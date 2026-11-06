@@ -1,3 +1,4 @@
+import { groupObservedClass } from '../../design-agent/lib/layout-groups.js';
 import { projectComponentTemplate, projectExpandContentCard, pageUsesCardSections, cx, projectTable } from '../../design-agent/lib/design-profile.js';
 import { classifyPageType } from '../../design-agent/live-analysis/schema.js';
 import { isSectionScaleTextClass, isFixedHeightClass } from '../../lib/text-scale.js';
@@ -781,7 +782,18 @@ function groundedInlineHeadingClass(designProfile, pageUrl) {
   // scale, which is what an in-article subheading actually is. Falling through
   // to null (leave the stripped heading unsized, inheriting the article's own
   // copy) is strictly better than restoring a hero size.
-  const candidate = entry ? entry.classes : designProfile?.typography?.heading?.item;
+  // Most exact first: the subheading class observed on THIS page's own design
+  // group sample (profile.layoutGroups — every known page was compared, so a
+  // post built differently from the other posts uses its own template's
+  // class). Falls through to the page-type summary, then the site-wide item
+  // scale, exactly as before, whenever the page is not in a saved group or its
+  // sample shows no subheading class.
+  // `null` from the group means the sample's subheadings are genuinely plain
+  // (no class): the exact design is "inherit the article's styling", so no
+  // heading class is applied — never a homepage class borrowed from elsewhere.
+  const groupClass = groupObservedClass(designProfile, pageUrl, 'subheading');
+  if (groupClass === null) return null;
+  const candidate = groupClass || (entry ? entry.classes : designProfile?.typography?.heading?.item);
   return candidate ? inlineSafeHeadingClass(candidate) : null;
 }
 

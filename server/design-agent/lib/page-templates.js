@@ -40,6 +40,7 @@
 // This module never invents a structure for a page type the site has never
 // shown.
 import { updateSiteRepoConfig } from '../../db.js';
+import { validatedContextFor } from './live-design-validation.js';
 
 export const PAGE_TEMPLATE_VERSION = 1;
 
@@ -59,6 +60,16 @@ export const PAGE_TEMPLATE_TYPES_FOR_GENERATOR = Object.freeze({
   // pricing pages are found rather than falling to the generic 'service'.
   'missing-page-create': ['landing', 'service', 'features', 'case-study', 'pricing', 'how-it-works', 'demo', 'location', 'other', 'homepage'],
 });
+
+// A pattern approved by a person for a page type the site has no page of yet (review kind
+// 'new-page-pattern', stored at designProfile.approvedPagePatterns[type]).
+function approvedPatternMatch(profile, candidateTypes) {
+  for (const type of candidateTypes) {
+    const p = profile?.approvedPagePatterns?.[type];
+    if (p?.sectionOrder?.length) return { type, pattern: p, approved: true, approvedBy: p.approvedBy || null };
+  }
+  return null;
+}
 
 function firstMatchingPattern(patterns, candidateTypes) {
   for (const type of candidateTypes) {
@@ -136,12 +147,38 @@ function inferTemplateFromDesignLanguage(patterns, requestedType) {
  */
 export async function resolveOrCreateCanonicalPageTemplate(site, candidateTypes, {
   saveConfig = updateSiteRepoConfig,
+  // The page being edited. When the agent has already validated that page's
+  // design against the live site (live-design-validation.js), THAT context is
+  // the template — the same object the composer reads. It is deliberately NOT
+  // persisted as the page TYPE's canonical template: one page's validated
+  // design describes that page (and its layout group), and must not overwrite
+  // what every other page of the type is built from.
+  pageUrl = null,
+  designContext = null,
 } = {}) {
+  const validated = designContext || validatedContextFor(site, pageUrl);
+  if (validated?.pattern?.sectionOrder?.length) {
+    const pageType = validated.pageType || candidateTypes?.[0] || 'other';
+    return {
+      ok: true,
+      source: 'validated-context',
+      pageType,
+      template: {
+        version: PAGE_TEMPLATE_VERSION,
+        pageType,
+        sectionOrder: validated.pattern.sectionOrder,
+        textRoles: [...new Set((validated.pattern.textHierarchy || []).map((h) => h.role).filter(Boolean))],
+        notes: `Validated against the live page on ${String(validated.validatedAt).slice(0, 10)} (${validated.source}${validated.groupId ? `, group ${validated.groupId}` : ''}).`,
+        validatedContext: { groupId: validated.groupId, fingerprint: validated.fingerprint, validatedAt: validated.validatedAt },
+        derivedAt: validated.validatedAt,
+      },
+    };
+  }
   const profile = site?.url_file_map?.siteRoot?.designProfile;
   const patterns = profile?.pageTypePatterns;
   const existingTemplates = site?.url_file_map?.siteRoot?.pageTemplates || {};
 
-  if (!patterns) return { ok: false, reason: 'no-design-profile', template: null };
+  if (!patterns && !profile?.approvedPagePatterns) return { ok: false, reason: 'no-design-profile', template: null };
 
   // What the BEST real pattern match is RIGHT NOW, most-specific-first —
   // decided before ever looking at what happens to already be persisted, so
@@ -155,11 +192,25 @@ export async function resolveOrCreateCanonicalPageTemplate(site, candidateTypes,
   // from the site's own established design language (see
   // inferTemplateFromDesignLanguage). Inference is deliberately the second
   // choice, never a shortcut past real evidence.
-  const match = firstMatchingPattern(patterns, candidateTypes)
-    || inferTemplateFromDesignLanguage(patterns, candidateTypes[0]);
-  if (!match) return { ok: false, reason: 'no-real-pattern-for-type', template: null };
+  // Direct observation of this page type (or its explicitly related fallbacks) first; then a
+  // pattern a PERSON approved for this type. Borrowing the site's most established pattern of an
+  // UNRELATED type is no longer done silently: it becomes a suggestion that waits for approval
+  // (a 'new-page-pattern' proposal), and the draft is held until then.
+  const match = firstMatchingPattern(patterns, candidateTypes) || approvedPatternMatch(profile, candidateTypes);
+  if (!match) {
+    const suggestion = inferTemplateFromDesignLanguage(patterns, candidateTypes[0]);
+    return {
+      ok: false,
+      reason: suggestion ? 'needs-approved-pattern' : 'no-real-pattern-for-type',
+      template: null,
+      pageType: candidateTypes[0],
+      suggestion: suggestion ? { pageType: candidateTypes[0], inferredFrom: suggestion.inferredFrom, pattern: { sectionOrder: suggestion.pattern.sectionOrder, textHierarchy: suggestion.pattern.textHierarchy } } : null,
+    };
+  }
 
   const existing = existingTemplates[match.type];
+  // A template persisted earlier by the old silent-borrowing path is not trusted unless approved.
+  if (existing?.inferredFromPageType && !existing.approvedBy && !match.approved) { /* recompose below */ } else
   if (existing && profile.derivedAt && existing.derivedFromProfileVersion === profile.derivedAt) {
     return { ok: true, template: existing, source: 'existing', pageType: match.type };
   }
@@ -182,6 +233,7 @@ export async function resolveOrCreateCanonicalPageTemplate(site, candidateTypes,
     // template and every later page of that type reuses it — the site grows
     // its own blog/resources convention instead of re-inventing one per page.
     ...(match.inferredFrom ? { inferredFromPageType: match.inferredFrom } : {}),
+    ...(match.approved ? { approvedPattern: true, approvedBy: match.approvedBy } : {}),
     derivedFromProfileVersion: profile.derivedAt,
     derivedAt: new Date().toISOString(),
   };

@@ -13,6 +13,7 @@
 // design profile schema wants.
 import { chromium } from 'playwright';
 import { classifyPageType } from './schema.js';
+import { surveyLayouts, NOT_A_LAYOUT } from './layout-survey.js';
 
 // Raised from 8 (2026-09-16): with 'other' no longer sub-capped (see
 // discoverPages), a real small-business site's actual page variety needs
@@ -23,6 +24,11 @@ import { classifyPageType } from './schema.js';
 // deploy — see force-design-profile-rescan.js), not per request, so the
 // added cost is small and bounded, not per-generation.
 const DEFAULT_MAX_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_MAX_PAGES) || 20;
+// Extra pages, on top of maxPages, reserved for one sample of each layout group
+// (see pickLayoutGroupSamples). 0 turns the step off.
+const DEFAULT_LAYOUT_GROUP_PAGES = process.env.DESIGN_AGENT_CAPTURE_LAYOUT_GROUP_PAGES === undefined
+  ? 40
+  : Number(process.env.DESIGN_AGENT_CAPTURE_LAYOUT_GROUP_PAGES);
 const NAV_TIMEOUT_MS = Number(process.env.DESIGN_AGENT_CAPTURE_NAV_TIMEOUT_MS) || 20_000;
 
 // The viewports this agent actually looks at. `desktop` is the one the design
@@ -64,8 +70,11 @@ const MIN_TAP_TARGET_PX = 24;
 const DEFAULT_EXTRA_CARD_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_EXTRA_CARD_PAGES) || 2;
 const DEFAULT_CARD_SCAN_BUDGET = Number(process.env.DESIGN_AGENT_CAPTURE_CARD_SCAN_BUDGET) || 6;
 
+// Every browser this platform launches for design work holds a GLOBAL slot for its lifetime
+// (lib/browser-slots.js), so the number of concurrent browsers is bounded across all workers.
 export async function launchBrowser() {
-  return chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+  const { launchWithSlot } = await import('../../lib/browser-slots.js');
+  return launchWithSlot(() => chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] }));
 }
 
 function sameOrigin(a, b) {
@@ -136,7 +145,84 @@ const DEEPER_SAMPLE_TYPES = Object.freeze([
 // already knows a site's real page list (this platform's onboarding already
 // records one) can hand it in here instead of leaving those pages
 // permanently undiscoverable.
-export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAULT_MAX_PAGES, knownUrls = [], propertyType } = {}) {
+// ONE SAMPLE PER LAYOUT GROUP — so a page that is not the same design as the
+// rest of the site is still seen, however many pages the site has.
+//
+// discoverPages above keeps one page per URL-shaped page TYPE, and every
+// 'other' page competes for the same maxPages budget. On a site with 60+ blog
+// posts, a /services/ tree, /events/ pages and city landing pages, that budget
+// is spent on whichever pages the homepage links first; whole page templates
+// (a blog post, a service page, an events page) are never opened, so the
+// profile has no recorded layout for them and the agent can break their
+// design.
+//
+// Pages built from one template share their URL SHAPE: a directory
+// (/blog/<post>, /services/<x>, /events/<x>) or, on flat sites, a slug family
+// (/study-in-uk-from-nepal, /study-in-usa-from-nepal). This groups the site's
+// known URLs by that shape and takes ONE representative per group not already
+// captured. It is a cheap URL-only step (no extra page loads): the grouping is
+// a heuristic, a group that shares a template is represented once, and a
+// bounded budget (layoutGroupBudget) keeps it from becoming a crawl. Language
+// folders (/de/, /de-ch/) are stripped first so a translated page groups with
+// its original and the original is preferred as the sample.
+const LOCALE_PREFIX = /^\/[a-z]{2}(?:-[a-z]{2})?(?=\/|$)/i;
+
+function layoutPath(url) {
+  let pathname;
+  try { pathname = new URL(url).pathname; } catch { return null; }
+  pathname = pathname.replace(/\/index\.html?$/i, '').replace(/\/+$/, '');
+  const stripped = pathname.replace(LOCALE_PREFIX, '');
+  return { segments: stripped.split('/').filter(Boolean), hadLocale: stripped !== pathname };
+}
+
+function slugFamily(lp) {
+  if (!lp || lp.segments.length !== 1) return null;
+  const tokens = lp.segments[0].toLowerCase().split('-');
+  if (tokens.length < 3) return null;
+  // Longer slugs also carry their ending, so /study-in-uk-from-nepal and
+  // /study-in-dubai are two families, not one.
+  return tokens.length >= 5
+    ? `slug:${tokens.slice(0, 2).join('-')}|${tokens.slice(-2).join('-')}`
+    : `slug:${tokens.slice(0, 2).join('-')}`;
+}
+
+export function layoutGroupKey(url, slugFamilyCounts) {
+  const lp = layoutPath(url);
+  if (!lp || !lp.segments.length) return null;
+  if (NOT_A_LAYOUT.test(`/${lp.segments.join('/')}`)) return null;
+  if (lp.segments.length >= 2) return `dir:${lp.segments[0].toLowerCase()}`;
+  const family = slugFamily(lp); // a one-off flat page (/contact) is its own page, not a family
+  return family && (slugFamilyCounts?.get(family) || 0) >= 2 ? family : null;
+}
+
+export function pickLayoutGroupSamples(knownUrls, alreadyChosen, { budget = DEFAULT_LAYOUT_GROUP_PAGES } = {}) {
+  if (!(budget > 0)) return [];
+  const urls = [...new Set(knownUrls)];
+  const counts = new Map();
+  for (const u of urls) {
+    const family = slugFamily(layoutPath(u));
+    if (family) counts.set(family, (counts.get(family) || 0) + 1);
+  }
+  const covered = new Set();
+  for (const u of alreadyChosen) { const k = layoutGroupKey(u, counts); if (k) covered.add(k); }
+
+  const groups = new Map(); // key -> { size, url, rank }
+  for (const u of urls) {
+    const k = layoutGroupKey(u, counts);
+    if (!k || covered.has(k)) continue;
+    const lp = layoutPath(u);
+    // Prefer the original-language page, then the shallowest path, then the shortest URL.
+    const rank = [lp.hadLocale ? 1 : 0, lp.segments.length, u.length];
+    const g = groups.get(k) || { size: 0, url: u, rank };
+    g.size++;
+    if (rank[0] < g.rank[0] || (rank[0] === g.rank[0] && (rank[1] < g.rank[1] || (rank[1] === g.rank[1] && rank[2] < g.rank[2])))) { g.url = u; g.rank = rank; }
+    groups.set(k, g);
+  }
+  // Bigger groups first: the template most pages use matters most.
+  return [...groups.values()].sort((a, b) => b.size - a.size).slice(0, budget).map((g) => g.url);
+}
+
+export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAULT_MAX_PAGES, knownUrls = [], propertyType, layoutGroupBudget = DEFAULT_LAYOUT_GROUP_PAGES, layoutSurvey = null } = {}) {
   await browserPage.goto(homepageUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   const rawLinks = await browserPage.evaluate(collectLinksInPage);
 
@@ -217,6 +303,24 @@ export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAU
       total++;
       break;
     }
+  }
+
+  // One sample of every layout group the steps above did not reach, on a
+  // reserved budget so they cannot be crowded out by 'other' pages.
+  const sameOriginKnown = knownUrls.filter((u) => sameOrigin(u, homepageUrl));
+  const chosen = [...byType.values()].flat();
+  // Preferred: the survey's REAL groups (every known page was fetched and
+  // compared) — one sample per group none of whose pages is already chosen.
+  // Fallback when no survey is available: the URL-shape grouping above.
+  const surveyed = (layoutSurvey?.groups || []);
+  const samples = surveyed.length
+    ? surveyed.filter((g) => !g.members.some((m) => seen.has(m))).slice(0, layoutGroupBudget).map((g) => g.sample)
+    : pickLayoutGroupSamples(sameOriginKnown, chosen, { budget: layoutGroupBudget });
+  for (const abs of samples) {
+    if (seen.has(abs) || /\.(pdf|jpg|jpeg|png|svg|gif|zip|css|js|xml)$/i.test(abs)) continue;
+    seen.add(abs);
+    const type = classifyPageType(abs, { propertyType });
+    byType.set(type, [...(byType.get(type) || []), abs]);
   }
 
   return [...byType.entries()].flatMap(([pageType, urls]) => urls.map((url) => ({ url, pageType })));
@@ -753,6 +857,8 @@ export async function captureSite(homepageUrl, {
   // sites.property_type — 'product' sites get product page types (pricing/
   // features/how-it-works/demo/case-study); omitted/'website' is unchanged.
   propertyType,
+  // Injectable for tests; set to null to skip the survey.
+  surveyFn = surveyLayouts,
 } = {}) {
   const browser = await launchBrowserFn();
   try {
@@ -760,7 +866,16 @@ export async function captureSite(homepageUrl, {
       viewport: { width: DESKTOP_VIEWPORT.width, height: DESKTOP_VIEWPORT.height },
     });
     const page = await context.newPage();
-    const targets = await discoverPages(page, homepageUrl, { maxPages, knownUrls, propertyType });
+    // Look at every known page first (HTTP only, no browser), so the sample
+    // pages are chosen from what the pages actually look like.
+    let layoutSurvey = null;
+    if (surveyFn) {
+      layoutSurvey = await surveyFn([homepageUrl, ...knownUrls.filter((u) => sameOrigin(u, homepageUrl))]).catch((err) => {
+        console.warn(`[design-agent/capture] layout survey failed, falling back to URL-shape sampling: ${err.message}`);
+        return null;
+      });
+    }
+    const targets = await discoverPages(page, homepageUrl, { maxPages, knownUrls, propertyType, layoutSurvey });
 
     const pages = [];
     for (const { url, pageType } of targets) {
@@ -827,7 +942,7 @@ export async function captureSite(homepageUrl, {
       responsive.pages = [...byUrl.values()].filter((p) => Object.keys(p.byViewport).length > 0);
     }
 
-    return { homepageUrl, pages, responsive };
+    return { homepageUrl, pages, responsive, layoutSurvey };
   } finally {
     await browser.close();
   }

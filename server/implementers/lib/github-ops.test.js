@@ -624,3 +624,56 @@ describe('batchBranchName', () => {
     assert.equal(batchBranchName({ id: 3 }, new Date('2026-08-13T23:00:00Z')), 'action-center/batch-3-2026-08-13');
   });
 });
+
+// H2 — the final page design-integrity gate sits in pushDraftBranch, the ONE function every
+// implementer funnels through. Exercised here for every action type that writes into an
+// existing page's markup, through the real pushDraftBranch.
+describe('page design-integrity gate in pushDraftBranch — every markup-writing path', () => {
+  const BASE = '<main><section class="post-wrap prose"><h2 class="post-h2">Old</h2><p>Body</p></section></main>';
+  const OFF_DESIGN = BASE.replace('</main>', '<section class="bg-fuchsia-600 brand-new-hero" style="color:#f0f"><h2>New</h2></section></main>');
+  const ON_DESIGN = BASE.replace('</main>', '<section class="post-wrap prose"><h2 class="post-h2">New</h2><p>More</p></section></main>');
+  const MARKUP_WRITERS = ['faq', 'qa-content', 'expand-content', 'internal-links', 'refresh-content', 'breadcrumbs', 'blog-image',
+    'content-integrity-repair', 'alt-text', 'broken-link-fix', 'duplicate-id-fix', 'schema-repair', 'schema', 'meta-title', 'canonical',
+    'open-graph', 'analytics-install', 'html-lang', 'viewport', 'content-repair', 'template-capability-repair'];
+  let commits;
+  const withHappyGithub = async (fn) => {
+    const saved = { ...defaults };
+    commits = [];
+    defaults.getFileContent = async () => ({ content: BASE, sha: 's' });
+    defaults.getBranchSha = async () => 'sha';
+    defaults.createBranch = async () => ({});
+    defaults.commitFilesAtomic = async (s, b, files) => { commits.push(files.map((f) => f.path)); return { sha: 'c' }; };
+    try { return await fn(); } finally { Object.assign(defaults, saved); delete process.env.PAGE_DESIGN_INTEGRITY; }
+  };
+  const target = { branchName: 'action-center/batch-x', exists: false };
+
+  for (const actionType of MARKUP_WRITERS) {
+    test(`${actionType}: an edit that adds classes/styles the page never had is held, and nothing is committed`, () => withHappyGithub(async () => {
+      const r = await pushDraftBranch(site, { id: 9, action_type: actionType, content: {} }, [{ path: 'src/page.njk', content: OFF_DESIGN }], target);
+      assert.equal(r.ok, false, `${actionType} bypassed the gate`);
+      assert.equal(r.reason, 'page-design-integrity-failed');
+      assert.deepEqual(commits, []);
+    }));
+  }
+
+  test('an edit that reuses the page\'s own design passes and is committed', () => withHappyGithub(async () => {
+    const r = await pushDraftBranch(site, { id: 9, action_type: 'faq', content: {} }, [{ path: 'src/page.njk', content: ON_DESIGN }], target);
+    assert.equal(r.ok, true); assert.equal(commits.length, 1);
+  }));
+
+  test('net-new files and non-markup files are not judged by this gate (documented scope)', () => withHappyGithub(async () => {
+    defaults.getFileContent = async () => null; // brand-new file: no before-state
+    assert.equal((await pushDraftBranch(site, { id: 9, action_type: 'landing-page', content: {} }, [{ path: 'src/new-page.njk', content: OFF_DESIGN }], target)).ok, true);
+    defaults.getFileContent = async () => ({ content: 'User-agent: *' });
+    assert.equal((await pushDraftBranch(site, { id: 9, action_type: 'robots-fix', content: {} }, [{ path: 'robots.txt', content: 'User-agent: *\nDisallow: /x <div class="q">' }], target)).ok, true);
+  }));
+
+  test('PAGE_DESIGN_INTEGRITY=log lets the edit through; =off skips; anything else enforces', () => withHappyGithub(async () => {
+    process.env.PAGE_DESIGN_INTEGRITY = 'log';
+    assert.equal((await pushDraftBranch(site, { id: 9, action_type: 'faq', content: {} }, [{ path: 'p.njk', content: OFF_DESIGN }], target)).ok, true);
+    process.env.PAGE_DESIGN_INTEGRITY = 'off';
+    assert.equal((await pushDraftBranch(site, { id: 9, action_type: 'faq', content: {} }, [{ path: 'p.njk', content: OFF_DESIGN }], target)).ok, true);
+    process.env.PAGE_DESIGN_INTEGRITY = 'nonsense';
+    assert.equal((await pushDraftBranch(site, { id: 9, action_type: 'faq', content: {} }, [{ path: 'p.njk', content: OFF_DESIGN }], target)).ok, false);
+  }));
+});

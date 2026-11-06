@@ -1,7 +1,7 @@
 import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget, resolveMissingPageTarget, slugifyTitle } from './lib/url-file-map.js';
 import { deriveNewContentContract, deriveContractFromSourceFile } from './lib/newcontent-contract.js';
 import { getFileContent } from '../github/client.js';
-import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
+import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, resolveBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderBlogOutlineBodyTsx, renderTranslationBody, renderTranslationBodyTsx, renderDirectAnswerBody, renderDirectAnswerBodyTsx, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
 import { buildGradientCover } from '../generators/lib/gradient-cover.js';
 import { siteHasUsableDesignProfile, checkDesignIntegrityGate, getDesignProfile } from './lib/design-drift.js';
@@ -377,7 +377,8 @@ export async function apply(site, draft) {
     }
   }
 
-  const batchInfo = await getOrInitBatchBranch(site);
+  const { batchInfo, failure: batchFailure } = await resolveBatchBranch(site);
+  if (batchFailure) return batchFailure;
   if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
 
   const files = [{
@@ -433,7 +434,8 @@ export async function mergeToStage(site, draft) {
 export async function preview(site, draft) {
   const resolved = await resolveTargetAndBody(site, draft);
   if (!resolved.ok) return resolved;
-  const batchInfo = await getOrInitBatchBranch(site);
+  const { batchInfo, failure: batchFailure } = await resolveBatchBranch(site);
+  if (batchFailure) return batchFailure;
   if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
   const branch = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   const existing = await getFileContent(site, resolved.filePath, branch);

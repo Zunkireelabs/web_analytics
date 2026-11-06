@@ -382,6 +382,48 @@ function subheadingSamplesByPageType(segmentedPages) {
   return byType;
 }
 
+// The model summarises pageTypePatterns for only some of the page types it is
+// shown (often just the homepage), while every captured page — blog article,
+// service, location, events — is recorded in full under `pages`. The consumers
+// of pageTypePatterns (marker-merge's groundedInlineHeadingClass) then find
+// nothing for a page type that WAS captured and fall back to the site-wide
+// heading, so an inserted block can render at the wrong scale. This fills only
+// the page types the model left out, from what the captured sample itself
+// shows: its section order and the central observed class per heading role.
+// Nothing is invented — a role with no observed class is left out — and a
+// pattern the model did return is never replaced. 'other' is skipped: it is a
+// catch-all of unrelated pages, not one template.
+export function backfillPageTypePatterns(patterns, segmentedPages) {
+  const out = { ...(patterns || {}) };
+  const filled = [];
+  const seen = new Set();
+  for (const page of segmentedPages || []) {
+    const type = page.pageType;
+    if (!type || type === 'other' || out[type] || seen.has(type)) continue;
+    seen.add(type);
+    const content = (page.sections || []).filter((sec) => !CHROME_ROLES.has(sec.role));
+    const byRole = new Map();
+    for (const sec of content) {
+      for (const item of sec.textHierarchy || []) {
+        if (!item.classes || isLabelStyle(item.style)) continue;
+        if (!byRole.has(item.role)) byRole.set(item.role, []);
+        byRole.get(item.role).push(item);
+      }
+    }
+    const textHierarchy = [...byRole.entries()]
+      .filter(([role]) => ['heading', 'subheading', 'body'].includes(role))
+      .map(([role, items]) => ({ role, classes: pickCentralClass(items), styleNotes: 'Observed on the captured sample page.' }));
+    if (!content.length && !textHierarchy.length) continue;
+    out[type] = {
+      sectionOrder: (page.sections || []).map((sec) => sec.role).filter(Boolean),
+      textHierarchy,
+      notes: 'Derived from the captured sample page, not summarised by the model.',
+    };
+    filled.push(type);
+  }
+  return { pageTypePatterns: out, filled };
+}
+
 // pageTypePatterns.textHierarchy is a MODEL SUMMARY across a page type's own
 // pages, not a direct per-page capture — same distance from ground truth
 // that made typography.body/heading need their own correction pass above.
@@ -518,9 +560,13 @@ export async function extractDesignProfile(segmentedPages, {
     );
   }
 
-  const { pageTypePatterns, corrected: pageTypesCorrected } = correctPageTypeTextHierarchy(
+  const { pageTypePatterns: modelPatterns, corrected: pageTypesCorrected } = correctPageTypeTextHierarchy(
     extracted.pageTypePatterns || {}, segmentedPages,
   );
+  const { pageTypePatterns, filled: pageTypesFilled } = backfillPageTypePatterns(modelPatterns, segmentedPages);
+  if (pageTypesFilled.length) {
+    console.log(`[design-agent] site ${siteId}: pageTypePatterns for ${pageTypesFilled.join(', ')} filled from the captured sample pages (the model summarised only some page types).`);
+  }
   if (pageTypesCorrected.length) {
     console.warn(
       `[design-agent] site ${siteId}: pageTypePatterns subheading class(es) for page type(s) `

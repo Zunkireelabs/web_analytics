@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { discoverCardHeavyPages, discoverPages } from './capture.js';
+import { discoverCardHeavyPages, discoverPages, layoutGroupKey, pickLayoutGroupSamples } from './capture.js';
 
 // A fake Playwright Page — goto/evaluate are the only two methods
 // discoverCardHeavyPages and the capturePage() it calls internally use.
@@ -383,5 +383,73 @@ describe('discoverPages — the "other" bucket and knownUrls (chayceproperties.c
       knownUrls: ['https://chayceproperties.com/faq/', 'https://chayceproperties.com/news/'],
     });
     assert.equal(pages.length, 2);
+  });
+});
+
+describe('pickLayoutGroupSamples — one sample per layout group', () => {
+  const O = 'https://x.test';
+  const u = (...p) => p.map((x) => O + x);
+
+  test('takes one page from each directory group and ignores groups already captured', () => {
+    const known = u('/blog/a', '/blog/b', '/blog/c', '/services/web', '/services/seo', '/events/expo', '/contact');
+    const picks = pickLayoutGroupSamples(known, [O + '/', O + '/services/web']);
+    assert.equal(picks.filter((x) => x.includes('/blog/')).length, 1);
+    assert.equal(picks.filter((x) => x.includes('/events/')).length, 1);
+    assert.equal(picks.some((x) => x.includes('/services/')), false, 'services is already represented');
+    assert.equal(picks.some((x) => x.endsWith('/contact')), false, 'a one-off flat page is not a family');
+  });
+
+  test('groups a flat slug family, and keeps /study-in-x apart from /study-in-x-from-y', () => {
+    const known = u('/study-in-uk', '/study-in-usa', '/study-in-uk-from-nepal', '/study-in-usa-from-nepal', '/about-us');
+    const picks = pickLayoutGroupSamples(known, [O + '/study-in-uk']);
+    assert.deepEqual(picks.length, 1);
+    assert.match(picks[0], /from-nepal/);
+  });
+
+  test('prefers the original-language page over a translated one, and groups translations together', () => {
+    const known = u('/de/blog/post-1', '/blog/post-2', '/de-ch/blog/post-3');
+    assert.deepEqual(pickLayoutGroupSamples(known, []), [O + '/blog/post-2']);
+    assert.equal(layoutGroupKey(O + '/de/blog/post-1'), layoutGroupKey(O + '/blog/post-2'));
+  });
+
+  test('skips admin, test, old and thank-you pages; budget 0 turns it off; budget caps it', () => {
+    assert.equal(layoutGroupKey(O + '/affiliate-admin/login'), null);
+    assert.equal(layoutGroupKey(O + '/affiliate-admin/affiliate'), null);
+    assert.equal(layoutGroupKey(O + '/events/test-page'), null);
+    assert.equal(layoutGroupKey(O + '/thank-you/uk'), null);
+    const known = u('/a/1', '/b/1', '/c/1', '/d/1');
+    assert.deepEqual(pickLayoutGroupSamples(known, [], { budget: 0 }), []);
+    assert.equal(pickLayoutGroupSamples(known, [], { budget: 2 }).length, 2);
+  });
+});
+
+describe('discoverPages — layout-group samples get their own budget', () => {
+  const H = 'https://example.com';
+  test('a blog post and an events page are captured even when maxPages is already full', async () => {
+    const links = Array.from({ length: 6 }, (_, i) => `${H}/other-page-${i}/`);
+    const page = fakePage({ homepageLinks: links, blocksByUrl: {} });
+    const pages = await discoverPages(page, `${H}/`, {
+      maxPages: 4,
+      knownUrls: [`${H}/blog/post-1`, `${H}/events/expo`],
+    });
+    const urls = pages.map((p) => p.url);
+    assert.ok(urls.includes(`${H}/blog/post-1`));
+    assert.ok(urls.includes(`${H}/events/expo`));
+  });
+});
+
+describe('discoverPages — uses the survey groups when given', () => {
+  test('one sample from every surveyed group that has no captured page, none from covered groups', async () => {
+    const H = 'https://example.com';
+    const page = fakePage({ homepageLinks: [`${H}/a/`], blocksByUrl: {} });
+    const layoutSurvey = { groups: [
+      { id: 'g1', sample: `${H}/a/`, members: [`${H}/a/`, `${H}/a2/`] },
+      { id: 'g2', sample: `${H}/odd-one`, members: [`${H}/odd-one`] },
+      { id: 'g3', sample: `${H}/blog/p1`, members: [`${H}/blog/p1`, `${H}/blog/p2`] },
+    ] };
+    const urls = (await discoverPages(page, `${H}/`, { maxPages: 5, layoutSurvey })).map((p) => p.url);
+    assert.ok(urls.includes(`${H}/odd-one`));
+    assert.ok(urls.includes(`${H}/blog/p1`));
+    assert.equal(urls.includes(`${H}/a2/`), false, 'g1 is already represented by /a/');
   });
 });

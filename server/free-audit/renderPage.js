@@ -10,7 +10,9 @@ async function renderPageDetails(url) {
 
   let browser;
   try {
-    browser = await chromium.launch({ headless: true });
+    // Holds a global browser slot (lib/browser-slots.js) so public audits cannot crowd out design work.
+    const { launchWithSlot } = await import('../lib/browser-slots.js');
+    browser = await launchWithSlot(() => chromium.launch({ headless: true }));
     const page = await browser.newPage();
     // Default desktop viewport
     await page.setViewportSize({ width: 1280, height: 800 });

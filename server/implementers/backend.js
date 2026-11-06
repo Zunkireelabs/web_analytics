@@ -1,5 +1,5 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, isPageMapped, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
-import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
+import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, resolveBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, getRepoTree } from '../github/client.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
 import { planRedirect } from './lib/redirect-writer.js';
@@ -1523,7 +1523,8 @@ async function previewLiveMarkerContent(site, draft) {
 // ignored by llms-txt (no mode concept) and simply unused for anything but
 // marker-merge types.
 export async function apply(site, draft, opts = {}) {
-  const batchInfo = await getOrInitBatchBranch(site);
+  const { batchInfo, failure: batchFailure } = await resolveBatchBranch(site);
+  if (batchFailure) return batchFailure;
   if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
   const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   if (draft.action_type === 'llms-txt') return pushLlmsTxtBranch(site, draft, batchInfo);
@@ -1613,7 +1614,8 @@ export async function preview(site, draft, opts = {}) {
     return { ok: false, reason: 'merge-strategy-not-implemented', error: `No live view available for "${draft.action_type}" yet.` };
   }
 
-  const batchInfo = await getOrInitBatchBranch(site);
+  const { batchInfo, failure: batchFailure } = await resolveBatchBranch(site);
+  if (batchFailure) return batchFailure;
   if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
   const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
 

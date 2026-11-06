@@ -23,6 +23,7 @@ import { extractDesignProfile } from './live-analysis/profile-extract.js';
 import { compareSectionsToProfile } from './live-analysis/consistency-check.js';
 import { summarizeResponsive, detectResponsiveIssues } from './live-analysis/responsive-analysis.js';
 import { composeGeneratedExpandLayout } from './live-analysis/compose-expand-layout.js';
+import { compactSurvey } from './live-analysis/layout-survey.js';
 import { projectAllComponentTemplates } from './lib/design-profile.js';
 import { getSiteById } from '../store/read.js';
 import { safeMessage } from '../lib/errors.js';
@@ -180,6 +181,9 @@ export function createLiveDesignAnalysisHandler({
 
       return { jobId: job.id, componentTemplates };
     }
-    return { jobId: job.id, designProfile: profile };
+    // The layout survey's page -> design-group map rides on the profile, so the
+    // agent can look up which captured sample shows any page's design.
+    const layoutGroups = compactSurvey(capture.layoutSurvey);
+    return { jobId: job.id, designProfile: layoutGroups ? { ...profile, layoutGroups } : profile };
   };
 }

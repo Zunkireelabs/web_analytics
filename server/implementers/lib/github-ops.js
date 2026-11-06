@@ -1,3 +1,4 @@
+import { validatePageDesignIntegrity } from './page-design-integrity-gate.js';
 import {
   getBranchSha, createBranch, commitFilesAtomic, createCommitObject, updateRef, getCommitMessage,
   openPullRequest, retargetPullRequest, listOpenPullRequestsForBranch, defaultBranchName, prTargetBranchName, mergeBranchFromBase, getFileContent,
@@ -100,6 +101,16 @@ export function batchBranchName(site, date = new Date()) {
 // one real incident. `conflicted: true` means the sync itself hit a real
 // merge conflict (base and the batch branch both touched the same lines) —
 // callers must fail fast on this rather than splice against stale content.
+// The batch-branch lookup as a RESULT instead of an exception. A GitHub outage here used to throw straight
+// out of implementer.apply(): the caller (approveAndPublishDraft) had already marked the draft approved and
+// only records failures that come back as {ok:false}, so the draft was left approved with no apply_error —
+// invisible to every retry. Returned as an ordinary (transient) apply failure, it is recorded and retried.
+export async function resolveBatchBranch(site) {
+  try { return { batchInfo: await getOrInitBatchBranch(site) }; } catch (err) {
+    return { failure: { ...persistedFailure('github-ops.getOrInitBatchBranch', err, 'GitHub could not be reached to prepare the branch right now; this will be retried.'), transient: true } };
+  }
+}
+
 export async function getOrInitBatchBranch(site, date = new Date()) {
   const branchName = batchBranchName(site, date);
   let beforeSha;
@@ -369,6 +380,15 @@ export async function pushDraftBranch(site, draft, files, target) {
   // has. See section-preservation-gate.js for why only DISAPPEARANCE fails.
   const sectionGate = await validateSectionPreservation(site, draft, files, { ref: baseBranch(site) });
   if (!sectionGate.ok) return sectionGate;
+
+  // Page Design-Integrity Gate — what the edit ADDS must come from the design the page and
+  // site already have (page-design-integrity-gate.js). Same placement and reasoning as the
+  // two gates above: the one function every implementer funnels through.
+  const integrityGate = await validatePageDesignIntegrity(site, draft, files, {
+    ref: baseBranch(site),
+    record: async (siteId, rec) => { try { await (await import('../../design-agent/lib/design-review-store.js')).createReviewStore().appendEvidence(siteId, rec); } catch { /* evidence is best-effort */ } },
+  });
+  if (!integrityGate.ok) return integrityGate;
 
   const { branchName, exists } = target;
   try {

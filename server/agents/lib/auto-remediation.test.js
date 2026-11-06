@@ -123,6 +123,10 @@ mock.module(resolve('../../store/recommendations.js'), {
 });
 mock.module(resolve('../../store/drafts.js'), {
   namedExports: {
+    // github-ops.js imports these two; they were added after this mock was written, which left the
+    // whole file unloadable (SyntaxError: ... does not provide an export named 'listBatchActionTypes').
+    listBatchActionTypes: async () => [],
+    setBatchPrBase: async () => null,
     getDraftedFindingIds: async () => draftedFindingIds,
     getPendingDraftFilePaths: async () => pendingDraftFilePaths,
     countDraftsBySourceToday: async () => spentToday,
@@ -1579,6 +1583,58 @@ describe('autoRemediateSafeRecommendations — refusal vs failure classification
     const result = await autoRemediateSafeRecommendations(1);
     assert.equal(result.shipped, 1);
     assert.equal(result.attempted, 13, 'the streak restarts after the success, so 4 + 1 + 8 are attempted');
+  });
+});
+
+describe('live design validation — a page whose design cannot be confirmed is PENDING, not refused and not failed', () => {
+  beforeEach(reset);
+
+  const pending = (reason = 'page-unreachable', extra = {}) => Object.assign(
+    new Error(`faq is held: this page's current design could not be confirmed against the live site (${reason}).`),
+    { status: 503, userFacing: true, designPending: true, reason: 'design-validation-pending', pendingReason: reason, ...extra },
+  );
+
+  test('a long run of pending items does NOT trip the refusal streak or the breaker, and the unrelated items after them still ship', async () => {
+    // 10 pending items in a row: more than the refusal limit (8) and the systemic limit — if they were
+    // counted as either, the run would stop and the two healthy items would never ship.
+    generateError = (n) => (n <= 10 ? pending() : null);
+    recommendations = Array.from({ length: 12 }, (_, i) => rec(i + 1));
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.stoppedReason, null, 'neither refusal-streak nor circuit-breaker');
+    assert.equal(result.refused, 0, 'a design check that could not run is not an honest refusal');
+    assert.equal(result.failed, 0, 'and not a failure');
+    assert.equal(result.shipped, 2, 'unrelated work continues');
+    assert.deepEqual(recordedOutcomes.filter((o) => ['refused', 'failed'].includes(o.outcome)), [], 'nothing is recorded against the generator or the items');
+  });
+
+  test('pending items release their share of the day\'s budget (attempted is not spent on them)', async () => {
+    generateError = (n) => (n <= 3 ? pending('capture-failed') : null);
+    recommendations = Array.from({ length: 6 }, (_, i) => rec(i + 1));
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.shipped, 3);
+    assert.equal(result.attempted, 3, 'only the 3 items that were really attempted count');
+  });
+
+  test('a page parked for review (exhausted) behaves the same way', async () => {
+    generateError = (n) => (n === 1 ? pending('page-structure-unreadable', { exhausted: true, transient: false }) : null);
+    recommendations = [rec(1), rec(2)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.shipped, 1);
+    assert.equal(result.refused + result.failed, 0);
+  });
+
+  test('control: an ordinary honest refusal still counts toward the streak', async () => {
+    generateError = () => Object.assign(new Error('no real data on the page'), { status: 422, userFacing: true });
+    recommendations = Array.from({ length: 12 }, (_, i) => rec(i + 1));
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.stoppedReason, 'refusal-streak');
   });
 });
 
