@@ -26,8 +26,19 @@ afterEach(() => {
 });
 
 describe('PROVIDERS', () => {
-  test('lists exactly openai, anthropic, perplexity, in that order', () => {
-    assert.deepEqual(PROVIDERS.map((p) => p.id), ['openai', 'anthropic', 'perplexity']);
+  test('lists the real-answer provider first, then the model-API providers', () => {
+    // dataforseo-ai observes the assistant products themselves; the other three ask a model what it recalls when
+    // asked cold. Order here is display-only, but the real measurement leads.
+    assert.deepEqual(PROVIDERS.map((p) => p.id), ['dataforseo-ai', 'openai', 'anthropic', 'perplexity']);
+  });
+
+  test('every provider implements the same contract', () => {
+    for (const p of PROVIDERS) {
+      assert.equal(typeof p.id, 'string', 'id');
+      for (const fn of ['configured', 'ask', 'extract']) {
+        assert.equal(typeof p[fn], 'function', `${p.id}.${fn}`);
+      }
+    }
   });
 });
 

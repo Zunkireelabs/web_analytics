@@ -1,6 +1,7 @@
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +17,7 @@ router = APIRouter()
 # How many of the newest insights the dashboard read returns. See the comment
 # at the query itself for why this is not tighter.
 INSIGHT_LIMIT = 200
+SYNC_PAGE_MAX = 1000
 
 
 @router.get("/dashboard/{client_id}")
@@ -46,7 +48,10 @@ async def get_dashboard(client: Client = Depends(get_active_client), session: As
 
 
 @router.get("/clients/{client_id}/insights")
-async def get_insights(client: Client = Depends(get_active_client), session: AsyncSession = Depends(get_session)) -> dict:
+async def get_insights(
+    client: Client = Depends(get_active_client), session: AsyncSession = Depends(get_session),
+    limit: int | None = Query(None, ge=1, le=SYNC_PAGE_MAX), offset: int = Query(0, ge=0), since_days: int | None = Query(None, ge=1, le=60),
+) -> dict:
     """The same recent-insights read GET /dashboard/{client_id} already
     builds (see _recent_insights), exposed on its own so a caller that only
     wants insights — server/job.js's nightly runAnalystSyncForAllSites,
@@ -57,17 +62,34 @@ async def get_insights(client: Client = Depends(get_active_client), session: Asy
     unknown client, same as every other /clients/{client_id}/* route), same
     insight shape, same resolved/dismissed exclusion, so the two callers can
     never see divergent data for the same client."""
-    return {"insights": await _recent_insights(session, client.id)}
+    # PAGING (opt-in; the default is unchanged). The dashboard cap above is deliberately small, but the nightly sync must see EVERY
+    # fresh finding: on a noisy night the 200 newest dimension-level insights can fill the whole window and push eligible page
+    # findings out of sight (measured on the production copy: 25 eligible findings for one project and 122 for another never
+    # reached the queue). `limit`/`offset` page through insights newest first, `since_days` bounds them to recent generations, and
+    # `has_more` says whether another page exists (resolved/dismissed rows are filtered after paging, so a short page is not "the end").
+    if limit is None and since_days is None and not offset:
+        return {"insights": await _recent_insights(session, client.id)}
+    items, raw = await _recent_insights_page(session, client.id, limit=limit or INSIGHT_LIMIT, offset=offset, since_days=since_days)
+    return {"insights": items, "has_more": raw == (limit or INSIGHT_LIMIT), "next_offset": offset + raw}
 
 
 async def _recent_insights(session: AsyncSession, client_id: int) -> list[dict]:
+    return (await _recent_insights_page(session, client_id))[0]
+
+
+async def _recent_insights_page(session: AsyncSession, client_id: int, *, limit: int = INSIGHT_LIMIT, offset: int = 0,
+                                since_days: int | None = None) -> tuple[list[dict], int]:
     # The dashboard groups these by metric_key client-side, so a cap that is
     # too tight silently drops signal rather than merely shortening a list: a
     # single noisy metric can occupy every slot and hide every other metric's
     # findings entirely. Still bounded — this is a cache-only read that must
     # stay fast — just bounded well above the number of metrics in the catalog.
+    query = select(Insight).where(Insight.client_id == client_id)
+    if since_days is not None:
+        query = query.where(Insight.generated_at >= datetime.now(timezone.utc) - timedelta(days=since_days))
+    # id is the tie-break so paging is stable when many insights share one generated_at
     insights_rows = (
-        await session.execute(select(Insight).where(Insight.client_id == client_id).order_by(Insight.generated_at.desc()).limit(INSIGHT_LIMIT))
+        await session.execute(query.order_by(Insight.generated_at.desc(), Insight.id.desc()).limit(limit).offset(offset))
     ).scalars().all()
 
     # One query for every recommendation instead of one per insight. At the
@@ -107,7 +129,7 @@ async def _recent_insights(session: AsyncSession, client_id: int) -> list[dict]:
             "recommendation": rec.recommendation_text if rec else None,
             "narration_status": rec.narration_status if rec else None,
         })
-    return insights
+    return insights, len(insights_rows)
 
 
 @router.get("/dashboard/{client_id}/series/{metric_key}")

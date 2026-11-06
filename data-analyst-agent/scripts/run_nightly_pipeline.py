@@ -59,10 +59,13 @@ Run via cron (see docker-compose.yml comment) as:
     docker compose exec app python -m scripts.run_nightly_pipeline
 """
 import asyncio
+import logging
+import os
 
-from app.activity.log import track
-from app.alerts.deliver import deliver_predictive_alerts
-from app.briefings.generator import generate_morning_briefing
+from app.activity.log import FINDINGS_COMPLETE_TASK, run_in_progress, track
+from app.notifications.nightly import send_nightly_notifications
+
+logger = logging.getLogger(__name__)
 from app.forecast.accuracy import run_forecast_accuracy_evaluation
 from app.forecast.run import run_forecasts
 from app.ingestion.run_nightly import run_nightly
@@ -86,6 +89,11 @@ from app.stats.deltas import run_stats
 
 
 async def main() -> None:
+    # Never two runs at once on the shared database (production's scheduler owns the night; a manual staging run must not overlap).
+    live_since = await run_in_progress()
+    if live_since is not None:
+        logger.warning("another Data Analyst run has been in progress since %s: not starting a second one", live_since)
+        return
     async with track("monitoring"):
         await run_nightly()
         await run_stats()
@@ -112,16 +120,25 @@ async def main() -> None:
         await run_investigation_engine()
         await run_opportunity_rollup()
         await run_investigation_reasoning()
-    async with track("preparing_drafts"):
-        await run_draft_trigger()
-    await deliver_predictive_alerts()
-    # Morning Briefing (Phase 3 Step 10) — the nightly run IS "this morning"
-    # for every client (single timezone-agnostic cron, see the module
-    # docstring in app/briefings/generator.py); weekly/monthly cadences run
-    # from their own separate cron entries (scripts/run_weekly_briefing.py,
-    # scripts/run_monthly_briefing.py), not from here.
-    await generate_morning_briefing()
-
+    # Findings only when ANALYST_DRAFT_TRIGGER=off (app/investigations/draft_switch.py). run_draft_trigger() also checks it, but
+    # skipping here keeps a "preparing_drafts" row that never ran out of ai_activity_log.
+    from app.investigations.draft_switch import draft_trigger_enabled, log_state
+    log_state("run_nightly_pipeline")
+    if draft_trigger_enabled():
+        async with track("preparing_drafts"):
+            await run_draft_trigger()
+    # Every findings stage above finished without raising: say so, for the analytics app's orchestrator. Never fatal: if the
+    # marker cannot be written (migration 0042 not applied yet), the findings ARE complete but stay unconfirmed, and the
+    # orchestrator safely refuses them rather than this run being reported as failed.
+    try:
+        async with track(FINDINGS_COMPLETE_TASK):
+            pass
+    except Exception:
+        logger.exception("findings_complete marker could not be written (is migration 0042 applied?): today's findings will be treated as unconfirmed")
+    # Predictive alerts and the morning briefing (the nightly run IS "this morning" for every client; weekly/monthly briefings run
+    # from their own scripts). Shared with production's scheduled run and sent at most once a day (app/notifications/nightly.py),
+    # so a manual staging run on the same day as production's cannot send them twice.
+    await send_nightly_notifications()
 
 if __name__ == "__main__":
     asyncio.run(main())

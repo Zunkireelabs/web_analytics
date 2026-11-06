@@ -29,6 +29,48 @@ export async function upsertCompetitorProfile(siteId, domain, comparison, runAt,
   return rows[0];
 }
 
+// Market-discovery classification (migration 232). Separate from upsertCompetitorProfile above because it writes a
+// different kind of fact: not "how does this competitor's page compare to ours" but "what sort of competitor is this,
+// and on what evidence". Both can touch the same row; neither overwrites the other's columns.
+//
+// `kind` is one of business / organic / keyword_specific, or null for a domain that is no competitor at all (a
+// platform), in which case excluded_reason carries the why. first_seen_at is set once and never moved, so emergence
+// (`emerging`) stays meaningful: a domain is emerging when this project had not seen it before this run.
+export async function upsertCompetitorClassification(siteId, domain, {
+  kind = null, relevanceScore = null, classification = {}, excludedReason = null, runAt = new Date(),
+} = {}) {
+  const { rows } = await query(
+    `INSERT INTO competitor_profiles (site_id, domain, kind, relevance_score, classification, excluded_reason, first_seen_at, emerging)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, true)
+     ON CONFLICT (site_id, domain) DO UPDATE SET
+       kind = EXCLUDED.kind,
+       relevance_score = EXCLUDED.relevance_score,
+       classification = EXCLUDED.classification,
+       excluded_reason = EXCLUDED.excluded_reason,
+       first_seen_at = COALESCE(competitor_profiles.first_seen_at, EXCLUDED.first_seen_at),
+       -- Emerging only while this is genuinely the project's first sighting: an existing row (whenever it was created)
+       -- means the domain was already known, so a re-run must clear the flag rather than re-assert it.
+       emerging = false
+     RETURNING id, domain, kind, relevance_score, first_seen_at, emerging`,
+    [siteId, domain, kind, relevanceScore, JSON.stringify(classification ?? {}), excludedReason, runAt]
+  );
+  return rows[0];
+}
+
+// This project's classified competitors of one kind, strongest evidence first — the lookup Phase 3 uses to decide
+// whose keyword footprint is worth paying to collect.
+export async function listCompetitorsByKind(siteId, kind, { limit = 20 } = {}) {
+  const { rows } = await query(
+    `SELECT domain, kind, relevance_score::float AS relevance_score, classification, emerging, first_seen_at, last_analyzed_at
+       FROM competitor_profiles
+      WHERE site_id = $1 AND kind = $2 AND excluded_reason IS NULL
+      ORDER BY relevance_score DESC NULLS LAST, domain
+      LIMIT $3`,
+    [siteId, kind, Math.min(Math.max(Number(limit) || 20, 1), 200)]
+  );
+  return rows;
+}
+
 // Only the most recent discovery run's competitors, not every domain ever
 // guessed across every past weekly run — each upsert only touches domains
 // the CURRENT run identified, so a domain dropped from this week's list

@@ -32,7 +32,7 @@ SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
 # rank 10) — direction-of-change heuristics elsewhere in this file assume
 # "value went down" == "declined"; this is the one metric family where
 # that's backwards.
-LOWER_IS_BETTER_METRICS = {"gsc_position"}
+from app.metrics.direction import LOWER_IS_BETTER_METRICS  # one definition, shared (app/metrics/direction.py)  # noqa: E402
 
 EXPLANATION_SYSTEM_PROMPT = (
     "You are a data analyst writing a short explanation of a flagged SEO/growth metric change for internal "

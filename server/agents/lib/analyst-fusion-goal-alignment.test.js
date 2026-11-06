@@ -14,6 +14,8 @@ let existingRec;
 
 mock.module(resolve('../../store/recommendations.js'), {
   namedExports: {
+    // the corroboration path (an issue already open gets the analyst recorded on it): a no-op stand-in here
+    corroborateRecommendation: async () => null,
     findOpenRecommendation: async () => existingRec,
     insertRecommendation: async (siteId, payload) => { inserted.push({ siteId, ...payload }); return { id: 999, ...payload }; },
     // Never called by shipConclusion itself — these exist only so

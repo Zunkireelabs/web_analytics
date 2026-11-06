@@ -37,7 +37,9 @@ const DIFFICULTY_TO_PRIORITY = { low: 'high', medium: 'medium', high: 'low' }; /
 // real search volume for it, then re-sort (fetchKeywordIdeas already
 // returns each location's own results sorted desc by volume; merging two
 // already-sorted lists needs its own re-sort, not a naive concat).
-export async function fetchIdeasAcrossLocations(seedTerms, locations) {
+// `siteId` is optional and only decides whether the paid call is recorded in the provider spend ledger (migration 231):
+// passed, the call goes through the budgeted client; omitted (existing tests, any other caller), nothing changes.
+export async function fetchIdeasAcrossLocations(seedTerms, locations, { siteId = null } = {}) {
   const byKeyword = new Map();
   const failedLocations = []; // neither real DataForSEO product could serve these at all — see guessKeywordsForLocation
   for (const location of locations) {
@@ -52,7 +54,7 @@ export async function fetchIdeasAcrossLocations(seedTerms, locations) {
     // this fix.
     let ideas;
     try {
-      ideas = await fetchKeywordIdeas(seedTerms, location);
+      ideas = await fetchKeywordIdeas(seedTerms, { ...location, siteId });
     } catch (err) {
       console.warn(`[keyword-demand] location ${location.locationCode} failed on keyword_ideas: ${err.message}`);
       // Second, narrower chance before giving up on this location entirely —
@@ -177,7 +179,7 @@ export async function runKeywordDemandIfDue(site) {
   }
 
   const locations = resolveSiteLocations(site);
-  const { ideas, failedLocations } = await fetchIdeasAcrossLocations(seedTerms, locations);
+  const { ideas, failedLocations } = await fetchIdeasAcrossLocations(seedTerms, locations, { siteId: site.id });
   const top = ideas.slice(0, MAX_GAPS_PER_RUN);
 
   if (top.length) {

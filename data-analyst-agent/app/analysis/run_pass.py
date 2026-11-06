@@ -67,7 +67,8 @@ deliberately rather than assuming these paths are still dormant.
 import logging
 from datetime import date
 
-from app.activity.log import track
+from app.activity.log import FINDINGS_COMPLETE_TASK, run_in_progress, track
+from app.notifications.nightly import send_nightly_notifications
 from app.forecast.accuracy import run_forecast_accuracy_evaluation
 from app.forecast.run import run_forecasts
 from app.insights.engine import run_insight_engine
@@ -102,6 +103,11 @@ async def run_analysis_pass() -> None:
     """Runs the analysis stages in dependency order. Raises on failure — the
     caller decides whether that's fatal (a manual script run) or merely logged
     (the scheduler, which must survive a bad night)."""
+    # Never two runs at once on the shared database (production's scheduler owns the night; a manual staging run must not overlap).
+    live_since = await run_in_progress()
+    if live_since is not None:
+        logger.warning("another Data Analyst run has been in progress since %s: not starting a second one", live_since)
+        return
     async with track("monitoring"):
         await run_stats()
         await run_anomaly_detection()
@@ -135,3 +141,14 @@ async def run_analysis_pass() -> None:
         await run_investigation_reasoning()
     async with track("preparing_drafts"):
         await run_draft_trigger()
+    # Every findings stage above finished without raising: say so, for the analytics app's orchestrator. Never fatal: if the
+    # marker cannot be written (migration 0042 not applied yet), the findings ARE complete but stay unconfirmed, and the
+    # orchestrator safely refuses them rather than this run being reported as failed.
+    try:
+        async with track(FINDINGS_COMPLETE_TASK):
+            pass
+    except Exception:
+        logger.exception("findings_complete marker could not be written (is migration 0042 applied?): today's findings will be treated as unconfirmed")
+    # The customer-facing notifications the staging script used to be the only one to send (predictive alerts, morning briefing),
+    # at the same moment it sent them, at most once a day (app/notifications/nightly.py).
+    await send_nightly_notifications()

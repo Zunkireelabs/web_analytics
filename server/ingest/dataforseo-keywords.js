@@ -34,8 +34,11 @@ function authHeader() {
 // this adapter guessing a default. Returns keywords with real search
 // volume only (a null/zero-volume idea isn't real demand evidence), sorted
 // highest-volume first.
-export async function fetchKeywordIdeas(seedTerms, { locationCode, languageCode, limit = 100 } = {}) {
+export async function fetchKeywordIdeas(seedTerms, { locationCode, languageCode, limit = 100, siteId = null } = {}) {
   const keywords = seedTerms.slice(0, MAX_SEED_TERMS);
+  // With a siteId the call goes through the budgeted client, which records what DataForSEO charged
+  // (server/providers/dataforseo/client.js, migration 231). Without one, behaviour is exactly as before.
+  if (siteId) return ideasFromLedgeredCall(keywords, { locationCode, languageCode, limit, siteId });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   let res;
@@ -65,7 +68,10 @@ export async function fetchKeywordIdeas(seedTerms, { locationCode, languageCode,
     throw new Error(`DataForSEO keyword_ideas task error: ${task.status_message || task.status_code}`);
   }
 
-  const items = task?.result?.[0]?.items || [];
+  return mapIdeaItems(task?.result?.[0]?.items || []);
+}
+
+function mapIdeaItems(items) {
   return items
     .filter((item) => item.keyword && item.keyword_info?.search_volume)
     .map((item) => ({
@@ -75,6 +81,25 @@ export async function fetchKeywordIdeas(seedTerms, { locationCode, languageCode,
       difficulty: item.keyword_properties?.keyword_difficulty ?? null,
     }))
     .sort((a, b) => b.searchVolume - a.searchVolume);
+}
+
+// Same request and same mapping as fetchKeywordIdeas, made through the budgeted client. A budget refusal throws like
+// any other failure, so the caller's existing per-location fallback and warning path handles it unchanged.
+async function ideasFromLedgeredCall(keywords, { locationCode, languageCode, limit, siteId }) {
+  const { dataforseoCall } = await import('../providers/dataforseo/client.js');
+  const out = await dataforseoCall({
+    siteId,
+    job: 'keyword-demand',
+    endpoint: '/v3/dataforseo_labs/google/keyword_ideas/live',
+    body: [{ keywords, location_code: locationCode, language_code: languageCode, limit, closely_variants: false }],
+    timeoutMs: FETCH_TIMEOUT_MS,
+  });
+  if (!out.ok) {
+    throw new Error(out.reason === 'budget_refused'
+      ? `DataForSEO keyword_ideas skipped: site ${siteId} has used its monthly provider budget (${out.spentUsd?.toFixed(4)} of ${out.budgetUsd} USD).`
+      : `DataForSEO keyword_ideas request failed: ${out.error}`);
+  }
+  return mapIdeaItems(out.body?.tasks?.[0]?.result?.[0]?.items || []);
 }
 
 const SEARCH_VOLUME_ENDPOINT = 'https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live';

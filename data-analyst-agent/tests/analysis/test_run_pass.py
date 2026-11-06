@@ -48,6 +48,14 @@ def _install_recorder(monkeypatch):
     async def _has_model():
         return True
     monkeypatch.setattr(run_pass, "has_pooled_model", _has_model)
+    # the "another run is live" guard reads the database; these tests are about stage ORDER, so nothing is running
+    async def _nothing_running():
+        return None
+    monkeypatch.setattr(run_pass, "run_in_progress", _nothing_running)
+    async def _notify():
+        calls.append("send_nightly_notifications")
+        return True
+    monkeypatch.setattr(run_pass, "send_nightly_notifications", _notify)
 
     return calls
 
@@ -57,7 +65,7 @@ def test_run_analysis_pass_now_runs_the_full_batch_pipeline_in_dependency_order(
 
     asyncio.run(run_pass.run_analysis_pass())
 
-    stage_order = [c for c in calls if not c.startswith("track:")]
+    stage_order = [c for c in calls if not c.startswith("track:") and c != "send_nightly_notifications"]
     assert stage_order == [
         "run_stats", "run_anomaly_detection",
         "run_forecasts", "run_forecast_accuracy_evaluation", "run_investigation_outcome_evaluation",
@@ -79,19 +87,32 @@ def test_opportunity_scoring_and_prioritizer_run_before_the_draft_trigger(monkey
 
     asyncio.run(run_pass.run_analysis_pass())
 
-    stage_order = [c for c in calls if not c.startswith("track:")]
+    stage_order = [c for c in calls if not c.startswith("track:") and c != "send_nightly_notifications"]
     assert stage_order.index("run_opportunity_scoring") < stage_order.index("run_draft_trigger")
     assert stage_order.index("run_recommendation_prioritizer") < stage_order.index("run_draft_trigger")
     assert stage_order.index("run_effort_estimation") < stage_order.index("run_opportunity_scoring")
 
 
-def test_predictive_alerts_and_briefings_remain_deliberately_unscheduled(monkeypatch):
-    # A product decision (cadence/opt-in), not a scheduling bug — see the
-    # module docstring. Proves the pass never imports/calls either.
-    import inspect
-    source = inspect.getsource(run_pass)
-    assert "deliver_predictive_alerts" not in source
-    assert "generate_morning_briefing" not in source
+def test_notifications_are_sent_by_the_scheduled_pass_after_the_findings_and_never_before(monkeypatch):
+    # Decision (Nov 2026): production's scheduled pass sends the predictive alerts and the morning briefing, which only the staging
+    # script used to send, at the same moment it did: after every findings stage. (Previously a deliberate exclusion.)
+    calls = _install_recorder(monkeypatch)
+    asyncio.run(run_pass.run_analysis_pass())
+    assert calls[-1] == "send_nightly_notifications"
+    assert calls.index("send_nightly_notifications") > calls.index("run_draft_trigger")
+
+
+def test_a_pass_that_fails_part_way_sends_no_notifications(monkeypatch):
+    calls = _install_recorder(monkeypatch)
+    async def boom():
+        calls.append("run_insight_engine")
+        raise RuntimeError("insight engine failed")
+    monkeypatch.setattr(run_pass, "run_insight_engine", boom)
+    try:
+        asyncio.run(run_pass.run_analysis_pass())
+    except RuntimeError:
+        pass
+    assert "send_nightly_notifications" not in calls
 
 
 def test_predictions_run_after_insights_and_before_recommendations_and_pooled_training_only_on_training_days(monkeypatch):

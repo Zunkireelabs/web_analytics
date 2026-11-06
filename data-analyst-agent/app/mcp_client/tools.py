@@ -1,3 +1,4 @@
+from app.investigations.draft_switch import DraftTriggerDisabled, draft_trigger_enabled
 from app.mcp_client.client import McpClient
 from app.mcp_client.datasource import DataSource
 
@@ -200,7 +201,11 @@ async def generate_draft(mcp: McpClient, *, generator_id: str, params: dict, fin
     Idempotent per finding_id — a repeat call for the same finding returns
     the existing draft instead of creating a duplicate. Same 'ai_actions'
     permission requirement and McpToolError-on-missing-permission caveat as
-    push_predictive_alert above."""
+    push_predictive_alert above.
+
+    Refuses when ANALYST_DRAFT_TRIGGER=off (app/investigations/draft_switch.py): the Data Analyst is findings-only then."""
+    if not draft_trigger_enabled():
+        raise DraftTriggerDisabled("ANALYST_DRAFT_TRIGGER=off: the Data Analyst does not generate drafts")
     return await _call(mcp, "generate_draft", {
         "generatorId": generator_id, "params": params, "source": "analyst-auto", "findingId": finding_id,
     })

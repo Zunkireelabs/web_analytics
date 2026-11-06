@@ -1,4 +1,6 @@
 import { knownDomain, hostnameOf } from './site-domain.js';
+import { mayInsertContentBlock, mayWriteComparisonInto, CONTENT_FACT_RULES } from './content-placement-policy.js';
+import { localSeoNote } from './local-seo.js';
 import {
   getRelatedQueriesForTopic, getProductCapabilities, setGapClassification, getKeywordClusters, getKeywordGaps,
   recordCapabilityVisibilitySnapshot, getRecentCapabilityVisibilitySnapshots,
@@ -8,8 +10,9 @@ import { getLearnedGapConfidence, temperPriorityBoost } from './gap-learning.js'
 import { classifyGapCoverage, isCoverageFresh } from './keyword-coverage-service.js';
 import { foldText, baseLang, LOCATION_CODE_TO_MARKET } from './keyword-coverage.js';
 import { buildGrowthOpportunities } from './growth-opportunities.js';
-import { findOpenRecommendation, insertRecommendation, refreshRecommendationBlockState } from '../../store/recommendations.js';
+import { findOpenRecommendation, insertRecommendation, refreshRecommendationBlockState, corroborateRecommendation } from '../../store/recommendations.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
+import { isWorsening, anomalyIsWorsening } from '../../lib/metric-direction.js';
 import { riskTierForGenerator } from './risk-tiers.js';
 import { impactFromPriority } from './findings.js';
 import { getSiteById } from '../../store/read.js';
@@ -57,8 +60,9 @@ import { countDraftsBySourceToday, countDraftsBySourceAndTypeThisWeek, hasRecent
 function isDecline(insight) {
   const e = insight?.evidence || {};
   switch (insight?.insight_type) {
-    case 'trend_shift': return typeof e.pct_change === 'number' && e.pct_change < 0;
-    case 'anomaly': return e.direction === 'low';
+    // the metric's own direction decides (lib/metric-direction.js): for search position a HIGHER number is the decline
+    case 'trend_shift': return isWorsening(insight.metric_key, e.pct_change);
+    case 'anomaly': return anomalyIsWorsening(insight.metric_key, e.direction);
     case 'forecast_risk': return true; // a forecast_risk insight is a decline by definition
     case 'milestone': return e.direction === 'down';
     default: return false;
@@ -283,9 +287,34 @@ export function gapDraftEligibility(gap) {
   // one exception: a question-shaped topic against that same page is a real
   // FAQ opportunity (see above), not nothing.
   if (gap.existing_page_match) {
-    return shape === 'question'
-      ? { eligible: true, generatorId: 'faq', findingId, existingPage: gap.existing_page_match }
-      : null;
+    // A comparison topic is refused before anything else here. Without this, a comparison-shaped topic that happens to
+    // have an existing page would fall through to the improve-page branch below and a comparison would be written into
+    // a real page — a layout break and a claim that page never earned. A comparison belongs in a post whose subject it
+    // is, or on its own compare page; the comparison branch further down reports that honestly.
+    if (shape === 'comparison' && !mayWriteComparisonInto(gap.existing_page_match).allowed) return null;
+    if (shape === 'question') {
+      // Even an FAQ must not be spliced into a designed page (home, a listing/index, a products or solutions hub).
+      // null, not an object: every caller of this function treats null as "not eligible", and anything truthy as
+      // shippable. The human-readable reason is recovered by blockedPlacementForGap below, used by
+      // recommendedActionForGap, so the refusal is explained without changing this contract.
+      if (!mayInsertContentBlock('faq', gap.existing_page_match).allowed) return null;
+      return { eligible: true, generatorId: 'faq', findingId, existingPage: gap.existing_page_match };
+    }
+    // Competitor evidence (migration 234) changes what "already covered" means for this one case. Normally a page
+    // already covering the topic is a correct "nothing to draft". But when measured competitor data says rivals rank
+    // for this keyword and we do not — or we rank far behind them — the page existing is precisely why the work
+    // belongs there: strengthen it rather than write a second page competing with it. Only reached for a gap carrying
+    // that evidence; every other gap keeps the original "nothing to draft" answer.
+    if (gap.opportunity_type === 'improve_page' || gap.opportunity_type === 'position_gap') {
+      // A designed page cannot hold a generated prose block, whatever the competitor evidence says. Refused here,
+      // before any LLM call, and reported as a real reason rather than as a draft that fails on apply.
+      if (!mayInsertContentBlock('expand-content', gap.existing_page_match).allowed) return null;
+      return {
+        eligible: true, generatorId: 'expand-content', findingId, existingPage: gap.existing_page_match,
+        shapeHint: [competitorGroundingNote(gap), CONTENT_FACT_RULES].filter(Boolean).join(' '),
+      };
+    }
+    return null;
   }
 
   if (gap.product_relevance === 'unrelated' && gap.search_intent === 'informational' && gap.priority === 'low') {
@@ -304,7 +333,12 @@ export function gapDraftEligibility(gap) {
   }
 
   const isCommercialIntent = gap.search_intent === 'commercial' || gap.search_intent === 'transactional';
-  const generatorId = isCommercialIntent && gap.product_relevance === 'direct' ? 'landing-page' : 'blog-outline';
+  // A service-and-place opportunity is a landing page by its nature, whatever the intent classifier made of the
+  // phrase: someone searching "<service> <city>" wants a page about that service in that place, not an article.
+  // The opportunity type is only set when real competitor data established it (competitor-opportunities.js).
+  const generatorId = gap.opportunity_type === 'service_location'
+    ? 'landing-page'
+    : (isCommercialIntent && gap.product_relevance === 'direct' ? 'landing-page' : 'blog-outline');
   return {
     eligible: true,
     generatorId,
@@ -322,8 +356,44 @@ export function gapDraftEligibility(gap) {
           'supporting detail — do not bury the answer under a generic introduction.'
         : null,
       groundingNote(gap),
+      competitorGroundingNote(gap),
     ].filter(Boolean).join(' ') || null,
   };
+}
+
+// Why a gap that otherwise looks shippable was refused on placement grounds, so a human sees the real reason instead
+// of a bare "no action". Returns null when placement was not what stopped it.
+export function blockedPlacementForGap(gap) {
+  if (!gap?.existing_page_match) return null;
+  const shape = detectContentShape(gap.topic);
+  if (shape === 'comparison') {
+    const comparison = mayWriteComparisonInto(gap.existing_page_match);
+    return comparison.allowed ? null : comparison;
+  }
+  const generatorId = shape === 'question'
+    ? 'faq'
+    : (gap.opportunity_type === 'improve_page' || gap.opportunity_type === 'position_gap' ? 'expand-content' : null);
+  if (!generatorId) return null;
+  const placement = mayInsertContentBlock(generatorId, gap.existing_page_match);
+  return placement.allowed ? null : placement;
+}
+
+// What measured competitor data tells a generator, as plain instruction. Deliberately narrow: it says which rivals
+// rank and where, and forbids the two failure modes that evidence invites — copying a rival's page, and repeating
+// their claims as our own. It never passes a rival's page content, only domains and positions we measured.
+export function competitorGroundingNote(gap) {
+  const ev = gap?.competitor_evidence;
+  if (!ev || !Array.isArray(ev.competitors) || !ev.competitors.length) return null;
+  const named = ev.competitors
+    .filter((c) => c.domain && c.position != null)
+    .slice(0, 3)
+    .map((c) => `${c.domain} (position ${c.position})`);
+  if (!named.length) return null;
+  const ours = ev.ourPosition != null ? ` We currently rank ${ev.ourPosition} for it.` : ' We do not rank for it.';
+  return `Competitor evidence: ${named.join(', ')} rank for this search.${ours} ` +
+    'Cover the subject more completely and more usefully than they do, from this site\'s own verified information. ' +
+    'Do not copy their structure or wording, do not mention or compare against them, and do not repeat any claim, ' +
+    'price or statistic of theirs as if it were ours.';
 }
 
 const MARKET_NAMES = { US: 'United States', IN: 'India', GB: 'United Kingdom', AU: 'Australia', CA: 'Canada', NP: 'Nepal', CH: 'Switzerland', NL: 'Netherlands', DE: 'Germany' };
@@ -342,6 +412,9 @@ export function groundingNote(gap, now = new Date()) {
       'Do not present companies from other countries as competitors or examples for this market, and do not reuse a client result as a general claim.'
     );
   }
+  // Where this client works and how it spells — attached to the gap by the paths below, which know the site. A gap with
+  // no note (no declared places, not a UK site) leaves the hint exactly as it was.
+  if (gap?.local_seo_note) parts.push(gap.local_seo_note);
   return parts.join(' ');
 }
 
@@ -361,9 +434,25 @@ export function recommendedActionForGap(gap) {
   if (cov === 'duplicate') return { kind: 'none', label: 'No action: already targeted', reason: gap.coverage_reason || (near ? `Already targeted by ${near}.` : 'Already targeted.') };
   if ((cov === 'covered' || cov === 'duplicate') && ev.needsRefresh) return { kind: 'refresh', label: 'Refresh the existing page', reason: ev.staleReason || gap.coverage_reason };
   const e = gapDraftEligibility(gap);
-  if (!e) return { kind: 'none', label: 'No action', reason: gap.coverage_reason || 'Nothing new to add.' };
+  if (!e) {
+    const blocked = blockedPlacementForGap(gap);
+    if (blocked) {
+      return { kind: 'none', label: 'No action: wrong kind of page', reason: blocked.detail, page: gap.existing_page_match };
+    }
+    return { kind: 'none', label: 'No action', reason: gap.coverage_reason || 'Nothing new to add.' };
+  }
   if (e.requiresFutureInfrastructure) return { kind: 'comparison-page', label: 'Comparison page (not supported yet)', reason: e.note };
   if (e.generatorId === 'faq') return { kind: 'faq', label: 'Add an FAQ to the existing page', reason: gap.coverage_reason || null, page: e.existingPage };
+  // Must stay in step with gapDraftEligibility's competitor-evidence branch above: the UI has to promise the page
+  // improvement that will actually be drafted, not "no action".
+  if (e.generatorId === 'expand-content') {
+    return {
+      kind: 'improve-page',
+      label: 'Strengthen the existing page',
+      reason: gap.reason || gap.coverage_reason || null,
+      page: e.existingPage,
+    };
+  }
   if (e.generatorId === 'landing-page') return { kind: 'landing-page', label: 'Create a landing page', reason: gap.coverage_reason || null };
   return { kind: 'blog-post', label: 'Create a blog post', reason: gap.coverage_reason || null };
 }
@@ -513,6 +602,10 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
     }
   }
 
+  const gapSite = await getSiteById(siteId).catch(() => null);
+  const gapLocalNote = gapSite ? localSeoNote(gapSite) : null;
+  if (gapLocalNote) gap = { ...gap, local_seo_note: gapLocalNote };
+
   const eligibility = plan === 'landing' ? requestedLandingEligibility(gap)
     : clientRequested ? requestedBlogEligibility(gap) : gapDraftEligibility(gap);
   if (!eligibility) return { eligible: false };
@@ -542,6 +635,10 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
     // gap is re-seen would pay LLM cost for the same already-blocked card
     // over and over with nothing new to say.
     const decision = existing ? null : await decisionEngineAnnotation(gap, siteId);
+    if (existing) {
+      await corroborateRecommendation(existing.id, { findingId: eligibility.findingId, agentId: 'analyst-keyword-gaps' })
+        .catch((err) => console.error(`[analyst-seo-mapping] could not corroborate recommendation ${existing.id}:`, err.message));
+    }
     const blockedReason = decision
       ? `${eligibility.note} Cross-domain evidence review: ${decision.rationale}`
       : eligibility.note;
@@ -608,6 +705,8 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
     // periodic counterpart that revisits these without requiring a
     // re-approval to trigger it).
     recommendationId = existing.id;
+    await corroborateRecommendation(existing.id, { findingId: eligibility.findingId, agentId: 'analyst-keyword-gaps' })
+      .catch((err) => console.error(`[analyst-seo-mapping] could not corroborate recommendation ${existing.id}:`, err.message));
     await refreshRecommendationBlockState(existing.id, {
       blockedReason: gate.blockedReason,
       riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(eligibility.generatorId),
@@ -828,6 +927,8 @@ export async function syncAnalystInsightsToActionCenter(siteId, insights, { site
   let ineligible = 0;
   let dropped = 0;
   let blocked = 0;
+  let corroborated = 0;
+  const droppedByReason = {}; // why findings were dropped, so a dropped finding is explained rather than only counted
 
   // One gates instance for the whole nightly pass, so its caches hold: one
   // repo-tree read and one soft-404 fingerprint for every insight, not one
@@ -844,11 +945,19 @@ export async function syncAnalystInsightsToActionCenter(siteId, insights, { site
 
     const page = recommendationPageKey({ generatorId: action.generatorId, params: action.params });
     const existing = await findOpenRecommendation(siteId, page, action.generatorId);
-    if (existing) { skipped++; continue; }
+    if (existing) {
+      // The same issue is already open (found by an app detector, or an earlier sync). Record the analyst as corroboration on THAT
+      // row instead of dropping its evidence, so app-first and analyst-first both end as one recommendation.
+      await corroborateRecommendation(existing.id, { findingId: action.findingId, agentId: 'analyst-insights' })
+        .catch((err) => console.error(`[analyst-seo-mapping] could not corroborate recommendation ${existing.id}:`, err.message));
+      corroborated++;
+      skipped++;
+      continue;
+    }
 
     const gate = await gates.evaluate(action.generatorId, action.params)
       .catch(() => ({ drop: null, blockedReason: null }));
-    if (gate.drop) { dropped++; continue; }
+    if (gate.drop) { dropped++; droppedByReason[gate.drop] = (droppedByReason[gate.drop] || 0) + 1; continue; }
     if (gate.blockedReason) blocked++;
 
     // forecast_risk is a PREDICTED problem, not an observed one. Saying so in
@@ -873,7 +982,7 @@ export async function syncAnalystInsightsToActionCenter(siteId, insights, { site
     });
     created++;
   }
-  return { created, skipped, ineligible, dropped, blocked };
+  return { created, skipped, ineligible, dropped, droppedByReason, blocked, corroborated };
 }
 
 // Website-wide Growth Opportunities -> Action Center, the weekly counterpart
@@ -899,6 +1008,7 @@ export async function syncGrowthOpportunitiesToActionCenter(siteId, { site } = {
   let ineligible = 0;
   let dropped = 0;
   let blocked = 0;
+  let corroborated = 0;
 
   const gates = createRecommendationGates(siteId, resolvedSite);
 
@@ -1179,7 +1289,8 @@ async function rankBlogPool(siteId, blogEligible, { dryRun }) {
 
 export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, now = new Date() } = {}) {
   const resolvedSite = site || await getSiteById(siteId);
-  const gaps = await getKeywordGaps(siteId, 'pending_review');
+  const localNote = localSeoNote(resolvedSite);
+  const gaps = (await getKeywordGaps(siteId, 'pending_review')).map((g) => (localNote ? { ...g, local_seo_note: localNote } : g));
 
   // A gap discovered THIS week is never shippable by this week's own pass.
   // The cycle is "ship what last week's discovery produced, then let this

@@ -57,6 +57,8 @@ mock.module(resolve('../../store/read.js'), {
 // store/drafts.js above — these three are all the code under test reaches.
 mock.module(resolve('../../store/recommendations.js'), {
   namedExports: {
+    // the corroboration path (an issue already open gets the analyst recorded on it): a no-op stand-in here
+    corroborateRecommendation: async () => null,
     findOpenRecommendation: async () => null,
     insertRecommendation: async () => ({ id: 77 }),
     refreshRecommendationBlockState: async () => {},
