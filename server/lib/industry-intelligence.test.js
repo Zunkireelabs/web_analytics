@@ -54,11 +54,11 @@ describe('votes and promotion', () => {
     assert.equal(evaluateGroup(g.evidence).status, 'candidate');
   });
 
-  test('validated only with enough distinct projects AND workspaces AND measured outcomes', () => {
+  test('validated only with enough distinct projects AND measured outcomes', () => {
     const three = [vote(1, 10, 'faq', 2), vote(2, 11, 'faq', 2), vote(3, 12, 'faq', 2)];
     const [g] = aggregateGroups(three);
     assert.equal(g.evidence.sites, MIN_SITES);
-    assert.equal(g.evidence.workspaces, MIN_WORKSPACES);
+    assert.equal(g.evidence.workspaces, 3, 'still recorded');
     assert.ok(g.evidence.measured >= MIN_MEASURED);
     const v = evaluateGroup(g.evidence);
     assert.equal(v.status, 'validated');
@@ -66,10 +66,15 @@ describe('votes and promotion', () => {
     assert.equal(v.confidence, 'medium');
   });
 
-  test('three projects from ONE workspace cannot validate a pattern', () => {
+  test('a project is its own client: three projects in ONE workspace can validate a pattern', () => {
     const [g] = aggregateGroups([vote(1, 10, 'faq', 3), vote(2, 10, 'faq', 3), vote(3, 10, 'faq', 3)]);
     assert.equal(g.evidence.sites, 3);
-    assert.equal(g.evidence.workspaces, 1);
+    assert.equal(g.evidence.workspaces, 1, 'the workspace is still recorded, only no longer required');
+    assert.equal(evaluateGroup(g.evidence).status, 'validated');
+  });
+
+  test('two projects, even in different workspaces, are still not enough', () => {
+    const [g] = aggregateGroups([vote(1, 10, 'faq', 3), vote(2, 11, 'faq', 3)]);
     assert.equal(evaluateGroup(g.evidence).status, 'candidate');
   });
 

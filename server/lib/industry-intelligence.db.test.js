@@ -62,7 +62,7 @@ after(async () => {
 });
 
 describe('industry intelligence against the real database', () => {
-  test('three workspaces agreeing validate a pattern; opted-out and low-confidence projects do not count; nothing identifying is stored', async () => {
+  test('three projects agreeing validate a pattern; opted-out and low-confidence projects do not count; nothing identifying is stored', async () => {
     const a = await site(await workspace(), { label: 'a' });
     const b = await site(await workspace(), { label: 'b' });
     const c = await site(await workspace(), { label: 'c' });

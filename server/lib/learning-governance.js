@@ -7,7 +7,7 @@
 //               other's memory either; a workspace is an ownership boundary, not a data pool.
 //   industry  - the ONLY shared layer. Table industry_knowledge (+ its log) has no site_id / workspace_id and holds labels from a
 //               fixed catalog plus counts. A project contributes only if opted in, its industry is known with confidence, and a
-//               pattern is served only when enough distinct projects AND workspaces agree (lib/industry-intelligence.js).
+//               pattern is served only when enough distinct projects agree (each project counts as its own client) (lib/industry-intelligence.js).
 //
 // What this module adds: human review of shared knowledge (hold back / reject / restore, always with a reviewer and a
 // reason), the readable history of how knowledge changed, and a plain measure of whether past learning held up.
