@@ -70,6 +70,20 @@ describe('steps', () => {
     assert.deepEqual(r.missing, ['Data Analyst client']);
     assert.equal((await STEPS.readiness(ctx(site(), { assessTenantReadiness: readinessOf([items[0]]) }))).status, 'ok');
   });
+  test('autoBaseline can be a per-project decision, and a "no" waits without starting anything', async () => {
+    let started = 0; const deps = { runBaseline: async () => { started++; return {}; } };
+    const fresh = site({ onboarded_at: null });
+    const no = await STEPS.baseline(ctx(fresh, deps, { autoBaseline: async () => ({ ok: false, reason: 'existing-project' }) }));
+    assert.equal(no.status, 'pending'); assert.match(no.detail, /awaiting the baseline/); assert.equal(started, 0);
+    const limit = await STEPS.baseline(ctx(fresh, deps, { autoBaseline: async () => ({ ok: false, reason: 'daily-limit-reached' }) }));
+    assert.match(limit.detail, /starts tomorrow/); assert.equal(started, 0);
+    const running = await STEPS.baseline(ctx(fresh, deps, { autoBaseline: async () => ({ ok: false, reason: 'already-started' }) }));
+    assert.match(running.detail, /still running/); assert.equal(started, 0);
+    const yes = await STEPS.baseline(ctx(fresh, deps, { autoBaseline: async () => ({ ok: true }) }));
+    assert.equal(yes.status, 'ok'); assert.equal(started, 1);
+    assert.equal((await STEPS.baseline(ctx(fresh, deps, { autoBaseline: async () => true }))).status, 'ok', 'a plain boolean answer still works');
+  });
+
   test('baseline is never started unless asked, and says what it is waiting for', async () => {
     let started = 0;
     const deps = { runBaseline: async () => { started++; return {}; } };

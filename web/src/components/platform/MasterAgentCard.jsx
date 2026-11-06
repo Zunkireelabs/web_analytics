@@ -85,6 +85,7 @@ export default function MasterAgentCard({ m, onChanged }) {
                 <Fact><b className="font-semibold text-fg tnum">{t.queued || 0}</b> waiting</Fact>
                 {m.limits && <Fact>Concurrency <b className="font-semibold text-fg tnum">{m.limits.concurrency}</b></Fact>}
                 {m.limits && <Fact>Browser slots <b className="font-semibold text-fg tnum">{m.limits.browserSlots}</b></Fact>}
+                {m.autoBaseline && <Fact>New-project baselines today <b className="font-semibold text-fg tnum">{m.autoBaseline.startedToday}</b> of {m.autoBaseline.cap}</Fact>}
               </>
             )}
           </div>
@@ -164,7 +165,7 @@ export default function MasterAgentCard({ m, onChanged }) {
       <Modal isOpen={dialog === 'live'} onClose={() => !busy && setDialog(null)} icon={ShieldCheck} title="Take the Master Agent live?" subtitle="This changes how the daily work runs for every project." maxWidth="max-w-[520px]"
         footer={<><Button variant="light" onClick={() => { setDialog(null); setAck(false); }} disabled={busy}>Cancel</Button><Button variant="primary" onClick={() => apply('on')} disabled={busy || !ack}>{busy ? 'Going live…' : 'Go live'}</Button></>}>
         <div className="space-y-3 text-[13.5px] leading-5 text-text">
-          <div><h4 className="text-[11px] font-semibold uppercase tracking-[.05em] text-faint mb-1">What happens</h4><ul className="list-disc pl-5 space-y-1"><li>New projects are set up by the Agent Factory as soon as they are created.</li><li>The daily work for every connected project runs from a queue, in this order: never-succeeded first, then longest wait.</li><li>The 07:00 run skips its own detection step and the queue starts earlier, at 05:00.</li></ul></div>
+          <div><h4 className="text-[11px] font-semibold uppercase tracking-[.05em] text-faint mb-1">What happens</h4><ul className="list-disc pl-5 space-y-1"><li>New projects are set up by the Agent Factory as soon as they are created.</li><li>The daily work for every connected project runs from a queue, in this order: never-succeeded first, then longest wait.</li><li>The 07:00 run skips its own detection step and the queue starts earlier, at 05:00.</li><li>From this moment, a project that is onboarded gets its first baseline started automatically, up to {m.autoBaseline?.cap ?? 3} a day. Projects that already exist keep starting theirs by hand, as today.</li></ul></div>
           <p className="rounded-[10px] px-3 py-2.5 text-[13px]" style={{ background: '#fdf3e1', boxShadow: 'inset 0 0 0 1px #f1dcae', color: '#7a5b00' }}><b>Not yet proven on real clients.</b> Watch the first day. Going back to safe start stops new jobs; a job already running finishes.</p>
           <label className="flex items-start gap-2.5 text-fg cursor-pointer"><input type="checkbox" className="mt-1" checked={ack} onChange={(e) => setAck(e.target.checked)} />I have compared the safe-start plan with the existing run and I want to take it live.</label>
           {error && <p className="text-[13px]" style={{ color: '#b42318' }} role="alert">{error}</p>}

@@ -27,7 +27,7 @@ const pending = (detail, extra = {}) => ({ status: 'pending', detail, ...extra }
 const failed = (detail) => ({ status: 'failed', detail });
 const skipped = (detail) => ({ status: 'skipped', detail });
 
-// Each step: (ctx) -> { status, detail }. ctx = { site, deps, autoBaseline, now }. Steps never throw out of runStep (see below).
+// Each step: (ctx) -> { status, detail }. ctx = { site, deps, autoBaseline (boolean or (site) => decision), now }. Steps never throw out of runStep (see below).
 export const STEPS = {
   // The project exists, is active, and belongs to a workspace. Read only.
   async identity({ site }) {
@@ -63,7 +63,15 @@ export const STEPS = {
     if (site.property_type === 'product') return skipped('Not applicable to a product project.');
     if (site.onboarded_at) return ok('Baseline captured.');
     if (!isSchedulable(site)) return pending('Waiting for Search Console and Analytics to be connected.');
-    if (!autoBaseline) return pending('Connected; awaiting the baseline (started from the client controls).');
+    // `autoBaseline` is true/false, or a function that decides per project (lib/auto-baseline.js: only projects onboarded after the
+    // Master Agent went live, within a daily limit). Everything else keeps waiting for the deliberate, manual start.
+    let allowed = autoBaseline; let why = null;
+    if (typeof autoBaseline === 'function') { const d = await autoBaseline(site); allowed = typeof d === 'object' ? Boolean(d.ok) : Boolean(d); why = typeof d === 'object' ? d.reason : null; }
+    if (!allowed) {
+      if (why === 'daily-limit-reached') return pending('Connected; the automatic baseline starts tomorrow (the daily limit is reached).');
+      if (why === 'already-started') return pending('The baseline has started and is still running.');
+      return pending('Connected; awaiting the baseline (started from the client controls).');
+    }
     const r = await deps.runBaseline(site);
     return r?.error ? failed(`Baseline: ${String(r.error).slice(0, 160)}`) : ok('Baseline started.', { changed: true });
   },

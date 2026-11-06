@@ -3,6 +3,7 @@ import { isSchedulable } from './instance-lifecycle.js';
 import { runSiteWithDeadline, SITE_RUN_TIMEOUT_MS, SITE_RUN_GRACE_MS } from './site-run.js';
 import { jobLockInfo, jobKeyFor } from './job-lock.js';
 import { reconcileInstances } from './agent-factory.js';
+import { makeAutoBaselinePolicy } from './auto-baseline.js';
 import { getMasterMode } from './master-agent-control.js';
 
 // THE MASTER AGENT (P3). One queue of per-project jobs, run by a small worker pool, in place of one sequential loop over every site.
@@ -256,7 +257,13 @@ export async function masterTick({ mode: modeIn, now = new Date(), query = dbQue
   const out = { mode, day: dayOf(now) };
   // Only a live pass keeps instances provisioned: that can register an analyst client and record a memory version, which a shadow
   // pass (whose whole point is to change nothing) must not do.
-  if (mode === 'on') out.instances = await reconcileInstances({ query, deps: factoryDeps, now }).catch((e) => ({ error: e.message }));
+  if (mode === 'on') {
+    // Projects onboarded since the Master Agent went live get their first baseline automatically (a few a day); older ones stay manual.
+    const policy = await makeAutoBaselinePolicy({ query, now }).catch(() => null);
+    out.instances = await reconcileInstances({
+      query, now, deps: { ...(policy ? { runBaseline: policy.run } : {}), ...factoryDeps }, autoBaseline: policy ? policy.allow : false,
+    }).catch((e) => ({ error: e.message }));
+  }
   out.plan = await planDay({ mode, now, query, siteIds });
   if (mode === 'on') {
     if (await legacyDailyRunning().catch(() => false)) { out.drain = { stoppedReason: 'legacy-daily-run-active', ran: 0 }; return out; }

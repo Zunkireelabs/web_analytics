@@ -1,6 +1,7 @@
 import { query as dbQuery } from '../db.js';
 import { isSchedulable } from './instance-lifecycle.js';
 import { getSetting, setSetting, putSettingQuiet, listChanges } from './platform-settings.js';
+import { LIVE_SINCE_KEY, autoBaselineStatus } from './auto-baseline.js';
 
 // Everything the Platform page needs to SWITCH the Master Agent between off / shadow / on (migration 246), kept apart from
 // lib/master-agent.js (the queue itself) so the queue has no dependency on how its mode is chosen.
@@ -161,6 +162,7 @@ export async function loadMasterControl({ query = dbQuery, env = process.env, no
   const { ready, ...readinessOut } = readiness;
   return {
     mode: current, ceiling, locked, canSwitch, readiness: readinessOut,
+    autoBaseline: await autoBaselineStatus({ query, now, env }),
     history: history.map((h) => ({ at: h.at, by: h.by, from: h.from ?? 'off', to: h.to })),
   };
 }
@@ -177,6 +179,8 @@ export async function setMasterMode(mode, { by = null, email = null, query = dbQ
   const stored = (await getSetting(MODE_KEY, { query }))?.value ?? 'off';
   if (stored === mode) { clearMasterModeCache(); return { changed: false, from: stored, to: mode }; } // no duplicate history row
   await setSetting(MODE_KEY, mode, { by, email, query });
+  // The moment it goes live is the cut-off for automatic baselines: only projects created after it get one (lib/auto-baseline.js).
+  if (mode === 'on') await putSettingQuiet(LIVE_SINCE_KEY, now.toISOString(), { query });
   clearMasterModeCache();
   return { changed: true, from: stored, to: mode };
 }
