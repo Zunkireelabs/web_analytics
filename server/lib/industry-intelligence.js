@@ -22,7 +22,7 @@ import { FEED_CATALOG, FEED_CATALOG_KEYS } from '../agents/lib/trend-feeds.js';
 export const INDUSTRY_KEYS = FEED_CATALOG_KEYS;
 
 // ── thresholds (exported so tests and the CLI read the same numbers) ────────────────────────────────────────────────
-export const MIN_SITES = 3;          // distinct projects that voted
+export const MIN_SITES = 2;          // distinct projects that voted (owner decision 2026-11-06: 2, down from 3; 'high' confidence still needs ESTABLISHED_SITES)
 export const MIN_WORKSPACES = 1;     // a PROJECT is its own client (owner decision 2026-11-06): which workspace it sits in, or who created it, does not matter. Still recorded in the evidence, no longer required.
 export const MIN_MEASURED = 5;       // measured outcomes behind those votes
 export const AGREEMENT = 0.7;        // share of voting projects that must point the same way
@@ -440,7 +440,7 @@ export function buildIndustryMap(intel) {
 }
 
 // Whether the ranking step reads industry knowledge at all. ON unless explicitly disabled. Safe to leave on: it only ever scores
-// VALIDATED patterns (3+ projects, 5+ measured outcomes, 70% agreement), so with none it changes nothing.
+// VALIDATED patterns (2+ projects, 5+ measured outcomes, 70% agreement), so with none it changes nothing.
 export const industryRankingEnabled = (env = process.env) => onUnlessDisabled(env.INDUSTRY_INTELLIGENCE_RANKING);
 
 // Never throws: a failure to load industry knowledge must leave ranking exactly as it was, not stop the day's run.
