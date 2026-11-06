@@ -38,6 +38,7 @@ import { createHash } from 'node:crypto';
 import * as cheerio from 'cheerio';
 import { layoutGroupFor } from './layout-groups.js';
 import { scopedDesignContextFor } from './design-context-scope.js';
+import { safeMessage } from '../../lib/errors.js';
 
 export const FINGERPRINT_VERSION = 2;
 export const DESIGN_CONTEXT_VERSION = 2;
@@ -239,7 +240,7 @@ export async function defaultFetchHtml(url, { signal } = {}) {
     headers: { 'user-agent': 'Mozilla/5.0 (compatible; ZunkireeDesignValidation/1.0)' },
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout, redirect: 'follow',
   });
-  if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { httpStatus: res.status });
+  if (!res.ok) throw Object.assign(new Error('The live page returned an error status.'), { httpStatus: res.status });
   return res.text();
 }
 
@@ -389,7 +390,8 @@ export async function validatePageDesign(site, pageUrl, {
     return await run();
   } catch (err) {
     if (ac.signal.aborted) return blocked('validation-timeout', `Validation exceeded ${Math.round(deadlineMs / 1000)}s.`);
-    return blocked('validation-error', err.message);
+    const { id } = safeMessage('live-design-validation.validate', err, 'validation error');
+    return blocked('validation-error', `The design validation failed unexpectedly (ref: ${id}).`);
   } finally {
     clearTimeout(timer);
   }
@@ -400,7 +402,8 @@ export async function validatePageDesign(site, pageUrl, {
       // 404 / 410: the page appears to be deleted — a different situation from an outage (handled by
       // the stage: confirmed twice, then a page-gone proposal for review).
       if (err.httpStatus === 404 || err.httpStatus === 410) return blocked('page-gone', `The live page returned HTTP ${err.httpStatus}.`, { transient: false, httpStatus: err.httpStatus });
-      return blocked('page-unreachable', `Could not read the live page: ${err.message}`, { transient: !(err.httpStatus >= 400 && err.httpStatus < 500 && err.httpStatus !== 408 && err.httpStatus !== 429), httpStatus: err.httpStatus ?? null });
+      const { message, id } = safeMessage('live-design-validation.fetchPage', err, 'Could not read the live page.');
+      return blocked('page-unreachable', `${message} (ref: ${id})`, { transient: !(err.httpStatus >= 400 && err.httpStatus < 500 && err.httpStatus !== 408 && err.httpStatus !== 429), httpStatus: err.httpStatus ?? null });
     }
     // Unreadable = the served HTML has no structure at all (a page built only in the browser: an empty
     // <div id="root">). A simple static page with a few classed sections is readable.
@@ -420,7 +423,8 @@ export async function validatePageDesign(site, pageUrl, {
         entry = await captureOnce(`${site.id}|${pathKey(pageUrl)}|${page.fp.hash}`, () => captureFn(pageUrl, { propertyType: site?.property_type, signal: ac.signal }));
         if (!entry?.sections?.length) throw new Error('capture returned no sections');
       } catch (err) {
-        return blocked('capture-failed', `${reason}; and a fresh capture of this page failed: ${err.message}`);
+        const { id } = safeMessage('live-design-validation.capture', err, 'capture failed');
+        return blocked('capture-failed', `${reason}; and a fresh capture of this page failed (ref: ${id}).`);
       }
       const capture = stamp(page.fp);
       return {
@@ -451,7 +455,8 @@ export async function validatePageDesign(site, pageUrl, {
       if (pathKey(sampleUrl) === pathKey(pageUrl)) return { ok: true, visual: { verdict: 'self' } };
       let v;
       try { v = await visualCheck(pageUrl, sampleUrl); } catch (err) {
-        return { ok: false, result: blocked('visual-check-failed', `The rendered comparison could not run: ${err.message}`, { groupId: group.id }) };
+        const { id } = safeMessage('live-design-validation.visual', err, 'visual check failed');
+        return { ok: false, result: blocked('visual-check-failed', `The rendered comparison could not run (ref: ${id}).`, { groupId: group.id }) };
       }
       if (v.verdict === 'match' || v.verdict === 'skipped') return { ok: true, visual: { verdict: v.verdict, issues: 0 } };
       if (v.verdict === 'unmeasurable') return { ok: false, result: blocked('visual-check-failed', v.issues?.[0]?.detail || 'nothing measurable on the rendered page', { groupId: group.id }) };

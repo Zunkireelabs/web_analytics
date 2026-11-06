@@ -18,6 +18,7 @@ import {
   loadLivePage, sharedLivePageCache, defaultFetchHtml,
 } from './live-design-validation.js';
 import { createReviewStore, reviewStateOf, lookupMemo } from './design-review-store.js';
+import { safeMessage } from '../../lib/errors.js';
 
 export const SITE_KEY = '/__site__';
 
@@ -175,7 +176,8 @@ export async function runDesignValidationStage({
   }
   let result;
   try { result = await validate(site, pageUrl); } catch (err) {
-    result = { status: 'blocked', reason: 'validation-error', detail: err.message, transient: true, context: null, proposal: null };
+    const { id } = safeMessage('design-validation-stage.validate', err, 'validation error');
+    result = { status: 'blocked', reason: 'validation-error', detail: `The design validation failed unexpectedly (ref: ${id}).`, transient: true, context: null, proposal: null };
   }
 
   if (result.status === 'skipped') return { ...skip(result.reason), outcome: 'skipped' };
