@@ -5,6 +5,7 @@ import Modal from '../Modal.jsx';
 import Button from '../Button.jsx';
 import Field from '../Field.jsx';
 import ChoiceCard from './ChoiceCard.jsx';
+import WhatYouCanAsk from './WhatYouCanAsk.jsx';
 
 // Plain names over the four MCP permission levels (mcp-server/permissions.js).
 export const TOKEN_TIERS = [
@@ -14,7 +15,7 @@ export const TOKEN_TIERS = [
   { value: 'admin', label: 'Full admin', short: 'Admin', hint: 'Can also create and revoke tokens. Use with care.', highTier: true },
 ];
 
-function connectSnippet(token) {
+export function connectSnippet(token) {
   const origin = import.meta.env.VITE_MCP_ORIGIN || (typeof window !== 'undefined' ? window.location.origin : '');
   return `claude mcp add --transport http superrank ${origin}/api/mcp \\\n  --header "Authorization: Bearer ${token}"`;
 }
@@ -85,6 +86,9 @@ export default function CreateTokenModal({ projects = [], where, createToken, is
             <pre className="flex-1 font-mono text-[12px] text-fg bg-white rounded-control px-3 py-2 overflow-x-auto whitespace-pre" style={ring}>{connectSnippet(created.token)}</pre>
             <CopyButton text={connectSnippet(created.token)} />
           </div>
+          {/* The tools were reachable but unknown, which is the same as missing. Shown with the token's OWN tier, so
+              the paid questions are not offered to a token that cannot run them. */}
+          <WhatYouCanAsk tier={tier} className="bg-white" />
         </div>
       ) : confirming ? (
         <form id="token-confirm" onSubmit={confirmPassword} className="rounded-card px-4 py-4 space-y-3" style={{ background: '#fdf3e1', boxShadow: '0 0 0 1px #f3ddb0' }}>

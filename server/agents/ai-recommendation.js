@@ -10,7 +10,8 @@ import { PROVIDERS, getConfiguredProviders } from './lib/model-providers/index.j
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
 import { effortForGenerator } from './lib/page-content.js';
 import { callLLM } from '../llm.js';
-import { targetMarketNames } from './lib/site-locations.js';
+import { targetMarketNames, resolveSiteLocations } from './lib/site-locations.js';
+import { placeNames, isUkSite } from './lib/local-seo.js';
 
 // Distinct from server/agents/ai-visibility.js — that agent measures
 // structural readiness to be cited (schema/FAQ/robots.txt on this site's
@@ -57,7 +58,7 @@ const HIGH_INTENT_SOURCES = new Set(['service', 'top-query']);
 // below) since this step is generation/phrasing, not the actual "does
 // OpenAI recommend us" test — that distinction matters: only the real
 // probe below is locked to OpenAI per the agent's design.
-async function generatePromptCandidates({ companyName, homepageTitle, homepageDescription, topPages, topQueries, targetMarkets = [] }) {
+async function generatePromptCandidates({ companyName, homepageTitle, homepageDescription, topPages, topQueries, targetMarkets = [], localPlaces = [], british = false }) {
   const system = 'You write realistic buyer-style questions a real prospective customer might ask an AI ' +
     'assistant, based ONLY on the real company context given below — never invent a service, industry, or fact ' +
     'not evidenced in the context. For each of: (1) the company\'s real services/offerings as described on its ' +
@@ -69,7 +70,15 @@ async function generatePromptCandidates({ companyName, homepageTitle, homepageDe
     // ranks in (zunkireelabs.com: "...in Nepal"), so without this a global
     // business is only ever tested on its home market. Phrased from the
     // site's own configured markets, never invented.
-    (targetMarkets.length
+    // A LOCAL business is the opposite case. Someone choosing an estate agent, a dentist or a plumber asks "…in
+    // Northampton", so questions with no place in them test something no real customer types. When the client has
+    // declared the places it works in, most questions must name one — the first listed is where it is based.
+    (localPlaces.length
+      ? `This is a LOCAL business that works in: ${localPlaces.join(', ')} (the first is where it is based). Real customers ask ` +
+        'with a place in the question ("best X in <place>", "X near <place>"), so make most questions name one of these places, ' +
+        'weighted towards the first, and keep a few without a place. Never name a place that is not in that list. ' +
+        (british ? 'Phrase them the way someone in the UK would, with British spelling. ' : '')
+      : targetMarkets.length
       ? `This company serves these markets: ${targetMarkets.join(', ')}. Do NOT anchor every question to one country or city, ` +
         'even if the pages/queries below do — make roughly half of the questions location-neutral (how a buyer anywhere would ask), ' +
         'and spread the rest across the listed markets. '
@@ -250,6 +259,8 @@ export async function run({ siteId, start, end }) {
     homepageDescription: homepage.ok ? homepage.analysis.metaDescription : null,
     topPages: topPageUrls, topQueries: topQueryTexts,
     targetMarkets: targetMarketNames(site),
+    localPlaces: placeNames(site, { max: 5 }),
+    british: isUkSite(site),
   });
   await Promise.all(candidates.map((c) => upsertTrackedPrompt(siteId, c.promptText, c.source)
     .catch((err) => console.error('[agents] ai-recommendation: failed to upsert prompt:', err.message))));
@@ -270,6 +281,11 @@ export async function run({ siteId, start, end }) {
   const batch = rotatedIds.slice(0, BATCH_SIZE).map((id) => byId.get(id));
 
   const runDate = new Date().toISOString().slice(0, 10);
+  // The site's primary market, for the one provider that can ask in a specific place (dataforseo-ai). A model API has
+  // no location concept, so the model-API providers simply ignore it.
+  const [primaryMarket] = resolveSiteLocations(site);
+  const locationCode = primaryMarket?.locationCode ?? null;
+  const languageCode = primaryMarket?.languageCode ?? 'en';
   // Every configured provider probes the same rotated batch independently —
   // a provider's own failure (transient API error, etc.) never blocks
   // another provider's results; each is caught per-(prompt, provider) pair,
@@ -277,7 +293,10 @@ export async function run({ siteId, start, end }) {
   const perProviderResults = await Promise.all(providers.map(async (provider) => {
     const results = await Promise.all(batch.map(async (prompt) => {
       try {
-        const probe = await provider.ask(prompt.prompt_text);
+        // siteId and the site's market go to every provider: the model-API providers ignore the extra options (their
+        // `ask` takes only the prompt), while dataforseo-ai REQUIRES siteId because its call is paid and must be
+        // attributed to a project in the spend ledger, and uses the location to ask in the client's own market.
+        const probe = await provider.ask(prompt.prompt_text, { siteId, locationCode, languageCode });
         const mentioned = detectMention(probe.raw, site.name, domain);
         const extracted = await provider.extract(probe.raw, { companyName: site.name, domain }).catch(() => null);
         const saved = await saveAiPromptRun(siteId, {

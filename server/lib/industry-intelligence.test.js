@@ -54,11 +54,11 @@ describe('votes and promotion', () => {
     assert.equal(evaluateGroup(g.evidence).status, 'candidate');
   });
 
-  test('validated only with enough distinct projects AND workspaces AND measured outcomes', () => {
-    const three = [vote(1, 10, 'faq', 2), vote(2, 11, 'faq', 2), vote(3, 12, 'faq', 2)];
-    const [g] = aggregateGroups(three);
+  test('validated only with enough distinct projects AND measured outcomes', () => {
+    const two = [vote(1, 10, 'faq', 3), vote(2, 11, 'faq', 3)];
+    const [g] = aggregateGroups(two);
     assert.equal(g.evidence.sites, MIN_SITES);
-    assert.equal(g.evidence.workspaces, MIN_WORKSPACES);
+    assert.equal(g.evidence.workspaces, 2, 'still recorded');
     assert.ok(g.evidence.measured >= MIN_MEASURED);
     const v = evaluateGroup(g.evidence);
     assert.equal(v.status, 'validated');
@@ -66,11 +66,23 @@ describe('votes and promotion', () => {
     assert.equal(v.confidence, 'medium');
   });
 
-  test('three projects from ONE workspace cannot validate a pattern', () => {
+  test('a project is its own client: three projects in ONE workspace can validate a pattern', () => {
     const [g] = aggregateGroups([vote(1, 10, 'faq', 3), vote(2, 10, 'faq', 3), vote(3, 10, 'faq', 3)]);
     assert.equal(g.evidence.sites, 3);
-    assert.equal(g.evidence.workspaces, 1);
+    assert.equal(g.evidence.workspaces, 1, 'the workspace is still recorded, only no longer required');
+    assert.equal(evaluateGroup(g.evidence).status, 'validated');
+  });
+
+  test('one project is never enough: it learns from its own results, not as an industry lesson', () => {
+    const [g] = aggregateGroups([vote(1, 10, 'faq', 9)]);
+    assert.equal(g.evidence.measured, 9);
     assert.equal(evaluateGroup(g.evidence).status, 'candidate');
+  });
+
+  test('two projects validate a lesson but only at medium confidence, never high', () => {
+    const [g] = aggregateGroups([vote(1, 10, 'faq', 3), vote(2, 11, 'faq', 3)]);
+    const v = evaluateGroup(g.evidence);
+    assert.equal(v.status, 'validated'); assert.equal(v.confidence, 'medium');
   });
 
   test('too few measured outcomes stays a candidate even with enough projects', () => {

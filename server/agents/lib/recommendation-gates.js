@@ -10,6 +10,7 @@ import { FRONTEND_ACTION_TYPES } from '../../implementers/frontend.js';
 import { getFileContent, getRepoTree } from '../../github/client.js';
 import { baseBranch } from '../../implementers/lib/github-ops.js';
 import { autoHealFileMapping, buildPermalinkIndex } from '../../implementers/lib/discover-file-mapping.js';
+import { repairStaleFileMapping, staleMappingBlockedReason } from '../../implementers/lib/stale-mapping-repair.js';
 import { autoHealNewContentTarget } from '../../implementers/lib/discover-content-target.js';
 import { discoverPaginationRoutes, matchPaginationRoute, paginationBlockedReason, paginationHeadTagAutoHandled } from '../../implementers/lib/pagination-routes.js';
 import { healPaginationAdapter } from '../../implementers/lib/pagination-adapter-discovery.js';
@@ -89,6 +90,11 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     discoverRoutes = discoverPaginationRoutes,
     fetchFingerprint = fetchSoftNotFoundFingerprint,
     checkSoftNotFound = isSoftNotFound,
+    // Does the live page itself still answer (2xx after redirects, through the free audit's guarded fetcher)? Used only to tell a
+    // STALE MAPPING (file gone, page live) apart from a page that is really gone.
+    checkPageLive = pageAnswersLive,
+    // Finds the file that now serves a live page whose mapped file was deleted (permalink evidence only; never guesses).
+    repairStaleMapping = repairStaleFileMapping,
     designAgentStatus = getDesignAgentStatus,
     log = console,
     // Injectable purely for tests — real defaults exercise the actual
@@ -258,6 +264,25 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
   let softNotFoundFingerprint;      // undefined = not fetched yet, null = unavailable
   let softNotFoundDiscriminates;    // guard, see below
   const softNotFoundCache = new Map();
+  const pageLiveCache = new Map();
+  // One repair attempt per (page, stale file) per pass; later findings on the same page reuse the outcome.
+  const staleRepairCache = new Map();
+  const staleRepairOnce = async (pageUrl, staleFile) => {
+    const key = `${pageUrl}::${staleFile}`;
+    if (!staleRepairCache.has(key)) {
+      staleRepairCache.set(key, (async () => {
+        const r = await repairStaleMapping(site, pageUrl, staleFile, { fetchTree: cachedFetchTree, fetchFile: cachedFetchFile, routes: paginationRoutes, log })
+          .catch((err) => ({ outcome: 'unverifiable', oldFile: staleFile, reason: err.message }));
+        if (r.outcome === 'repaired' && r.site) site = r.site;
+        return r;
+      })());
+    }
+    return staleRepairCache.get(key);
+  };
+  const cachedPageLive = async (pageUrl) => {
+    if (!pageLiveCache.has(pageUrl)) pageLiveCache.set(pageUrl, await checkPageLive(pageUrl).catch(() => false));
+    return pageLiveCache.get(pageUrl);
+  };
   const isPageSoftNotFound = async (pageUrl) => {
     if (softNotFoundCache.has(pageUrl)) return softNotFoundCache.get(pageUrl);
     if (softNotFoundFingerprint === undefined) {
@@ -477,7 +502,21 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
       if (filePath) {
         const ref = baseBranch(site);
         const file = await cachedFetchFile(site, filePath, ref);
-        if (!file && !unverifiableFiles.has(`${filePath}@${ref}`)) return { drop: 'file-missing', blockedReason: null };
+        if (!file && !unverifiableFiles.has(`${filePath}@${ref}`)) {
+          // The mapped file is gone. That alone does not mean the FINDING is unreal: the site may have moved the page to another
+          // file (zunkireelabs-web replaced its homepage template on 2 Oct 2026 and every homepage finding was silently dropped
+          // as 'file-missing' from then on). If the page still answers, the mapping is stale: keep the finding visible, blocked,
+          // with that reason. Drop only when the page itself is gone (or a soft-404).
+          if (!(await isPageSoftNotFound(page)) && (await cachedPageLive(page))) {
+            const repair = await staleRepairOnce(page, filePath);
+            if (repair.outcome === 'repaired') {
+              // Mapping fixed with evidence: the finding continues through the normal gates and validation below.
+              return evaluate(generatorId, params);
+            }
+            return { drop: null, blockedReason: staleMappingBlockedReason(page, repair) };
+          }
+          return { drop: 'file-missing', blockedReason: null };
+        }
 
         // A file that already carries an FAQPage schema block can never take
         // a faq/qa-content draft: render-mode inspection (render-inspector.js)
@@ -636,4 +675,16 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     isPageSoftNotFound,
     paginationRouteFor,
   };
+}
+
+// 2xx after following redirects, through the free audit's SSRF-guarded fetcher. Anything else (an error, a 404, a non-HTML answer)
+// is "not live", so a page that is really gone still drops as before.
+async function pageAnswersLive(pageUrl) {
+  const { fetchMainPage, normalizeUrl } = await import('../../free-audit/fetchPage.js');
+  try {
+    const r = await fetchMainPage(normalizeUrl(pageUrl));
+    return r.statusCode >= 200 && r.statusCode < 300;
+  } catch {
+    return false;
+  }
 }

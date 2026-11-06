@@ -17,7 +17,7 @@ import { FEED_CATALOG_KEYS, industryIsMappable } from '../agents/lib/trend-feeds
 // So capture is only complete when the value is MAPPABLE, and an unmappable
 // one is recorded as such rather than stored as if it worked.
 
-export const INDUSTRY_SOURCES = Object.freeze(['human', 'growth-config', 'llm-classified', 'inferred', 'unmapped']);
+export const INDUSTRY_SOURCES = Object.freeze(['human', 'growth-config', 'llm-classified', 'inferred', 'unmapped', 'detected']);
 
 // Confidence by source, not by the value. A staff member typing the industry
 // is ground truth; the growth config was also entered by a human but may be
@@ -28,6 +28,7 @@ const CONFIDENCE_BY_SOURCE = {
   'growth-config': 'medium',
   'llm-classified': 'low',
   inferred: 'medium',
+  detected: 'medium', // two independent signals agreed
 };
 
 const CLASSIFY_SYSTEM =

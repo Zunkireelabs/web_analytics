@@ -9,6 +9,8 @@ import Button from '../../components/Button.jsx';
 import Field from '../../components/Field.jsx';
 import Select from '../../components/Select.jsx';
 import { UserPlus, Ban, KeyRound } from 'lucide-react';
+import WhatYouCanAsk from '../../components/workspace/WhatYouCanAsk.jsx';
+import { connectSnippet } from '../../components/workspace/CreateTokenModal.jsx';
 
 // Mirrors login.js's PLATFORM_ROLE_RANK/TENANT_ROLE_RANK — this is the only
 // path permitted to grant a platform tier (PLATFORM-ADMIN-DESIGN.md §E), so
@@ -228,6 +230,22 @@ function TokensTab() {
   return (
     <>
       {error && <ErrorBanner>{error}</ErrorBanner>}
+
+      {/* The connect flow and the tool list lived only in the per-project token modal, so a platform admin could see
+          every token and still had nowhere to learn how one is used or what it can do. Same components, so the two
+          screens cannot drift apart. */}
+      <Tray>
+        <TrayCard title="How a token is used" subtitle="What to hand someone, and what they can then ask">
+          <div className="border-t border-border px-5 py-4 space-y-3">
+            <p className="text-[13px] leading-relaxed">
+              A token is connected once, with one command. Tokens are issued per project from that project&rsquo;s own
+              Settings &rarr; API tokens; this screen is for seeing and revoking them across every tenant.
+            </p>
+            <pre className="font-mono text-[12px] bg-white rounded-control px-3 py-2 overflow-x-auto whitespace-pre border border-border">{connectSnippet('<the token>')}</pre>
+            <WhatYouCanAsk tier="automation" className="bg-white" />
+          </div>
+        </TrayCard>
+      </Tray>
 
       <Tray>
         <TrayCard title="MCP tokens" subtitle={tokens ? `${tokens.length} issued across all tenants` : undefined}>

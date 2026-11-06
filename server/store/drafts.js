@@ -2,6 +2,7 @@ import { query } from '../db.js';
 import { isVerifiableDraft, createPendingVerification, getWatchlistItemByFindingId } from './fix-verifications.js';
 import { sanitizeForCustomer } from '../lib/errors.js';
 import { classifyAbandonReason, RETRY_POLICY } from '../lib/attempt-classification.js';
+import { takeSlot, giveBackSlot, isAutonomousSource } from './autonomous-slots.js';
 
 // CRUD for the drafts table, plus its approval lifecycle:
 // draft/edited -> submitted_for_approval -> approved -> implemented. There's
@@ -25,6 +26,11 @@ export async function createDraft(siteId, { actionType, source, findingOrigin, i
   // fast path for how they're consumed at apply/preview time. Both null for
   // an action type this doesn't apply to (marker-merge types, which must
   // still compute their splice fresh against the live file at apply time).
+  // AUTONOMOUS work takes a slot from the site's atomic daily ceiling BEFORE the row exists (store/autonomous-slots.js).
+  // A human clicking Generate (source 'manual' / action-center) is not autonomous and never takes one. If the slot cannot
+  // be taken this throws AutonomousCeilingError, which callers treat as "the day is full", never as a failed item.
+  const takesSlot = isAutonomousSource(source);
+  if (takesSlot) await takeSlot(siteId);
   try {
     const { rows } = await query(
       `INSERT INTO drafts (site_id, action_type, source, finding_origin, input, content, original_content, finding_id, gate_resolved_patterns, rendered_body, target_file_path, memory_ref_id)
@@ -34,6 +40,8 @@ export async function createDraft(siteId, { actionType, source, findingOrigin, i
     );
     return rows[0];
   } catch (err) {
+    // No row was created, so the slot was not spent.
+    if (takesSlot) await giveBackSlot(siteId);
     // drafts_site_finding_id_unique (migration 118) — the DB-level backstop
     // for generateDraft()'s app-level getDraftByFindingId-then-insert check.
     // That check-then-insert has a real window (up to two LLM generation
@@ -345,12 +353,27 @@ export async function markDraftMergedToStage(siteId, id, { mergeSha, mergeUrl, r
 // earlier, abandoned PR-based design) reused here rather than adding new
 // ones. `rollbackSnapshot` follows the same optional, writer-supplied
 // pattern as markDraftMergedToStage below.
+// The action types of every draft already on a batch branch, so the router (lib/pr-routing.js) decides from the WHOLE day.
+export async function listBatchActionTypes(siteId, branchName) {
+  if (!branchName) return [];
+  const { rows } = await query(`SELECT DISTINCT action_type FROM drafts WHERE site_id = $1 AND branch_name = $2 AND action_type IS NOT NULL`, [siteId, branchName]);
+  return rows.map((r) => r.action_type);
+}
+
+// Records which branch a batch's pull request really targets (main or stage) on every draft sharing that branch.
+export async function setBatchPrBase(siteId, branchName, baseBranch) {
+  if (!branchName || !baseBranch) return 0;
+  const { rowCount } = await query(`UPDATE drafts SET pr_base_branch = $3, updated_at = now() WHERE site_id = $1 AND branch_name = $2`, [siteId, branchName, baseBranch]);
+  return rowCount;
+}
+
 export async function markDraftPrOpened(siteId, id, { prNumber, prUrl, rollbackSnapshot = null }) {
   const { rows } = await query(
     `UPDATE drafts SET status = 'pr_opened', pr_number = $3, pr_url = $4, pr_state = 'open',
        apply_error = NULL, render_mode_confirm = NULL, updated_at = now(),
        rollback_snapshot = COALESCE($5, rollback_snapshot),
-       pr_base_branch = (SELECT COALESCE(NULLIF(pr_target_branch, ''), NULLIF(repo_default_branch, ''), 'main') FROM sites WHERE id = $1)
+       -- The base the router already recorded for this batch wins; only a draft that never went through it falls back to the site's config.
+       pr_base_branch = COALESCE(NULLIF(pr_base_branch, ''), (SELECT COALESCE(NULLIF(pr_target_branch, ''), NULLIF(repo_default_branch, ''), 'main') FROM sites WHERE id = $1))
      WHERE site_id = $1 AND id = $2 AND status = 'branch_pushed'
      RETURNING *`,
     [siteId, id, prNumber, prUrl, rollbackSnapshot ? JSON.stringify(rollbackSnapshot) : null]

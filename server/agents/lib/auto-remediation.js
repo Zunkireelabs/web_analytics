@@ -14,6 +14,8 @@ import { buildDailyQueue } from './daily-queue.js';
 import { loadDeclines } from './decline-detection.js';
 import { listActionableAnalystEvidence } from '../../store/analyst-evidence.js';
 import { buildPageMetrics } from './growth-scoring.js';
+import { loadIndustryMap } from '../../lib/industry-intelligence.js';
+import { loadGrowthStage } from '../../lib/growth-stage.js';
 import { classifyShipFailure, failureFamilyKey, FAILURE_KIND, SYSTEMIC_FAILURE_LIMIT, FAMILY_FAILURE_LIMIT } from './failure-policy.js';
 import { getQueryPageMetrics } from '../../store/read.js';
 import { draftShipState, SHIP_STATE } from '../../lib/draft-ship-state.js';
@@ -21,6 +23,8 @@ import { classifyAbandonReason, RETRY_POLICY } from '../../lib/attempt-classific
 import { NO_FILE_MAPPING_FRAGMENT, NO_MARKERS_CONFIGURED_FRAGMENT, UNVERIFIED_PLACEHOLDER_FRAGMENT } from '../../lib/draft-failure-phrases.js';
 import { recordAutoRemediationRun } from '../../store/auto-remediation-runs.js';
 import { laneBudgets, ANALYST_MAX, AUTONOMOUS_DRAFT_SOURCES } from '../../lib/autonomous-quota.js';
+import { surgeStatus, effectiveSiteLimit } from '../../lib/surge-mode.js';
+import { takeSlot, giveBackSlot, isCeilingError } from '../../store/autonomous-slots.js';
 import { countDraftsBySourcesToday } from '../../store/drafts.js';
 import { listByState as listQueueItemsByState, markShipped as markQueueItemShipped, releaseItem as releaseQueueItem, countShippedFileEditsToday, QUEUE_STATES } from '../../store/shipping-queue.js';
 import { recordFixOutcome } from '../../agent-memory.js';
@@ -131,36 +135,15 @@ const CREDENTIAL_RETRY_DELAY_MS = Number(process.env.CREDENTIAL_RETRY_DELAY_MS ?
 // across ALL autonomous sources." laneBudgets() below is what makes that
 // combination structurally unreachable instead of merely undocumented.
 
-export async function autoRemediateSafeRecommendations(siteId, {
-  globalRemaining = Infinity,
-  onboardingAnalysisPending = isOnboardingAnalysisPending,
-  // Soft time limit for THIS site's run (ms since epoch). Checked between items, where
-  // stopping is safe; never mid-push.
-  deadlineAt = null,
-} = {}) {
-  const site = await getSiteById(siteId);
-  // No site row to attribute a run log to (auto_remediation_runs.site_id is a
-  // real FK) — nothing to record, same 'disabled' outcome as the flag being off.
-  if (!site) return { attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'disabled' };
-
-  // Human-facing label for this run's log lines. client_number is the small
-  // sequential onboarding number (1, 2, 3...) shown to people; the real
-  // sites.id primary key (e.g. 8862) is never sequential and isn't what
-  // anyone reading these logs is trying to track a site by.
-  const clientLabel = site.client_number ? `client #${site.client_number}` : `site ${siteId}`;
-
-  const startedAt = new Date();
-  // Every exit below goes through this so `auto_remediation_runs` always has
-  // a row for what a console-only log used to be the only record of — see
-  // migration 136's own comment for the 2026-09-02 incident this answers.
-  const finish = (result) => {
-    // recordAutoRemediationRun already swallows its own errors — never blocks
-    // on the write finishing.
-    recordAutoRemediationRun(siteId, { startedAt, finishedAt: new Date(), ...result });
-    return result;
-  };
-
-  if (!site.auto_remediation_enabled) return finish({ attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'disabled' });
+// SELECTION: which open recommendations are eligible to be fixed today, and in what order, within today's budget.
+// Moved out of autoRemediateSafeRecommendations VERBATIM so the daily pipeline's preparation stage can choose candidates by exactly the
+// same rules (opt-in, onboarding gate, drafted/pending-file/suppression exclusions, classification and learning, pacing, convergence
+// and refusal caps, lane budgets, growth scoring) without shipping anything. Nothing here pushes or drafts.
+//
+// `finish` records the run in auto_remediation_runs; the pipeline passes a no-op because selecting is not a shipping run.
+// Returns { done } when the run ends before any item is attempted, otherwise { ctx } with everything the shipping loop needs.
+export async function selectRemediationCandidates(site, siteId, { globalRemaining = Infinity, onboardingAnalysisPending = isOnboardingAnalysisPending, finish = (r) => r, clientLabel } = {}) {
+  if (!site.auto_remediation_enabled) return { done: finish({ attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'disabled' }) };
 
   // Two-stage onboarding: a genuinely new tenant's repo connection queues
   // ONLY the whole-site analysis job (job.js's queueDesignAgentDerivationForSite)
@@ -169,7 +152,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // isOnboardingAnalysisPending's own comment for exactly what "pending"
   // means and why a site that predates this gate is never newly blocked.
   if (await onboardingAnalysisPending(site)) {
-    return finish({ attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'onboarding-analysis-pending' });
+    return { done: finish({ attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'onboarding-analysis-pending' }) };
   }
 
   // No day-level gate here on purpose: a still-open, unmerged PR from a
@@ -415,11 +398,14 @@ export async function autoRemediateSafeRecommendations(siteId, {
   }
   const sharedQueueDemand = learnedRepairQueueItems.length + fileEditsQueueItems.length;
 
+  // FIRST-30-DAY SURGE MODE. Only the site's daily limit changes (60 -> 100 while sites.surge_mode_until is in the future);
+  // laneBudgets below still applies the hard 100 ceiling, the reserved analyst lane and "eligible work only".
+  const surge = surgeStatus(site.surge_mode_until);
   const analyticsCandidates = candidates.length - decliningCandidates.length + sharedQueueDemand;
   const { analyticsBudget, analystBudget, dailyLimit, remaining, ceiling, target } = laneBudgets({
     analyticsCandidates,
     analystCandidates: decliningCandidates.length,
-    siteLimitOverride: site.auto_remediation_daily_limit,
+    siteLimitOverride: effectiveSiteLimit(site.auto_remediation_daily_limit, surge),
     spentToday,
     globalRemaining,
   });
@@ -429,6 +415,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
     + `(${analyticsCandidates} eligible), analyst ${analystBudget}/${ANALYST_MAX} `
     + `(${decliningCandidates.length} evidenced), total ${dailyLimit}/${ceiling} (spent today across every `
     + `autonomous lane: ${spentToday}).`
+    + (surge.active ? ` Surge Mode ACTIVE day ${surge.day}/30 (expires ${surge.expiresAt}).` : '')
   );
   if (dailyLimit < target) {
     console.log(`[auto-remediation] ${clientLabel}: only ${dailyLimit} genuinely eligible item(s) available against the ${target} normal target — shipping all of them rather than padding to reach it.`);
@@ -444,7 +431,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // mistake an empty queue for a stopped run.
     const reason = candidates.length === 0 ? null : (spentToday >= ceiling ? 'budget-exhausted' : 'global-ceiling-reached');
     console.log(`[auto-remediation] ${clientLabel} has no budget left this run (${spentToday}/${dailyLimit} site budget used${globalRemaining < Infinity ? `, ${globalRemaining} left in the platform-wide ceiling` : ''}) — nothing attempted.`);
-    return finish({ attempted: 0, shipped: 0, failed: 0, skipped: candidates.length, spentToday, dailyLimit, stoppedReason: reason });
+    return { done: finish({ attempted: 0, shipped: 0, failed: 0, skipped: candidates.length, spentToday, dailyLimit, stoppedReason: reason }) };
   }
 
   // GROWTH-VALUE SELECTION. The day's queue is built, scored and ranked
@@ -476,7 +463,12 @@ export async function autoRemediateSafeRecommendations(siteId, {
       return new Map();
     });
 
-  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap, declines, analystBudget, analystFindingIds, baselineBudget: Math.max(0, analyticsBudget - spentToday) });
+  // Industry knowledge (Phase 4): empty unless INDUSTRY_INTELLIGENCE_RANKING=on, and only validated, project-agnostic patterns
+  // are ever scored (see growth-scoring.js industryScore). A load failure leaves ranking unchanged.
+  const industryMap = await loadIndustryMap(siteId);
+  // Where this project is in its 30 / 30 / ongoing growth programme; null (unchanged ranking) if the clock cannot be read.
+  const growth = await loadGrowthStage(siteId);
+  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap, industryMap, growth, declines, analystBudget, analystFindingIds, baselineBudget: Math.max(0, analyticsBudget - spentToday) });
   const budgeted = queue.map((item) => item.rec);
   const scoreById = new Map(queue.map((item) => [item.rec.id, item]));
   for (const note of selection.groupNotes) console.log(`[auto-remediation] ${clientLabel}: ${note}`);
@@ -492,6 +484,47 @@ export async function autoRemediateSafeRecommendations(siteId, {
   if (budgeted.length < candidates.length) {
     console.log(`[auto-remediation] ${clientLabel}: ${candidates.length} eligible, taking ${budgeted.length} within today's budget (${spentToday}/${dailyLimit} already used); ${candidates.length - budgeted.length} deferred to tomorrow.`);
   }
+
+  return { ctx: { budgeted, candidates, ceiling, dailyLimit, eligible, fileEditsQueueItems, learnedRepairQueueItems, now, preconditionsEnforced, queue, remaining, rows, selection, selectionDeferred, spentToday, surge } };
+}
+
+export async function autoRemediateSafeRecommendations(siteId, {
+  globalRemaining = Infinity,
+  onboardingAnalysisPending = isOnboardingAnalysisPending,
+  // Soft time limit for THIS site's run (ms since epoch). Checked between items, where
+  // stopping is safe; never mid-push.
+  deadlineAt = null,
+  // Ship only what the shared queues (learned-repair, content/template repair) already hold; choose and draft nothing new. The daily
+  // pipeline's 11:00 run uses this: new fixes come only from its PREPARE stage, so unprepared work cannot ship.
+  drainOnly = false,
+} = {}) {
+  const site = await getSiteById(siteId);
+  // No site row to attribute a run log to (auto_remediation_runs.site_id is a
+  // real FK) — nothing to record, same 'disabled' outcome as the flag being off.
+  if (!site) return { attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'disabled' };
+
+  // Human-facing label for this run's log lines. client_number is the small
+  // sequential onboarding number (1, 2, 3...) shown to people; the real
+  // sites.id primary key (e.g. 8862) is never sequential and isn't what
+  // anyone reading these logs is trying to track a site by.
+  const clientLabel = site.client_number ? `client #${site.client_number}` : `site ${siteId}`;
+
+  const startedAt = new Date();
+  // Every exit below goes through this so `auto_remediation_runs` always has
+  // a row for what a console-only log used to be the only record of — see
+  // migration 136's own comment for the 2026-09-02 incident this answers.
+  const finish = (result) => {
+    // recordAutoRemediationRun already swallows its own errors — never blocks
+    // on the write finishing.
+    recordAutoRemediationRun(siteId, { startedAt, finishedAt: new Date(), ...result });
+    return result;
+  };
+
+  const selection_ = await selectRemediationCandidates(site, siteId, { globalRemaining, onboardingAnalysisPending, finish, clientLabel });
+  if (selection_.done) return selection_.done;
+  const { budgeted, candidates, ceiling, dailyLimit, eligible, fileEditsQueueItems, learnedRepairQueueItems, now, preconditionsEnforced, queue: selectedQueue, remaining, rows, selection, selectionDeferred: selectedDeferred, spentToday, surge } = selection_.ctx;
+  const queue = drainOnly ? [] : selectedQueue;
+  const selectionDeferred = drainOnly ? [] : selectedDeferred;
 
   let shipped = 0;
   let failed = 0;
@@ -800,6 +833,14 @@ export async function autoRemediateSafeRecommendations(siteId, {
       // on 2026-09-01, counting rate limits as ordinary failures is what
       // turned an hour of exhausted quota into 113 permanently abandoned
       // drafts.
+      // THE DAY IS FULL (store/autonomous-slots.js): another run or lane took the last slot between this run's sizing and
+      // this item. Neither a fault nor a refusal: stop quietly, count nothing against the item, leave it open for tomorrow.
+      if (isCeilingError(err)) {
+        attempted--;
+        stoppedReason = 'ceiling-reached';
+        console.log(`[auto-remediation] ${clientLabel}: the daily ceiling was filled by another run or lane (${err.used}/${err.cap}) — stopping; remaining candidates stay open for tomorrow. Not a fault.`);
+        break;
+      }
       const shipFailure = classifyShipFailure(err, { isRefusal: false });
       if (shipFailure.kind === FAILURE_KIND.RATE_LIMIT) {
         stoppedReason = 'github-rate-limited';
@@ -944,6 +985,12 @@ export async function autoRemediateSafeRecommendations(siteId, {
         memoryRefId: item.memory_ref_id,
       });
     } catch (err) {
+      if (isCeilingError(err)) {
+        attempted--;
+        stoppedReason = stoppedReason || 'ceiling-reached';
+        await releaseQueueItem(item.id, { retryable: true, error: null }).catch(() => {});
+        break;
+      }
       failed++;
       console.warn(`[auto-remediation] ${clientLabel}: learned-repair queue item ${item.id} (${item.generator_id}) could not be prepared, leaving it for the Action Center:`, err.message);
       // ITEM-STATE refusals say nothing about whether the borrowed repair
@@ -983,7 +1030,12 @@ export async function autoRemediateSafeRecommendations(siteId, {
     if (queueHeadroom <= 0) break;
     queueHeadroom--;
     attempted++;
+    let tookSlot = false;
     try {
+      // file-edits never create a drafts row, so this lane takes its slot here, before the push (and gives it back below
+      // if the push fails and the item returns to the queue).
+      await takeSlot(siteId);
+      tookSlot = true;
       const files = (item.params?.edits || []).map(({ path, content }) => ({ path, content }));
       const pushed = await pushFileEditsOntoBatch(
         site,
@@ -995,6 +1047,12 @@ export async function autoRemediateSafeRecommendations(siteId, {
       branchExistsOnGithub = true;
       shippedFileEditsQueueIds.push(item.id);
     } catch (err) {
+      if (isCeilingError(err)) {
+        attempted--;
+        stoppedReason = stoppedReason || 'ceiling-reached';
+        break;
+      }
+      if (tookSlot) await giveBackSlot(siteId);
       failed++;
       console.warn(`[auto-remediation] ${clientLabel}: ${item.source} queue item ${item.id} could not be pushed onto the batch, leaving it for the next run:`, err.message);
       await releaseQueueItem(item.id, { retryable: true, error: String(err.message || '').slice(0, 500) }).catch(() => {});
@@ -1150,6 +1208,11 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // console log that scrolled away.
     selection: {
       ...selection,
+      // Visible per run: is this project in First-30-Day Surge Mode, what the day could take, what shipped, what is left.
+      surge: {
+        ...surge, dailyCapacity: dailyLimit, ceiling, spentBefore: spentToday, shippedThisRun: shipped,
+        remainingEligible: Math.max(0, candidates.length - attempted),
+      },
       quarantinedGenerators: Object.fromEntries(quarantinedGenerators),
       quarantineNotes,
     },

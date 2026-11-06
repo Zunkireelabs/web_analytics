@@ -104,6 +104,16 @@ describe('claimForPreparation — FOR UPDATE SKIP LOCKED prevents double-claimin
     }
   });
 
+  test('sources restricts the claim to those producers (the pipeline must not claim learned-repair intents); omitted = unchanged', async () => {
+    const siteId = await makeSite();
+    await enqueue(siteId, { source: 'auto-remediation', generatorId: 'meta-title', findingId: 'src-a', params: { page: 'https://a.com/' } });
+    await enqueue(siteId, { source: 'learned-repair', generatorId: 'meta-title', findingId: 'src-b', params: { page: 'https://b.com/' } });
+    const only = await claimForPreparation(siteId, { sources: ['auto-remediation'] });
+    assert.deepEqual(only.map((r) => r.source), ['auto-remediation']);
+    const rest = await claimForPreparation(siteId, {});
+    assert.deepEqual(rest.map((r) => r.source), ['learned-repair'], 'no sources filter still claims everything queued');
+  });
+
   test('claiming only ever pulls from queued, never from prepared/shipping/shipped', async () => {
     const siteId = await makeSite();
     const { row } = await enqueue(siteId, { source: 'auto-remediation', generatorId: 'alt-text', findingId: 'already-prepared' });

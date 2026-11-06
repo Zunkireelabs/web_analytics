@@ -43,6 +43,18 @@ beforeEach(() => {
 });
 
 describe('POST /get-started/email/check', () => {
+  test('a trial that ended within 30 days is still reported, so it can see its overview', async () => {
+    access = { state: 'ended', endedAt: new Date(Date.now() - 29 * 864e5).toISOString() };
+    const res = await check('owner@acme.test');
+    assert.equal(res.body.member, true);
+    assert.equal(res.body.state, 'ended');
+  });
+
+  test('a trial that ended more than 30 days ago is treated as new', async () => {
+    access = { state: 'ended', endedAt: new Date(Date.now() - 31 * 864e5).toISOString() };
+    assert.deepEqual((await check('owner@acme.test')).body, { member: false });
+  });
+
   test('an address with a workspace they can sign in to is told so, with the project', async () => {
     const res = await check(' Owner@Acme.test ');
     assert.equal(res.statusCode, 200);

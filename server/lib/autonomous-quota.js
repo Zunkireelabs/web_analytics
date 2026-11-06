@@ -57,6 +57,10 @@ export const AUTONOMOUS_DRAFT_SOURCES = Object.freeze([
 export const ANALYTICS_TARGET = Number(process.env.AUTO_REMEDIATION_ANALYTICS_TARGET) || 60;
 export const ANALYST_MAX = Number(process.env.AUTO_REMEDIATION_ANALYST_MAX) || 20;
 export const NORMAL_TARGET = ANALYTICS_TARGET + ANALYST_MAX;
+// sites.auto_remediation_daily_limit's default (migrations 115/203). Only a site still at this value is treated as
+// "unconfigured" and may be raised to SURGE_SITE_LIMIT during First-30-Day Surge Mode (lib/surge-mode.js).
+export const DEFAULT_SITE_LIMIT = 60;
+export const SURGE_SITE_LIMIT = 100;
 // The absolute ceiling across both lanes and every source above. An env
 // override is accepted (an operator holding the whole platform lower is a
 // legitimate need) but it can only ever LOWER the ceiling — raising it past

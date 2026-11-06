@@ -30,7 +30,7 @@ import { callLLMForJson } from '../llm.js';
 import { setOnboardingBaseline } from '../store/upsert.js';
 import { safeMessage } from '../lib/errors.js';
 import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
-import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite, queueDesignAgentDerivationForSite, queueDesignProfileDerivationForOnboarding, runGeoAuditIfDue } from '../job.js';
+import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite, queueDesignAgentDerivationForSite, queueDesignProfileDerivationForOnboarding, runGeoAuditIfDue, runAiRecommendationIfDue } from '../job.js';
 import { buildReviewReport } from '../agents/lib/review-report.js';
 import { buildBaselineReport } from '../agents/lib/baseline-report.js';
 import { buildDesignReviewReport } from '../agents/lib/design-review.js';
@@ -388,6 +388,19 @@ async function runBaselineSequenceUnlocked(siteId, site) {
     return null;
   });
 
+  // What this client actually sells, read from their own site and PROPOSED for review. Everything downstream of it —
+  // market research, gap relevance, competitor footprints — is grounded in this list, and until now it was typed in by
+  // hand, so a client onboarded quickly simply had none and paid research refused to run for them. Best-effort and
+  // never fatal: a vague homepage or a model outage means no proposals, not a failed onboarding. Skipped entirely when
+  // any capability already exists, so re-running a baseline never adds to a list a person has curated.
+  const proposedCaps = await import('../lib/capability-discovery.js')
+    .then((m) => m.discoverCapabilitiesIfNone(site))
+    .catch((err) => {
+      console.error(`[clients] site ${siteId} capability discovery failed:`, err.message);
+      return null;
+    });
+  if (proposedCaps?.proposed) console.log(`[clients] site ${siteId}: proposed ${proposedCaps.proposed} capability(ies) for review.`);
+
   // Real historical GSC/GA4 data — if the platform's Google account
   // hasn't actually been granted access yet, this fails honestly here
   // rather than silently proceeding to a baseline with no real data.
@@ -401,6 +414,16 @@ async function runBaselineSequenceUnlocked(siteId, site) {
       discovery,
     };
   }
+
+  // Does the client's repository have a stage branch? If so, record it so the routing rule (light edits to main; new pages, blogs and
+  // site-wide fixes to stage) works for this client without anyone configuring it. Never overwrites a person's setting.
+  await import('../lib/stage-branch.js')
+    .then((m) => m.detectStageBranch(site))
+    .catch((err) => console.error(`[clients] site ${siteId} stage-branch detection failed:`, err.message));
+
+  // Which industry is this project in? Decided here, from the data just ingested, with nobody clicking anything: applied only
+  // when two signals agree (server/lib/industry-detect.js). The agents below and the baseline report read the result.
+  const industry = await import('../lib/industry-detect.js').then((m) => m.runIndustryDetection(site));
 
   const analysis = await runDailyAgentAnalysisForSite(site);
   const [execRun] = await getLatestAgentRuns(siteId, ['executive-report']);
@@ -422,6 +445,14 @@ async function runBaselineSequenceUnlocked(siteId, site) {
     console.error(`[clients] site ${siteId} onboarding GEO audit failed:`, err.message);
   });
 
+  // The first AI-answer check, so a new client starts with a real "do AI assistants name you?" reading instead of waiting for the
+  // monthly run. runAiRecommendationIfDue skips a site that already has a recent check, and does nothing unless the server has the
+  // AI_RECOMMENDATION_ENABLED switch and a provider key (the agent says "insufficient data" then). Awaited so the Industry page and
+  // the baseline report see it; best-effort like every step here.
+  await runAiRecommendationIfDue(site).catch((err) => {
+    console.error(`[clients] site ${siteId} onboarding AI-answer check failed:`, err.message);
+  });
+
   // The client-facing "day 0" document (server/migrations/150_baseline_reports.sql) —
   // a single LLM call, not a slow crawl, so this is awaited like
   // ingestion/analysis above rather than fire-and-forget like the full site
@@ -431,6 +462,14 @@ async function runBaselineSequenceUnlocked(siteId, site) {
     console.error(`[clients] site ${siteId} baseline report generation failed:`, err.message);
     return null;
   });
+
+  // Phase 1 project memory: write this project's first memory versions now that the baseline report exists, so it
+  // starts life with a recorded starting point instead of waiting for the next job to notice it. Best-effort like every
+  // step here: it only reads existing tables and a failure must never fail onboarding. Sections that are not ready yet
+  // (the design capture above is queued, not finished) are simply skipped and picked up by a later snapshot.
+  await import('../lib/project-memory.js')
+    .then((m) => m.snapshotProjectMemory(siteId, { reason: 'onboarding' }))
+    .catch((err) => { console.error(`[clients] site ${siteId} project-memory init failed:`, err.message); });
 
   // Real "where you stand today" findings for Milestones — fire-and-forget
   // like the manual /site-audit trigger: resolves once the audit_runs row
@@ -447,7 +486,7 @@ async function runBaselineSequenceUnlocked(siteId, site) {
 
   return {
     site: { id: finalSite.id, name: finalSite.name, onboardedAt: finalSite.onboarded_at, baselineRunId: finalSite.baseline_run_id },
-    discovery, ingestion, analysis, healthScore, baselineReport, analyst,
+    discovery, ingestion, industry, analysis, healthScore, baselineReport, analyst,
     // What this tenant still needs before it runs end to end, in the same
     // response that reports onboarding "succeeded" — so a half-provisioned
     // tenant is visible at the moment it is created, not weeks later when

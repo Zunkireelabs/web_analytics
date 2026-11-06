@@ -16,6 +16,8 @@ let opportunities;
 
 mock.module(resolve('../../store/recommendations.js'), {
   namedExports: {
+    // the corroboration path (an issue already open gets the analyst recorded on it): a no-op stand-in here
+    corroborateRecommendation: async () => null,
     findOpenRecommendation: async () => openRecommendation,
     insertRecommendation: async (siteId, rec) => { inserted.push({ siteId, ...rec }); return { id: inserted.length }; },
     refreshRecommendationBlockState: async () => null,

@@ -4,6 +4,7 @@ import { scorePageCategories, scoreLlmsReadiness, combineScores, geoSignalsScore
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { callLLM } from '../llm.js';
+import * as aiCitationTracking from './lib/model-providers/dataforseo-ai.js';
 
 export const meta = {
   id: 'ai-visibility',
@@ -20,8 +21,12 @@ export const meta = {
   // signals from the page's own fetched HTML plus the site's own robots.txt/
   // llms.txt.
   dataSources: [
-    { id: 'ai-citation-tracking', status: 'not-connected', description: 'Citation tracking across AI answer engines — needed to know if a page is ACTUALLY cited, not just structurally ready' },
-    { id: 'serp-ai-overview', status: 'not-connected', description: 'SERP API AI Overview presence detection' },
+    // Real citation tracking now EXISTS (agents/lib/model-providers/dataforseo-ai.js: the assistant products are
+    // scraped and their real cited sources read), and the AI Recommendation agent records it per prompt. It is
+    // opt-in per deployment, so this status is reported from the provider's own gate rather than hardcoded —
+    // 'not-connected' here must keep meaning "nobody switched it on", never "we never built it".
+    { id: 'ai-citation-tracking', status: aiCitationTracking.configured() ? 'connected' : 'not-connected', description: 'Whether this site is ACTUALLY cited in real ChatGPT/Gemini answers and Google AI Overviews, with the sources those answers cited — recorded by the AI Recommendation agent. Opt-in: AI_CITATION_TRACKING_ENABLED.' },
+    { id: 'serp-ai-overview', status: aiCitationTracking.configured() ? 'connected' : 'not-connected', description: 'Google AI Overview presence and its cited sources, read from the real SERP (same opt-in as above).' },
   ],
 };
 

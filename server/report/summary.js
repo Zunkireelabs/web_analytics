@@ -2,7 +2,7 @@ import {
   getDataRange, getDay, getDailySeries, getTopMovers,
   getWeeklyDocUrl, getDailyDocUrl, getMonthlyDocUrl,
   getRangeTotals, getMonthlyTotals,
-  getGa4BreakdownRange, getGscBreakdownRange,
+  getGa4BreakdownRange, getGscBreakdownRange, getGa4DataQuality,
 } from '../store/read.js';
 import { previousWeek, previousMonth, monthBounds, shiftMonth } from '../util/dates.js';
 import { countryName } from '../util/countries.js';
@@ -76,6 +76,8 @@ export async function buildReportSummary(site, period) {
         users: totals.users, sessions: totals.sessions,
       },
       series, movers: { gainers, droppers }, history: withDeltaPct(weeklyTotals),
+      // What GA4 actually returned for these days, so the UI can say so instead of implying exactness.
+      dataQuality: await getGa4DataQuality(site.id, start, end),
       ...resolveNarrative(site.weekly_report_narrative, matches),
       docUrl: await getWeeklyDocUrl(site.id),
     };
@@ -88,6 +90,7 @@ export async function buildReportSummary(site, period) {
   const totals = await getMonthlyTotals(site.id, year, month);
   const matches = site.monthly_report_narrative_ym === ym;
   const series = await getDailySeries(site.id, start, end);
+  const dataQuality = await getGa4DataQuality(site.id, start, end);
   const priorYm = shiftMonth(year, month, -1);
   const priorBounds = monthBounds(priorYm.year, priorYm.month);
   const { gainers, droppers } = await getTopMovers(site.id, { start, end }, priorBounds, 8);
@@ -104,6 +107,7 @@ export async function buildReportSummary(site, period) {
       users: totals.users, sessions: totals.sessions,
     },
     series, movers: { gainers, droppers }, history: withDeltaPct(monthlyTotals),
+    dataQuality,
     ...resolveNarrative(site.monthly_report_narrative, matches),
     docUrl: await getMonthlyDocUrl(site.id),
   };

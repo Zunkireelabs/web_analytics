@@ -75,7 +75,7 @@ const ALLOWED_PATH_PATTERNS = [
 // destructured `log` binding, so it doesn't match either pattern above.
 // Confirmed false positive on pagination-adapter-discovery.js:212.
 function isLoggingLine(line) {
-  return /console\.(error|warn)\(/.test(line) || /\blog\.(error|warn|log)\(/.test(line) || /\blogInternal\(/.test(line)
+  return /console\.(error|warn)\(/.test(line) || /\blog\.(error|warn|log)\??\.?\(/.test(line) || /\blogInternal\(/.test(line)
     || /\)\.(error|warn|log)\(/.test(line)
     // An injected logger whose default is console.error (daily-pipeline/orchestrator.js: `logError = (...a) => console.error(...a)`).
     || /\blogError\(/.test(line);

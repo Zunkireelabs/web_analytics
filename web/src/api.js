@@ -136,6 +136,18 @@ export const api = {
   // The platform admin's own view across every client workspace (404 for anyone else).
   platform: {
     workspaces: () => req('/platform/workspaces'),
+    // Agent instances, read only: one row per project, and one project's counts and statuses (never its content).
+    instances: () => req('/platform/instances'),
+    instance: (siteId) => req(`/platform/instances/${siteId}`),
+    masterAgent: () => req('/platform/master-agent'),
+    // Industry sets (what the platform knows up front about each industry). A saved set replaces the built-in default; reset restores it.
+    industrySets: () => req('/platform/industry-sets'),
+    saveIndustrySet: (industry, set) => req(`/platform/industry-sets/${industry}`, { method: 'PUT', body: JSON.stringify({ set }) }),
+    resetIndustrySet: (industry) => req(`/platform/industry-sets/${industry}`, { method: 'DELETE' }),
+    // Switch the Master Agent between off / shadow / on. The server enforces the readiness rule and the server-setting ceiling.
+    setMasterMode: (mode) => req('/platform/master-agent/mode', { method: 'PUT', body: JSON.stringify({ mode }) }),
+    // Auto-fixes (autonomous shipping) for one project. Needs a connected GitHub repository to turn on.
+    setAutonomy: (siteId, enabled) => req(`/platform/projects/${siteId}/autonomy`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
     // Platform admin: remove a whole workspace and its projects. The workspace name must be typed back.
     deleteWorkspace: (id, confirmName) => req(`/platform/workspaces/${id}`, { method: 'DELETE', body: JSON.stringify({ confirmName }) }),
     // Records that support opened a client's project, before the page switches to it.
@@ -190,12 +202,43 @@ export const api = {
       businessProfileStart: (siteId) => req(`/projects/${siteId}/connect/business-profile/start`),
       businessProfileLocations: (siteId) => req(`/projects/${siteId}/connect/business-profile/locations`),
       businessProfile: (siteId, body) => req(`/projects/${siteId}/connect/business-profile`, { method: 'POST', body: JSON.stringify(body) }),
+      // Optional PostHog, for a client who already uses it. GET returns { connected, connection, guide } — never the
+      // key itself, which the server deliberately does not select. POST verifies the key immediately, so a wrong
+      // project ID or host is reported here rather than discovered as empty charts a week later.
+      posthog: (siteId) => req(`/projects/${siteId}/connect/posthog`),
+      posthogSave: (siteId, body) => req(`/projects/${siteId}/connect/posthog`, { method: 'POST', body: JSON.stringify(body) }),
+      posthogDisconnect: (siteId) => req(`/projects/${siteId}/connect/posthog`, { method: 'DELETE' }),
+      // "Connect with PostHog": the server returns PostHog's own sign-in address; the person comes back to the Workspace page.
+      posthogStart: (siteId, region, host) => req(`/projects/${siteId}/connect/posthog/start?region=${encodeURIComponent(region)}${host ? `&host=${encodeURIComponent(host)}` : ''}`),
+      posthogProjects: (siteId) => req(`/projects/${siteId}/connect/posthog/projects`),
+      posthogSelect: (siteId, projectId) => req(`/projects/${siteId}/connect/posthog/select`, { method: 'POST', body: JSON.stringify({ projectId }) }),
+    },
+    // Where a local business works: the town it is based in, then the places around it, in priority order.
+    places: {
+      get: (siteId) => req(`/projects/${siteId}/places`),
+      save: (siteId, body) => req(`/projects/${siteId}/places`, { method: 'PUT', body: JSON.stringify(body) }),
+    },
+    // What the project offers: discovery PROPOSES from the client's own site, a person approves. Nothing proposed
+    // steers research or content until it is approved here.
+    capabilities: {
+      list: (siteId) => req(`/projects/${siteId}/capabilities`),
+      review: (siteId, id, body) => req(`/projects/${siteId}/capabilities/${id}/review`, { method: 'POST', body: JSON.stringify(body) }),
+      add: (siteId, body) => req(`/projects/${siteId}/capabilities`, { method: 'POST', body: JSON.stringify(body) }),
+      discover: (siteId) => req(`/projects/${siteId}/capabilities/discover`, { method: 'POST' }),
     },
     // Runs the real baseline (discovery, GSC/GA4 ingestion, first analysis).
     // Slow by nature — minutes, not seconds.
     baseline: (siteId) => req(`/projects/${siteId}/baseline`, { method: 'POST' }),
     baselineStatus: (siteId) => req(`/projects/${siteId}/baseline`),
   },
+  // PostHog product metrics, when the project connected it. { summary: null } means not connected — a normal state.
+  // The metrics router takes the site from the authenticated session (req.siteId), like every other route on it —
+  // passing a siteId here would be ignored and would imply a per-site switch that does not exist.
+  // The client's Industry page. { available: false } until the industry is confirmed from two signals.
+  industry: (siteId) => req(`/projects/${siteId}/industry`),
+  product: (start, end) => req(`/product?start=${start}&end=${end}`),
+  // Google Analytics views by page title for a range, with the previous period alongside (the Visitors tab's Top pages).
+  ga4Pages: (start, end, compareStart, compareEnd) => req(`/ga4-pages?start=${start}&end=${end}${compareStart && compareEnd ? `&compareStart=${compareStart}&compareEnd=${compareEnd}` : ''}`),
   demand: {
     prospects: () => req('/demand/prospects'),
     approve: (id) => req(`/demand/prospects/${id}/approve`, { method: 'POST' }),

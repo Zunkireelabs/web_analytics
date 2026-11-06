@@ -2,6 +2,7 @@ import { pool } from '../db.js';
 import { getBaselineReport } from '../store/baseline-reports.js';
 import { buildWorkItems, tallyWork } from './work-catalogue.js';
 import { deriveBrandTheme, accentFromSite } from './brand-theme.js';
+import { getPosthogSummary } from '../store/project-posthog.js';
 import {
   longDate, weeklyBuckets, matchingSearches, previousSiteShare, compareChecks, businessDetails,
   extractJsonLd, describeListing, checkListing, countSitemapUrls, buildHeadline,
@@ -62,12 +63,20 @@ export async function buildProgressReportData(siteId, { now = new Date(), fetchI
     } catch { /* leave empty */ }
   }
 
+  // PostHog, when this client connected it: the last 30 days ending YESTERDAY (today is a partial day). Null for a
+  // client without it, which the PDF treats as "show nothing", never as a "not connected" line in their report.
+  const visitors = await (async () => {
+    const end = new Date(now); end.setUTCDate(end.getUTCDate() - 1);
+    const start = new Date(end); start.setUTCDate(start.getUTCDate() - 29);
+    return getPosthogSummary(siteId, start.toISOString().slice(0, 10), end.toISOString().slice(0, 10)).catch(() => null);
+  })();
+
   return {
     siteName: site.name,
     dateLabel: longDate(now),
     dataThrough: google ? longDate(google.lastDay) : null,
     theme,
-    ai, pages, google,
+    ai, pages, google, visitors,
     weekly: weeklyBuckets(dailyRows),
     searches: matchingSearches(queriesQ.rows),
     previousSite: previousSiteShare({ pageRows: pagesQ.rows, queryRows: queriesQ.rows }),

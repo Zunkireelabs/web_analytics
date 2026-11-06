@@ -1,4 +1,5 @@
 import { query } from '../db.js';
+import { endedBeyondGrace } from '../lib/ended-grace.js';
 
 // The /get-started "finish" step (migration 218). Pure rules live here so the route only has to say yes or no.
 
@@ -115,4 +116,26 @@ export async function getDraft(userId) {
 
 export async function deleteDraft(userId) {
   await query('DELETE FROM onboarding_drafts WHERE user_id = $1', [userId]);
+}
+
+// ───────── "Add another project" from /get-started ─────────
+// Someone who already has a workspace can add another website to it instead of getting a second workspace. The new project
+// is a different project, so it asks for its own approval like any request: it is not covered by the access of the others.
+// This finds the workspace to add to: one they own or administer that has a project that is a client, a running demo, or a
+// trial that ended within the last 30 days (still theirs). A client comes first. Anything else is not offered it.
+export async function findAddTarget(userId, now = new Date()) {
+  const { rows } = await query(
+    `SELECT s.workspace_id, s.access_state, s.access_ended_at, s.access_ends_at
+       FROM sites s
+       JOIN workspace_members m ON m.workspace_id = s.workspace_id
+       JOIN workspaces w ON w.id = s.workspace_id AND w.deleted_at IS NULL
+      WHERE m.user_id = $1 AND m.role IN ('owner', 'admin')
+        AND s.status IS DISTINCT FROM 'soft_deleted' AND s.access_state IN ('client', 'demo', 'ended')
+      ORDER BY (s.access_state = 'client') DESC, (s.access_state = 'demo') DESC, s.id DESC`, [userId]);
+  return rows.find((r) => r.access_state !== 'ended' || !endedBeyondGrace({ state: 'ended', endedAt: r.access_ended_at || r.access_ends_at }, now)) || null;
+}
+
+// Takes back only the project made in a request that then failed. Never the workspace: it is the person's own.
+export async function discardNewProject({ siteId, workspaceId }) {
+  await query('DELETE FROM sites WHERE id = $1 AND workspace_id = $2', [siteId, workspaceId]);
 }

@@ -87,6 +87,23 @@ jobs:
             REPORT_PROVIDER=${{ vars.REPORT_PROVIDER }}
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+
+            # ── AI Recommendation Agent (opt-in, real costed OpenAI probes) ──
+            # Needs this separate flag as well as OPENAI_API_KEY (server/agents/ai-recommendation.js), so a key alone never starts
+            # spending. It was set on staging only, so on production every scheduled check answered "no provider configured" from
+            # 21 Oct. Being a server-wide switch, it also covers every client onboarded from now on: the baseline runs this agent, and
+            # the agent seeds that client's tracked prompts on its first run.
+            AI_RECOMMENDATION_ENABLED=true
+
+            # ── Shipping time (owner decision 2026-11-06) ───────────────────
+            # Fixes are drafted and pull requests opened ONCE a day at 11:00 (server time, TZ above), after the 07:00 detection run.
+            # SHIP_CRON_SCHEDULE moves shipping out of the 07:00 pass; SHIP_HOUR_LOCAL tells the "was today's run missed" checks the
+            # same hour. If a project has not shipped by 12:00, ONE catch-up pass at 12:00 ships it (SHIP_CATCHUP_CRON_SCHEDULE default;
+            # SHIP_CATCHUP_END_HOUR_LOCAL=13 makes 12:00 fall inside the window). No hourly checks. The stage -> main promotion check
+            # runs once a day at 16:00 (STAGE_PROMOTION_CRON_SCHEDULE default).
+            SHIP_CRON_SCHEDULE=0 11 * * *
+            SHIP_HOUR_LOCAL=11
+            SHIP_CATCHUP_END_HOUR_LOCAL=13
             REPORT_MODEL_DAILY=${{ vars.REPORT_MODEL_DAILY }}
             REPORT_MODEL_MONTHLY=${{ vars.REPORT_MODEL_MONTHLY }}
 
@@ -256,7 +273,17 @@ jobs:
             # that this workflow never installed — without this the Analyst
             # page's early-warning section has no data to render.
             ANALYSIS_SCHEDULE_ENABLED=true
-            ANALYSIS_SCHEDULE_HOUR_UTC=4
+            # Findings must be complete before the app's 05:30 Asia/Kathmandu daily orchestrator, which waits for this run's
+            # findings_complete marker and refuses to use findings without it. 22:00 UTC is 03:45 Kathmandu, the same hour as
+            # staging. Ingestion runs two hours earlier (20:00 UTC, 01:45 Kathmandu) so analysis reads a finished ingest; it was
+            # 03:00/04:00 UTC, which delivered findings at 09:45 Kathmandu, after the orchestrator had already run.
+            # This scheduler is the ONLY scheduled owner of the shared analyst database: deploy-staging.yml no longer installs its
+            # 22:00 UTC crontab (and removes an old one), so the two cannot collide.
+            INGEST_SCHEDULE_HOUR_UTC=20
+            ANALYSIS_SCHEDULE_HOUR_UTC=22
+            # Findings only: the Data Analyst never asks the app to generate drafts (both entry points check this). The app's
+            # unified generator owns every fix. Python->app parity was verified end to end before this was set.
+            ANALYST_DRAFT_TRIGGER=off
             ENVEOF
 
             docker compose build

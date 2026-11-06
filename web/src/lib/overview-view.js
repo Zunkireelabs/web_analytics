@@ -14,24 +14,24 @@ export function daysBetween(startYmd, endYmd) {
   return Math.round((new Date(`${endYmd}T00:00:00Z`) - new Date(`${startYmd}T00:00:00Z`)) / DAY);
 }
 
-// The quick ranges. `days` counts back from the newest day we have data for.
+// The quick ranges, the same as Search Console. `days` counts back from the newest day we have data for.
+// "24 hours" is the newest day: the data here is daily, so there is no hourly view to show.
+// Search Console keeps about 16 months and Google Analytics 14, so "18 months" shows whatever exists before that.
 export const PRESETS = [
-  { key: '3', label: '3 days', days: 3 },
+  { key: '1', label: '24 hours', days: 0 },
   { key: '7', label: '7 days', days: 7 },
-  { key: '14', label: '14 days', days: 14 },
   { key: '28', label: '28 days', days: 28 },
   { key: '90', label: '3 months', days: 90 },
   { key: '180', label: '6 months', days: 180 },
   { key: '365', label: '12 months', days: 365 },
-  { key: 'all', label: 'All time', days: null },
+  { key: '545', label: '18 months', days: 545 },
 ];
-// The ones shown in the bar. The rest live under "More".
-export const BAR_KEYS = ['7', '28', '90'];
+// The ones shown in the bar. The rest live under "More", next to Custom dates.
+export const BAR_KEYS = ['1', '7', '28', '90'];
 
-export function presetRange(anchor, key, earliest) {
+export function presetRange(anchor, key) {
   const p = PRESETS.find((x) => x.key === key);
   if (!p) return null;
-  if (p.days == null) return earliest ? { start: earliest, end: anchor } : null;
   return { start: shiftYmd(anchor, p.days), end: anchor };
 }
 
@@ -201,3 +201,69 @@ export function buildInsights({ channels = [], queries = [], pages = [], totalIm
   out.sort((a, b) => IMPACT_ORDER[a.impact] - IMPACT_ORDER[b.impact]);
   return out.slice(0, max);
 }
+
+// Quick insights for the Visitors tab: plain notes from the channel mix, by rule (the same kind of note the Search tab
+// gives from queries). Each only appears when its own condition holds, so a thin or unusual month produces fewer notes
+// rather than filler. `channels` is the Google Analytics channel list: [{ channel, sessions }].
+export function buildVisitorInsights({ channels = [] } = {}, max = 3) {
+  const out = [];
+  const total = channels.reduce((s, c) => s + num(c.sessions), 0);
+  if (total <= 0) return out;
+  const share = (re) => channels.filter((c) => re.test(String(c.channel))).reduce((s, c) => s + num(c.sessions), 0) / total;
+  const pct = (x) => Math.round(x * 100);
+
+  const organic = share(/organic search/i);
+  if (organic >= 0.5) {
+    out.push({
+      key: 'organic-main', tag: 'opportunity', impact: 'high', icon: 'page',
+      title: 'Search brings most of your visits',
+      parts: [{ t: `${pct(organic)}%`, b: true }, { t: ` of ${compact(total)} visits came from Organic Search. Pages that rank are doing most of the work, so protect them.` }],
+      action: 'Review top pages', to: '/insights',
+    });
+  }
+  const direct = share(/^direct$/i);
+  if (direct >= 0.3) {
+    out.push({
+      key: 'direct-high', tag: 'attention', impact: 'medium', icon: 'search',
+      title: 'A lot of direct traffic',
+      parts: [{ t: `${pct(direct)}%`, b: true }, { t: ' of visits arrive as Direct. Some are people who know your name; some are links that carry no tag. Tagging campaign links lets them show as their own channel.' }],
+      action: 'Tag campaign links',
+    });
+  }
+  const small = share(/referral|social/i);
+  if (small < 0.05 && total >= 100) {
+    out.push({
+      key: 'referral-social-small', tag: 'growth', impact: 'medium', icon: 'idea',
+      title: 'Referral and Social are small',
+      parts: [{ t: 'Together they bring ' }, { t: `${small < 0.005 ? 'almost none' : `under ${Math.max(1, Math.ceil(small * 100))}%`}`, b: true }, { t: ' of visits. A few mentions on other sites would add a new source.' }],
+      action: 'Find sites that could link to you',
+    });
+  }
+  out.sort((a, b) => IMPACT_ORDER[a.impact] - IMPACT_ORDER[b.impact]);
+  return out.slice(0, max);
+}
+
+// Totals for the Behavior tab from PostHog's daily series [{ date, pageviews, sessions, events, people }]. People are
+// the busiest single day, never a sum: the same person returning on two days is one person, so adding daily counts
+// would overstate reach. A metric PostHog did not return stays null, not 0.
+export function behaviorTotals(series = []) {
+  const col = (k) => {
+    const v = series.map((r) => r[k]).filter((x) => x != null).map(Number);
+    return v.length ? v : null;
+  };
+  const sum = (k) => { const v = col(k); return v ? v.reduce((a, b) => a + b, 0) : null; };
+  const peak = col('people');
+  return { pageviews: sum('pageviews'), sessions: sum('sessions'), events: sum('events'), people: peak ? Math.max(...peak) : null };
+}
+
+// A daily series with one row for EVERY day from `startYmd` for `days` days, a day with no row stays an empty row (so a
+// metric reads as a gap, never 0). PostHog only returns days it has data for, so pairing a comparison period with the
+// current one by array position would shift the dashed line onto the wrong dates; by-date keeps them aligned.
+export function denseSeries(startYmd, days, rows = []) {
+  const by = new Map(rows.map((r) => [String(r.date).slice(0, 10), r]));
+  return Array.from({ length: days }, (_, i) => {
+    const date = shiftYmd(startYmd, -i); // shiftYmd counts BACK, so a negative step walks forward
+    return by.get(date) || { date };
+  });
+}
+

@@ -13,7 +13,7 @@ const src = readFileSync(fileURLToPath(new URL('./cron.js', import.meta.url)), '
 
 // Lanes that are safe WITHOUT a lane-level lock, and why.
 const PER_SITE_LOCKED = new Set([
-  "'35 * * * *'", // shipping catch-up: takes each site's ship lock and its GitHub-credential lock (job.js shipSiteWithLocks)
+  'shipCatchupSchedule', // shipping catch-up (once a day at 12:00, schedule in a variable): takes each site's ship lock and its GitHub-credential lock (job.js shipSiteWithLocks)
 ]);
 
 test('every cron.schedule callback runs under a job lock', () => {

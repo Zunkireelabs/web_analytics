@@ -23,7 +23,7 @@ const days = (start, n, clicks) => Array.from({ length: n }, (_, i) => {
 });
 
 mock.module('../auth/google.js', { namedExports: { getDocs: () => fakeDocs } });
-mock.module('../db.js', { namedExports: { query: async (sql) => { queries.push(sql); return { rows: [] }; } } });
+mock.module('../db.js', { namedExports: { query: async (sql) => { queries.push(sql); return { rows: [] }; }, pool: {} } });
 mock.module('../llm.js', { namedExports: { callLLM: async () => 'A short plain summary.' } });
 mock.module('../store/read.js', { namedExports: {
   getDailySeries: async (_id, start) => (start.startsWith('2026-10') ? days(start, 31, 20) : days(start, 7, 18)),

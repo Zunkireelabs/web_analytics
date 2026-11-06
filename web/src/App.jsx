@@ -2,6 +2,9 @@ import { useEffect, useState, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { api, setReadOnlyAccess } from './api.js';
 import { AccessProvider, isOpenWhileLocked } from './lib/access.jsx';
+import { PosthogProvider } from './lib/posthog-state.jsx';
+import { IndustryProvider } from './lib/industry-state.jsx';
+import Industry from './pages/Industry.jsx';
 import AccessBanner from './components/access/AccessBanner.jsx';
 import LockedPage from './components/access/LockedPage.jsx';
 import SuperRankLogin from './pages/SuperRankLogin.jsx';
@@ -217,6 +220,8 @@ export default function App() {
 
   return (
     <AccessProvider value={{ readOnly, access }}>
+    <PosthogProvider siteId={siteId}>
+    <IndustryProvider siteId={siteId}>
     <div className="min-h-screen md:h-screen md:overflow-hidden flex text-sm">
       <Sidebar sites={sites} siteId={siteId} isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} onSwitchProject={switchProject} onLogout={logout}
         mobileOpen={mobileNavOpen} onCloseMobile={() => setMobileNavOpen(false)}
@@ -247,6 +252,7 @@ export default function App() {
               <Route path="/insights" element={<Insights siteId={siteId} />} />
               <Route path="/compare" element={<Compare siteId={siteId} />} />
               {/* Reports opens on the Baseline tab (the old Milestones page, folded in), then weekly and monthly. */}
+              <Route path="/industry" element={<Industry />} />
               <Route path="/reports" element={<Reports siteId={siteId} isInternal={isInternal} />} />
               <Route path="/milestones" element={<Navigate to="/reports?tab=baseline" replace />} />
               {/* One page per job, for every client's own project (see lib/nav.js). */}
@@ -344,6 +350,8 @@ export default function App() {
           staff-only Admin Assistant on /analyst has. */}
       <ClientAssistantPanel open={agentOpen} onClose={() => setAssistantOpen(false)} />
     </div>
+    </IndustryProvider>
+    </PosthogProvider>
     </AccessProvider>
   );
 }

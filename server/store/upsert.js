@@ -1,4 +1,5 @@
 import { query } from '../db.js';
+import { replaceGa4PagesForDay } from './ga4-pages.js';
 
 // All upserts use ON CONFLICT DO UPDATE keyed on the primary key, so re-running
 // the ingest for the same day overwrites with fresh values (never duplicates).
@@ -47,19 +48,35 @@ export async function upsertGsc(siteId, { date, totals, queries, pages, devices 
   }
 }
 
-export async function upsertGa4(siteId, { date, totals, channels, devices = [], countries = [], cities = [], languages = [], browsers = [], sourceMediums = [] }) {
+export async function upsertGa4(siteId, { date, totals, channels, devices = [], countries = [], cities = [], languages = [], browsers = [], dataQuality = null, sourceMediums = [], pages = null }) {
   await query(
     `INSERT INTO ga4_daily
-       (site_id, date, users, new_users, sessions, engaged_sessions, avg_engagement_time, conversions, bounce_rate)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       (site_id, date, users, new_users, sessions, engaged_sessions, avg_engagement_time, conversions, bounce_rate,
+        data_confidence, data_quality)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
      ON CONFLICT (site_id, date) DO UPDATE SET
        users = EXCLUDED.users, new_users = EXCLUDED.new_users,
        sessions = EXCLUDED.sessions, engaged_sessions = EXCLUDED.engaged_sessions,
        avg_engagement_time = EXCLUDED.avg_engagement_time, conversions = EXCLUDED.conversions,
-       bounce_rate = EXCLUDED.bounce_rate`,
+       bounce_rate = EXCLUDED.bounce_rate,
+       -- A re-ingest of the same day re-assesses it, but must never DOWNGRADE a stored verdict to "unknown": a
+       -- caller that did not compute one (an older code path, a partial backfill) leaves the existing one alone.
+       data_confidence = COALESCE(EXCLUDED.data_confidence, ga4_daily.data_confidence),
+       -- The day's quality JSON is refreshed, but its 'pages' key (how well the top-pages list covers the day, migration
+       -- 245) belongs to the page-title fetch: when this run did not fetch pages, the incoming JSON has no such key, and
+       -- overwriting would drop a coverage note whose ga4_pages rows are still there. So an incoming JSON without 'pages'
+       -- inherits the stored one; one WITH 'pages' (a successful fetch) replaces it.
+       data_quality = CASE
+         WHEN EXCLUDED.data_quality IS NULL THEN ga4_daily.data_quality
+         WHEN NOT (EXCLUDED.data_quality ? 'pages') AND ga4_daily.data_quality ? 'pages'
+           THEN EXCLUDED.data_quality || jsonb_build_object('pages', ga4_daily.data_quality->'pages')
+         ELSE EXCLUDED.data_quality
+       END`,
     [
       siteId, date, totals.users, totals.new_users, totals.sessions,
       totals.engaged_sessions, totals.avg_engagement_time, totals.conversions, totals.bounce_rate,
+      dataQuality?.confidence ?? null,
+      dataQuality ? JSON.stringify(dataQuality) : null,
     ]
   );
 
@@ -93,6 +110,10 @@ export async function upsertGa4(siteId, { date, totals, channels, devices = [], 
       [siteId, date, r.dim_type, r.dim_value, r.sessions, r.users]
     );
   }
+
+  // Top pages (migration 245). `null` means the caller did not fetch them (an older code path, or the fetch failed), and
+  // an earlier list for the day is then left alone; an array, even an empty one, is GA4's answer and replaces it.
+  if (Array.isArray(pages)) await replaceGa4PagesForDay(siteId, date, pages);
 }
 
 export async function saveNarrative(siteId, date, narrative, emailedAt = null) {

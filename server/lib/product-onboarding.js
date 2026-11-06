@@ -40,6 +40,11 @@ const DEFAULT_DEPS = {
   createProductCapability,
   proposeProductCapability,
   ensureAnalystClient,
+  // Reads the site's own homepage for what it sells, when nothing was supplied. A lazy wrapper rather than a static
+  // import so this file's tests stay free of the page-fetch and LLM graph — but a REAL default, not null: it used to
+  // be null and nothing ever supplied it, so the step was permanently skipped and a tenant set up quickly still
+  // arrived with no capabilities at all.
+  discoverCapabilities: async (site) => (await import('./capability-discovery.js')).discoverCapabilitiesIfNone(site),
   // Optional: the LLM homepage classification tier. Left out entirely by
   // default so no caller pays for a model call it did not ask for.
   classifyIndustry: null,
@@ -186,7 +191,17 @@ export async function provisionProductTenant(site, {
       const row = await d.proposeProductCapability(siteId, c);
       if (row) proposed++;
     }
-    return { verified, proposed };
+    // Nothing was passed in and nothing is on file: read what the site itself says it offers, and PROPOSE it for
+    // review. Until this existed, a tenant set up quickly had no capabilities at all — and the honest consequence
+    // was that market research and gap relevance refused to run for them, because both are grounded in this list.
+    // Still proposals: a person approves them before they steer a paid call or a piece of content.
+    let discovered = 0;
+    if (!verified && !proposed && d.discoverCapabilities) {
+      const found = await d.discoverCapabilities(site).catch(() => null);
+      discovered = found?.proposed || 0;
+    }
+
+    return { verified, proposed, discovered };
   }));
 
   // 6. The Data Analyst client — the same call website onboarding makes.

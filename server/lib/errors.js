@@ -62,6 +62,16 @@ const recentErrors = new Map(); // key -> { windowStart, count, lastId }
 
 export function __resetInternalErrorDedupe() { recentErrors.clear(); }
 
+/**
+ * The short raw text of an exception, for fields only an OPERATOR reads (the Platform admin pages, job and pipeline run records, the
+ * project-memory loader's "reason"). Never for anything a customer sees: customer-facing text goes through safeMessage /
+ * UserFacingError. Using this named helper (and not an inline `String(err.message)`) is what marks a field as operator-only, so the
+ * raw-error-leak check can tell it apart from a leak.
+ */
+export function operatorDetail(err, max = 200) {
+  return String(err?.message || err || 'failed').slice(0, max);
+}
+
 export function logInternal(context, err) {
   const message = err?.message || String(err);
   // The cause is part of the identity: wrappers (UserFacingError around a

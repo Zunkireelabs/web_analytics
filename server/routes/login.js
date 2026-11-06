@@ -16,6 +16,7 @@ import { decideCodeGate, getCodeGateFacts, redeemResumeLink } from '../store/sig
 import { needsReturnApproval, openReturnRequest, markReturnUsed, RETURN_WAIT_MESSAGE } from '../store/returning.js';
 import { createPasswordReset, consumePasswordReset } from '../store/password-resets.js';
 import { findMemberProject, describeAccess } from '../store/access.js';
+import { endedBeyondGrace } from '../lib/ended-grace.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
 
 // Per-client login. One user account per site (see
@@ -209,6 +210,7 @@ router.post('/get-started/email/check', async (req, res, next) => {
     if (!project) return res.json({ member: false }); // a login but no workspace yet: they are mid-trial-setup, carry on
     const access = describeAccess(project);
     if (!access?.state) return res.json({ member: false });
+    if (endedBeyondGrace(access)) return res.json({ member: false }); // ended more than 30 days ago: treated as new
     res.json({ member: true, state: access.state, daysLeft: access.daysLeft, project: { name: project.name, domain: project.website_domain } });
   } catch (e) { next(e); }
 });

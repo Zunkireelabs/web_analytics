@@ -20,7 +20,7 @@ import { recordCapabilityRepair } from '../../store/capability-repairs.js';
 // component-based formats too — before that existed, auto-mapping a page to
 // one of these files would have been a dead end anyway (no safe way to ever
 // splice content into it), so they were deliberately left out.
-const TEMPLATE_EXTENSIONS = ['njk', 'html', 'liquid', 'hbs', 'ejs', 'md', 'jsx', 'tsx', 'astro', 'vue'];
+export const TEMPLATE_EXTENSIONS = ['njk', 'html', 'liquid', 'hbs', 'ejs', 'md', 'jsx', 'tsx', 'astro', 'vue'];
 
 export function normalizedPath(pageUrl) {
   let path;
@@ -207,7 +207,7 @@ export async function findCandidateFileByCodeSearch(site, pageUrl, { searchCode 
 //   4. the candidate is already mapped to a DIFFERENT url in `cfg.pages` —
 //      direct proof of sharing: the same file is already recorded as
 //      authoritative for another URL.
-async function sharedTargetVeto(site, pageUrl, candidateFile, { routes, fetchFile = getFileContent, branch }) {
+export async function sharedTargetVeto(site, pageUrl, candidateFile, { routes, fetchFile = getFileContent, branch }) {
   if (routes && matchPaginationRoute(pageUrl, routes)) {
     return `${pageUrl} is inside a known generated-route family; mapping it to a file would be a page-specific action on a shared target.`;
   }

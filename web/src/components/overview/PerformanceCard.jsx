@@ -5,7 +5,8 @@ import { TrayCard } from '../layout/Tray.jsx';
 import SegmentedTabs from '../SegmentedTabs.jsx';
 import { SERIES, STATUS, AXIS_TICK, CHART } from '../../lib/palette.js';
 import { fmtDay, fmtRange } from '../../lib/format.js';
-import { compact, pctDelta, seriesTotals } from '../../lib/overview-view.js';
+import { compact, pctDelta, seriesTotals, behaviorTotals } from '../../lib/overview-view.js';
+import { BehaviorEmpty } from './BehaviorCards.jsx';
 
 const LINE = SERIES[1];      // the same blue the traffic donut uses for Organic Search
 const COMPARE = '#a3a3a3';
@@ -21,6 +22,14 @@ const GROUPS = {
     { key: 'users', label: 'Users', value: (r) => Number(r.users || 0), total: (t) => t.users, fmt: (v) => compact(v) },
     { key: 'sessions', label: 'Sessions', value: (r) => Number(r.sessions || 0), total: (t) => t.sessions, fmt: (v) => compact(v) },
     { key: 'conversions', label: 'Conversions', value: (r) => Number(r.conversions || 0), total: (t) => t.conversions, fmt: (v) => compact(v) },
+  ],
+  // What visitors DID, from the client's own PostHog. A metric PostHog did not return is null (a gap), never 0.
+  // People is the busiest single day: summing daily people would count a returning person twice.
+  behavior: [
+    { key: 'pageviews', label: 'Pages viewed', value: (r) => (r.pageviews == null ? null : Number(r.pageviews)), total: (t) => t.pageviews, fmt: (v) => compact(v) },
+    { key: 'visits', label: 'Visits', value: (r) => (r.sessions == null ? null : Number(r.sessions)), total: (t) => t.sessions, fmt: (v) => compact(v) },
+    { key: 'actions', label: 'Actions taken', value: (r) => (r.events == null ? null : Number(r.events)), total: (t) => t.events, fmt: (v) => compact(v) },
+    { key: 'people', label: 'People, busiest day', value: (r) => (r.people == null ? null : Number(r.people)), total: (t) => t.people, fmt: (v) => compact(v) },
   ],
 };
 
@@ -55,32 +64,39 @@ function ChartTip({ active, payload, metric, compareLabel }) {
 // false zero.
 // One card instead of eight numbers and a separate chart: pick the number, see its chart. A single line (never two
 // scales on one chart), with the comparison as a dashed line behind it.
-export default function PerformanceCard({ series, compareSeries, compareLabel, start, end, channels, loading }) {
-  const [group, setGroup] = useState('search');
+export default function PerformanceCard({ group, onGroup, series, compareSeries, compareLabel, start, end, channels, loading, behavior, siteId }) {
   const [metricKey, setMetricKey] = useState('impressions');
   const metrics = GROUPS[group];
   const metric = metrics.find((m) => m.key === metricKey) || metrics[0];
 
-  const cur = useMemo(() => seriesTotals(series), [series]);
-  const prev = useMemo(() => (compareSeries ? seriesTotals(compareSeries) : null), [compareSeries]);
+  const onBehavior = group === 'behavior';
+  const curSeries = onBehavior ? (behavior?.series || []) : series;
+  const prevSeries = onBehavior ? (behavior?.compareSeries || null) : compareSeries;
+  const cur = useMemo(() => (onBehavior ? behaviorTotals(curSeries) : seriesTotals(curSeries)), [onBehavior, curSeries]);
+  const prev = useMemo(() => (prevSeries?.length ? (onBehavior ? behaviorTotals(prevSeries) : seriesTotals(prevSeries)) : null), [onBehavior, prevSeries]);
 
-  const rows = useMemo(() => (series || []).map((r, i) => ({
+  const rows = useMemo(() => (curSeries || []).map((r, i) => ({
     date: String(r.date).slice(0, 10),
     value: metric.value(r),
-    prev: compareSeries?.[i] ? metric.value(compareSeries[i]) : null,
-  })), [series, compareSeries, metric]);
+    prev: prevSeries?.[i] ? metric.value(prevSeries[i]) : null,
+  })), [curSeries, prevSeries, metric]);
+  // Behavior with nothing to draw yet: not connected, or connected and still filling in.
+  const behaviorEmpty = onBehavior && !loading && !(behavior?.series || []).some((r) => r.pageviews != null || r.sessions != null || r.events != null);
 
   const sessions = (channels || []).reduce((a, c) => a + Number(c.sessions || 0), 0);
   const topChannel = [...(channels || [])].sort((a, b) => Number(b.sessions) - Number(a.sessions))[0];
   const topShare = topChannel && sessions ? Math.round((Number(topChannel.sessions) / sessions) * 100) : 0;
-  const compareOn = Boolean(compareSeries && compareLabel);
+  const compareOn = Boolean(prevSeries && compareLabel);
 
   return (
     <TrayCard title="Performance" subtitle={start && end ? `Daily, ${fmtRange(start, end)}` : 'Daily'}
       action={(
-        <SegmentedTabs options={[{ value: 'search', label: 'Search' }, { value: 'visitors', label: 'Visitors' }]} value={group}
-          onChange={(g) => { setGroup(g); setMetricKey(GROUPS[g][0].key); }} />
+        <SegmentedTabs options={[{ value: 'search', label: 'Search' }, { value: 'visitors', label: 'Visitors' }, { value: 'behavior', label: 'Behavior' }]} value={group}
+          onChange={(g) => { onGroup(g); setMetricKey(GROUPS[g][0].key); }} />
       )}>
+      {behaviorEmpty ? (
+        <BehaviorEmpty siteId={siteId} connected={Boolean(behavior?.connected)} status={behavior?.status} canConnect={Boolean(behavior?.canConnect)} />
+      ) : (<>
       <div className={`grid grid-cols-2 ${metrics.length === 3 ? 'md:grid-cols-4' : 'md:grid-cols-4'} border-y border-border`}>
         {metrics.map((m, i) => {
           const on = m.key === metric.key;
@@ -131,11 +147,12 @@ export default function PerformanceCard({ series, compareSeries, compareLabel, s
               <span className="inline-flex items-center gap-2"><i className="w-4 border-t-2" style={{ borderColor: LINE }} /><b className="font-medium text-fg">{metric.label}</b> this period</span>
               {compareOn && <span className="inline-flex items-center gap-2"><i className="w-4 border-t-2 border-dashed" style={{ borderColor: COMPARE }} />{compareLabel}</span>}
               {metric.lowerIsBetter && <span className="text-faint">Lower is better</span>}
-              <Link to="/insights" className="ml-auto text-primary font-medium hover:underline">View performance report</Link>
+              <Link to={onBehavior ? '/reports' : '/insights'} className="ml-auto text-primary font-medium hover:underline">{onBehavior ? 'View in reports' : 'View performance report'}</Link>
             </div>
           </>
         )}
       </div>
+      </>)}
     </TrayCard>
   );
 }

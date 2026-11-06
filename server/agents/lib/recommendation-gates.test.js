@@ -13,6 +13,8 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 // soft-404 detection, design verification) is out of scope here.
 const { createRecommendationGates } = await import(resolve('./recommendation-gates.js'));
 
+const { repairStaleFileMapping } = await import(resolve('../../implementers/lib/stale-mapping-repair.js'));
+
 const baseSite = { id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', url_file_map: {} };
 
 // Neutralizes every gate this test isn't about: no pagination routes, no
@@ -24,6 +26,10 @@ const baseSite = { id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_br
 const neutralDeps = () => ({
   discoverRoutes: async () => [],
   fetchFingerprint: async () => null,
+  // no network in tests: a missing file on a page that is not live drops exactly as it always did
+  checkPageLive: async () => false,
+  // no repo scan / audit writes in tests that are not about the repair
+  repairStaleMapping: async (_s, _p, oldFile) => ({ outcome: 'unverifiable', oldFile, reason: 'not exercised in this test' }),
   healFn: async () => null,
   fetchTree: async () => ({ files: [], truncated: false }),
   log: { log: () => {}, warn: () => {} },
@@ -566,5 +572,133 @@ describe('createRecommendationGates — design context availability (not stored-
     const result = await gates.evaluate('meta-title', { page: 'https://acme.com/page' });
 
     assert.equal(result.blockedReason, null);
+  });
+});
+
+// zunkireelabs-web replaced its homepage template on 2 Oct 2026; the stored mapping kept pointing at the deleted file and every
+// homepage finding was silently dropped as 'file-missing'. A missing mapped file on a LIVE page is a stale mapping: blocked and
+// visible, never dropped as if the finding were unreal.
+describe('createRecommendationGates — a missing mapped file on a live page is a stale mapping, not an unreal finding', () => {
+  const site = {
+    id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', auto_remediation_enabled: true,
+    url_file_map: { pages: { '/': { file: 'src/pages/index.njk' } } },
+  };
+  test('file gone, page live -> kept, blocked, with the stale-mapping reason', async () => {
+    const gates = createRecommendationGates(1, site, { ...neutralDeps(), fetchFile: async () => null, checkPageLive: async () => true });
+    const out = await gates.evaluate('meta-title', { page: 'https://acme.com/' });
+    assert.equal(out.drop, null);
+    assert.match(out.blockedReason, /mapping is stale/);
+    assert.match(out.blockedReason, /src\/pages\/index\.njk/);
+  });
+  test('file gone, page gone -> dropped as before', async () => {
+    const gates = createRecommendationGates(1, site, { ...neutralDeps(), fetchFile: async () => null, checkPageLive: async () => false });
+    const out = await gates.evaluate('meta-title', { page: 'https://acme.com/' });
+    assert.equal(out.drop, 'file-missing');
+  });
+  test('the liveness check runs once per page per pass', async () => {
+    let n = 0;
+    const gates = createRecommendationGates(1, site, { ...neutralDeps(), fetchFile: async () => null, checkPageLive: async () => { n++; return true; } });
+    await gates.evaluate('meta-title', { page: 'https://acme.com/' });
+    await gates.evaluate('expand-content', { page: 'https://acme.com/' });
+    assert.equal(n, 1);
+  });
+});
+
+// Gate-level behaviour of the automatic repair (module-level cases live in stale-mapping-repair.test.js).
+describe('createRecommendationGates — stale mapping repair continues or blocks', () => {
+  const site = {
+    id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', auto_remediation_enabled: true,
+    url_file_map: { pages: { '/': { file: 'src/pages/index.njk' } } },
+  };
+  const files = { 'src/pages/homepage-v2.njk': { content: '---\npermalink: /\n---\n<h1>Hi</h1>' } };
+  const fetchFile = async (_s, path) => files[path] || null;
+  test('repaired -> the site map is updated, the stale block is gone and the same finding is re-evaluated against the new file', async () => {
+    let repairs = 0;
+    const repairStaleMapping = async (s, page, oldFile) => {
+      repairs++;
+      return { outcome: 'repaired', oldFile, newFile: 'src/pages/homepage-v2.njk', site: { ...s, url_file_map: { pages: { '/': { file: 'src/pages/homepage-v2.njk' } } } } };
+    };
+    const gates = createRecommendationGates(1, site, { ...neutralDeps(), fetchFile, checkPageLive: async () => true, repairStaleMapping });
+    const out = await gates.evaluate('meta-title', { page: 'https://acme.com/' });
+    assert.equal(repairs, 1);
+    assert.equal(out.drop, null);
+    assert.doesNotMatch(out.blockedReason || '', /mapping is stale/);
+    assert.equal(gates.site.url_file_map.pages['/'].file, 'src/pages/homepage-v2.njk');
+  });
+  for (const [outcome, extra, pattern] of [
+    ['no-match', {}, /Manual re-mapping is required/],
+    ['ambiguous', { candidates: ['a.njk', 'b.njk'] }, /a\.njk, b\.njk/],
+    ['unverifiable', { reason: 'timed out' }, /retried on the next pass/],
+  ]) {
+    test(`${outcome} -> finding stays visible and blocked, never dropped`, async () => {
+      const repairStaleMapping = async (_s, _p, oldFile) => ({ outcome, oldFile, ...extra });
+      const gates = createRecommendationGates(1, site, { ...neutralDeps(), fetchFile, checkPageLive: async () => true, repairStaleMapping });
+      const out = await gates.evaluate('meta-title', { page: 'https://acme.com/' });
+      assert.equal(out.drop, null);
+      assert.match(out.blockedReason, pattern);
+    });
+  }
+  test('page not live -> no repair is attempted and the finding drops as before', async () => {
+    let repairs = 0;
+    const gates = createRecommendationGates(1, site, { ...neutralDeps(), fetchFile, checkPageLive: async () => false, repairStaleMapping: async () => { repairs++; } });
+    const out = await gates.evaluate('meta-title', { page: 'https://acme.com/' });
+    assert.equal(repairs, 0);
+    assert.equal(out.drop, 'file-missing');
+  });
+  test('a repair that throws is unverifiable: blocked, visible, nothing dropped', async () => {
+    const gates = createRecommendationGates(1, site, { ...neutralDeps(), fetchFile, checkPageLive: async () => true, repairStaleMapping: async () => { throw new Error('boom'); } });
+    const out = await gates.evaluate('meta-title', { page: 'https://acme.com/' });
+    assert.equal(out.drop, null);
+    assert.match(out.blockedReason, /could not be verified/);
+  });
+  test('two findings on one page cause one repair attempt per pass', async () => {
+    let repairs = 0;
+    const repairStaleMapping = async (_s, _p, oldFile) => { repairs++; return { outcome: 'no-match', oldFile }; };
+    const gates = createRecommendationGates(1, site, { ...neutralDeps(), fetchFile, checkPageLive: async () => true, repairStaleMapping });
+    await gates.evaluate('meta-title', { page: 'https://acme.com/' });
+    await gates.evaluate('expand-content', { page: 'https://acme.com/' });
+    assert.equal(repairs, 1);
+  });
+});
+
+// End to end through the REAL gate and the REAL repair (only GitHub, the database and the live-page probe are faked): the homepage
+// case from zunkireelabs-web. index.njk was deleted, homepage-v2.njk declares permalink /.
+describe('stale mapping repair — homepage end to end', () => {
+  const mk = (extraFiles = {}) => {
+    const tree = { 'src/pages/homepage-v2.njk': { content: '---\npermalink: /\n---\n<h1>Hi</h1>' }, 'src/pages/about.njk': { content: '---\npermalink: /about/\n---\n' }, ...extraFiles };
+    const site = { id: 7, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', website_domain: 'acme.com', auto_remediation_enabled: true,
+      url_file_map: { pages: { '/': { file: 'src/pages/index.njk' } } } };
+    const state = { site, writes: [], audits: [] };
+    const repair = (s, page, oldFile, o) => repairStaleFileMapping(s, page, oldFile, {
+      ...o, loadSite: async () => state.site,
+      persist: async (a) => { state.writes.push(a); state.site = { ...state.site, url_file_map: a.urlFileMap }; return state.site; },
+      record: async (id, r) => { state.audits.push(r); return true; },
+    });
+    const deps = { ...neutralDeps(), checkPageLive: async () => true, repairStaleMapping: repair,
+      fetchTree: async () => ({ files: Object.keys(tree), truncated: false }), fetchFile: async (_s, path) => tree[path] || null };
+    return { state, deps };
+  };
+  test('stale index.njk is detected, homepage-v2.njk is found by permalink, the mapping is repaired and the finding is not blocked by it', async () => {
+    const { state, deps } = mk();
+    const gates = createRecommendationGates(7, state.site, deps);
+    const out = await gates.evaluate('meta-title', { page: 'https://acme.com/' });
+    assert.equal(state.writes.length, 1);
+    assert.equal(state.site.url_file_map.pages['/'].file, 'src/pages/homepage-v2.njk');
+    assert.equal(out.drop, null);
+    assert.doesNotMatch(out.blockedReason || '', /stale|no longer exists/);
+    assert.equal(state.audits[0].detail.oldFile, 'src/pages/index.njk');
+    assert.equal(state.audits[0].detail.newFile, 'src/pages/homepage-v2.njk');
+    // a second finding on the same page reuses the repaired map: no second write
+    await gates.evaluate('expand-content', { page: 'https://acme.com/' });
+    assert.equal(state.writes.length, 1);
+  });
+  test('two files claim permalink / -> stays blocked and visible with both candidates, nothing written', async () => {
+    const { state, deps } = mk({ 'src/pages/home-copy.njk': { content: '---\npermalink: /\n---\n' } });
+    const gates = createRecommendationGates(7, state.site, deps);
+    const out = await gates.evaluate('meta-title', { page: 'https://acme.com/' });
+    assert.equal(out.drop, null);
+    assert.match(out.blockedReason, /home-copy\.njk/);
+    assert.match(out.blockedReason, /homepage-v2\.njk/);
+    assert.equal(state.writes.length, 0);
   });
 });
