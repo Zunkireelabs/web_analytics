@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Check, ChevronDown, ClipboardPaste, ExternalLink, Info, Loader2 } from 'lucide-react';
+import { AlertTriangle, Check, ChevronDown, ClipboardPaste, Copy, ExternalLink, Info, Loader2, Share2 } from 'lucide-react';
 import { api } from '../../api.js';
+import { classifyProfileLink, PROFILE_LINK_HELP } from '../../lib/gbp-link.js';
 import ChoiceCard from './ChoiceCard.jsx';
 import Field from '../Field.jsx';
 import Button from '../Button.jsx';
@@ -15,7 +16,7 @@ const GUIDE = [
   ['Verify it', 'Google confirms the business is yours by video, phone, email or a postcard. A postcard can take a few days.'],
 ];
 
-export const gbpReady = (choice, url) => Boolean(choice) && (choice !== 'linked' || String(url || '').trim().length > 0);
+export const gbpReady = (choice, url) => Boolean(choice) && (choice !== 'linked' || classifyProfileLink(url) === 'ok');
 
 export const GBP_LABELS = { linked: 'Linked', none: 'Not created yet', not_applicable: 'Does not apply' };
 
@@ -36,8 +37,11 @@ const OUTCOMES = {
   failed: 'We could not read your Business Profiles just now. You can paste its link instead.',
 };
 
-// Google's own page listing every Business Profile on the signed-in account (used when the business cannot be looked up).
-const MANAGER_URL = 'https://business.google.com/locations';
+
+// Listing a client's own profiles after "Connect Google" needs Google's Business Profile API approval for SuperRank,
+// which Google will not give (owner, 2026-11-17). Off: the client opens their profile on Google and copies its link.
+// The listing code below stays, so turning this on is the only change if Google ever approves it.
+const LIST_FROM_GOOGLE = false;
 const PANEL = { background: 'var(--muted)' };
 
 // A short box that scrolls inside the popup (so choosing an option never makes the popup taller) and SHOWS that it
@@ -82,7 +86,8 @@ function Steps({ items }) {
   );
 }
 
-export default function BusinessProfileFields({ choice, setChoice, url, setUrl, showWhy = true, source = null, outcome = null }) {
+export default function BusinessProfileFields({ choice, setChoice, url, setUrl, showWhy = true, source = null, outcome: googleOutcome = null }) {
+  const outcome = LIST_FROM_GOOGLE ? googleOutcome : null;
   // What Google returned for this project: idle -> loading -> ready | error.
   //   locations: null  = nothing listed yet (offer "Connect Google" when the server can), or the account's profiles
   const [list, setList] = useState({ status: 'idle', canConnect: false, locations: null, account: null });
@@ -95,7 +100,7 @@ export default function BusinessProfileFields({ choice, setChoice, url, setUrl, 
   sourceRef.current = source;
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => {
-    if (choice !== 'linked' || !sourceRef.current || started.current) return;
+    if (!LIST_FROM_GOOGLE || choice !== 'linked' || !sourceRef.current || started.current) return;
     started.current = true;
     setList((l) => ({ ...l, status: 'loading' }));
     sourceRef.current.load().then((r) => {
@@ -112,7 +117,6 @@ export default function BusinessProfileFields({ choice, setChoice, url, setUrl, 
   };
 
   const canPaste = typeof navigator !== 'undefined' && Boolean(navigator.clipboard?.readText);
-  const looksLikeProfile = (t) => /^(https?:\/\/)?((www\.|maps\.)?google\.[a-z.]+\/maps|maps\.app\.goo\.gl|goo\.gl\/maps|g\.page|g\.co\/kgs|share\.google|business\.google\.com)/i.test(String(t || '').trim());
   const pasteLink = async () => {
     try {
       const text = (await navigator.clipboard.readText()).trim();
@@ -124,7 +128,7 @@ export default function BusinessProfileFields({ choice, setChoice, url, setUrl, 
   const blocked = outcome === 'not_available';
   const offerConnect = list.status === 'ready' && !listed && list.canConnect && !blocked;
   // The paste path: when they ask for it, or when Google cannot be used (not set up here, or it failed).
-  const showBox = manual || blocked || list.status === 'error' || (list.status === 'ready' && !listed && !list.canConnect);
+  const showBox = !LIST_FROM_GOOGLE || manual || blocked || list.status === 'error' || (list.status === 'ready' && !listed && !list.canConnect);
   // Coming back from Google after "Copy link": read it for them, so nothing has to be pasted. Only a Google Maps /
   // Business Profile looking link is taken (the server checks it again on save); the browser may ask permission once.
   const awaiting = choice === 'linked' && !url && showBox;
@@ -133,7 +137,7 @@ export default function BusinessProfileFields({ choice, setChoice, url, setUrl, 
     const grab = async () => {
       try {
         const text = (await navigator.clipboard.readText()).trim();
-        if (looksLikeProfile(text)) setUrl(text);
+        if (classifyProfileLink(text) === 'ok') setUrl(text);
       } catch { /* no permission: the Paste button and the box still work */ }
     };
     window.addEventListener('focus', grab);
@@ -144,11 +148,28 @@ export default function BusinessProfileFields({ choice, setChoice, url, setUrl, 
     <button type="button" className="text-xs text-text underline underline-offset-2 hover:text-fg" onClick={() => { setManual(true); setUrl(''); }}>Paste its link instead</button>
   );
 
+  // The link box says what a right link looks like, and says plainly when a pasted link is the wrong kind
+  // (their list of profiles, or their website), before anything is saved. Same rules as the server.
+  const linkState = classifyProfileLink(url);
+  const ring = linkState === 'ok' ? '0 0 0 1px #34a853' : linkState === 'empty' ? undefined : '0 0 0 1px #e8b04b';
   const linkRow = (
-    <div className="flex items-end gap-2">
-      <Field className="flex-1 min-w-0" label="Your profile link" placeholder="https://maps.app.goo.gl/…" value={url} onChange={(e) => setUrl(e.target.value)} />
-      {canPaste && <Button variant="light" onClick={pasteLink} className="shrink-0 mb-px"><ClipboardPaste size={14} />Paste</Button>}
+    <div className="space-y-1.5">
+      <div className="flex items-end gap-2">
+        <label className="fld flex-1 min-w-0">
+          <span className="fld__label">Your profile link</span>
+          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://share.google/…" autoComplete="off" spellCheck={false}
+            aria-invalid={linkState !== 'ok' && linkState !== 'empty' ? true : undefined} style={ring ? { boxShadow: ring } : undefined} />
+        </label>
+        {canPaste && <Button variant="light" onClick={pasteLink} className="shrink-0 mb-px"><ClipboardPaste size={14} />Paste</Button>}
+      </div>
+      {linkState === 'ok' ? <span className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--green)' }}><Check size={13} />This is a Business Profile link.</span>
+        : linkState === 'empty' ? <span className="block text-xs text-faint leading-[17px]">It looks like <span className="font-mono text-text">https://share.google/…</span> or <span className="font-mono text-text">https://maps.app.goo.gl/…</span></span>
+        : <span className="block text-xs leading-[17px]" style={{ color: '#8a5300' }} role="alert">{PROFILE_LINK_HELP[linkState]}</span>}
     </div>
+  );
+  // A drawing of the two buttons to look for on Google (not a copy of Google's page).
+  const gButton = (Icon, label) => (
+    <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full bg-white text-xs font-medium" style={{ color: '#1a56db', boxShadow: '0 0 0 2px #1a56db' }}><Icon size={13} />{label}</span>
   );
 
   return (
@@ -161,7 +182,7 @@ export default function BusinessProfileFields({ choice, setChoice, url, setUrl, 
       )}
       <div role="radiogroup" aria-label="Your Business Profile" className="space-y-2.5">
         <ChoiceCard selected={choice === 'linked'} onSelect={() => setChoice('linked')} title="I have a Business Profile"
-          description={list.status === 'ready' && !list.canConnect && !listed ? 'Open it on Google and we will pick up its link.' : 'Connect Google and choose it from your list.'} />
+          description={!LIST_FROM_GOOGLE || (list.status === 'ready' && !list.canConnect && !listed) ? 'Paste its link from Google. It takes a minute.' : 'Connect Google and choose it from your list.'} />
         {choice === 'linked' && (
           <div className="ml-7 rounded-card p-4 space-y-4" style={PANEL}>
             {(outcomeText || connectError) && (
@@ -208,12 +229,15 @@ export default function BusinessProfileFields({ choice, setChoice, url, setUrl, 
             )}
             {showBox && (
               <>
-                <Steps items={[
-                  { title: 'Open your profile on Google', extra: <Button variant="primary" onClick={() => window.open(MANAGER_URL, '_blank', 'noopener,noreferrer')}><ExternalLink size={14} />Open my Business Profile</Button> },
-                  { title: 'Choose Share profile, then Copy link' },
-                  { title: 'Come back to this tab', detail: 'The link fills in by itself.' },
-                ]} />
                 {linkRow}
+                <div className="space-y-3">
+                  <div className="text-[13px] font-medium text-fg">How to get your link</div>
+                  <Steps items={[
+                    { title: 'Open your business’s profile on Google', detail: 'Search your business name on Google or Google Maps and open it.' },
+                    { title: 'Click Share profile, then Copy link', extra: <span className="flex flex-wrap items-center gap-2 text-xs text-faint">On Google, look for {gButton(Share2, 'Share profile')} then {gButton(Copy, 'Copy link')}</span> },
+                    { title: 'Paste it in the box above', detail: 'Or just come back to this tab: it fills in by itself.' },
+                  ]} />
+                </div>
               </>
             )}
           </div>

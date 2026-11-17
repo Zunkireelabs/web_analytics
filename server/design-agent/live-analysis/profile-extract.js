@@ -536,7 +536,7 @@ export async function extractDesignProfile(segmentedPages, {
     + (designKnowledge ? `\n\n${designKnowledge}` : '');
 
   const extracted = await callLLMForJson(SYSTEM_PROMPT, userPrompt, {
-    tier: 'monthly', maxTokens: 4000, generatorId, siteId,
+    task: 'content', tier: 'monthly', maxTokens: 4000, generatorId, siteId,
   });
 
   const typography = extracted.typography || {};

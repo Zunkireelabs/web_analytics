@@ -43,7 +43,7 @@ export async function generate({ siteId, params }) {
 
   let altTexts;
   try {
-    altTexts = await callLLMForJson(SYSTEM, user, { maxTokens: 500, generatorId: meta.id, siteId });
+    altTexts = await callLLMForJson(SYSTEM, user, { task: 'content', maxTokens: 500, generatorId: meta.id, siteId });
     if (!Array.isArray(altTexts)) throw new Error('not an array');
   } catch {
     throw Object.assign(new Error('Alt text generation failed: model did not return valid JSON'), { status: 400 });

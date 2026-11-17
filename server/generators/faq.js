@@ -75,7 +75,7 @@ export async function generateFaqItemsFromEvidence({ siteId, subject, bodyExcerp
     (structureGuidance ? `\n\n${structureGuidance}` : '');
   let items;
   try {
-    items = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
+    items = await callLLMForJson(system, user, { task: 'content', maxTokens: 900, generatorId: meta.id, siteId });
     if (!Array.isArray(items)) throw new Error('not an array');
   } catch {
     throw Object.assign(new Error('FAQ generation failed: model did not return valid JSON'), { status: 400 });

@@ -22,6 +22,7 @@ export function PosthogProvider({ siteId, children }) {
 
 export const usePosthogState = () => useContext(Ctx);
 
-// Where "Connect PostHog" leads: the same step the project setup uses, opened on the Workspace page.
-export const connectPosthogPath = (siteId) => `/workspace?finish=${siteId}&step=6`;
-export const POSTHOG_GUIDE_PATH = (siteId) => `/workspace?finish=${siteId}&step=6&guide=1`;
+// PostHog is offered ONLY to a project that already has it (SuperRank's own); nobody is asked to connect it any more
+// (owner decision 2026-11-17). Where "Reconnect PostHog" leads: that project's Connections settings.
+export const connectPosthogPath = (siteId) => `/account?scope=project&proj=${siteId}&tab=connections`;
+export const POSTHOG_GUIDE_PATH = connectPosthogPath;

@@ -67,7 +67,7 @@ async function expandSections(sections, title) {
     `${MIN_TOTAL_WORDS} words (add at least ${shortfall} more). Respond with ONLY a JSON array matching the input ` +
     'shape: [{"heading": "...", "body": "..."}].';
   const user = `Page title: ${title}\n\nCurrent draft:\n${JSON.stringify(sections)}`;
-  const expanded = await callLLMForJson(system, user, { maxTokens: 2400 }).catch(() => null);
+  const expanded = await callLLMForJson(system, user, { task: 'content', maxTokens: 2400 }).catch(() => null);
   if (!Array.isArray(expanded) || !expanded.length) return sections;
   return expanded.filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string');
 }
@@ -119,7 +119,7 @@ export async function generate({ siteId, params }) {
 
   let parsed;
   try {
-    parsed = await callLLMForJson(system, user, { maxTokens: 2500, generatorId: meta.id, siteId });
+    parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 2500, generatorId: meta.id, siteId });
   } catch {
     throw Object.assign(new Error('Missing-page generation failed: model did not return valid JSON'), { status: 400 });
   }

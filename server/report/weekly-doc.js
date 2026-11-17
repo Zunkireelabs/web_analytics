@@ -102,7 +102,7 @@ export async function runWeeklyDocReport(site, anchorDate) {
     'do not invent one. No preamble, no bullet symbols, no markdown headers.';
   // The report is numbers first: if the summary cannot be written (model down, spend limit) it goes out without it.
   let overview = null;
-  try { overview = await callLLM(system, `Weekly digest:\n\n${JSON.stringify(digest, null, 2)}`, { maxTokens: 400 }); }
+  try { overview = await callLLM(system, `Weekly digest:\n\n${JSON.stringify(digest, null, 2)}`, { task: 'report', maxTokens: 400 }); }
   catch (e) { console.warn('[weekly-doc] summary skipped:', e.message); }
 
   const brand = resolveBrand(site);

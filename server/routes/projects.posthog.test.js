@@ -177,7 +177,7 @@ mock.module(resolve('../integrations/posthog-connect.js'), {
 mock.module(resolve('../ingest/posthog.js'), { namedExports: { verifyConnection: async () => phVerify } });
 mock.module(resolve('../lib/posthog-backfill.js'), { namedExports: { backfillPosthog: async () => { phCalls.backfills += 1; return { ok: true, imported: 3 }; } } });
 
-const router = (await import('./projects.js')).default;
+const { default: router, posthogOauthClientDocument, connectedTabUrl } = await import('./projects.js');
 
 function mockRes() {
   const res = { statusCode: 200, body: null, headers: {}, redirected: null };
@@ -224,14 +224,26 @@ const noSecrets = (value) => {
 };
 
 describe('the client document PostHog fetches', () => {
-  test('is public (no auth layer), cached for a few minutes, and describes this client', async () => {
-    const layer = router.stack.find((l) => l.route?.path === '/posthog/oauth-client' && l.route.methods.get);
-    assert.equal(layer.route.stack.length, 1, 'PostHog fetches it with no session, so nothing may gate it');
-    const res = await call('get', '/posthog/oauth-client');
+  test('is cached for a few minutes and describes this client', async () => {
+    const res = mockRes();
+    posthogOauthClientDocument({ protocol: 'https', get: () => 'app.superrank.si' }, res);
     assert.equal(res.statusCode, 200);
     assert.match(res.headers['Cache-Control'], /public, max-age=\d+/);
     assert.equal(res.body.client_id, 'https://app.superrank.si/api/posthog/oauth-client');
     assert.deepEqual(res.body.redirect_uris, ['https://app.superrank.si/api/posthog/callback']);
+  });
+
+  // Live 2026-11-17: registered inside the projects router, behind routers with a blanket requireAuth, every PostHog fetch
+  // got "401 Not authenticated" and the sign-in could never start. It must be mounted publicly, ahead of all of them.
+  test('is mounted publicly in server/index.js, before every router that requires a session', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+    const mount = src.indexOf("app.get('/api/posthog/oauth-client', posthogOauthClientDocument)");
+    assert.ok(mount > 0, 'mounted on its own, with no auth middleware');
+    for (const gated of ['metricsRouter', 'loginRouter', 'accessGate']) {
+      assert.ok(mount < src.indexOf(`app.use('/api', ${gated})`), `must come before ${gated}`);
+    }
+    assert.equal(router.stack.some((l) => l.route?.path === '/posthog/oauth-client'), false, 'not also registered behind the auth routers');
   });
 });
 
@@ -307,7 +319,8 @@ describe('callback', () => {
     const session = { userId: PADMIN, posthogConnect: pendingFor() };
     const res = await cb({ code: 'c', state: 'abc' }, session);
     const u = back(res);
-    assert.equal(u.pathname, '/workspace');
+    assert.equal(u.pathname, '/connected', 'the new tab hands the outcome to the waiting SuperRank tab');
+    assert.equal(u.searchParams.get('kind'), 'posthog');
     assert.deepEqual([u.searchParams.get('finish'), u.searchParams.get('posthog')], [String(ADMIZZ), 'connected']);
     assert.equal(phCalls.saved.length, 1); assert.equal(phCalls.saved[0].siteId, ADMIZZ); assert.equal(phCalls.saved[0].email, 'maya@brightsmile.com');
     assert.equal(phCalls.selected.length, 0, 'two projects: the person chooses');
@@ -480,5 +493,33 @@ describe('pasting a key (the other way to connect)', () => {
   test('only a project admin can paste a key', async () => {
     assert.equal((await paste({}, PREAD)).statusCode, 403);
     assert.equal((await paste({}, STRANGER)).statusCode, 404);
+  });
+});
+
+describe('where GitHub and PostHog send the new tab back to', () => {
+  test('/connected, carrying which provider it was and every outcome parameter', () => {
+    const u = new URL(connectedTabUrl('github', { ws: 2, finish: 9, gherror: 'cancelled' }), 'https://app.superrank.si');
+    assert.equal(u.pathname, '/connected');
+    assert.deepEqual(Object.fromEntries(u.searchParams), { kind: 'github', ws: '2', finish: '9', gherror: 'cancelled' });
+  });
+});
+
+describe('GitHub callback: coming back from installing the app', () => {
+  const back = (res) => new URL(res.redirected, 'https://app.superrank.si');
+  test('installed with no GitHub sign-in in this session: "installed, now sign in", not an error', async () => {
+    const res = await call('get', '/github/callback', { query: { installation_id: '123', setup_action: 'install' }, session: { userId: PADMIN } });
+    const u = back(res);
+    assert.equal(u.pathname, '/connected');
+    assert.equal(u.searchParams.get('github'), 'installed');
+    assert.equal(u.searchParams.get('gherror'), null);
+  });
+  test('installed while signed in to GitHub here: connected, and the list is read again', async () => {
+    const session = { userId: PADMIN, githubUser: { siteId: ADMIZZ, userId: PADMIN, token: 't', login: 'dev', at: Date.now() } };
+    const u = back(await call('get', '/github/callback', { query: { installation_id: '123' }, session }));
+    assert.deepEqual([u.searchParams.get('github'), u.searchParams.get('finish')], ['connected', String(ADMIZZ)]);
+  });
+  test('a sign-in return that does not match this session is still refused', async () => {
+    const u = back(await call('get', '/github/callback', { query: { code: 'c', state: 'nope' }, session: { userId: PADMIN } }));
+    assert.equal(u.searchParams.get('gherror'), 'expired');
   });
 });

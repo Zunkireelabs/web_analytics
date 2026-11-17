@@ -61,7 +61,7 @@ export async function generate({ siteId, params }) {
     + (designCorrections ? `\n\n${designCorrections}` : '');
   let parsed;
   try {
-    parsed = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
+    parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 900, generatorId: meta.id, siteId });
   } catch {
     throw Object.assign(new Error('Landing page generation failed: model did not return valid JSON'), { status: 400 });
   }

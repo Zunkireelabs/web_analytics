@@ -39,7 +39,7 @@ import trialSignupRouter from './routes/trial-signup.js';
 import oauthConsentRouter from './routes/oauth-consent.js';
 import usersRouter from './routes/users.js';
 import workspacesRouter from './routes/workspaces.js';
-import projectsRouter from './routes/projects.js';
+import projectsRouter, { posthogOauthClientDocument } from './routes/projects.js';
 import platformRouter from './routes/platform.js';
 import userInvitationsRouter from './routes/user-invitations.js';
 import mcpAdminRouter from './routes/mcp-admin.js';
@@ -98,6 +98,9 @@ app.use(
 );
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
+// Public: PostHog's servers fetch this with no session to learn who SuperRank is. It must sit before every router with a
+// blanket requireAuth below, or it answers 401 and "Connect with PostHog" fails (routes/projects.js explains).
+app.get('/api/posthog/oauth-client', posthogOauthClientDocument);
 // Mount order matters here and isn't just cosmetic: every router below gates
 // itself with an unscoped `router.use(requireAuth, ...)` (no path prefix),
 // so once Express hands a request to a mounted router, that router's blanket

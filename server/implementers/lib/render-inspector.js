@@ -146,7 +146,7 @@ async function llmAssistedInspection(fileContent, deterministicSignals, { visibl
 
   let parsed;
   try {
-    const raw = await callLLM(system, user, { maxTokens: 300 });
+    const raw = await callLLM(system, user, { task: 'content', maxTokens: 300 });
     parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
   } catch (err) {
     const { message } = safeMessage('render-inspector.inspectRenderMode', err, 'Could not determine render mode automatically right now.');

@@ -121,7 +121,8 @@ export function ConnectPosthogStrip({ siteId }) {
   const [gone, setGone] = useState(false);
   const broken = Boolean(state?.connected && state.status === 'error');
   // A broken connection is not "optional": it is told again even after the optional strip was dismissed.
-  if (!siteId || !state || (state.connected && !broken) || !state.canConnect || gone || (!broken && wasDismissed(siteId))) return null;
+  // Only a connected PostHog that broke; a project without PostHog is never asked to connect it.
+  if (!siteId || !state || !broken || !state.canConnect || gone) return null;
   const dismiss = () => { try { localStorage.setItem(dismissKey(siteId), '1'); } catch { /* storage unavailable */ } setGone(true); };
   return (
     <div className="mb-3 flex flex-wrap items-center gap-3 rounded-card bg-white pl-3.5 pr-2 py-2.5" style={{ boxShadow: '0 0 0 1px var(--border-2)' }}>

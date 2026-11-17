@@ -133,7 +133,7 @@ async function expandSections(sections, topic) {
     'input shape: [{"heading": "...", "body": "..."}].';
   const user = `Topic: ${topic}\n\nCurrent draft (${currentWords} words total, needs ${shortfall}+ more words to reach ` +
     `${MIN_TOTAL_WORDS}):\n${JSON.stringify(sections)}`;
-  const expanded = await callLLMForJson(system, user, { maxTokens: 2600 }).catch(() => null);
+  const expanded = await callLLMForJson(system, user, { task: 'content', maxTokens: 2600 }).catch(() => null);
   if (!Array.isArray(expanded) || !expanded.length) return sections;
   return expanded.filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string');
 }
@@ -246,7 +246,7 @@ export async function generate({ siteId, params }) {
     + (designCorrections ? `\n\n${designCorrections}` : '');
   let parsed;
   try {
-    parsed = await callLLMForJson(system, user, { maxTokens: 2500, generatorId: meta.id, siteId });
+    parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 2500, generatorId: meta.id, siteId });
   } catch {
     throw Object.assign(new Error('Blog post generation failed: model did not return valid JSON'), { status: 400 });
   }

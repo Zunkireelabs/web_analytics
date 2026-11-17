@@ -49,18 +49,18 @@ export default function Sidebar({
 
   const currentSite = currentSiteOf(sites, siteId);
   const baseGroups = visibleGroups({ isPlatformAdmin, isProduct: currentSite?.property_type === 'product' });
-  // Someone who skipped PostHog at setup gets a way back to it, right above Overview, until they connect it (and only if
-  // they are allowed to). Not shown while the project is locked, or while the state is still unknown.
+  // Only a project that already has PostHog, and only when it stopped working: "Reconnect PostHog" right above Overview
+  // (and only for someone allowed to). Nobody is asked to connect PostHog any more.
   const ph = usePosthogState().state;
   const phBroken = Boolean(ph?.connected && ph.status === 'error');
-  const showConnectPosthog = Boolean(siteId && ph && (!ph.connected || phBroken) && ph.canConnect && !access?.locked);
+  const showConnectPosthog = Boolean(siteId && ph && phBroken && ph.canConnect && !access?.locked);
   // The Industry page exists only once the project's industry is confirmed (two signals agree). Until then it is not in the menu.
   const industryShown = Boolean(useIndustry()?.available) && !access?.locked;
   const withIndustry = industryShown
     ? baseGroups.map((g) => (g.id === 'performance' ? { ...g, items: [...g.items, { to: '/industry', label: 'Industry', icon: Target }] } : g))
     : baseGroups;
   const groups = showConnectPosthog
-    ? withIndustry.map((g, i) => (i === 0 ? { ...g, items: [{ to: connectPosthogPath(siteId), label: phBroken ? 'Reconnect PostHog' : 'Connect PostHog', icon: Activity, attention: true }, ...g.items] } : g))
+    ? withIndustry.map((g, i) => (i === 0 ? { ...g, items: [{ to: connectPosthogPath(siteId), label: 'Reconnect PostHog', icon: Activity, attention: true }, ...g.items] } : g))
     : withIndustry;
 
   const toggleSection = (id) => {

@@ -51,7 +51,7 @@ export async function generate({ siteId, params }) {
   let sections;
   try {
     sections = await callLLMForJson(SYSTEM_REFRESH, user, {
-      maxTokens: 500, generatorId: meta.id, siteId, validate: Array.isArray,
+      task: 'content', maxTokens: 500, generatorId: meta.id, siteId, validate: Array.isArray,
     });
   } catch {
     throw Object.assign(new Error('Content refresh failed: model did not return valid JSON'), { status: 400, userFacing: true });

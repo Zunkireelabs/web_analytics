@@ -15,6 +15,38 @@ export function pickProvider() {
   return 'anthropic';
 }
 
+// Split work between providers. A call tagged `task: 'report'` (client reports and narratives) or `task: 'content'` (the
+// text the agent writes onto a client's site: generators, FAQ/schema/meta, design layout) can run on its own provider via
+// LLM_PROVIDER_REPORTS / LLM_PROVIDER_CONTENT, with its own models via LLM_MODEL_<TASK>_DAILY / _MONTHLY. Untagged calls,
+// and tagged calls whose variable is unset, behave exactly as before (REPORT_PROVIDER + REPORT_MODEL_*).
+const TASK_ENV = { report: 'REPORTS', content: 'CONTENT' };
+const PROVIDER_KEY = { openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY' };
+const warnedTasks = new Set();
+
+export function resolveProviderAndModel({ task, tier = 'daily', model, promoted, env = process.env } = {}) {
+  const base = env.REPORT_PROVIDER ? env.REPORT_PROVIDER.toLowerCase()
+    : (env.OPENAI_API_KEY && !env.OPENAI_API_KEY.startsWith('sk-xxxx') ? 'openai' : 'anthropic');
+  const name = TASK_ENV[task];
+  let provider = base;
+  const wanted = name && env[`LLM_PROVIDER_${name}`] ? env[`LLM_PROVIDER_${name}`].toLowerCase() : null;
+  if (wanted && wanted !== base) {
+    // A task switched to a provider whose key is missing would fail every call; stay on the working default instead.
+    if (PROVIDER_KEY[wanted] && env[PROVIDER_KEY[wanted]]) provider = wanted;
+    else if (!warnedTasks.has(task)) {
+      warnedTasks.add(task);
+      console.warn(`[llm] LLM_PROVIDER_${name}=${wanted} but ${PROVIDER_KEY[wanted] || 'its key'} is not set — using ${base} for ${task} calls.`);
+    }
+  }
+  const t = tier === 'monthly' ? 'monthly' : 'daily';
+  const resolvedModel = model
+    || (promoted && promoted.provider === provider ? promoted.model : null)
+    || (name ? env[`LLM_MODEL_${name}_${t.toUpperCase()}`] : null)
+    // REPORT_MODEL_* names a model of the default provider; never send it to the other one.
+    || (provider === base ? env[t === 'monthly' ? 'REPORT_MODEL_MONTHLY' : 'REPORT_MODEL_DAILY'] : null)
+    || MODEL_DEFAULTS[provider][t];
+  return { provider, model: resolvedModel };
+}
+
 // Transient upstream failures (rate limits, 5xx, dropped connections) are
 // worth one retry — a bare `throw` on the first hiccup is what turned into a
 // raw 500 for a user clicking a generator button during the product audit.
@@ -72,7 +104,7 @@ export const MODEL_DEFAULTS = {
 // calling generator's own meta.id. This is the automatic RETRIEVE step of
 // the platform-wide learning loop: every generator gets it for free just by
 // passing its own id, with no separate opt-in per generator.
-export async function callLLM(system, user, { model, maxTokens = 500, tier = 'daily', generatorId, siteId, pageUrl, modelRole } = {}) {
+export async function callLLM(system, user, { model, maxTokens = 500, tier = 'daily', generatorId, siteId, pageUrl, modelRole, task } = {}) {
   system = await withAgentMemory(system, generatorId, siteId);
   // Shared design-intelligence layer (server/implementers/lib/design-drift.js) —
   // real site design/voice grounding for every website-facing generator, the
@@ -85,12 +117,10 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
   // or when this site has no active competitor data. See
   // agents/lib/competitor-policy.js.
   system = await withCompetitorContext(system, generatorId, siteId);
-  const provider = pickProvider();
-  const envVar = tier === 'monthly' ? 'REPORT_MODEL_MONTHLY' : 'REPORT_MODEL_DAILY';
   // A model promoted through the evaluated registry for this call's ROLE (only decision-engine calls pass one; a model tuned to
   // decide is never used to write page content). Used only when it belongs to the provider in use and no model was forced.
   const promoted = !model && modelRole ? await activeModelFor(modelRole) : null;
-  const resolvedModel = model || (promoted && promoted.provider === provider ? promoted.model : null) || process.env[envVar] || MODEL_DEFAULTS[provider][tier];
+  const { provider, model: resolvedModel } = resolveProviderAndModel({ task, tier, model, promoted });
 
   if (provider === 'openai') {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
@@ -131,12 +161,10 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
 // codebase makes, so a caller here is expected to defensively re-parse with
 // extractJson() itself and treat a parse failure as "zero findings this
 // run" rather than pay for a second full vision round-trip.
-export async function callLLMWithImages(system, user, images, { model, maxTokens = 1500, tier = 'daily', generatorId, siteId } = {}) {
+export async function callLLMWithImages(system, user, images, { model, maxTokens = 1500, tier = 'daily', generatorId, siteId, task } = {}) {
   system = await withAgentMemory(system, generatorId, siteId);
   system = await withDesignContext(system, generatorId, siteId);
-  const provider = pickProvider();
-  const envVar = tier === 'monthly' ? 'REPORT_MODEL_MONTHLY' : 'REPORT_MODEL_DAILY';
-  const resolvedModel = model || process.env[envVar] || MODEL_DEFAULTS[provider][tier];
+  const { provider, model: resolvedModel } = resolveProviderAndModel({ task, tier, model });
   const imageList = Array.isArray(images) ? images : [];
 
   if (provider === 'openai') {

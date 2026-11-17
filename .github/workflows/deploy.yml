@@ -87,6 +87,13 @@ jobs:
             REPORT_PROVIDER=${{ vars.REPORT_PROVIDER }}
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            # Split work by provider (server/llm.js resolveProviderAndModel). Unset = same as REPORT_PROVIDER, so nothing changes until set.
+            LLM_PROVIDER_REPORTS=${{ vars.LLM_PROVIDER_REPORTS }}
+            LLM_PROVIDER_CONTENT=${{ vars.LLM_PROVIDER_CONTENT }}
+            LLM_MODEL_REPORTS_DAILY=${{ vars.LLM_MODEL_REPORTS_DAILY }}
+            LLM_MODEL_REPORTS_MONTHLY=${{ vars.LLM_MODEL_REPORTS_MONTHLY }}
+            LLM_MODEL_CONTENT_DAILY=${{ vars.LLM_MODEL_CONTENT_DAILY }}
+            LLM_MODEL_CONTENT_MONTHLY=${{ vars.LLM_MODEL_CONTENT_MONTHLY }}
 
             # ── AI Recommendation Agent (opt-in, real costed OpenAI probes) ──
             # Needs this separate flag as well as OPENAI_API_KEY (server/agents/ai-recommendation.js), so a key alone never starts
@@ -94,6 +101,9 @@ jobs:
             # 21 Oct. Being a server-wide switch, it also covers every client onboarded from now on: the baseline runs this agent, and
             # the agent seeds that client's tracked prompts on its first run.
             AI_RECOMMENDATION_ENABLED=true
+            # Claude probes in the same agent (server/agents/lib/model-providers/anthropic.js) need their own flag plus ANTHROPIC_API_KEY,
+            # so a Claude key alone never starts paid probe calls.
+            AI_RECOMMENDATION_ANTHROPIC_ENABLED=true
 
             # ── Shipping time (owner decision 2026-11-06) ───────────────────
             # Fixes are drafted and pull requests opened ONCE a day at 11:00 (server time, TZ above), after the 07:00 detection run.

@@ -63,7 +63,7 @@ export async function runDailyDocReport(site, date) {
     'If you cite a percent change, use ONLY the precomputed vsPriorDayPct values given — never calculate ' +
     'your own percentage. null means no prior-day baseline; do not invent one. ' +
     'No preamble, no bullet symbols, no markdown headers. Under 80 words.';
-  const overview = await callLLM(system, `Daily digest:\n\n${JSON.stringify(digest, null, 2)}`, { maxTokens: 150 });
+  const overview = await callLLM(system, `Daily digest:\n\n${JSON.stringify(digest, null, 2)}`, { task: 'report', maxTokens: 150 });
 
   const label = dayLabel(date);
   let text = '';

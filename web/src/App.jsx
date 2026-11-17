@@ -38,6 +38,7 @@ const Content = lazy(() => import('./pages/Content.jsx'));
 const Workspace = lazy(() => import('./pages/Workspace.jsx'));
 const OAuthAuthorize = lazy(() => import('./pages/OAuthAuthorize.jsx'));
 const Account = lazy(() => import('./pages/Account.jsx'));
+const ConnectedTab = lazy(() => import('./pages/ConnectedTab.jsx'));
 const UsersAndTokens = lazy(() => import('./pages/admin/UsersAndTokens.jsx'));
 const Monitoring = lazy(() => import('./pages/admin/Monitoring.jsx'));
 
@@ -190,6 +191,11 @@ export default function App() {
   // Standalone account page (Humblytics-style): no sidebar, top bar, toolbar or
   // agent panel — the person's own account settings (profile, sign-in, plan).
   // Workspace things live on the in-app /workspace page.
+  // The new tab GitHub / PostHog send back to: hands the outcome to the waiting SuperRank tab (lib/connect-tab.js).
+  if (location.pathname === '/connected') {
+    return <Suspense fallback={<div className="min-h-screen bg-canvas" />}><ConnectedTab /></Suspense>;
+  }
+
   if (location.pathname === '/account') {
     return (
       <Suspense fallback={<div className="p-8 text-faint">Loading…</div>}>

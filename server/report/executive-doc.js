@@ -114,7 +114,7 @@ export async function runExecutiveDocReport(site, anchorDate) {
     '- estimatedImpact: cite ONLY the opportunity section\'s own estimatedTrafficGain figures if present, framed ' +
     'explicitly as an estimate — never invent a revenue or dollar figure, there is no conversion-value data here.';
   const user = `Weekly executive digest:\n\n${JSON.stringify(digest)}`;
-  const raw = await callLLM(system, user, { maxTokens: 1200 });
+  const raw = await callLLM(system, user, { task: 'report', maxTokens: 1200 });
   const sections = parseSections(raw);
 
   const { text: sectionText, heading, subheads } = buildSection(label, sections);

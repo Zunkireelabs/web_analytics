@@ -7,9 +7,9 @@ import Button from '../Button.jsx';
 import Badge from '../Badge.jsx';
 import GoalFields from './GoalFields.jsx';
 import BusinessProfileFields, { gbpReady, gbpSource } from './BusinessProfileFields.jsx';
-import PosthogFields from './PosthogFields.jsx';
 import { DEFAULT_GOAL, goalComplete } from '../../lib/workspace.js';
 import { useAccess } from '../../lib/access.jsx';
+import { openConnectTab, useConnectTab, GITHUB_ERRORS } from '../../lib/connect-tab.js';
 
 // Adding a project, end to end, with no staff step anywhere in it:
 //
@@ -33,8 +33,9 @@ import { useAccess } from '../../lib/access.jsx';
 //
 // Closing part-way is safe: the project already exists, and the Projects page
 // shows "Finish setting up" on it, which reopens this at the step still owed.
-// 'Product' is the optional PostHog step: most clients skip it, and the Baseline step runs whether they did or not.
-const STEPS = ['Details', 'Goal', 'Google', 'Business', 'GitHub', 'PostHog', 'Baseline'];
+// Step ids are fixed (links such as ?step=7 rely on them). Step 6, PostHog, was removed from setup on 2026-11-17: only
+// SuperRank's own project uses PostHog and it is already connected, so no client is asked. The circles show 1 to 6.
+const STEPS = [[1, 'Details'], [2, 'Goal'], [3, 'Google'], [4, 'Business'], [5, 'GitHub'], [7, 'Baseline']];
 
 const CARD = { boxShadow: '0 0 0 1px var(--input), 0 1px 2px rgba(0,0,0,.03)' };
 const CARD_ON = { boxShadow: '0 0 0 1px var(--primary), 0 0 0 4px var(--primary-tint)' };
@@ -51,16 +52,16 @@ function nameFromDomain(raw) {
 
 function Stepper({ step }) {
   return (
-    <div className="mb-6" role="list" aria-label={`Step ${step} of ${STEPS.length}`}>
+    <div className="mb-6" role="list" aria-label={`Step ${Math.max(1, STEPS.findIndex(([n]) => n === step) + 1)} of ${STEPS.length}`}>
       <div className="flex items-center">
-        {STEPS.map((label, i) => {
-          const n = i + 1, on = n === step, done = n < step;
+        {STEPS.map(([n, label], i) => {
+          const on = n === step, done = n < step;
           return (
             <div key={label} role="listitem" aria-current={on ? 'step' : undefined} className={`flex items-center min-w-0 ${i > 0 ? 'flex-1' : ''}`}>
               {/* The line leading into a step fills in once the step before it is done. */}
               {i > 0 && <span className="h-0.5 flex-1 mx-2 rounded-full" style={{ background: done || on ? 'var(--primary)' : 'var(--border-2)', opacity: done ? 1 : on ? 0.35 : 1 }} />}
               <span className={`w-7 h-7 rounded-full grid place-items-center text-xs font-semibold shrink-0 transition-colors ${done ? 'bg-primary text-white' : on ? 'bg-fg text-white ring-4 ring-[var(--muted)]' : 'bg-muted text-faint'}`}>
-                {done ? <Check size={13} strokeWidth={3} /> : n}
+                {done ? <Check size={13} strokeWidth={3} /> : i + 1}
               </span>
             </div>
           );
@@ -68,8 +69,8 @@ function Stepper({ step }) {
       </div>
       {/* Names sit under their circles; on a phone only the current one is named. */}
       <div className="flex mt-2">
-        {STEPS.map((label, i) => {
-          const n = i + 1, on = n === step, done = n < step;
+        {STEPS.map(([n, label], i) => {
+          const on = n === step, done = n < step;
           return (
             <span key={label} className={`flex-1 text-xs ${i === 0 ? 'text-left' : i === STEPS.length - 1 ? 'text-right' : 'text-center'} ${on ? 'font-medium text-fg' : done ? 'hidden sm:block text-text' : 'hidden sm:block text-faint'}`}>{label}</span>
           );
@@ -213,6 +214,7 @@ export default function NewProjectModal({ workspace, first = false, project: exi
   const [gbpChoice, setGbpChoice] = useState(null); // linked | none | not_applicable | null = not answered
   const [gbpUrl, setGbpUrl] = useState('');
   const [baseline, setBaseline] = useState(existing ? 'idle' : 'idle'); // idle | running | done | failed
+  const [jumpToNeeded, setJumpToNeeded] = useState(false); // reopened via "Finish setting up": skip steps already done
 
   // Reopening on an existing project: start at the first step it still owes.
   useEffect(() => {
@@ -221,7 +223,9 @@ export default function NewProjectModal({ workspace, first = false, project: exi
     setName(existing.name || '');
     setDomain(existing.domain || '');
     if (existing.goal) setGoal(existing.goal);
-    setStep(startStep || (!existing.goal ? 2 : 3));
+    setStep(startStep === 6 ? 7 : startStep || (!existing.goal ? 2 : 3));
+    // "Finish setting up" (no particular step asked for): once we know what is connected, jump past what is done.
+    setJumpToNeeded(!startStep);
     // Coming back from Google/GitHub the project arrives without its goal. Look it up before asking
     // again, or "Save goal" on step 2 would overwrite the goal the person already chose.
     if (existing.goal === undefined) {
@@ -246,6 +250,8 @@ export default function NewProjectModal({ workspace, first = false, project: exi
   const [mine, setMine] = useState(null); // the signed-in person's own GitHub repositories; null = not loaded
  // staff: 'app' = every repo the SuperRank app reaches, 'mine' = the signed-in GitHub account's own
   const [useShared, setUseShared] = useState(false); // staff only: list SuperRank's shared account instead of a connected one
+  const [ghWaiting, setGhWaiting] = useState(false); // GitHub is open in another tab and this step is waiting for it
+  const [ghNote, setGhNote] = useState(null); // 'connected' once the other tab reports back
   const loadConnect = async (siteId, { shared = false } = {}) => {
     setConnect(null);
     try {
@@ -263,6 +269,16 @@ export default function NewProjectModal({ workspace, first = false, project: exi
     }
   };
   useEffect(() => { if (isOpen && project?.id && step >= 3 && !connect) loadConnect(project.id); }, [isOpen, project?.id, step]);
+  // Reopened with "Finish setting up": open the first step that still needs doing, not Google again when Google is done.
+  // Goal (2) is handled above; from Google on: Google (3), GitHub (5), then Baseline (7). Business is optional and was
+  // offered when the person passed it, so it is not reopened by itself (it stays reachable with Back).
+  useEffect(() => {
+    if (!jumpToNeeded || step !== 3 || !connect?.state) return;
+    setJumpToNeeded(false);
+    const st = connect.state;
+    const next = !st.google?.connected ? 3 : !st.github?.connected ? 5 : 7;
+    if (next !== 3) setStep(next);
+  }, [jumpToNeeded, step, connect]);
   // GitHub's list is slow (one call per installation): it starts loading while the person is still on the
   // Google step, so it is usually ready by the time they get to GitHub. Clients never get it (staff only).
   useEffect(() => {
@@ -293,6 +309,7 @@ export default function NewProjectModal({ workspace, first = false, project: exi
     setStep(1); setName(''); setDomain(''); setNameTouched(false); setGoal(DEFAULT_GOAL); setProject(null);
     setConnect(null); setGithub(null); setGsc(null); setGa4(null); setRepo(null); setGithubChecks(null); setUseStage(false); setStage('stage'); setUseShared(false);
     setBaseline('idle'); setError(null); setBusy(false); setMine(null); setBranches(null); setBranch('');
+    setGhWaiting(false); setGhNote(null); setJumpToNeeded(false);
     onClose(created);
   };
 
@@ -323,9 +340,40 @@ export default function NewProjectModal({ workspace, first = false, project: exi
     window.location.assign(url);
   });
   // "Connect with GitHub": GitHub's own screen, where the person chooses which repositories SuperRank may see.
+  // It opens in a NEW tab, so this popup stays on the GitHub step; the other tab reports back (lib/connect-tab.js).
   const startGithub = () => run(async () => {
-    const { url } = await api.project.connect.githubStart(project.id);
-    window.location.assign(url);
+    setGhNote(null);
+    const how = await openConnectTab(async () => (await api.project.connect.githubStart(project.id)).url);
+    if (how === 'tab') setGhWaiting(true);
+  });
+  // Installing the SuperRank app on more repositories: also a new tab, and the list refreshes when it is done.
+  const installGithubApp = (installUrl) => run(async () => {
+    setGhNote(null);
+    const how = await openConnectTab(async () => installUrl);
+    if (how === 'tab') setGhWaiting(true);
+  });
+  // Re-read the GitHub sign-in and its repositories without blanking the step (no "Loading" flash).
+  const refreshGithub = async () => {
+    if (!project?.id) return;
+    try {
+      const data = await api.project.connect.state(project.id, { shared: useShared });
+      setConnect(data);
+      if (data.github?.connected) setMine(await api.project.connect.githubMine(project.id));
+    } catch { /* the step keeps what it showed; "I finished, check now" tries again */ }
+  };
+  useConnectTab('github', ghWaiting, {
+    onDone: (params) => {
+      setGhWaiting(false);
+      if (params.gherror) { setError(GITHUB_ERRORS[params.gherror] || 'GitHub could not be connected.'); return; }
+      setGhNote(params.github === 'installed' ? 'installed' : 'connected');
+      refreshGithub();
+    },
+    // No message (a browser without BroadcastChannel): look again when the person comes back to this tab.
+    onFocus: async () => {
+      if (!project?.id) return;
+      const r = await api.project.connect.githubMine(project.id).catch(() => null);
+      if (r?.signedIn && (!mine?.signedIn || r.repos.length !== mine.repos.length)) { setGhWaiting(false); setGhNote('connected'); refreshGithub(); }
+    },
   });
   const disconnectGoogle = () => run(async () => {
     await api.project.connect.googleDisconnect(project.id);
@@ -358,7 +406,7 @@ export default function NewProjectModal({ workspace, first = false, project: exi
     const r = await api.project.connect.github(project.id, { repoOwner: owner, repoName, ...(usingMine ? { source: 'mine' } : {}), ...(usingMine && branch ? { repoDefaultBranch: branch } : {}), ...(useStage && stage.trim() ? { prTargetBranch: stage.trim() } : {}) });
     setConnect((c) => ({ ...c, state: r.state }));
     setGithubChecks({ ...r.checks, techStack: r.techStack });
-    setStep(6);
+    setStep(7);
   });
 
   // A run that is already going (this popup was closed and reopened, the page was refreshed, a
@@ -615,13 +663,14 @@ export default function NewProjectModal({ workspace, first = false, project: exi
             <div className="text-[13px] font-semibold text-fg">{who === 'staff' ? 'Sign in with your own GitHub account' : 'Connect the repository behind your website'}</div>
             <p className="mt-1 text-xs text-faint leading-[18px]">
               {who === 'staff'
-                ? 'You see the repositories your account can reach, choose the one for this project, and the agent works from it.'
-                : 'GitHub opens in a new screen. You choose which repositories SuperRank may use, then come straight back and pick the one for this site. SuperRank only ever sees the ones you allow.'}
+                ? 'GitHub opens in a new tab. Sign in there, then come back to this tab: the repositories your account can reach appear here by themselves.'
+                : 'GitHub opens in a new tab. Choose which repositories SuperRank may use there, then come back to this tab. Your repositories appear here by themselves. If anything goes wrong on GitHub, just close that tab. You stay right here.'}
             </p>
             <div className="mt-3 flex flex-wrap items-center gap-3">
               <Button variant="primary" onClick={startGithub} disabled={busy || !ghCanConnect}>
                 <ExternalLink size={14} />{busy ? 'Opening GitHub…' : 'Connect with GitHub'}
               </Button>
+              {ghCanConnect && <span className="text-xs text-faint">Opens in a new tab</span>}
               {!ghCanConnect && <span className="text-xs" style={{ color: '#8a5300' }}>GitHub sign-in is not set up on this server yet.</span>}
             </div>
           </div>
@@ -644,13 +693,34 @@ export default function NewProjectModal({ workspace, first = false, project: exi
         })}
       </ol>
     );
+    const waitingCard = (
+      <div className="rounded-card bg-white p-4" style={CARD} role="status">
+        <div className="flex items-start gap-3">
+          <span className="w-9 h-9 rounded-control bg-primary-tint text-primary grid place-items-center shrink-0" style={{ boxShadow: 'inset 0 0 0 1px var(--primary-ring)' }}><Loader2 size={16} className="animate-spin" /></span>
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-semibold text-fg">Finish on the GitHub tab</div>
+            <p className="mt-1 text-xs text-faint leading-[18px]">Sign in and choose the repositories SuperRank may use. This page updates by itself when you are done.</p>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <Button variant="light" onClick={startGithub} disabled={busy}><ExternalLink size={14} />Open the GitHub tab again</Button>
+              <button type="button" className="text-[13px] text-faint underline underline-offset-2 hover:text-fg" onClick={() => { setGhWaiting(false); refreshGithub(); }}>I finished, check now</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
     const mineLoaded = mine && mine.signedIn;
     const mineBlock = () => {
-      if (!connect?.github?.connected) return connectCard(restricted ? 'client' : 'staff');
+      if (ghWaiting) return waitingCard;
+      // The app was installed, but there is no GitHub sign-in in this session yet: one more click, not an error.
+      const installedNote = (ghNote === 'installed' || notice?.github === 'installed') && (
+        <Note tone="green" icon={Check}>The SuperRank app is installed on GitHub. Now click <b className="font-medium">Connect with GitHub</b> to sign in and choose the repository.</Note>
+      );
+      if (!connect?.github?.connected) return <>{installedNote}{connectCard(restricted ? 'client' : 'staff')}</>;
       if (mine === null) return <div className="flex items-center gap-2 text-[13px] text-faint py-6 justify-center"><Loader2 size={15} className="animate-spin" />Reading your repositories…</div>;
-      if (!mine.signedIn) return <>{mine.error && <Note tone="amber" icon={AlertTriangle}>{mine.error}</Note>}{connectCard(restricted ? 'client' : 'staff')}</>;
+      if (!mine.signedIn) return <>{installedNote}{mine.error && <Note tone="amber" icon={AlertTriangle}>{mine.error}</Note>}{connectCard(restricted ? 'client' : 'staff')}</>;
       return (
         <div className="space-y-3">
+          {ghNote === 'connected' && <Note tone="green" icon={Check}>{mine.repos.length ? 'GitHub connected. Pick the repository for this website.' : 'GitHub connected. One more step: install the SuperRank app.'}</Note>}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-text">
             <span className="inline-flex items-center gap-1.5"><Check size={14} style={{ color: 'var(--green)' }} />Signed in to GitHub{mine.login ? <> as <b className="font-medium text-fg">{mine.login}</b></> : null}</span>
             <button type="button" className="text-fg underline underline-offset-2 hover:text-primary" onClick={startGithub} disabled={busy}>Use a different account</button>
@@ -662,13 +732,13 @@ export default function NewProjectModal({ workspace, first = false, project: exi
                 <div className="min-w-0 flex-1">
                   <div className="text-[13px] font-semibold text-fg">Next: install the SuperRank app</div>
                   <p className="mt-1 text-xs text-faint leading-[18px]">
-                    You are signed in, but SuperRank cannot see any repository yet. GitHub asks you to install the app and tick the repositories it may use. It opens in this tab and brings you back here, where your repositories will be waiting.
+                    You are signed in, but SuperRank cannot see any repository yet. GitHub asks you to install the app and tick the repositories it may use. It opens in a new tab; when you finish there, your repositories appear here by themselves.
                   </p>
                   <div className="mt-3 flex flex-wrap items-center gap-3">
                     {mine.installUrl
-                      ? <a href={mine.installUrl} className="btn btn--primary"><ExternalLink size={14} />Install SuperRank on GitHub</a>
+                      ? <Button variant="primary" onClick={() => installGithubApp(mine.installUrl)} disabled={busy}><ExternalLink size={14} />Install SuperRank on GitHub</Button>
                       : <span className="text-xs" style={{ color: '#8a5300' }}>The SuperRank app address is not set up on this server yet.</span>}
-                    <button type="button" className="text-[13px] text-faint underline underline-offset-2 hover:text-fg" onClick={() => { setMine(null); }}>I have installed it, check again</button>
+                    <button type="button" className="text-[13px] text-faint underline underline-offset-2 hover:text-fg" onClick={refreshGithub}>I have installed it, check again</button>
                   </div>
                 </div>
               </div>
@@ -716,7 +786,7 @@ export default function NewProjectModal({ workspace, first = false, project: exi
             </div>
           )}
           {mine.installUrl && mine.repos.length > 0 && (
-            <a href={mine.installUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-[13px] font-medium text-fg hover:text-primary"><ExternalLink size={13} />A repository missing? Add it on GitHub</a>
+            <button type="button" onClick={() => installGithubApp(mine.installUrl)} disabled={busy} className="inline-flex items-center gap-1.5 text-[13px] font-medium text-fg hover:text-primary"><ExternalLink size={13} />A repository missing? Add it on GitHub</button>
           )}
         </div>
       );
@@ -800,39 +870,15 @@ export default function NewProjectModal({ workspace, first = false, project: exi
         <Button variant="light" onClick={() => setStep(4)} disabled={busy}>Back</Button>
         {restricted ? (
           <>
-            {(githubOptional || !fromGetStarted) && <Button variant="light" onClick={() => setStep(6)} disabled={busy}>Skip for now</Button>}
+            {(githubOptional || !fromGetStarted) && <Button variant="light" onClick={() => setStep(7)} disabled={busy}>Skip for now</Button>}
             {mineLoaded && mine.repos.length > 0 && <Button variant="primary" onClick={saveGithub} disabled={busy || !repo || (useStage && !stage.trim())}>{busy ? 'Connecting…' : 'Connect repository'}</Button>}
           </>
         ) : (
           <>
-            {githubOptional && <Button variant="light" onClick={() => setStep(6)} disabled={busy}>Skip for now</Button>}
+            {githubOptional && <Button variant="light" onClick={() => setStep(7)} disabled={busy}>Skip for now</Button>}
             <Button variant="primary" onClick={saveGithub} disabled={busy || !repo || (useStage && !stage.trim()) || (effSource === 'mine' && !mineLoaded)}>{busy ? 'Connecting…' : 'Connect repository'}</Button>
           </>
         )}
-      </>
-    );
-  }
-
-  if (step === 6) {
-    icon = BarChart3;
-    title = 'Connect PostHog';
-    subtitle = 'Optional. See where people drop out before they convert.';
-    body = (
-      <div className="space-y-4">
-        {project?.id
-          ? <PosthogFields siteId={project.id} notice={notice} initialGuide={Boolean(notice?.guide)} />
-          : <div className="text-sm text-faint">Finish the earlier steps first.</div>}
-        {errorBox}
-      </div>
-    );
-    footer = (
-      <>
-        <Button variant="light" onClick={() => setStep(5)} disabled={busy}>Back</Button>
-        {/* Same shape as every other optional step (Back / Skip for now / primary), so someone who has read
-            "optional" has the word they are looking for. Both buttons advance: nothing on this step is saved by the
-            footer — connecting happens through the form's own button. */}
-        <Button variant="light" onClick={() => setStep(7)} disabled={busy}>Skip for now</Button>
-        <Button variant="primary" onClick={() => setStep(7)} disabled={busy}>Continue</Button>
       </>
     );
   }

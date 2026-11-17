@@ -43,7 +43,7 @@ export async function checkPositioning(content, siteId) {
   const user = `Drafted landing page:\n${pageSummary(content)}\n\nVerified capabilities:\n${capabilityList}`;
 
   try {
-    const parsed = await callLLMForJson(POSITIONING_SYSTEM, user, { maxTokens: 300, generatorId: 'positioning-guard', siteId });
+    const parsed = await callLLMForJson(POSITIONING_SYSTEM, user, { task: 'content', maxTokens: 300, generatorId: 'positioning-guard', siteId });
     const issues = Array.isArray(parsed?.issues) ? parsed.issues.filter((i) => typeof i === 'string' && i.trim()) : [];
     return issues.map((snippet) => ({ path: 'positioning', patternId: 'positioning-mismatch', snippet }));
   } catch (e) {

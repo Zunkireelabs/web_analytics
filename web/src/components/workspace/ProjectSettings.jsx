@@ -1,13 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import { Activity, BarChart3, ArrowLeftRight, Check, ChevronsUpDown, Globe, KeyRound, MapPin, PlugZap, Search, Settings as SettingsIcon, Target, Users, UserPlus, X } from 'lucide-react';
+import { Activity, BarChart3, ArrowLeftRight, Check, ChevronsUpDown, Globe, KeyRound, MapPin, PlugZap, Search, Settings as SettingsIcon, Store, Target, Users, UserPlus, X } from 'lucide-react';
 import { api, timeAgo } from '../../api.js';
 import Avatar from '../Avatar.jsx';
 import Badge from '../Badge.jsx';
 import Button from '../Button.jsx';
 import RichSelect from '../RichSelect.jsx';
 import SettingsCard from '../settings/SettingsCard.jsx';
+import SettingRow, { ChipList } from '../settings/SettingRow.jsx';
+import Modal from '../Modal.jsx';
 import UnderlineTabs from '../settings/UnderlineTabs.jsx';
 import GoalModal from './GoalModal.jsx';
 import BusinessProfileModal from './BusinessProfileModal.jsx';
@@ -23,8 +25,12 @@ import { STATUS } from '../../lib/palette.js';
 import { siteDomain, siteInitials } from '../../lib/nav.js';
 import { ROLE_LABELS, SCOPED_PERMISSIONS, goalLine } from '../../lib/workspace.js';
 
+// Each setting is one line with one action; editing opens a popup. The General tab used to stack six cards and two
+// open forms (about 2,400px); it is now split by what the setting is about.
 const PROJECT_TABS = [
   { key: 'general', label: 'General', icon: SettingsIcon },
+  { key: 'business', label: 'Business', icon: Store },
+  { key: 'connections', label: 'Connections', icon: PlugZap, manage: true },
   { key: 'people', label: 'People', icon: Users },
   { key: 'tokens', label: 'API tokens', icon: KeyRound, manage: true },
   { key: 'monitoring', label: 'Monitoring', icon: Activity },
@@ -38,14 +44,6 @@ const options = ['admin', 'member'].map((value) => ({ value, label: SCOPED_PERMI
 // this project sees exactly the same page, with nothing about the workspace around it.
 export default function ProjectSettings({ projects, project, email, tab, onTab, onPickProject, onChanged }) {
   const navigate = useNavigate();
-  // What is connected to this project (the project's own columns): the Setup card says what is left and lets each be done alone.
-  const [conn, setConn] = useState(null);
-  useEffect(() => {
-    let live = true;
-    setConn(null);
-    api.sites().then((list) => { if (live) setConn((list || []).find((x) => x.id === project.id) || null); }).catch(() => {});
-    return () => { live = false; };
-  }, [project.id]);
   const [overview, setOverview] = useState(null);
   const [goalOpen, setGoalOpen] = useState(false);
   const [gbpOpen, setGbpOpen] = useState(false);
@@ -58,6 +56,27 @@ export default function ProjectSettings({ projects, project, email, tab, onTab, 
   const manage = project.role === 'admin' || project.role === 'owner';
   const tabs = PROJECT_TABS.filter((t) => manage || !t.manage);
   const active = tabs.some((t) => t.key === tab) ? tab : 'general';
+
+  // What the Business and Connections lines show. Each is read for THIS project (not the session's current one), and
+  // read again when its popup closes, so a line always shows what was just saved.
+  const [places, setPlaces] = useState(null);       // { primary, nearby[] }
+  const [offer, setOffer] = useState(null);         // { proposed[], verified[] }
+  const [connect, setConnect] = useState(null);     // GET /projects/:id/connect
+  const [posthog, setPosthog] = useState(null);     // GET /projects/:id/connect/posthog
+  const [editing, setEditing] = useState(null);     // 'places' | 'offer' | 'posthog' | null
+  const loadPlaces = () => api.project.places.get(project.id).then(setPlaces).catch(() => setPlaces({ primary: '', nearby: [] }));
+  const loadOffer = () => api.project.capabilities.list(project.id).then(setOffer).catch(() => setOffer({ proposed: [], verified: [] }));
+  const loadConnect = () => (manage ? api.project.connect.state(project.id).then(setConnect).catch(() => setConnect({ error: true })) : Promise.resolve());
+  const loadPosthog = () => (manage ? api.project.connect.posthog(project.id).then(setPosthog).catch(() => setPosthog({ connected: false })) : Promise.resolve());
+  useEffect(() => { setPlaces(null); setOffer(null); loadPlaces(); loadOffer(); }, [project.id]);
+  useEffect(() => { setConnect(null); setPosthog(null); if (active === 'connections' || active === 'general') { loadConnect(); loadPosthog(); } }, [project.id, active === 'connections' || active === 'general']);
+  const closeEditor = () => {
+    const was = editing;
+    setEditing(null);
+    if (was === 'places') loadPlaces();
+    if (was === 'offer') loadOffer();
+    if (was === 'posthog') loadPosthog();
+  };
 
   const refresh = () => api.project.overview(project.id).then(setOverview).catch(() => setOverview({ projects: [], needsAttention: 0, activity: [] }));
   useEffect(() => { setOverview(null); refresh(); }, [project.id]);
@@ -173,85 +192,97 @@ export default function ProjectSettings({ projects, project, email, tab, onTab, 
       <div className="mt-5">
         {active === 'general' && (
           <div className="space-y-3">
-            {conn && conn.property_type !== 'product' && (() => {
-              // Each step on its own: a missing Google connection never blocks GitHub. `step` is where the setup form opens.
+            {/* Only while something is still missing: what is left, each step on its own. */}
+            {manage && connect?.state && (() => {
+              const st = connect.state;
               const rows = [
-                { label: 'Search Console and Analytics', ok: Boolean(conn.gsc_property && conn.ga4_property_id), step: 3, detail: conn.gsc_property ? String(conn.gsc_property).replace(/^sc-domain:/, '') : 'Not connected yet' },
-                { label: 'GitHub', ok: Boolean(conn.repo_owner && conn.repo_name), step: 5, detail: conn.repo_owner && conn.repo_name ? `${conn.repo_owner}/${conn.repo_name}` : 'Not connected yet' },
-                { label: 'Baseline report', ok: Boolean(conn.onboarded_at), step: 6, detail: conn.onboarded_at ? 'Built' : 'Not built yet' },
+                { label: 'Search Console and Analytics', ok: Boolean(st.google?.gscProperty && st.google?.ga4PropertyId), step: 3 },
+                { label: 'GitHub', ok: Boolean(st.github?.repo), step: 5 },
+                { label: 'Baseline report', ok: Boolean(st.baseline?.done), step: 7 },
               ];
-              const left = rows.filter((r) => !r.ok).length;
-              if (!left) return null; // all connected: nothing to show
+              const left = rows.filter((r) => !r.ok);
+              if (!left.length) return null;
               return (
-                <SettingsCard icon={PlugZap} title="Setup" description={`${left} step${left === 1 ? '' : 's'} left. Skipped something? Connect it here, one step at a time.`}
-                  action={manage && <Button variant="primary" onClick={() => navigate(`/workspace?finish=${project.id}`)}>Complete setup</Button>}>
-                  <div className="px-5 py-1">
-                    {rows.map((r) => (
-                      <div key={r.label} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
-                        <span className={`w-5 h-5 rounded-full grid place-items-center shrink-0 ${r.ok ? 'bg-primary text-white' : 'bg-muted text-faint'}`}>{r.ok ? <Check size={11} strokeWidth={3} /> : <X size={11} />}</span>
-                        <div className="min-w-0 flex-1"><div className="text-[13px] font-medium text-fg">{r.label}</div><div className="text-xs text-faint truncate">{r.detail}</div></div>
-                        {r.ok ? <Badge tone="green">Connected</Badge> : manage && <Button variant="light" size="sm" onClick={() => navigate(`/workspace?finish=${project.id}&step=${r.step}`)}>Connect</Button>}
-                      </div>
+                <SettingsCard icon={PlugZap} title="Setup" description={`${left.length} step${left.length === 1 ? '' : 's'} left. Connect each one on its own.`}
+                  action={<Button variant="primary" onClick={() => navigate(`/workspace?finish=${project.id}`)}>Complete setup</Button>}>
+                  <div className="px-4 sm:px-5">
+                    {left.map((r) => (
+                      <SettingRow key={r.label} label={r.label} value="Not connected yet" muted
+                        action={<Button variant="light" size="sm" onClick={() => navigate(`/workspace?finish=${project.id}&step=${r.step}`)}>Connect</Button>} />
                     ))}
                   </div>
                 </SettingsCard>
               );
             })()}
-            <SettingsCard icon={Target} title="Goal" description="What you want to grow with this project. Set it when you create a project, change it here any time."
-              action={manage && <Button variant="light" onClick={() => setGoalOpen(true)}>{p?.goal ? 'Edit goal' : 'Set a goal'}</Button>}>
-              <div className="px-5 py-4 flex items-center gap-3">
-                <span className="w-8 h-8 rounded-[8px] bg-primary text-white text-[11px] font-medium grid place-items-center shrink-0">{siteInitials(project.name)}</span>
-                <div className="min-w-0 flex-1">
-                  <div className="text-[13px] font-medium text-fg">{!overview ? ' ' : p?.goal ? goalLine(p.goal) : 'No goal yet'}</div>
-                  <div className="text-xs text-faint mt-0.5">{p?.goal ? 'Tracked on your Overview' : 'Pick what matters most and by when'}</div>
-                </div>
+            <SettingsCard icon={Globe} title="Project">
+              <div className="px-4 sm:px-5">
+                <SettingRow label="Name" value={project.name} />
+                <SettingRow label="Website" value={siteDomain({ website_domain: project.domain }) || 'Not set'} muted={!project.domain} />
+                <SettingRow label="Goal" hint="What you want to grow" muted={!p?.goal}
+                  value={!overview ? ' ' : p?.goal ? goalLine(p.goal) : 'None yet'}
+                  action={manage && <Button variant={p?.goal ? 'light' : 'primary'} size="sm" onClick={() => setGoalOpen(true)}>{p?.goal ? 'Edit goal' : 'Set a goal'}</Button>} />
+                {project.workspaceName && !project.shared && (
+                  <SettingRow label="Workspace" value={project.workspaceName}
+                    action={project.canTransfer && <Button variant="light" size="sm" onClick={() => setTransferOpen(true)}>Transfer</Button>} />
+                )}
               </div>
-            </SettingsCard>
-            <SettingsCard icon={MapPin} title="Business Profile" description="Your listing on Google Maps and local search. Optional."
-              action={manage && <Button variant="light" onClick={() => setGbpOpen(true)}>{p?.businessProfile?.status ? 'Change' : 'Add'}</Button>}>
-              <div className="px-5 py-4 min-w-0">
-                <div className="text-[13px] font-medium text-fg">{!overview ? ' ' : GBP_LABELS[p?.businessProfile?.status] || 'Not set up yet'}</div>
-                <div className="text-xs text-faint mt-0.5 break-words">
-                  {p?.businessProfile?.status === 'linked' && p.businessProfile.url
-                    ? <a href={p.businessProfile.url} target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:text-primary">{p.businessProfile.url.replace(/^https?:\/\//, '')}</a>
-                    : p?.businessProfile?.status === 'none' ? 'Create one so you show up in Maps and local searches.'
-                    : p?.businessProfile?.status === 'not_applicable' ? 'Marked as not a local business.'
-                    : 'Add it so Google Maps and local results can show your business.'}
-                </div>
-              </div>
-            </SettingsCard>
-            {/* Where a local business works. Optional; empty changes nothing. */}
-            {manage && (
-              <SettingsCard icon={MapPin} title="Where you work"
-                description="Optional. For a local business: the town you are based in and the places around it.">
-                <PlacesFields siteId={project.id} />
-              </SettingsCard>
-            )}
-            {/* The list research and recommendations are built around. Discovery proposes from the client's own site;
-                nothing proposed is used until a person approves it here. */}
-            {manage && (
-              <SettingsCard icon={Target} title="What you offer"
-                description="Confirm what your business sells. Research and recommendations are built around this.">
-                <CapabilityReview siteId={project.id} />
-              </SettingsCard>
-            )}
-            {/* Reachable for an EXISTING project, not only during setup: the connect step used to live solely in the
-                new-project flow, so a client who started using PostHog later had no way to add it. */}
-            {manage && (
-              <SettingsCard icon={BarChart3} title="PostHog"
-                description="Optional. See where people drop out before they convert.">
-                <div className="px-5 py-4"><PosthogFields siteId={project.id} /></div>
-              </SettingsCard>
-            )}
-            <SettingsCard icon={Globe} title="Details" description="What this project tracks.">
-              <dl className="px-5 py-1">
-                {[['Name', project.name], ['Website address', siteDomain({ website_domain: project.domain }) || 'Not set'], ...(project.workspaceName && !project.shared ? [['Workspace', project.workspaceName]] : [])].map(([l, v]) => (
-                  <div key={l} className="grid grid-cols-1 sm:grid-cols-[160px_1fr] gap-x-3 py-2.5 border-b border-border last:border-0"><dt className="text-[13px] text-faint">{l}</dt><dd className="text-sm text-fg min-w-0 truncate">{v}</dd></div>
-                ))}
-              </dl>
             </SettingsCard>
           </div>
         )}
+        {active === 'business' && (() => {
+          const verified = (offer?.verified || []).map((v) => v.name);
+          const toReview = offer?.proposed?.length || 0;
+          const nearby = places?.nearby || [];
+          const placeItems = [...(places?.primary ? [`Based in ${places.primary}`] : []), ...nearby];
+          const gbp = p?.businessProfile;
+          return (
+            <SettingsCard icon={Store} title="Your business" description="Research and recommendations are built around these. All optional.">
+              <div className="px-4 sm:px-5">
+                <SettingRow label="What you offer"
+                  hint={verified.length ? `${verified.length} product${verified.length === 1 ? '' : 's'} or service${verified.length === 1 ? '' : 's'}` : 'Products or services'}
+                  badge={toReview ? { tone: 'amber', label: `${toReview} to review` } : null}
+                  muted={!verified.length}
+                  value={!offer ? ' ' : verified.length ? <ChipList items={verified} /> : 'Nothing listed yet'}
+                  action={manage && <Button variant="light" size="sm" onClick={() => setEditing('offer')}>{verified.length || toReview ? 'Edit' : 'Add'}</Button>} />
+                <SettingRow label="Where you work"
+                  hint={places?.primary ? `Base${nearby.length ? ` and ${nearby.length} nearby place${nearby.length === 1 ? '' : 's'}` : ''}` : 'For a local business'}
+                  muted={!placeItems.length}
+                  value={!places ? ' ' : placeItems.length ? <ChipList items={placeItems} /> : 'Not set, so we write for everywhere'}
+                  action={manage && <Button variant="light" size="sm" onClick={() => setEditing('places')}>{placeItems.length ? 'Edit' : 'Add'}</Button>} />
+                <SettingRow label="Google Business Profile" hint="Maps and local search" muted={gbp?.status !== 'linked'}
+                  value={!overview ? ' ' : gbp?.status === 'linked' && gbp.url
+                    ? <a href={gbp.url} target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:text-primary break-all">{gbp.url.replace(/^https?:\/\//, '')}</a>
+                    : GBP_LABELS[gbp?.status] || 'Not set up'}
+                  action={manage && <Button variant="light" size="sm" onClick={() => setGbpOpen(true)}>{gbp?.status ? 'Change' : 'Add'}</Button>} />
+              </div>
+            </SettingsCard>
+          );
+        })()}
+        {active === 'connections' && manage && (() => {
+          const st = connect?.state;
+          const loading = !connect;
+          const change = (step, ok) => <Button variant="light" size="sm" onClick={() => navigate(`/workspace?finish=${project.id}&step=${step}`)}>{ok ? 'Change' : 'Connect'}</Button>;
+          const connected = { tone: 'green', label: 'Connected' };
+          const gsc = st?.google?.gscProperty; const ga4 = st?.google?.ga4PropertyId; const repo = st?.github?.repo;
+          const branch = st?.github?.prTargetBranch;
+          const ph = posthog?.connected ? posthog.connection : null;
+          return (
+            <SettingsCard icon={PlugZap} title="Connections" description="Where SuperRank reads your data and opens its pull requests.">
+              <div className="px-4 sm:px-5">
+                {connect?.error ? <div className="py-4 text-sm text-faint">Could not read the connections right now.</div> : (<>
+                  <SettingRow label="Search Console" badge={gsc ? connected : null} muted={!gsc} value={loading ? ' ' : gsc || 'Not connected'} action={!loading && change(3, gsc)} />
+                  <SettingRow label="Google Analytics" badge={ga4 ? connected : null} muted={!ga4} value={loading ? ' ' : ga4 ? `Property ${ga4}` : 'Not connected'} action={!loading && change(3, ga4)} />
+                  <SettingRow label="GitHub" badge={repo ? connected : null} muted={!repo}
+                    value={loading ? ' ' : repo ? `${repo}${branch ? ` · pull requests to ${branch}` : ''}` : 'Not connected'} action={!loading && change(5, repo)} />
+                  {/* Only a project that already has PostHog (SuperRank's own): nobody else is offered it. */}
+                  {(ph || posthog?.pending) && <SettingRow label="PostHog" badge={ph ? (ph.status === 'error' ? { tone: 'red', label: 'Not working' } : connected) : null} muted={!ph}
+                    value={!posthog ? ' ' : ph ? (ph.project_name || `Project ${ph.project_id}`) : posthog.pending ? 'Signed in, choose the project' : 'Not connected'}
+                    action={<Button variant="light" size="sm" onClick={() => setEditing('posthog')}>Manage</Button>} />}
+                </>)}
+              </div>
+            </SettingsCard>
+          );
+        })()}
         {active === 'people' && <ProjectPeople project={project} email={email} manage={manage} />}
         {active === 'tokens' && manage && <TokensTab projects={[{ id: project.id, name: project.name }]} workspaceName="" tokensApi={{
           list: () => api.project.tokens.list(project.id), create: (b) => api.project.tokens.create(project.id, b), revoke: (id) => api.project.tokens.revoke(project.id, id),
@@ -259,6 +290,18 @@ export default function ProjectSettings({ projects, project, email, tab, onTab, 
         {active === 'monitoring' && <MonitoringTab overview={overview} email={email} />}
       </div>
 
+      <Modal isOpen={editing === 'offer'} onClose={closeEditor} icon={Target} title="What you offer" maxWidth="max-w-[560px]" anchor="top"
+        footer={<Button variant="light" onClick={closeEditor}>Done</Button>}>
+        <div className="-mx-5 -my-4"><CapabilityReview siteId={project.id} onChanged={loadOffer} /></div>
+      </Modal>
+      <Modal isOpen={editing === 'places'} onClose={closeEditor} icon={MapPin} title="Where you work" maxWidth="max-w-[480px]" anchor="top"
+        footer={<Button variant="light" onClick={closeEditor}>Done</Button>}>
+        <div className="-mx-5 -my-4"><PlacesFields siteId={project.id} /></div>
+      </Modal>
+      <Modal isOpen={editing === 'posthog'} onClose={closeEditor} icon={BarChart3} title="PostHog" subtitle="Optional. See where people drop out before they convert." maxWidth="max-w-[560px]" anchor="top"
+        footer={<Button variant="light" onClick={closeEditor}>Done</Button>}>
+        <PosthogFields siteId={project.id} />
+      </Modal>
       <BusinessProfileModal project={gbpOpen ? { id: project.id, name: project.name, domain: project.domain, businessProfile: p?.businessProfile } : null}
         onClose={() => setGbpOpen(false)} onSaved={async () => { setGbpOpen(false); await refresh(); await onChanged?.(); }} />
       <GoalModal project={goalOpen ? { id: project.id, name: project.name, goal: p?.goal } : null} saveGoal={(g) => api.project.setGoal(project.id, g)}
