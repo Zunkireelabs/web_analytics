@@ -42,7 +42,7 @@ export async function generateCompliancePage({ siteId, params, pageLabel, factsG
     `or site-specific data claim not present in the given facts. ${factsGuidance}${sectionsList} ` +
     'Respond with ONLY a JSON object: {"headline": "...", "sections": [{"heading": "...", "body": "..."}], ' +
     '"metaTitle": "...", "metaDescription": "..."}';
-  const raw = await callLLM(system, `Facts: ${JSON.stringify(facts)}`, { maxTokens });
+  const raw = await callLLM(system, `Facts: ${JSON.stringify(facts)}`, { task: 'content', maxTokens });
 
   let parsed;
   try {

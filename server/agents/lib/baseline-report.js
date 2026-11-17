@@ -341,7 +341,7 @@ async function generateNarrative(site, kpiSnapshot, issuesSnapshot, industryPage
     '2-3 sentences: this is the measured state of the site today, and every future report is compared against ' +
     'these exact numbers. State it as a baseline for measurement — do not promise improvements.';
   const user = `site: ${site.name}\ndate: ${new Date().toISOString().slice(0, 10)}\nkpiSnapshot: ${JSON.stringify(kpiSnapshot)}\nissuesSnapshot: ${JSON.stringify(issuesSnapshot)}\nindustryPage: ${JSON.stringify(industryPage)}`;
-  const raw = await callLLM(system, user, { maxTokens: 1800 })
+  const raw = await callLLM(system, user, { task: 'report', maxTokens: 1800 })
     .catch((err) => { console.warn('[baseline-report] narrative failed:', err.message); return null; });
   return raw?.trim() || `# Baseline Report — ${site.name}\n\nReport generation failed — please retry.`;
 }

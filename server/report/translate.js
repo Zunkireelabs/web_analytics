@@ -17,7 +17,7 @@ export async function translateQuery(text) {
     '{"language": "...", "translation": "..."}';
   let result;
   try {
-    const raw = await callLLM(system, q, { maxTokens: 100 });
+    const raw = await callLLM(system, q, { task: 'report', maxTokens: 100 });
     const cleaned = raw.replace(/^```json\s*|\s*```$/g, '').trim();
     const parsed = JSON.parse(cleaned);
     result = { language: parsed.language || 'unknown', translation: parsed.translation || q };

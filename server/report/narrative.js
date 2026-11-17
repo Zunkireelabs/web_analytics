@@ -51,7 +51,7 @@ export async function generateNarrative(site, reportDate) {
   const user =
     `Here is today's data digest (percentages are change vs prior day / vs 7-day average):\n\n${JSON.stringify(digest, null, 2)}`;
 
-  return callLLM(system, user);
+  return callLLM(system, user, { task: 'report' });
 }
 
 // --- small date helpers operating on an explicit YYYY-MM-DD anchor ---

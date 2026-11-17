@@ -130,6 +130,14 @@ describe('parseBusinessProfile', () => {
       assert.match(r.value.url, /^https:\/\//);
     }
   });
+  test('the page listing ALL profiles is refused, with what to do instead (2026-11-17)', () => {
+    for (const url of ['https://business.google.com/locations', 'business.google.com', 'https://business.google.com/dashboard']) {
+      const r = parseBusinessProfile({ status: 'linked', url });
+      assert.equal(r.ok, false, url);
+      assert.match(r.error, /list of profiles.*Share profile.*Copy link/);
+    }
+    assert.equal(parseBusinessProfile({ status: 'linked', url: 'https://share.google/1maAsqJRhlqN8sKpl' }).ok, true);
+  });
   test('a website, a non-Maps Google page or garbage is refused', () => {
     for (const url of ['https://admizzeducation.com', 'https://www.google.com/search?q=admizz', 'not a link', 'javascript:alert(1)', 'https://evil.com/maps/place/x']) {
       assert.equal(parseBusinessProfile({ status: 'linked', url }).ok, false, url);

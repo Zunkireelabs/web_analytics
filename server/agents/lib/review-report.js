@@ -162,7 +162,7 @@ async function generateNarrative(facts) {
     'priority watchlist items, still-present verifications, agents with error_runs > 0) — never a generic ' +
     'platitude unconnected to the given data';
   const user = `Facts: ${JSON.stringify(facts)}`;
-  const raw = await callLLM(system, user, { maxTokens: 900 })
+  const raw = await callLLM(system, user, { task: 'report', maxTokens: 900 })
     .catch((err) => { console.warn('[review-report] narrative failed:', err.message); return null; });
   return parseSections(raw);
 }

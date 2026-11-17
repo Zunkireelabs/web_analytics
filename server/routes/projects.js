@@ -275,8 +275,12 @@ function asSessionActor(req) {
   return req;
 }
 
+// GitHub and PostHog open in a NEW tab. Their callbacks land on /connected, which hands the outcome to the waiting
+// SuperRank tab, or forwards to /workspace with the same parameters when no tab is waiting (web/src/lib/connect-tab.js).
+export const connectedTabUrl = (kind, params) => `/connected?${new URLSearchParams({ kind, ...params })}`;
+
 router.get('/github/callback', async (req, res) => {
-  const back = (params) => res.redirect(`/workspace?${new URLSearchParams(params)}`);
+  const back = (params) => res.redirect(connectedTabUrl('github', params));
   const pending = req.session?.githubConnect;
   if (req.session) delete req.session.githubConnect; // single use, whatever happens next
   try {
@@ -286,12 +290,22 @@ router.get('/github/callback', async (req, res) => {
     // the installation. The person is still signed in to GitHub here from a minute ago, and the list is read
     // with their own token, so the new installation simply appears; nothing from this request is trusted.
     const signedIn = req.session.githubUser;
-    if (!req.query.state && req.query.installation_id && signedIn && signedIn.userId === req.session.userId && Date.now() - signedIn.at < GITHUB_SESSION_MS) {
-      return back({ finish: signedIn.siteId, github: 'connected' });
+    const signedInHere = signedIn && signedIn.userId === req.session.userId && Date.now() - signedIn.at < GITHUB_SESSION_MS;
+    if (!req.query.state && req.query.installation_id) {
+      if (signedInHere) return back({ finish: signedIn.siteId, github: 'connected' });
+      // The app WAS installed, but this session has no GitHub sign-in to go with it (never signed in here, or more than
+      // an hour ago). Not an error: say it is installed and ask them to sign in. This used to show "took too long or did
+      // not start here", which read as a failure (seen live 2026-11-17).
+      console.warn(`[projects] GitHub callback: app installed (installation ${String(req.query.installation_id).slice(0, 20)}) with no GitHub sign-in in this session; asking to sign in.`);
+      return back({ finish: pending?.siteId ?? signedIn?.siteId ?? '', github: 'installed' });
     }
     const fresh = pending && Date.now() - pending.at < 10 * 60 * 1000;
     if (!fresh || !req.query.state || req.query.state !== pending.nonce || pending.userId !== req.session.userId) {
-      return back({ gherror: 'expired' });
+      // Which check failed, so the next "took too long" can be explained from the log (no secrets: no state or code values).
+      const why = !pending ? 'no sign-in started in this session' : !fresh ? 'started more than 10 minutes ago'
+        : !req.query.state ? 'GitHub sent no state' : req.query.state !== pending.nonce ? 'state did not match (started again in another tab?)' : 'different user';
+      console.warn(`[projects] GitHub callback refused as expired: ${why}.`);
+      return back({ finish: pending?.siteId ?? '', gherror: 'expired' });
     }
     if ((await getUserStatus(req.session.userId)) !== 'active') return back({ gherror: 'denied' });
     const ctx = await getAccessContext(req.session.userId, pending.siteId);
@@ -549,9 +563,11 @@ router.delete('/projects/:siteId/connect/posthog', requireAuth, requireProjectRo
 
 // The document PostHog fetches to learn who we are (Client ID Metadata Document). Public by necessity: PostHog fetches it
 // with no session. It holds nothing secret — a name, and the one address people are sent back to.
-router.get('/posthog/oauth-client', (req, res) => {
+// Mounted in server/index.js AHEAD of the routers with a blanket requireAuth: registered here, behind them, every
+// PostHog fetch got "401 Not authenticated", so PostHog refused the sign-in before it started (seen live 2026-11-17).
+export function posthogOauthClientDocument(req, res) {
   res.set('Cache-Control', 'public, max-age=300').json(posthogClientMetadata(originOf(req)));
-});
+}
 
 router.get('/projects/:siteId/connect/posthog/start', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
   try {
@@ -590,7 +606,7 @@ async function finishPosthogProject(siteId, { projectId, projectName }) {
 }
 
 router.get('/posthog/callback', async (req, res) => {
-  const back = (params) => res.redirect(`/workspace?${new URLSearchParams(params)}`);
+  const back = (params) => res.redirect(connectedTabUrl('posthog', params));
   const pending = req.session?.posthogConnect;
   if (req.session) delete req.session.posthogConnect; // single use, whatever happens next
   try {
@@ -904,6 +920,15 @@ router.post('/projects/:siteId/connect/business-profile', requireAuth, requirePr
 // and the config-completeness audit. Both are best-effort — a connect that
 // saved the repo must not fail because discovery had a bad minute — and the
 // audit's own result is what Integration Health reads back.
+// getBranchSha throws "getBranchSha failed (404): ..." when GitHub has no such branch. Anything else (no access, a
+// broken App key, GitHub down) is a different problem and must not be reported as a missing branch.
+export const branchMissing = (err) => /failed \((404|422)\)/.test(String(err?.message || ''));
+
+function branchCheckFailed(res, err, branch, match) {
+  console.error(`[projects] could not check branch "${branch}" in ${match.fullName}:`, err?.message);
+  return res.status(400).json({ error: `SuperRank could not read the branches of ${match.fullName} through GitHub, so "${branch}" could not be checked. Check that the app is still installed on it, then try again.` });
+}
+
 router.post('/projects/:siteId/connect/github', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
   try {
     // Two ways to pick: staff from the shared SuperRank app's list, or anyone from THEIR OWN GitHub sign-in.
@@ -930,6 +955,20 @@ router.post('/projects/:siteId/connect/github', requireAuth, requireProjectRole(
       });
     }
 
+    // Runs before the branch checks: they sign in as the same App, and a broken key there used to read as
+    // "There is no main branch" (live, 2026-11-17).
+    // Prove the connect App can really act on this installation BEFORE the project is pointed at it: a wrong
+    // key or App id would otherwise save fine and fail every pull request days later at 07:00.
+    if (mine) {
+      try {
+        const { getInstallationToken } = await import('../github/app-auth.js');
+        await getInstallationToken(String(match.installationId), { credentials: connectAppCredentials() });
+      } catch (err) {
+        console.error(`[projects] connect App could not act on installation ${match.installationId}:`, err.message);
+        return res.status(400).json({ error: 'SuperRank could not get access to that repository through GitHub. Check that the app is still installed on it, then try again.' });
+      }
+    }
+
     const branch = String(req.body?.repoDefaultBranch || match.defaultBranch || 'main').trim();
     if (!/^[\w./-]+$/.test(branch)) return res.status(400).json({ error: 'That branch name has characters a branch cannot have.' });
 
@@ -943,7 +982,8 @@ router.post('/projects/:siteId/connect/github', requireAuth, requireProjectRole(
           github_app_installation_id: Number(match.installationId),
           ...(mine ? { github_app_id: Number(process.env.GITHUB_CONNECT_APP_ID), github_app_private_key_env_var: CONNECT_KEY_ENV } : {}),
         }, branch);
-      } catch {
+      } catch (err) {
+        if (!branchMissing(err)) return branchCheckFailed(res, err, branch, match);
         return res.status(400).json({ error: `There is no "${branch}" branch in ${match.fullName}. Choose one from the list.` });
       }
     }
@@ -963,20 +1003,9 @@ router.post('/projects/:siteId/connect/github', requireAuth, requireProjectRole(
           github_app_installation_id: Number(match.installationId),
           ...(mine ? { github_app_id: Number(process.env.GITHUB_CONNECT_APP_ID), github_app_private_key_env_var: CONNECT_KEY_ENV } : {}),
         }, prTargetBranch);
-      } catch {
-        return res.status(400).json({ error: `There is no "${prTargetBranch}" branch in ${match.fullName}. Create it on GitHub first, or leave this empty to open pull requests into ${branch}.` });
-      }
-    }
-
-    // Prove the connect App can really act on this installation BEFORE the project is pointed at it: a wrong
-    // key or App id would otherwise save fine and fail every pull request days later at 07:00.
-    if (mine) {
-      try {
-        const { getInstallationToken } = await import('../github/app-auth.js');
-        await getInstallationToken(String(match.installationId), { credentials: connectAppCredentials() });
       } catch (err) {
-        console.error(`[projects] connect App could not act on installation ${match.installationId}:`, err.message);
-        return res.status(400).json({ error: 'SuperRank could not get access to that repository through GitHub. Check that the app is still installed on it, then try again.' });
+        if (!branchMissing(err)) return branchCheckFailed(res, err, prTargetBranch, match);
+        return res.status(400).json({ error: `There is no "${prTargetBranch}" branch in ${match.fullName}. Create it on GitHub first, or leave this empty to open pull requests into ${branch}.` });
       }
     }
 

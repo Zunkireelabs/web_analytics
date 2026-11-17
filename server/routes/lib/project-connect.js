@@ -250,12 +250,17 @@ export function parseBusinessProfile(body = {}) {
   try { u = new URL(/^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`); } catch { return { ok: false, error: 'That does not look like a link.' }; }
   if (!/^https?:$/.test(u.protocol)) return { ok: false, error: 'That does not look like a link.' };
   const host = u.hostname.toLowerCase();
+  // business.google.com on its own (or /locations, /dashboard) is the page listing ALL their profiles, the link people
+  // most often paste by mistake: it is not one business, so it is refused with what to do instead.
+  if (host === 'business.google.com' && /^\/(locations|dashboard)?\/?$/i.test(u.pathname)) {
+    return { ok: false, error: 'That is your list of profiles, not your profile link. On your business’s profile, click Share profile, then Copy link.' };
+  }
   const onGoogle = GBP_HOST_RE.test(host);
   // google.com/... is only a Business Profile when it is a Maps address (or the business.google.com / g.page ones above).
   // maps.google.* addresses are Maps by definition (what Google's own listing search returns); a bare google.* one must be /maps.
   const isMaps = /^(www\.)?google\.[a-z.]{2,6}$/i.test(host) ? /^\/maps(\/|$)/.test(u.pathname) : true;
   if (!onGoogle || !isMaps) {
-    return { ok: false, error: 'Paste the Google Maps link to your business (it starts with maps.app.goo.gl, g.page or google.com/maps).' };
+    return { ok: false, error: 'That is not your Google profile link. On your business’s profile on Google, click Share profile, then Copy link (it starts with share.google or maps.app.goo.gl).' };
   }
   u.protocol = 'https:';
   return { ok: true, value: { status, url: u.toString() } };

@@ -59,7 +59,7 @@ export async function generate({ siteId, params }) {
     }
     let jsonLd;
     try {
-      jsonLd = await callLLMForJson(SYSTEM, originalRaw, { maxTokens: 700, generatorId: meta.id, siteId });
+      jsonLd = await callLLMForJson(SYSTEM, originalRaw, { task: 'content', maxTokens: 700, generatorId: meta.id, siteId });
     } catch {
       throw Object.assign(new Error('Schema repair failed: model did not return valid JSON'), { status: 400 });
     }

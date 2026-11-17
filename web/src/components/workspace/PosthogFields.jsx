@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, ChevronDown, ExternalLink } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ExternalLink, Loader2 } from 'lucide-react';
 import { api } from '../../api.js';
 import Button from '../Button.jsx';
 import Field from '../Field.jsx';
 import { usePosthogState } from '../../lib/posthog-state.jsx';
+import { openConnectTab, useConnectTab } from '../../lib/connect-tab.js';
 
 // Connect a client's own PostHog, the way Google is connected: a button, PostHog's own sign-in, then choose which of
 // their PostHog projects is this website. OPTIONAL, and the screen says so first, because most clients do not use
@@ -31,8 +32,12 @@ const ERRORS = {
 const regionOf = (host) => (!host || /us\.posthog\.com/i.test(host) ? { region: 'us', selfHost: '' } : /eu\.posthog\.com/i.test(host) ? { region: 'eu', selfHost: '' } : { region: 'self', selfHost: host });
 const REGIONS = [{ id: 'us', label: 'US cloud' }, { id: 'eu', label: 'EU cloud' }, { id: 'self', label: 'Self-hosted' }];
 
-export default function PosthogFields({ siteId, notice = null, initialGuide = false }) {
+export default function PosthogFields({ siteId, notice: pageNotice = null, initialGuide = false }) {
   const { refresh } = usePosthogState();
+  // PostHog opens in a NEW tab (lib/connect-tab.js): while it is open this screen waits, then shows the outcome it is sent.
+  const [waiting, setWaiting] = useState(false);
+  const [tabNotice, setTabNotice] = useState(null);
+  const notice = tabNotice || pageNotice;
   const [state, setState] = useState(null); // GET /connect/posthog: { connected, pending, connection, canConnect, guide }
   const [region, setRegion] = useState('us');
   const [selfHost, setSelfHost] = useState('');
@@ -63,10 +68,23 @@ export default function PosthogFields({ siteId, notice = null, initialGuide = fa
   const start = async () => {
     setBusy(true); setError(null);
     try {
-      const { url } = await api.project.connect.posthogStart(siteId, region, region === 'self' ? selfHost.trim() : undefined);
-      window.location.assign(url);
+      setTabNotice(null);
+      const how = await openConnectTab(async () => (await api.project.connect.posthogStart(siteId, region, region === 'self' ? selfHost.trim() : undefined)).url);
+      if (how === 'tab') { setWaiting(true); setBusy(false); }
     } catch (e) { setError(e?.message || 'PostHog could not be opened.'); setBusy(false); }
   };
+  useConnectTab('posthog', waiting, {
+    onDone: async (params) => {
+      setWaiting(false);
+      setTabNotice(params);
+      if (!params.pherror) { await reload(); await refresh(); }
+    },
+    // No message (a browser without BroadcastChannel): look again when the person comes back to this tab.
+    onFocus: async () => {
+      const r = await api.project.connect.posthog(siteId).catch(() => null);
+      if (r && (r.connected || r.pending)) { setWaiting(false); adopt(r); await refresh(); }
+    },
+  });
   const choose = async () => {
     setBusy(true); setError(null);
     try {
@@ -94,6 +112,22 @@ export default function PosthogFields({ siteId, notice = null, initialGuide = fa
     : notice?.posthog === 'connected' && state.pending ? <Banner tone="green">Signed in to PostHog. Choose which project is this website.</Banner> : null;
   const errorBox = error && <Banner tone="red">{error}</Banner>;
 
+  const waitingCard = (
+    <div className="rounded-card px-4 py-4" style={{ boxShadow: '0 0 0 1px var(--border-2)' }} role="status">
+      <div className="flex items-start gap-3">
+        <span className="w-9 h-9 rounded-control bg-primary-tint text-primary grid place-items-center shrink-0" style={{ boxShadow: 'inset 0 0 0 1px var(--primary-ring)' }}><Loader2 size={16} className="animate-spin" /></span>
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-semibold text-fg">Finish signing in on the PostHog tab</div>
+          <p className="mt-1 text-xs text-faint leading-[18px]">PostHog is open in a new tab. Approve read access there. This page updates by itself when you are done. You do not need to refresh.</p>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <Button variant="light" onClick={start} disabled={busy}><ExternalLink size={14} />Open the PostHog tab again</Button>
+            <button type="button" className="text-[13px] text-faint underline underline-offset-2 hover:text-fg" onClick={() => setWaiting(false)}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   // ── Connected ──
   if (state.connected && state.connection) {
     const c = state.connection;
@@ -110,10 +144,10 @@ export default function PosthogFields({ siteId, notice = null, initialGuide = fa
           {bad && c.status_error && <p className="mt-1">{c.status_error}</p>}
           {bad && <p className="mt-1">Reconnect to fix it.</p>}
         </div>
-        <div className="flex flex-wrap gap-2">
+        {waiting ? waitingCard : <div className="flex flex-wrap gap-2">
           {bad && state.canConnect && <Button variant="primary" onClick={start} disabled={busy}>{busy ? 'Opening PostHog…' : 'Reconnect with PostHog'}</Button>}
           <Button variant="light" onClick={disconnect} disabled={busy}>{busy ? 'Removing…' : 'Disconnect PostHog'}</Button>
-        </div>
+        </div>}
         {errorBox}
       </div>
     );
@@ -165,10 +199,10 @@ export default function PosthogFields({ siteId, notice = null, initialGuide = fa
         <span className="text-faint"> Skip it if you don&rsquo;t use PostHog.</span>
       </p>
 
-      {state.canConnect ? (
+      {waiting ? waitingCard : state.canConnect ? (
         <div className="rounded-card px-4 py-3.5" style={{ boxShadow: '0 0 0 1px var(--border-2)' }}>
           <div className="text-[13px] font-medium text-fg">Sign in with the PostHog account that owns your site&rsquo;s data</div>
-          <p className="mt-1 text-xs text-faint leading-[18px]">PostHog opens in a new screen. You allow SuperRank to read your events (read-only), then you come straight back. No keys to copy.</p>
+          <p className="mt-1 text-xs text-faint leading-[18px]">PostHog opens in a new tab. Allow SuperRank to read your events (read-only), then come back to this tab. It updates by itself. No keys to copy.</p>
           <div className="mt-3 text-xs text-faint">Where is your PostHog?</div>
           <div className="mt-1.5 inline-flex rounded-control" style={{ boxShadow: '0 0 0 1px var(--input)' }} role="radiogroup">
             {REGIONS.map((r, i) => (
@@ -185,7 +219,7 @@ export default function PosthogFields({ siteId, notice = null, initialGuide = fa
             <Button variant="primary" onClick={start} disabled={busy || (region === 'self' && !selfHost.trim())}>
               <ExternalLink size={14} />{busy ? 'Opening PostHog…' : 'Connect with PostHog'}
             </Button>
-            <span className="text-xs text-faint">Read access only. You can disconnect any time.</span>
+            <span className="text-xs text-faint">Opens in a new tab · read access only</span>
           </div>
         </div>
       ) : (
@@ -194,14 +228,14 @@ export default function PosthogFields({ siteId, notice = null, initialGuide = fa
         </p>
       )}
 
-      <Disclosure open={guideOpen} onToggle={() => setGuideOpen((v) => !v)} title="Don’t have PostHog on your site yet?">
+      {!waiting && <Disclosure open={guideOpen} onToggle={() => setGuideOpen((v) => !v)} title="Don’t have PostHog on your site yet?">
         <p>PostHog has to be on your website before we can read from it. This takes about five minutes.</p>
         <ol className="mt-3 space-y-3">
           <Step n={1} title="Create a free PostHog account"><>Go to <a className="text-primary font-medium hover:underline" href="https://posthog.com" target="_blank" rel="noreferrer">posthog.com</a>, choose US or EU cloud, and create a project for this website.</></Step>
           <Step n={2} title="Add PostHog's code to your site's <head>">In PostHog, open Settings, then your project, and copy the web snippet it shows (it already contains your own project key). Your web developer can add it in a minute.</Step>
           <Step n={3} title="Visit your site once, then come back">Events usually show up in PostHog within a minute. Then connect PostHog here and we start reading it tonight.</Step>
         </ol>
-      </Disclosure>
+      </Disclosure>}
 
       <Disclosure open={keyOpen || !state.canConnect} onToggle={() => setKeyOpen((v) => !v)} title="Use an API key instead" hideToggle={!state.canConnect}>
         <div className="space-y-4">

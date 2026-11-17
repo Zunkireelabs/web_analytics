@@ -377,7 +377,7 @@ export async function generate({ siteId, params }) {
       let raw;
       try {
         raw = await callLLMForJson(system, prompt, {
-          maxTokens: 1200, generatorId: meta.id, siteId, pageUrl: page, validate: Array.isArray,
+          task: 'content', maxTokens: 1200, generatorId: meta.id, siteId, pageUrl: page, validate: Array.isArray,
         });
       } catch {
         throw Object.assign(new Error('Content expansion failed: model did not return valid JSON'), { status: 400, userFacing: true });

@@ -12,17 +12,10 @@ import FirstRunGuide from '../components/workspace/FirstRunGuide.jsx';
 import ProjectCard, { attentionReason } from '../components/workspace/ProjectCard.jsx';
 import { siteDomain, siteInitials } from '../lib/nav.js';
 import { ROLE_LABELS, canManageWorkspace, isWorkspaceOwner, goalLine } from '../lib/workspace.js';
+import { GITHUB_ERRORS } from '../lib/connect-tab.js';
 
 const VIEW_KEY = 'workspace-projects-view';
 
-// The same, for GitHub's screen.
-const GITHUB_ERRORS = {
-  cancelled: 'You closed the GitHub screen before finishing, so nothing was connected.',
-  expired: 'That GitHub sign-in took too long or did not start here. Please try again.',
-  denied: 'Your account cannot connect GitHub for this project.',
-  exchange_failed: 'GitHub did not accept that sign-in. Please try again.',
-  github_failed: 'GitHub could not be reached just now. Please try again.',
-};
 
 // What to tell someone who comes back from Google's own screen without a connection.
 const GOOGLE_ERRORS = {
@@ -99,9 +92,15 @@ export default function Workspace({ siteId, onSwitchProject }) {
     const project = finish ? workspaces.flatMap((w) => w.projects).find((p) => p.id === finish) : null;
     const fromGithub = Boolean(github || params.get('gherror'));
     const error = gerror ? (fromGithub ? (GITHUB_ERRORS[gerror] || 'GitHub could not be connected.') : (GOOGLE_ERRORS[gerror] || 'Google could not be connected.')) : null;
+    const posthog = params.get('posthog'); const pherror = params.get('pherror');
+    // PostHog is no longer a setup step: a PostHog sign-in that ends up here (no SuperRank tab was waiting for it) goes to
+    // that project's Connections settings, where "Reconnect" lives.
+    if (project && (posthog || pherror)) {
+      navigate(`/account?scope=project&proj=${project.id}&tab=connections`, { replace: true });
+      return;
+    }
     if (project) {
-      const posthog = params.get('posthog'); const pherror = params.get('pherror');
-      setReturning({ google, github, error, fromGithub, gbp, posthog, pherror, guide: Boolean(params.get('guide')), step: Number(params.get('step')) || (posthog || pherror ? 6 : null) });
+      setReturning({ google, github, error, fromGithub, gbp, guide: Boolean(params.get('guide')), step: Number(params.get('step')) || null });
       setResume({ id: project.id, name: project.name, domain: project.domain });
       setAddOpen(true);
     } else if (error) setPageError(error);
@@ -255,7 +254,9 @@ export default function Workspace({ siteId, onSwitchProject }) {
       )}
       {addOpen && workspace && (
         <NewProjectModal workspace={workspace} project={resume} isOpen
-          startStep={returning ? (returning.step || (returning.gbp ? 4 : returning.fromGithub ? 5 : 3)) : null} notice={returning}
+          // A step only when there is a reason for one (asked for, or coming back from Google/GitHub/Business). A plain
+          // "Finish setting up" passes none, so the popup opens on the first step still needed instead of Google again.
+          startStep={returning ? (returning.step || (returning.gbp ? 4 : returning.fromGithub ? 5 : (returning.google || returning.error) ? 3 : null)) : null} notice={returning}
           onClose={() => { setAddOpen(false); setResume(null); setReturning(null); }}
           onChanged={async () => { await Promise.all([load(), loadOverview()]); }}
           onOpenProject={(p) => p && open(p)} />

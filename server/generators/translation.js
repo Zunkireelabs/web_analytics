@@ -36,7 +36,7 @@ export async function generate({ siteId, params }) {
     + (designCorrections ? `\n\n${designCorrections}` : '');
   let parsed;
   try {
-    parsed = await callLLMForJson(system, user, { maxTokens: 1500, generatorId: meta.id, siteId });
+    parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 1500, generatorId: meta.id, siteId });
   } catch {
     throw Object.assign(new Error('Translation generation failed: model did not return valid JSON'), { status: 400 });
   }

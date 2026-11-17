@@ -27,7 +27,7 @@ async function rewriteToLength(text, label, min, max, query, generatorId, siteId
     `accurate ${label} for the query "${query}" — using ONLY facts already present in the given text, never adding ` +
     'a new claim. Respond with ONLY the rewritten text, no quotes, no markdown.';
   const user = `Current ${label} (${text.length} characters): ${text}`;
-  const raw = await callLLM(system, user, { maxTokens: 200, generatorId, siteId }).catch(() => null);
+  const raw = await callLLM(system, user, { task: 'content', maxTokens: 200, generatorId, siteId }).catch(() => null);
   return raw ? raw.trim() : text;
 }
 
@@ -77,7 +77,7 @@ export async function generate({ siteId, params }) {
   const user = `Query: ${query}\n${pageContext ? `Current title: ${pageContext.currentTitle}\nPage text: ${pageContext.bodyExcerpt}` : 'No existing page — new content.'}`;
   let parsed;
   try {
-    parsed = await callLLMForJson(system, user, { maxTokens: 400, generatorId: meta.id, siteId });
+    parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 400, generatorId: meta.id, siteId });
   } catch {
     throw Object.assign(new Error('Meta title generation failed: model did not return valid JSON'), { status: 400 });
   }

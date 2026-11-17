@@ -49,7 +49,7 @@ async function rewriteToWordCount(directAnswer, query) {
     'it a complete, standalone answer to the query, using ONLY facts already present in the given text — never add a ' +
     'new fact. Respond with ONLY the rewritten paragraph, no quotes, no markdown.';
   const user = `Query: ${query}\nCurrent paragraph (${wordCount(directAnswer)} words):\n${directAnswer}`;
-  const raw = await callLLM(system, user, { maxTokens: 400 }).catch(() => null);
+  const raw = await callLLM(system, user, { task: 'content', maxTokens: 400 }).catch(() => null);
   return raw ? raw.trim() : directAnswer;
 }
 
@@ -113,7 +113,7 @@ export async function generate({ siteId, params }) {
     (structureGuidance ? `\n\n${structureGuidance}` : '');
   let parsed;
   try {
-    parsed = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
+    parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 900, generatorId: meta.id, siteId });
   } catch {
     throw Object.assign(new Error('Direct-answer generation failed: model did not return valid JSON'), { status: 400 });
   }

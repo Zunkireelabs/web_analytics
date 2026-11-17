@@ -41,6 +41,8 @@ export default function Overview({ siteId }) {
   // reads as one story: Search = queries and pages, Visitors = channels and top pages, Behavior = where visitors go.
   const [group, setGroup] = useState('search');
   const [ph, setPh] = useState(null); // PostHog: { summary, series, behaviour, connected, canConnect } for the range
+  // The Behavior tab exists only with PostHog connected: a remembered 'behavior' falls back to Search otherwise.
+  useEffect(() => { if (ph && !ph.connected && group === 'behavior') setGroup('search'); }, [ph, group]);
   const [phCompare, setPhCompare] = useState(null); // the same, for the comparison range
   const [gaPages, setGaPages] = useState(null); // { pages, previous }
   const [loading, setLoading] = useState(true);

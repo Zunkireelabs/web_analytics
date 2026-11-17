@@ -189,7 +189,7 @@ export async function composeGeneratedExpandLayout(profile, { siteId, generatorI
     const accepts = (parsed) => validateGeneratedExpandLayout(parsed, profile).ok
       && assertLayoutMatchesPrior(parsed, structurePrior, profile).ok;
     const candidate = await callLLMForJson(SYSTEM_PROMPT, userPrompt, {
-      tier: 'monthly',
+      task: 'content', tier: 'monthly',
       maxTokens: 1200,
       generatorId,
       siteId,

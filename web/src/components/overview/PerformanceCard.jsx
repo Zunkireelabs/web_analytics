@@ -91,7 +91,7 @@ export default function PerformanceCard({ group, onGroup, series, compareSeries,
   return (
     <TrayCard title="Performance" subtitle={start && end ? `Daily, ${fmtRange(start, end)}` : 'Daily'}
       action={(
-        <SegmentedTabs options={[{ value: 'search', label: 'Search' }, { value: 'visitors', label: 'Visitors' }, { value: 'behavior', label: 'Behavior' }]} value={group}
+        <SegmentedTabs options={[{ value: 'search', label: 'Search' }, { value: 'visitors', label: 'Visitors' }, ...(behavior?.connected ? [{ value: 'behavior', label: 'Behavior' }] : [])]} value={group}
           onChange={(g) => { onGroup(g); setMetricKey(GROUPS[g][0].key); }} />
       )}>
       {behaviorEmpty ? (
