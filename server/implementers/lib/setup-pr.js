@@ -1,5 +1,6 @@
 import { hasMarker } from './marker-merge.js';
-import { resolveFile, resolveMarkers, resolveAdapter } from './url-file-map.js';
+import { resolveFile, resolveActionFile, resolveMarkers, resolveAdapter } from './url-file-map.js';
+import { adoptHeadTags, sameTagsIgnoringOrder } from './head-tag-adopt.js';
 import { resolveInsertion } from './insertion-engine.js';
 import * as github from '../../github/client.js';
 
@@ -55,7 +56,7 @@ const DEFAULT_DEPS = {
     const f = await github.getFileContent(site, path, ref);
     return f ? f.content : null;
   },
-  resolveFile, resolveMarkers, resolveAdapter, resolveInsertion,
+  resolveFile, resolveActionFile, resolveMarkers, resolveAdapter, resolveInsertion,
   layoutFile: (site) => site?.url_file_map?.siteRoot?.layoutTemplate || null,
   baseRef: (site) => github.defaultBranchName(site),
 };
@@ -72,7 +73,7 @@ export async function planSetupPr(site, deps = {}) {
 
   // One entry per template FILE, even when many pages share it (a single [slug] template), with every marker field it needs.
   const byFile = new Map(); // path -> { markerMap: { field: name } }
-  const pageNeeds = []; // { page, path, names: [markerName] } for every page that has a file
+  const pageNeeds = []; // { page, needs: Map(path -> [markerName]) } for every page that has a file
   const unmappedPages = [];
   // Sitewide markers go to the shared layout, once, and only when the project has one mapped.
   const layoutPath = d.layoutFile(site);
@@ -84,20 +85,23 @@ export async function planSetupPr(site, deps = {}) {
   if (layoutPath && Object.keys(sitewideMap).length) byFile.set(layoutPath, { markerMap: { ...sitewideMap } });
 
   for (const page of pages) {
-    const path = d.resolveFile(site, page);
-    const names = [];
+    const pageFile = d.resolveFile(site, page);
+    const needs = new Map();
     let adapterRouted = false;
     for (const actionType of types) {
       if (SITEWIDE_TYPES.includes(actionType)) continue; // installed once in the layout, never asked of a page
       if (d.resolveAdapter(site, page, actionType)) { adapterRouted = true; continue; } // adapter-routed pages own their own data path, not a marker gap
       const markers = d.resolveMarkers(site, page, actionType);
+      // The file THIS action type is written to: the page's own file unless the mapping names another (a per-page head include for
+      // open-graph and canonical). The same lookup the daily run's apply uses, so a marker is placed where the fix will look for it.
+      const path = pageFile ? d.resolveActionFile(site, page, actionType) : null;
       if (!markers || !path) continue;
       const entry = byFile.get(path) || { markerMap: {} };
       Object.assign(entry.markerMap, markers);
       byFile.set(path, entry);
-      names.push(...Object.values(markers));
+      needs.set(path, [...(needs.get(path) || []), ...Object.values(markers)]);
     }
-    if (path) pageNeeds.push({ page, path, names });
+    if (pageFile) pageNeeds.push({ page, needs });
     else if (!adapterRouted) unmappedPages.push(page);
   }
 
@@ -118,12 +122,21 @@ export async function planSetupPr(site, deps = {}) {
     // reported; the others in the same file are still added. The first real fix PR creates it with its real value as before.
     let content = before;
     const added = [];
+    let moved = false; // a file whose existing head tags were moved into a marker: later steps are checked line-for-line, not byte-for-byte
     for (const [field, markerName] of Object.entries(markerMap)) {
       if (hasMarker(content, markerName)) continue;
+      // Head tags that already exist (a converted site hard-codes og:/twitter:/canonical in its head file) are ADOPTED into the marker, so
+      // the first fix replaces them. A marker added beside them would give two sets of tags. Checked: same lines, nothing lost or added.
+      const adopt = (field === 'canonical' || field === 'openGraph') ? adoptHeadTags(content, field, markerName, path) : { ok: false };
+      if (adopt.ok) {
+        if (sameTagsIgnoringOrder(before, adopt.content)) { content = adopt.content; added.push(markerName); moved = true; continue; }
+        plan.skipped.push({ path, markerName, reason: 'moving its existing tags into the marker would have changed more than their position, so it was left alone' });
+        continue;
+      }
       const { content: next, unresolved } = await d.resolveInsertion(site, content, path, { [field]: markerName });
       for (const u of unresolved) plan.unresolved.push({ path, markerName: u.markerName, reason: u.reason });
       if (!hasMarker(next, markerName)) continue;
-      if (!onlyMarkersAdded(before, next)) { plan.skipped.push({ path, markerName, reason: 'creating it would add a value, not only a marker, so it is left for the first real fix' }); continue; }
+      if (!(moved ? sameTagsIgnoringOrder(before, next) : onlyMarkersAdded(before, next))) { plan.skipped.push({ path, markerName, reason: 'creating it would add a value, not only a marker, so it is left for the first real fix' }); continue; }
       content = next;
       added.push(markerName);
     }
@@ -138,10 +151,14 @@ export async function planSetupPr(site, deps = {}) {
   // or are listed under "not added"); UNMAPPED when the platform has no template file for it at all (nothing can be fixed there
   // until that is learned). Counted per page, not per file, because that is what a client thinks in.
   const coverage = { ready: 0, partial: 0, unmapped: unmappedPages.length, unknown: 0, unmappedExamples: unmappedPages.slice(0, 10) };
-  for (const { path, names } of pageNeeds) {
-    const content = finalContent.get(path);
-    if (content == null) { coverage.unknown++; continue; }
-    if (names.every((n) => hasMarker(content, n))) coverage.ready++; else coverage.partial++;
+  for (const { needs } of pageNeeds) {
+    let unknown = false; let missing = false;
+    for (const [path, names] of needs) {
+      const content = finalContent.get(path);
+      if (content == null) { unknown = true; continue; }
+      if (!names.every((n) => hasMarker(content, n))) missing = true;
+    }
+    if (unknown) coverage.unknown++; else if (missing) coverage.partial++; else coverage.ready++;
   }
   plan.coverage = coverage;
   return plan;

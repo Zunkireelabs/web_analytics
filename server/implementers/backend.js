@@ -1,4 +1,4 @@
-import { resolveFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, isPageMapped, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
+import { resolveFile, resolveActionFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, isPageMapped, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, resolveBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, getRepoTree } from '../github/client.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
@@ -1191,7 +1191,9 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // already falls back to this site-level default when no page/pattern
   // entry exists), not duplicated across every individual page.
   const isSitewideInstall = draft.action_type === 'analytics-install';
-  const filePath = isSitewideInstall ? resolveSiteRootFile(site, 'layoutTemplate') : resolveFile(site, page);
+  // resolveActionFile is resolveFile unless the project's mapping names another file for THIS action type (a per-page head include for
+  // open-graph/canonical), so a project with no such setting resolves exactly as it always did.
+  const filePath = isSitewideInstall ? resolveSiteRootFile(site, 'layoutTemplate') : resolveActionFile(site, page, draft.action_type);
   if (!filePath) {
     return isSitewideInstall
       ? { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.layoutTemplate is not configured — set it via `npm run connect-repo` before this can be applied.' }
@@ -1488,7 +1490,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
 // at merge time.
 async function previewLiveMarkerContent(site, draft) {
   const page = draft.content?.page || draft.input?.page;
-  const filePath = resolveFile(site, page);
+  const filePath = resolveActionFile(site, page, draft.action_type);
   if (!filePath) {
     return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${page || '(no page)'}".` };
   }
