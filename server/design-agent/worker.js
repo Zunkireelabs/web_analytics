@@ -148,7 +148,7 @@ export async function processOneJob({
         await appendJobLog(job.id, 'No structural drift vs. the stored design profile — skipped LLM re-derivation, refreshed lastCheckedAt.');
       } else {
         const saved = await persistProfile(site, outcome.designProfile, { jobId: job.id });
-        if (!saved.ok) throw new Error(`Design Agent returned an unusable design profile — ${saved.reason}`);
+        if (!saved.ok) throw new Error(`Design Agent returned an unusable design profile — ${saved.reason}${saved.errors?.length ? `: ${saved.errors.join(' | ')}` : ''}`);
         await appendJobLog(job.id, `Derived design profile; projected ${Object.keys(saved.projected).length} component template(s).`);
       }
     }

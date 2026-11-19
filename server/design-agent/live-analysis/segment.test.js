@@ -154,3 +154,14 @@ describe('consensusSectionOrder — one page type, several captured pages', () =
     assert.deepEqual(consensusSectionOrder([]), []);
   });
 });
+
+describe('containerClasses', () => {
+  test('the wrapper class capture.js saw inside a section is carried onto the section; none seen stays empty', () => {
+    const out = segmentPage([
+      { order: 0, tag: 'section', classes: 'section hero-sec', containerClasses: 'container', top: 0, height: 600, width: 1280, viewportWidth: 1280, headingLevel: 1, headingText: 'About MOBILISE' },
+      { order: 1, tag: 'section', classes: 'cmp-section', top: 600, height: 400, width: 1280, viewportWidth: 1280, headingLevel: 2, headingText: 'Compare' },
+    ]);
+    assert.equal(out[0].containerClasses, 'container');
+    assert.equal(out[1].containerClasses, '');
+  });
+});

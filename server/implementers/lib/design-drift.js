@@ -10,7 +10,7 @@ import { createComponentTemplateJob, getQueuedComponentTemplateJob, createDesign
 import { getSiteById } from '../../store/read.js';
 import {
   projectAllComponentTemplates, projectComponentTemplate, stampDesignProfile,
-  isProfileUsable, isProjectable, DESIGN_PROFILE_VERSION,
+  isProfileUsable, isProjectable, DESIGN_PROFILE_VERSION, validateDesignProfile,
 } from '../../design-agent/lib/design-profile.js';
 import { resolveFile } from './url-file-map.js';
 
@@ -1865,7 +1865,9 @@ export async function persistDesignProfile(site, rawProfile, {
     derivedRef: jobId,
   });
   if (!isProfileUsable(profile)) {
-    return { ok: false, reason: 'invalid-profile', profile: null, projected: {} };
+    // Say WHICH rule failed (typography.body, typography.heading.item, layout container/prose, version): "invalid-profile" alone gave the worker nothing to
+    // log, and a design capture that fails every time (mobilise.agency, 2026-11-19) could not be diagnosed from the job row.
+    return { ok: false, reason: 'invalid-profile', errors: validateDesignProfile(profile).errors, profile: null, projected: {} };
   }
 
   const urlFileMap = {

@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { planSetupPr, openSetupPr, refreshSetupPr, onlyMarkersAdded, setupBranchName, setupPrBody, MAX_FILES } from './setup-pr.js';
 import { sameLinesIgnoringOrder } from './head-tag-adopt.js';
@@ -363,4 +363,28 @@ test('a page whose every marker is placed has no gaps', async () => {
   const plan = await planSetupPr(mobSite, mobDeps());
   assert.deepEqual(plan.gaps, []);
   assert.ok(plan.placedCount >= 4);
+});
+
+// glossary / privacy-policy / terms-of-service / cookie-policy on zennly.io: a title written without quotes (2026-11-19)
+describe('a plain title that is only quoted to carry its marker', () => {
+  const page = (t) => `---\nlayout: base.njk\ntitle: ${t}\nbodyClass: page--light-nav\n---\n<main><p>x</p></main>\n`;
+  const marked = (t) => `---\nlayout: base.njk\ntitle: ${t}\nbodyClass: page--light-nav\n---\n<main><p>x</p></main>\n`;
+  test('is accepted when the value is the same text', () => {
+    assert.equal(onlyMarkersAdded(page('Terms of Service — Zennly'), marked('"Terms of Service — Zennly" # SEOAI:TITLE')), true);
+    assert.equal(onlyMarkersAdded(page('Booking & Operations Glossary for Service Businesses'), marked('"Booking & Operations Glossary for Service Businesses" # SEOAI:TITLE')), true);
+  });
+  test('is refused when the text differs', () => {
+    assert.equal(onlyMarkersAdded(page('Terms of Service'), marked('"Terms of Services" # SEOAI:TITLE')), false);
+  });
+  test('is refused when quoting could change the YAML type or meaning', () => {
+    for (const v of ['true', 'no', 'null', '2024', '1.5', 'a: b', 'C:\\temp']) {
+      assert.equal(onlyMarkersAdded(page(v), marked(`"${v}" # SEOAI:TITLE`)), false, v);
+    }
+  });
+  test('a quoted value that was already quoted is unchanged by this rule', () => {
+    assert.equal(onlyMarkersAdded(page('"Press Kit"'), marked('"Press Kit" # SEOAI:TITLE')), true);
+  });
+  test('any other change in the file still fails', () => {
+    assert.equal(onlyMarkersAdded(page('Terms'), marked('"Terms" # SEOAI:TITLE').replace('<p>x</p>', '<p>y</p>')), false);
+  });
 });

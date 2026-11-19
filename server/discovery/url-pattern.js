@@ -60,3 +60,24 @@ export function planPageEntries({ siteMap = {}, entries = [], repoFiles = [] }) 
   if (!added.length) return { ok: false, reason: 'every one of these pages is already mapped to that file' };
   return { ok: true, nextMap: { ...siteMap, pages }, added };
 }
+
+// The front-matter KEY a family of pages keeps a field under when it is not the field's own name (`description` -> `excerpt`: a blog whose
+// template renders `description={excerpt}`). Saved on that ONE pattern (patterns[].placements['meta-title'].lineKeys), so the pages around it that
+// really use `description` are untouched. The site-wide key alias, if there is one, is kept inside it (a pattern-level placement replaces the
+// site-level one, it does not merge). Strict: the pattern must exist, and the key it points at must really be in at least one of its files.
+export function planPatternLineKeys({ siteMap = {}, match, lineKeys = {} }) {
+  const entries = Object.entries(lineKeys);
+  if (!entries.length) return { ok: false, reason: 'no key given (use description=excerpt)' };
+  for (const [field, key] of entries) {
+    if (!['title', 'description'].includes(field)) return { ok: false, reason: `"${field}" is not a line field (title or description)` };
+    if (!/^[A-Za-z_][\w-]*$/.test(String(key))) return { ok: false, reason: `"${key}" is not a front-matter key name` };
+  }
+  const existing = Array.isArray(siteMap.patterns) ? siteMap.patterns : [];
+  const pattern = existing.find((p) => p.match === match);
+  if (!pattern) return { ok: false, reason: 'there is no pattern with this match' };
+  const current = pattern.placements?.['meta-title'] || {};
+  const merged = { ...(siteMap.defaults?.placements?.['meta-title']?.lineKeys || {}), ...(current.lineKeys || {}), ...lineKeys };
+  if (JSON.stringify(current.lineKeys || {}) === JSON.stringify(merged)) return { ok: false, reason: 'that pattern already has these keys' };
+  const placements = { ...(pattern.placements || {}), 'meta-title': { ...current, lineKeys: merged } };
+  return { ok: true, lineKeys: merged, nextMap: { ...siteMap, patterns: existing.map((p) => (p === pattern ? { ...p, placements } : p)) } };
+}

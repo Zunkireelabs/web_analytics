@@ -1,4 +1,4 @@
-import { hasMarker } from './marker-merge.js';
+import { hasMarker, isSafeToQuotePlainValue } from './marker-merge.js';
 import { resolveFile, resolveActionFile, resolveMarkers, resolveAdapter, resolveLineKeys } from './url-file-map.js';
 import { adoptHeadTags, sameTagsIgnoringOrder } from './head-tag-adopt.js';
 import { resolveInsertion } from './insertion-engine.js';
@@ -35,7 +35,19 @@ const strip = (s) => String(s ?? '').replace(ATTR_MARKER, '=$1').replace(MARKER_
 // The safety rule of this whole feature: after removing every marker token, the new file must equal the old file (ignoring the
 // whitespace the markers sit on). A change that is anything more than markers is never shipped.
 export function onlyMarkersAdded(before, after) {
-  return strip(before) === strip(after);
+  if (strip(before) === strip(after)) return true;
+  return strip(before) === strip(undoQuotingOfMarkedPlainValues(before, after));
+}
+
+// A marker goes on a QUOTED front-matter value (`title: "x" # SEOAI:TITLE`), so a plain one (`title: x`) is quoted with it. That is the same value, only when
+// quoting cannot change what it means (isSafeToQuotePlainValue): for exactly those lines the quotes are taken off again before the comparison, so such a page
+// is no longer refused as "adds a value". Any other difference between the two files still fails.
+function undoQuotingOfMarkedPlainValues(before, after) {
+  const plain = new Map();
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(String(before ?? ''));
+  if (!fm) return after;
+  for (const line of fm[1].split(/\r?\n/)) { const m = /^([A-Za-z_][\w-]*):[ \t]+(\S.*?)[ \t]*$/.exec(line); if (m && !/^["']/.test(m[2])) plain.set(m[1], m[2]); }
+  return String(after ?? '').replace(/^([A-Za-z_][\w-]*):([ \t]+)"([^"\\\n]*)"([ \t]+#[ \t]*SEOAI:[\w-]+)[ \t]*$/gm, (whole, key, gap, value, marker) => (plain.get(key) === value && isSafeToQuotePlainValue(value) ? `${key}:${gap}${value}${marker}` : whole));
 }
 
 const DEFAULT_DEPS = {

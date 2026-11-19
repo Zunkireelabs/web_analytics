@@ -427,3 +427,50 @@ describe('backfillPageTypePatterns', () => {
     assert.deepEqual(pageTypePatterns.faq.textHierarchy, []);
   });
 });
+
+// mobilise.agency, 2026-11-19: the model returned { container: null, prose: null } and the platform rejected the whole profile, so design capture failed
+// every time. The class names below are the real ones the capture observed (container 10x on about-us/services, cmp-wrap and hub-wrap on other pages).
+describe('correctLayout', () => {
+  const sec = (role, containerClasses) => ({ role, containerClasses });
+  const pages = [
+    { url: 'https://mobilise.agency/about-us/', sections: [sec('hero', 'container'), sec('content', 'container'), sec('content', 'container'), sec('footer', 'site-footer-premium')] },
+    { url: 'https://mobilise.agency/services/', sections: [sec('hero', 'container'), sec('content', 'container cta-content'), sec('footer', 'site-footer-premium')] },
+    { url: 'https://mobilise.agency/compare/', sections: [sec('content', 'cmp-wrap'), sec('content', 'cmp-wrap')] },
+  ];
+  test('an empty layout takes the wrapper observed most often inside content sections', async () => {
+    const { correctLayout } = await import('./profile-extract.js');
+    const r = correctLayout({ container: null, prose: null }, pages);
+    assert.equal(r.layout.container, 'container');
+    assert.deepEqual(r.corrected, { container: 'container', sections: 5 });
+  });
+  test('header/nav/footer chrome is never the content wrapper', async () => {
+    const { correctLayout } = await import('./profile-extract.js');
+    const chrome = [{ sections: [sec('footer', 'footer-inner'), sec('footer', 'footer-inner'), sec('footer', 'footer-inner')] }];
+    assert.equal(correctLayout({}, chrome).corrected, null);
+  });
+  test('a wrapper seen on one section only is not the site\'s wrapper', async () => {
+    const { correctLayout } = await import('./profile-extract.js');
+    assert.equal(correctLayout({}, [{ sections: [sec('content', 'hub-wrap')] }]).corrected, null);
+  });
+  test('a class that is not a wrapper by name is not taken (stage-card x3)', async () => {
+    const { correctLayout } = await import('./profile-extract.js');
+    assert.equal(correctLayout({}, [{ sections: [sec('content', 'stage-card'), sec('content', 'stage-card'), sec('content', 'stage-card')] }]).corrected, null);
+  });
+  test('what the model returned is never overridden', async () => {
+    const { correctLayout } = await import('./profile-extract.js');
+    assert.deepEqual(correctLayout({ container: 'mx-auto max-w-6xl', prose: null }, pages), { layout: { container: 'mx-auto max-w-6xl', prose: null }, corrected: null });
+    assert.equal(correctLayout({ container: null, prose: 'prose' }, pages).corrected, null);
+  });
+  test('no evidence at all: nothing is invented', async () => {
+    const { correctLayout } = await import('./profile-extract.js');
+    assert.equal(correctLayout(null, []).corrected, null);
+    assert.deepEqual(correctLayout(undefined, undefined).layout, {});
+  });
+  test('the platform validation passes once the layout is filled', async () => {
+    const { correctLayout } = await import('./profile-extract.js');
+    const { validateDesignProfile, DESIGN_PROFILE_VERSION } = await import('../lib/design-profile.js');
+    const base = { version: DESIGN_PROFILE_VERSION, typography: { body: 'hub-sub', heading: { item: 'sec-title' } } };
+    assert.equal(validateDesignProfile({ ...base, layout: { container: null, prose: null } }).ok, false);
+    assert.equal(validateDesignProfile({ ...base, layout: correctLayout({ container: null, prose: null }, pages).layout }).ok, true);
+  });
+});

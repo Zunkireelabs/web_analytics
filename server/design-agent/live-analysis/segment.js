@@ -104,6 +104,7 @@ export function segmentPage(blocks) {
       role,
       order: i,
       classes: block.classes || '',
+      containerClasses: block.containerClasses || '',
       alignment: alignmentOf(block),
       width: widthBucket(block),
       textHierarchy: textHierarchyOf(block),

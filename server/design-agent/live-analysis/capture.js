@@ -567,9 +567,15 @@ function extractBlocksInPage() {
     const tableHeaderCell = table?.querySelector('thead th, thead td, tr:first-child th, tr:first-child td') || null;
     const tableBodyRow = table?.querySelector('tbody tr, tr:nth-child(2)') || null;
     const tableBodyCell = tableBodyRow?.querySelector('td, th') || null;
+    // The element INSIDE this section that holds its content and so sets the content width (a `.container`, a `.wrapper`, `max-w-* mx-auto`): the first
+    // element child of the section that contains the heading, body or button. Only observed, never guessed: '' when the content sits directly in the
+    // section. profile-extract.js uses it when the model leaves layout.container empty.
+    const contentEl = heading || body || cta;
+    const containerEl = contentEl ? Array.from(el.children).find((c) => c !== contentEl && c.contains(contentEl)) || null : null;
     const cs = window.getComputedStyle(el);
     blocks.push({
       order: order++,
+      containerClasses: containerEl ? classesOf(containerEl) : '',
       tag: el.tagName.toLowerCase(),
       landmark: el.closest('header') ? 'header' : el.closest('nav') ? 'nav' : el.closest('footer') ? 'footer' : null,
       classes: classesOf(el),

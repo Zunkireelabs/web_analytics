@@ -85,3 +85,16 @@ test('exact pages: a file that does not exist, a bad path, or a path outside the
   assert.match(planPageEntries({ siteMap: mobMap, entries: [{ path: 'about', file: 'src/index.njk' }], repoFiles: mobFiles }).reason, /must start with \//);
   assert.match(planPageEntries({ siteMap: mobMap, entries: [{ path: '/x', file: '../secret' }], repoFiles: mobFiles }).reason, /relative path/);
 });
+
+import { planPatternLineKeys } from './url-pattern.js';
+test('planPatternLineKeys sets the key on one pattern only and keeps the site-wide key', () => {
+  const siteMap = { defaults: { placements: { 'meta-title': { lineKeys: { title: 'headline' } } } }, patterns: [{ match: '^/blog/([^/]+)/?$', file: 'src/content/blog/$1.md' }, { match: '^/x/([^/]+)/?$', file: 'src/x/$1.md' }] };
+  const r = planPatternLineKeys({ siteMap, match: '^/blog/([^/]+)/?$', lineKeys: { description: 'excerpt' } });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.nextMap.patterns[0].placements['meta-title'].lineKeys, { title: 'headline', description: 'excerpt' });
+  assert.equal(r.nextMap.patterns[1].placements, undefined);
+  assert.equal(r.nextMap.patterns[0].file, 'src/content/blog/$1.md');
+  assert.equal(planPatternLineKeys({ siteMap: r.nextMap, match: '^/blog/([^/]+)/?$', lineKeys: { description: 'excerpt' } }).ok, false);
+  assert.equal(planPatternLineKeys({ siteMap, match: '^/nope$', lineKeys: { description: 'excerpt' } }).ok, false);
+  assert.equal(planPatternLineKeys({ siteMap, match: '^/blog/([^/]+)/?$', lineKeys: { robots: 'x' } }).ok, false);
+});

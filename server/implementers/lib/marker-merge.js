@@ -418,7 +418,10 @@ function frontMatterLength(fileContent) {
 // failure instead of risking a wrong rewrite — same conservatism as the
 // quoted-value path, just drawing the safe boundary around a wider (and,
 // on this site's own real pages, at least as common) case.
-const UNSAFE_UNQUOTED_VALUE = /["#]|^[[{&*!|>%@`]/;
+// A plain (unquoted) front-matter value is quoted only when quoting cannot change what it means: no quote, backslash or `#`, no leading YAML indicator, and
+// not a word or number YAML reads as something other than a string (`true`, `no`, `null`, `2024`), which quoting would turn into a string.
+const UNSAFE_UNQUOTED_VALUE = /["#\\]|^[[{&*!|>%@`]|: |^(?:true|false|yes|no|on|off|null|~)$|^[-+]?(?:\d[\d_]*\.?\d*|\.\d+)(?:e[-+]?\d+)?$|^0x[\da-f]+$/i;
+export const isSafeToQuotePlainValue = (v) => !UNSAFE_UNQUOTED_VALUE.test(String(v));
 
 // Auto-inserts a trailing `# SEOAI:<name>` comment onto an existing
 // `field: value` front-matter line — deliberately conservative: only

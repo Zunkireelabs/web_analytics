@@ -178,6 +178,29 @@ function medianSamplePx(samples) {
   return values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
 }
 
+// The model fills `layout` from class names it is shown, and returns { container: null, prose: null } for a site whose wrappers are not obvious (a hand-written
+// stylesheet whose pages use `.container` on some pages and `.hub-wrap` on others: mobilise.agency). The platform then rejects the whole profile ("layout needs
+// at least one of container/prose") and design capture fails every time. When the model gave neither, take the wrapper class the capture OBSERVED most often
+// inside the page's content sections (capture.js containerClasses; header/nav/footer chrome is not the content wrapper), and only when it is a wrapper by name
+// and was seen on at least two sections. Nothing is invented: no observed wrapper, no change.
+const WRAPPER_TOKEN = /(^|[-_])(container|wrapper|wrap|inner)($|[-_])|^max-w-/i;
+export function correctLayout(layout, segmentedPages) {
+  const given = layout && typeof layout === 'object' ? layout : {};
+  if (given.container || given.prose) return { layout: given, corrected: null };
+  const seen = new Map();
+  for (const page of segmentedPages || []) {
+    for (const section of page.sections || []) {
+      if (['header', 'nav', 'footer'].includes(section.role)) continue;
+      for (const token of new Set(String(section.containerClasses || '').split(/\s+/).filter(Boolean))) {
+        if (WRAPPER_TOKEN.test(token)) seen.set(token, (seen.get(token) || 0) + 1);
+      }
+    }
+  }
+  const [best] = [...seen.entries()].filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1] || a[0].length - b[0].length || (a[0] < b[0] ? -1 : 1));
+  if (!best) return { layout: given, corrected: null };
+  return { layout: { ...given, container: best[0] }, corrected: { container: best[0], sections: best[1] } };
+}
+
 // typography.link is meant to be the site's INLINE link style — what a link
 // inside a sentence or a related-links list looks like. When it comes back
 // byte-identical to components.button.primary, it is not that: capture.js used
@@ -575,6 +598,11 @@ export async function extractDesignProfile(segmentedPages, {
     );
   }
 
+  const { layout, corrected: layoutCorrected } = correctLayout(extracted.layout, segmentedPages);
+  if (layoutCorrected) {
+    console.warn(`[design-agent] site ${siteId}: layout.container was empty — using "${layoutCorrected.container}", the wrapper observed inside ${layoutCorrected.sections} content section(s).`);
+  }
+
   const components = extracted.components || {};
   const { link, corrected: linkCorrected } = correctLinkTypography(typography.link || null, components);
   if (linkCorrected) {
@@ -592,7 +620,7 @@ export async function extractDesignProfile(segmentedPages, {
     typography: { ...typography, body, heading, link },
     color: extracted.color || {},
     spacing: correctSpacing(extracted.spacing, siteId),
-    layout: extracted.layout || {},
+    layout,
     components,
     // `breakpoints` stays exactly what it always was: the class PREFIXES the
     // model reported seeing. `measured` is the other half and is never

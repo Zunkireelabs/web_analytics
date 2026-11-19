@@ -128,6 +128,7 @@ export function validateDesignProfileV2(profile) {
 //   sections: [{
 //     role: string,               // 'header' | 'hero' | 'content' | 'cta' | 'testimonials' | 'pricing' | 'faq' | 'footer' | ...
 //     order: number,               // 0-based position on the page
+//     containerClasses: string,    // classes of the element inside the section that holds its content ('' when the content sits directly in it)
 //     alignment: 'left'|'center'|'right',
 //     width: 'narrow'|'normal'|'wide'|'full',
 //     textHierarchy: [{ role: 'eyebrow'|'heading'|'subheading'|'body'|'cta'|'link', text, tag, style, classes }],
