@@ -195,6 +195,151 @@ async function fetchSiblingFile(origin, path) {
   }
 }
 
+
+function sameUrl(a, b) {
+  const norm = (u) => { const x = new URL(u.toString()); x.hash = ''; return x.toString().replace(/\/$/, ''); };
+  try { return norm(a) === norm(b); } catch { return false; }
+}
+
+// Does the page's canonical point at a healthy page? One guarded request to the canonical target, no redirect
+// following (a redirecting canonical target is itself the finding). Returns null when it could not be checked.
+async function probeCanonicalTarget(canonicalHref, finalUrl) {
+  if (!canonicalHref) return null;
+  let target;
+  try { target = new URL(canonicalHref, finalUrl); } catch { return null; }
+  if (!/^https?:$/.test(target.protocol)) return null;
+  if (sameUrl(target, finalUrl)) return { checked: false, selfReferencing: true };
+  try {
+    await guardUrl(target);
+    const res = await fetch(target.toString(), {
+      method: 'GET',
+      redirect: 'manual',
+      cache: 'no-store',
+      headers: { 'user-agent': USER_AGENT, accept: 'text/html,*/*', 'cache-control': 'no-cache' },
+      signal: AbortSignal.timeout(SIBLING_TIMEOUT_MS),
+    });
+    const redirectedTo = [301, 302, 303, 307, 308].includes(res.status) ? res.headers.get('location') : null;
+    let noindex = /noindex/i.test(res.headers.get('x-robots-tag') || '');
+    if (!noindex && res.status < 300 && /text\/html/i.test(res.headers.get('content-type') || '')) {
+      const html = (await res.text()).slice(0, 200000);
+      noindex = /<meta[^>]+name=["']robots["'][^>]*content=["'][^"']*noindex/i.test(html);
+    }
+    return { checked: true, selfReferencing: false, status: res.status, redirectedTo, noindex, url: target.toString() };
+  } catch {
+    return null;
+  }
+}
+
+// ---- AI bot reachability probe -------------------------------------------------------------------------
+// robots.txt says what a site ASKS bots to do; a CDN/WAF (Cloudflare, Akamai, a security plugin) can still block
+// the same bots at the network edge. One request per bot, using that bot's user-agent token, compared with a
+// request that uses our normal audit user-agent. Blocked = the bot got a block/challenge and we did not.
+// Caveat (reported honestly by the check): a request from our server is not from the vendor's real IP range, so a
+// WAF that verifies bots by IP can block this probe while letting the real bot through. Advisory only.
+const BOT_PROBES = [
+  { token: 'OAI-SearchBot', ua: 'Mozilla/5.0 (compatible; OAI-SearchBot/1.0; +https://openai.com/searchbot)' },
+  { token: 'ChatGPT-User', ua: 'Mozilla/5.0 (compatible; ChatGPT-User/1.0; +https://openai.com/bot)' },
+  { token: 'Claude-SearchBot', ua: 'Mozilla/5.0 (compatible; Claude-SearchBot/1.0; +https://www.anthropic.com)' },
+  { token: 'PerplexityBot', ua: 'Mozilla/5.0 (compatible; PerplexityBot/1.0; +https://perplexity.ai/perplexitybot)' },
+];
+const CHALLENGE_BODY = /just a moment|attention required|checking your browser|enable javascript and cookies|captcha|access denied|request blocked/i;
+
+async function probeOne(url, userAgent) {
+  const res = await fetch(url.toString(), {
+    method: 'GET',
+    redirect: 'manual',
+    cache: 'no-store',
+    headers: { 'user-agent': userAgent, accept: 'text/html,*/*' },
+    signal: AbortSignal.timeout(SIBLING_TIMEOUT_MS),
+  });
+  let challenged = !!res.headers.get('cf-mitigated');
+  if (!challenged && /text\/html/i.test(res.headers.get('content-type') || '')) {
+    const body = (await res.text()).slice(0, 4000);
+    challenged = res.status !== 200 ? CHALLENGE_BODY.test(body) : /<title>[^<]*(just a moment|attention required|access denied)/i.test(body);
+  } else {
+    try { await res.body?.cancel(); } catch { /* ignore */ }
+  }
+  return { status: res.status, challenged };
+}
+
+const isBlockStatus = (r) => r.challenged || [401, 403, 406, 429, 451, 503].includes(r.status);
+
+async function probeBotAccess(origin) {
+  const url = new URL('/', origin);
+  try {
+    await guardUrl(url);
+    const baseline = await probeOne(url, USER_AGENT);
+    if (isBlockStatus(baseline) || baseline.status >= 400) return { checked: false, baselineStatus: baseline.status, bots: [] };
+    const bots = await Promise.all(BOT_PROBES.map(async (b) => {
+      try {
+        const r = await probeOne(url, b.ua);
+        return { token: b.token, status: r.status, blocked: isBlockStatus(r), challenged: r.challenged };
+      } catch {
+        return { token: b.token, status: null, blocked: false, challenged: false, error: true };
+      }
+    }));
+    return { checked: true, baselineStatus: baseline.status, bots };
+  } catch {
+    return null;
+  }
+}
+
+// ---- hreflang validation probe -------------------------------------------------------------------------
+// Reads the page's hreflang annotations and fetches each alternate (max 6, one request each) to learn whether it
+// is reachable, indexable, canonical to itself, and links BACK to this page (Google ignores one-way hreflang).
+const MAX_HREFLANG_PROBES = 6;
+
+function readHreflangTags($, baseUrl) {
+  return $('link[rel="alternate"][hreflang]').map((_, el) => {
+    const raw = ($(el).attr('href') || '').trim();
+    let abs = null;
+    try { abs = new URL(raw, baseUrl).toString(); } catch { /* invalid */ }
+    return { lang: ($(el).attr('hreflang') || '').trim(), raw, href: abs, absolute: /^https?:\/\//i.test(raw) };
+  }).get();
+}
+
+async function probeHreflang($, finalUrl) {
+  const tags = readHreflangTags($, finalUrl);
+  if (!tags.length) return null;
+  const seen = new Set();
+  const targets = [];
+  for (const t of tags) {
+    if (!t.href || sameUrl(t.href, finalUrl) || seen.has(t.href)) continue;
+    seen.add(t.href);
+    targets.push(t);
+  }
+  const probed = await Promise.all(targets.slice(0, MAX_HREFLANG_PROBES).map(async (t) => {
+    try {
+      const url = new URL(t.href);
+      if (!/^https?:$/.test(url.protocol)) return { lang: t.lang, url: t.href, error: true };
+      await guardUrl(url);
+      const res = await fetch(url.toString(), {
+        method: 'GET', redirect: 'manual', cache: 'no-store',
+        headers: { 'user-agent': USER_AGENT, accept: 'text/html,*/*' },
+        signal: AbortSignal.timeout(SIBLING_TIMEOUT_MS),
+      });
+      const redirectedTo = [301, 302, 303, 307, 308].includes(res.status) ? res.headers.get('location') : null;
+      let noindex = /noindex/i.test(res.headers.get('x-robots-tag') || '');
+      let returnsLink = null;
+      let canonicalElsewhere = null;
+      if (res.status < 300 && /text\/html/i.test(res.headers.get('content-type') || '')) {
+        const html = (await res.text()).slice(0, 500000);
+        const $t = cheerio.load(html);
+        noindex = noindex || /noindex/i.test($t('meta[name="robots"]').attr('content') || '');
+        returnsLink = readHreflangTags($t, url).some((x) => x.href && sameUrl(x.href, finalUrl));
+        const canon = $t('link[rel="canonical"]').first().attr('href');
+        if (canon) { try { const c = new URL(canon, url); if (!sameUrl(c, url)) canonicalElsewhere = c.toString(); } catch { /* ignore */ } }
+      } else {
+        try { await res.body?.cancel(); } catch { /* ignore */ }
+      }
+      return { lang: t.lang, url: t.href, status: res.status, redirectedTo, noindex, returnsLink, canonicalElsewhere };
+    } catch {
+      return { lang: t.lang, url: t.href, error: true };
+    }
+  }));
+  return { tags, probed, capped: targets.length > MAX_HREFLANG_PROBES };
+}
+
 function parseRobotsTxt(robotsTxt) {
   if (!robotsTxt.present || !robotsTxt.content) {
     return { present: robotsTxt.present, blocksAll: false, sitemapUrls: [], content: robotsTxt.content };
@@ -263,6 +408,7 @@ async function fetchPage(inputUrl, { siteCache } = {}) {
     fetchDnsRecords(hostname),
     probeHttpToHttpsRedirect(hostname),
     main.finalUrl.protocol === 'https:' ? probeHttp2(hostname) : Promise.resolve(false),
+    probeBotAccess(origin),
   ]);
   let siteFiles;
   if (siteCache) {
@@ -271,7 +417,7 @@ async function fetchPage(inputUrl, { siteCache } = {}) {
   } else {
     siteFiles = loadSiteFiles();
   }
-  const [robotsRaw, sitemapDirect, llmsTxt, mcpManifest, dnsRecords, httpToHttps, http2] = await siteFiles;
+  const [robotsRaw, sitemapDirect, llmsTxt, mcpManifest, dnsRecords, httpToHttps, http2, botProbe] = await siteFiles;
 
   const robotsTxt = parseRobotsTxt(robotsRaw);
   const sitemap = sitemapDirect.present
@@ -281,6 +427,8 @@ async function fetchPage(inputUrl, { siteCache } = {}) {
     : { present: sitemapDirect.present === null ? null : false, url: null };
 
   const $ = cheerio.load(main.html);
+  const canonicalTarget = await probeCanonicalTarget($('link[rel="canonical"]').first().attr('href'), main.finalUrl);
+  const hreflangProbe = await probeHreflang($, main.finalUrl);
 
   return {
     url: startUrl.toString(),
@@ -290,6 +438,9 @@ async function fetchPage(inputUrl, { siteCache } = {}) {
     headers: main.headers,
     html: main.html,
     $,
+    canonicalTarget,
+    hreflangProbe,
+    botProbe,
     robotsTxt,
     sitemap,
     llmsTxt,
@@ -304,4 +455,4 @@ async function fetchPage(inputUrl, { siteCache } = {}) {
   };
 }
 
-export { fetchPage, fetchMainPage, fetchSiblingFile, normalizeUrl, guardUrl, AuditError };
+export { fetchPage, probeCanonicalTarget, probeBotAccess, probeHreflang, fetchMainPage, fetchSiblingFile, normalizeUrl, guardUrl, AuditError };

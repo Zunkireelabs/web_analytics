@@ -1,4 +1,5 @@
 import { dataforseoCall } from '../../../providers/dataforseo/client.js';
+import { domainsFromUrls } from './citations.js';
 
 // REAL AI-answer tracking, as opposed to asking a model what it remembers.
 //
@@ -205,21 +206,13 @@ function finish(text, urls) {
   return {
     text: String(text || '').trim(),
     citedUrls,
-    citedDomains: [...new Set(citedUrls.map(domainOf).filter(Boolean))],
+    citedDomains: domainsFromUrls(citedUrls),
   };
 }
 
 export function citedDomainsFrom(text) {
   const urls = String(text || '').match(/https?:\/\/[^\s)<>"']+/g) || [];
-  return [...new Set(urls.map(domainOf).filter(Boolean))];
-}
-
-function domainOf(url) {
-  try {
-    return new URL(url).hostname.toLowerCase().replace(/^www\./, '');
-  } catch {
-    return null;
-  }
+  return domainsFromUrls(urls);
 }
 
 function normalizeDomain(raw) {

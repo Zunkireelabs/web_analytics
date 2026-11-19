@@ -10,6 +10,7 @@ import { health as masterHealth, shadowReport } from '../lib/master-agent.js';
 import { loadMasterControl, setMasterMode, shadowPlanDetail, MasterControlError } from '../lib/master-agent-control.js';
 import { setAutonomy, loadAutonomy, AutonomyError } from '../lib/autonomy-control.js';
 import { listIndustrySets, saveIndustrySet, resetIndustrySet, industrySetHistory } from '../lib/industry-sets.js';
+import { loadClientComparison, periodDays } from './ai-crawlers.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { isPlatformAdmin, listAllWorkspacesForPlatform, getProject, deleteWorkspaceAsPlatform } from '../store/workspaces.js';
 
@@ -26,6 +27,11 @@ async function requirePlatformAdmin(req, res, next) {
     next();
   } catch (e) { next(e); }
 }
+
+// AI crawler comparison across every client (platform admins only; a 404 for anyone else, like everything here).
+router.get('/platform/ai-crawlers', requireAuth, requirePlatformAdmin, async (req, res, next) => {
+  try { res.json(await loadClientComparison(periodDays(req.query.days))); } catch (e) { next(e); }
+});
 
 router.get('/platform/workspaces', requireAuth, requirePlatformAdmin, async (req, res, next) => {
   try {

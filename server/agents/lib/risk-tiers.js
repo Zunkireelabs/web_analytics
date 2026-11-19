@@ -259,6 +259,8 @@ export function riskTierForGenerator(generatorId) {
 // Per-finding, deliberately not a change to any generator's tier above.
 export function requiresHumanReview(item) {
   if (item?.source === 'geo-signals') return true;
+  // News-based posts state current rules and fees, so a person always approves them (agents/news-posts.js).
+  if (item?.source === 'news-posts') return true;
   // Trend insight posts used to ALWAYS need a person, because they make claims
   // about current events. Decided otherwise (2026-10-07, owner): they ship
   // unattended like any other blog-outline. What still protects them is not a

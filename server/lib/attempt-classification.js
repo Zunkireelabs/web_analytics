@@ -218,6 +218,17 @@ const RULES = [
     summary: 'The citation-grounding service was unavailable or out of quota.',
   },
   {
+    // The LLM provider failed (out of credit, bad key, 5xx, network). Tagged
+    // "LLM provider error:" by generators/lib/llm-error.js. Before that tag
+    // existed these were reported as "model did not return valid JSON" and
+    // scored against the generator — 2026-11-07..18, every auto-fix, because
+    // the OpenAI account had no credit. Nothing about the item or generator.
+    match: (r) => /^LLM provider error:/i.test(r),
+    failureClass: FAILURE_CLASS.EXTERNAL_SERVICE,
+    policy: RETRY_POLICY.RETRY,
+    summary: 'The AI provider was unavailable (out of credit, key problem or outage).',
+  },
+  {
     // "Draft was not in a submittable state" — the row moved underneath the
     // shipping loop (another pass, a reconciler sweep, a state reset). Pure
     // bookkeeping about draft lifecycle, the same class as 'Stuck at "'

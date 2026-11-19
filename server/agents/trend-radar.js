@@ -1,3 +1,4 @@
+import { llmFailure } from '../generators/lib/llm-error.js';
 import { getSiteById } from '../store/read.js';
 import { getSeoPolicy } from '../store/site-seo-policy.js';
 import { getSiteProfile } from '../store/data-analyst.js';
@@ -316,10 +317,22 @@ export async function run({ siteId, params = {}, deps = {} }) {
   }
 
   const tenantContext = await tenantContextTextFor(site, { sections: ['goals', 'product'] });
-  const llm = await callLLMForJson(SYSTEM, buildUserPrompt({ site, industries, mainTopics, items, tenantContext, secondaryIndustries }), {
-    maxTokens: 1500, siteId,
-    validate: (v) => Array.isArray(v?.topics),
-  });
+  let llm;
+  try {
+    llm = await callLLMForJson(SYSTEM, buildUserPrompt({ site, industries, mainTopics, items, tenantContext, secondaryIndustries }), {
+      maxTokens: 1500, siteId,
+      validate: (v) => Array.isArray(v?.topics),
+    });
+  } catch (err) {
+    // The AI provider being out of credit or down is not a fault of this agent or of the site: the run
+    // cannot judge trends, so it says so (insufficient-data) instead of ending as a crashed run. Anything
+    // that is not a provider fault is still thrown, exactly as before.
+    if (llmFailure(err, 'x').llmProvider) {
+      console.warn(`[agents] trend-radar: AI provider unavailable for site ${siteId}: ${err.message}`);
+      return insufficient('The AI provider was unavailable this run, so trends could not be judged. It will be tried again on the next run.', { facts: { capabilityGap: 'llm-provider-unavailable' } });
+    }
+    throw err;
+  }
 
   const pages = await listPageInventory(siteId, { limit: 500 }).catch(() => []);
   const pagePaths = pages.map((p) => String(p.page).toLowerCase());

@@ -153,6 +153,50 @@ export function classifyImpactEvidence(delta, before, control = null) {
   return out(change > 0 ? 'impact-positive' : 'impact-negative', 'supported', { pageChange, siteChange, adjusted, noiseBand });
 }
 
+// CLICK RATE (title and description fixes). Clicks alone cannot judge a title change on a page that had no clicks before,
+// and they mix two things: how often the page is shown and how often it is chosen. The click rate is the second one, which
+// is what a title changes. Same evidence rules as clicks, in proportion form:
+//   1. enough exposure: at least MIN_CTR_IMPRESSIONS impressions in EACH window;
+//   2. outside noise: a two-proportion z-test, |z| >= NOISE_Z;
+//   3. not just the site: the page's relative CTR change minus the whole site's still clears MIN_REGRESSION_SHARE, same sign.
+// Stored next to the click verdict for people and reports. It does not feed the learning loop or the undo, which stay on clicks.
+export const MIN_CTR_IMPRESSIONS = 100;
+
+export function classifyCtrEvidence(before, after, control = null) {
+  const out = (verdict, reason, extra = {}) => ({ verdict, reason, ...extra });
+  if (!before || !after) return out('ctr-inconclusive', 'no-measurement');
+  const nb = Number(before.impressions || 0); const na = Number(after.impressions || 0);
+  if (nb < MIN_CTR_IMPRESSIONS || na < MIN_CTR_IMPRESSIONS) return out('ctr-inconclusive', 'too-few-impressions');
+  const pb = Number(before.clicks || 0) / nb; const pa = Number(after.clicks || 0) / na;
+  const pooled = (Number(before.clicks || 0) + Number(after.clicks || 0)) / (nb + na);
+  const se = Math.sqrt(pooled * (1 - pooled) * (1 / nb + 1 / na));
+  const z = se > 0 ? (pa - pb) / se : 0;
+  const base = { ctrBefore: Number(pb.toFixed(5)), ctrAfter: Number(pa.toFixed(5)), z: Number(z.toFixed(2)) };
+  if (Math.abs(z) < NOISE_Z) return out('ctr-inconclusive', 'within-noise', base);
+  const cb = control?.before; const ca = control?.after;
+  const sb = cb && cb.impressions ? cb.clicks / cb.impressions : null;
+  const sa = ca && ca.impressions ? ca.clicks / ca.impressions : null;
+  if (!(sb > 0) || sa == null) return out('ctr-inconclusive', 'no-site-control', base);
+  const pageChange = pb > 0 ? (pa - pb) / pb : (pa > 0 ? Infinity : 0);
+  const siteChange = (sa - sb) / sb;
+  const adjusted = pageChange - siteChange;
+  const extra = { ...base, sitePctChange: Number((siteChange * 100).toFixed(1)), adjustedPctChange: Number.isFinite(adjusted) ? Number((adjusted * 100).toFixed(1)) : null };
+  if (Math.sign(adjusted) !== Math.sign(pa - pb) || Math.abs(adjusted) < MIN_REGRESSION_SHARE) return out('ctr-inconclusive', 'moved-with-site', extra);
+  return out(pa > pb ? 'ctr-up' : 'ctr-down', 'supported', extra);
+}
+
+// VISIBILITY (pages Google was not showing at all). A page with no impressions before has no baseline for clicks or click
+// rate; the question is simply whether it is now being shown. MIN_VISIBLE_IMPRESSIONS keeps a stray impression or two from
+// counting. Reported, not learned from: one page appearing says little about the generator in general.
+export const MIN_VISIBLE_IMPRESSIONS = 10;
+export function classifyVisibility(before, after) {
+  const b = Number(before?.impressions || 0); const a = Number(after?.impressions || 0);
+  if (b > 0) return null; // had a baseline: judged by clicks and click rate instead
+  return a >= MIN_VISIBLE_IMPRESSIONS
+    ? { verdict: 'now-visible', impressionsAfter: a }
+    : { verdict: 'still-invisible', impressionsAfter: a };
+}
+
 // Deployment → production-verification gap (2026-09 lifecycle-gap audit,
 // finding #2): scheduleImpactMeasurement used to assume a human's merge WAS
 // a live deploy — "the merge is the only moment we know a fix is genuinely
@@ -210,6 +254,16 @@ export async function measureOne(row) {
   // would read as "the fix did nothing", which is a different and unearned
   // claim. No outcome is logged for the learning loop either — "we don't
   // know" must never be recorded as a neutral/negative signal.
+  // A page that had NO impressions before (one Google was not showing) and has some now: no click baseline exists, but
+  // "is it shown now" is a real, honest answer, so it is recorded as measured with a visibility verdict. No learning
+  // outcome is logged for it (see classifyVisibility).
+  if (!before && after) {
+    const visibility = classifyVisibility(null, after);
+    return recordImpactOutcome(row.id, {
+      status: 'measured', beforeWindow: { ...windows.before, clicks: 0, impressions: 0, ctr: null, avgPosition: null }, afterWindow: after,
+      delta: { ...computeDelta({ clicks: 0, impressions: 0, ctr: null, avgPosition: null }, after), verdict: 'impact-inconclusive', verdictReason: 'no-baseline-impressions', visibility },
+    });
+  }
   if (!before || !after) {
     return recordImpactOutcome(row.id, {
       status: 'insufficient-data',
@@ -227,8 +281,19 @@ export async function measureOne(row) {
   const assessment = classifyImpactEvidence(baseDelta, before, siteBefore && siteAfter ? { before: siteBefore, after: siteAfter } : null);
   // Kept inside the existing delta jsonb, so the evidence behind every label is stored with the measurement itself and
   // no schema change is needed. Rows measured before this carry no `verdict` and are read as legacy.
-  const delta = { ...baseDelta, verdict: assessment.verdict, verdictReason: assessment.reason, evidence: assessment.evidence };
+  const control = siteBefore && siteAfter ? { before: siteBefore, after: siteAfter } : null;
+  const delta = {
+    ...baseDelta, verdict: assessment.verdict, verdictReason: assessment.reason, evidence: assessment.evidence,
+    ctrVerdict: classifyCtrEvidence(before, after, control),
+  };
   const updated = await recordImpactOutcome(row.id, { status: 'measured', beforeWindow: before, afterWindow: after, delta });
+
+  // A title changed automatically on a protected page is kept, or put back, on this measurement (protected-title-trials.js).
+  if (row.generator_id === 'meta-title') {
+    const { onTrialMeasured } = await import('./protected-title-trials.js');
+    const follow = await onTrialMeasured(row.draft_id, assessment.verdict);
+    if (follow.action === 'restore-queued') console.log(`[fix-impact] draft ${row.draft_id}: protected-page title cost clicks; restore queued (recommendation ${follow.recommendationId}).`);
+  }
 
   // The design lessons that came from this draft get the page's real before
   // and after: the lesson was recorded with the pre-fix baseline, and this is

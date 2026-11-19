@@ -10,7 +10,7 @@ import { PROVIDERS, getConfiguredProviders } from './lib/model-providers/index.j
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
 import { effortForGenerator } from './lib/page-content.js';
 import { callLLM } from '../llm.js';
-import { targetMarketNames, resolveSiteLocations } from './lib/site-locations.js';
+import { targetMarketNames, resolveSiteLocations, probeCountry } from './lib/site-locations.js';
 import { placeNames, isUkSite } from './lib/local-seo.js';
 
 // Distinct from server/agents/ai-visibility.js — that agent measures
@@ -76,13 +76,18 @@ async function generatePromptCandidates({ companyName, homepageTitle, homepageDe
     (localPlaces.length
       ? `This is a LOCAL business that works in: ${localPlaces.join(', ')} (the first is where it is based). Real customers ask ` +
         'with a place in the question ("best X in <place>", "X near <place>"), so make most questions name one of these places, ' +
-        'weighted towards the first, and keep a few without a place. Never name a place that is not in that list. ' +
-        (british ? 'Phrase them the way someone in the UK would, with British spelling. ' : '')
+        'weighted towards the first, and keep a few without a place. Never name a place that is not in that list. '
       : targetMarkets.length
       ? `This company serves these markets: ${targetMarkets.join(', ')}. Do NOT anchor every question to one country or city, ` +
         'even if the pages/queries below do — make roughly half of the questions location-neutral (how a buyer anywhere would ask), ' +
         'and spread the rest across the listed markets. '
       : '') +
+    // Every UK client whose buyers are in the UK (local, or the UK as its only market), with or without declared places:
+    // a question in American wording ("seniors", "assisted living") tests how an American asks, which no UK customer
+    // does. A multi-market site that merely includes the UK keeps neutral wording.
+    (british && (localPlaces.length || targetMarkets.length <= 1) ? 'Phrase every question the way someone in the UK would, with British spelling and British terms, never American ' +
+      'ones (for example "flat" not "apartment", "removals company" not "moving company", "care home" not "assisted living", ' +
+      '"older people" not "seniors"). ' : '') +
     'Respond with ONLY a JSON array, each item {"promptText": "...", "source": "service"|"landing-page"|"top-query"}, ' +
     `capped at ${MAX_TRACKED_PROMPTS} items total.`;
   const user = `Company: ${companyName}\nHomepage title: ${homepageTitle || 'unknown'}\n` +
@@ -118,7 +123,7 @@ function includesWholeMatch(text, needle) {
 // case-insensitive match of the company's real name or real domain against
 // the actual raw response text. Never trusted from the extraction LLM
 // call's own self-report of a checkable fact.
-function detectMention(rawResponse, companyName, domain) {
+export function detectMention(rawResponse, companyName, domain) {
   const text = rawResponse.toLowerCase();
   if (companyName && includesWholeMatch(text, companyName.toLowerCase())) return true;
   if (domain && includesWholeMatch(text, domain.toLowerCase())) return true;
@@ -286,35 +291,58 @@ export async function run({ siteId, start, end }) {
   const [primaryMarket] = resolveSiteLocations(site);
   const locationCode = primaryMarket?.locationCode ?? null;
   const languageCode = primaryMarket?.languageCode ?? 'en';
+  // Where a one-country client's buyers ask from, for the model-API providers that can take a location hint (openai, anthropic).
+  // Null for a global or multi-market site, which keeps being asked with no location.
+  const country = probeCountry(site);
   // Every configured provider probes the same rotated batch independently —
   // a provider's own failure (transient API error, etc.) never blocks
   // another provider's results; each is caught per-(prompt, provider) pair,
   // same discipline as the original single-provider loop.
   const perProviderResults = await Promise.all(providers.map(async (provider) => {
-    const results = await Promise.all(batch.map(async (prompt) => {
+    // A provider that fronts several engines (dataforseo-ai: ChatGPT, Gemini, AI Overviews) answers every enabled
+    // engine through askAll; calling ask() alone only ever used the first engine in AI_CITATION_ENGINES. Each engine's
+    // answer is its own row (model says which engine), and one engine failing never hides the others.
+    const probesFor = async (prompt) => {
+      const opts = { siteId, locationCode, languageCode, country };
+      if (typeof provider.askAll !== 'function') return [await provider.ask(prompt.prompt_text, opts)];
+      const all = await provider.askAll(prompt.prompt_text, opts);
+      for (const r of all) if (r.error) console.warn(`[agents] ai-recommendation: ${provider.id}/${r.engine} failed for prompt ${prompt.id}:`, r.error);
+      return all.filter((r) => !r.error); // an empty answer ("no AI Overview shown") is kept: it is itself the measurement
+    };
+    const results = (await Promise.all(batch.map(async (prompt) => {
+      let probes;
       try {
-        // siteId and the site's market go to every provider: the model-API providers ignore the extra options (their
-        // `ask` takes only the prompt), while dataforseo-ai REQUIRES siteId because its call is paid and must be
-        // attributed to a project in the spend ledger, and uses the location to ask in the client's own market.
-        const probe = await provider.ask(prompt.prompt_text, { siteId, locationCode, languageCode });
-        const mentioned = detectMention(probe.raw, site.name, domain);
-        const extracted = await provider.extract(probe.raw, { companyName: site.name, domain }).catch(() => null);
-        const saved = await saveAiPromptRun(siteId, {
-          promptId: prompt.id, provider: provider.id, model: probe.model, runDate, rawResponse: probe.raw, mentioned,
-          approximatePosition: mentioned ? (extracted?.approximatePosition ?? null) : null,
-          // Only names that really appear in probe.raw — see
-          // verifyExtractedCompetitors for why the model's own list isn't
-          // trusted as-is.
-          competitorsMentioned: verifyExtractedCompetitors(probe.raw, extracted?.competitorsMentioned),
-          sentiment: extracted?.sentiment ?? null,
-          recommendationStrength: mentioned ? (extracted?.recommendationStrength ?? null) : 'none',
-        });
-        return { ...saved, prompt_text: prompt.prompt_text, source: prompt.source };
+        // siteId and the site's market go to every provider, and each uses what it can: openai and anthropic ask from
+        // `country` (perplexity ignores the options), while dataforseo-ai REQUIRES siteId because its call is paid and must
+        // be attributed to a project in the spend ledger, and uses the location to ask in the client's own market.
+        probes = await probesFor(prompt);
       } catch (err) {
         console.warn(`[agents] ai-recommendation: ${provider.id} probe failed for prompt ${prompt.id}:`, err.message);
-        return null;
+        return [];
       }
-    }));
+      return Promise.all(probes.map(async (probe) => {
+        try {
+          const mentioned = detectMention(probe.raw, site.name, domain);
+          const extracted = await provider.extract(probe.raw, { companyName: site.name, domain }).catch(() => null);
+          const saved = await saveAiPromptRun(siteId, {
+            promptId: prompt.id, provider: provider.id, model: probe.model, runDate, rawResponse: probe.raw, mentioned,
+            approximatePosition: mentioned ? (extracted?.approximatePosition ?? null) : null,
+            // Only names that really appear in probe.raw — see
+            // verifyExtractedCompetitors for why the model's own list isn't
+            // trusted as-is.
+            competitorsMentioned: verifyExtractedCompetitors(probe.raw, extracted?.competitorsMentioned),
+            sentiment: extracted?.sentiment ?? null,
+            recommendationStrength: mentioned ? (extracted?.recommendationStrength ?? null) : 'none',
+            // Real cited sources when the probe searched the web; absent (stored null) for a memory-only probe.
+            citedDomains: Array.isArray(probe.citedDomains) ? probe.citedDomains : null,
+          });
+          return { ...saved, prompt_text: prompt.prompt_text, source: prompt.source };
+        } catch (err) {
+          console.warn(`[agents] ai-recommendation: ${provider.id} save failed for prompt ${prompt.id}:`, err.message);
+          return null;
+        }
+      }));
+    }))).flat();
     return { providerId: provider.id, checked: results.filter(Boolean) };
   }));
 

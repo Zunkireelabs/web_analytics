@@ -1,5 +1,6 @@
 import * as cheerio from 'cheerio';
 import { describeFetchFailure, describeHttpFailure } from '../../lib/errors.js';
+import { parseRobotsGroups, evaluateAccess } from '../../free-audit/robotsAccess.js';
 
 // Live-fetches a landing page and checks what's actually on it, so the
 // Opportunity Agent's recommendations are grounded in the real page instead
@@ -1140,29 +1141,13 @@ export function titleKeywordConsistency(title, bodyText) {
 // together regardless of whether it fetches pages for live citation.
 const ANSWER_ENGINE_CRAWLER_AGENTS = ['GPTBot', 'ChatGPT-User', 'ClaudeBot', 'anthropic-ai', 'PerplexityBot', 'Google-Extended', 'Applebot-Extended'];
 
-// Simplified robots.txt scan (line-based, not a full RFC 9309 parser): for
-// each known answer-engine user-agent block, treat a bare "Disallow: /" as
-// fully blocking that crawler. Anything more specific (partial paths) is
-// not evaluated — this only answers "is a real answer-engine bot flatly
-// disallowed site-wide".
+// RFC 9309 evaluation (free-audit/robotsAccess.js, shared with the free audit so the two never drift):
+// for each known answer-engine user-agent, is the site root closed to it? Allow rules count, the longest
+// matching rule wins, a tie goes to Allow, a bot with its own group ignores "*", and "*"/"$" work in paths.
+// Still only answers the site-wide question (root closed or not); partial-path blocks are not a "block" here.
 export function robotsAllowsAiCrawlers(robotsTxt) {
-  const lines = robotsTxt.split('\n').map((l) => l.trim());
-  let currentAgents = [];
-  let blockedAny = false;
-  for (const line of lines) {
-    const [rawKey, ...rest] = line.split(':');
-    if (!rawKey) continue;
-    const key = rawKey.trim().toLowerCase();
-    const value = rest.join(':').trim();
-    if (key === 'user-agent') {
-      currentAgents = [value];
-    } else if (key === 'disallow' && value === '/') {
-      if (currentAgents.some((a) => a === '*' || ANSWER_ENGINE_CRAWLER_AGENTS.some((bot) => bot.toLowerCase() === a.toLowerCase()))) {
-        blockedAny = true;
-      }
-    }
-  }
-  return !blockedAny;
+  const groups = parseRobotsGroups(robotsTxt);
+  return !ANSWER_ENGINE_CRAWLER_AGENTS.some((bot) => !evaluateAccess(groups, bot, '/').allowed);
 }
 
 // Response headers only — never reads the body — for security-headers.js.

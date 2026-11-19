@@ -24,6 +24,8 @@ async function makeSite(label) {
 after(async () => {
   if (siteIds.length) {
     await query('DELETE FROM generator_outcomes WHERE site_id = ANY($1::int[])', [siteIds]);
+    await query('DELETE FROM protected_title_trials WHERE site_id = ANY($1::int[])', [siteIds]).catch(() => {});
+    await query('DELETE FROM recommendations WHERE site_id = ANY($1::int[])', [siteIds]);
     await query('DELETE FROM fix_impact WHERE site_id = ANY($1::int[])', [siteIds]);
     await query('DELETE FROM drafts WHERE site_id = ANY($1::int[])', [siteIds]);
     await query('DELETE FROM gsc_breakdown WHERE site_id = ANY($1::int[])', [siteIds]);
@@ -50,7 +52,7 @@ async function seedDays(table, siteId, { start, end, clicksPerDay, impressionsPe
   }
 }
 
-async function scenario(label, { page, site }) {
+async function scenario(label, { page, site, generatorId = 'faq', beforeTrial = null }) {
   const siteId = await makeSite(label);
   await seedDays('gsc_breakdown', siteId, { ...W.before, clicksPerDay: page.before, impressionsPerDay: page.before * 100, page: PAGE });
   await seedDays('gsc_breakdown', siteId, { ...W.after, clicksPerDay: page.after, impressionsPerDay: page.after * 100, page: PAGE });
@@ -58,11 +60,12 @@ async function scenario(label, { page, site }) {
     await seedDays('gsc_daily', siteId, { ...W.before, clicksPerDay: site.before, impressionsPerDay: site.before * 100 });
     await seedDays('gsc_daily', siteId, { ...W.after, clicksPerDay: site.after, impressionsPerDay: site.after * 100 });
   }
-  const { rows: d } = await query(`INSERT INTO drafts (site_id, action_type, input, content, status) VALUES ($1,'faq','{}'::jsonb,'{}'::jsonb,'implemented') RETURNING id`, [siteId]);
+  const { rows: d } = await query(`INSERT INTO drafts (site_id, action_type, input, content, status) VALUES ($1,$2,'{}'::jsonb,'{}'::jsonb,'implemented') RETURNING id`, [siteId, generatorId]);
+  if (beforeTrial) await beforeTrial(siteId, d[0].id);
   const { rows: fi } = await query(
     `INSERT INTO fix_impact (site_id, draft_id, page_url, generator_id, merged_at, measure_after, status)
-     VALUES ($1,$2,$3,'faq',$4, now() - interval '1 day','pending') RETURNING *`,
-    [siteId, d[0].id, PAGE, MERGED_AT]
+     VALUES ($1,$2,$3,$4,$5, now() - interval '1 day','pending') RETURNING *`,
+    [siteId, d[0].id, PAGE, generatorId, MERGED_AT]
   );
   await measureOne(fi[0]);
   const { rows: after } = await query('SELECT status, delta FROM fix_impact WHERE id = $1', [fi[0].id]);
@@ -114,5 +117,35 @@ describe('measureOne against real rows', () => {
   test('the correlation caveat is stored with every measurement', async () => {
     const r = await scenario('caveat', { page: { before: 10, after: 20 }, site: { before: 100, after: 100 } });
     assert.match(r.impact.delta.caveat, /correlation, not attribution/);
+  });
+
+  // 2026-11-18: click rate, visibility, and the protected-title undo, through the same real path.
+  test('every measured row also carries a click-rate verdict', async () => {
+    const r = await scenario('ctr', { page: { before: 10, after: 20 }, site: { before: 100, after: 100 } });
+    assert.ok(r.impact.delta.ctrVerdict?.verdict, 'ctrVerdict stored');
+  });
+
+  test('a page Google was not showing before and shows now is measured as now-visible, with no lesson for the generator', async () => {
+    const r = await scenario('visible', { page: { before: 0, after: 1 }, site: { before: 100, after: 100 } });
+    assert.equal(r.impact.status, 'measured');
+    assert.equal(r.impact.delta.visibility.verdict, 'now-visible');
+    assert.equal(r.impact.delta.verdictReason, 'no-baseline-impressions');
+    assert.deepEqual(r.outcomes, []);
+  });
+
+  test('a protected-page title that measurably cost clicks queues a restore of the old title', async () => {
+    const r = await scenario('undo', {
+      generatorId: 'meta-title', page: { before: 20, after: 8 }, site: { before: 100, after: 100 },
+      beforeTrial: (siteId, draftId) => query(
+        `INSERT INTO protected_title_trials (site_id, draft_id, page, query, previous_title, previous_description, new_title)
+         VALUES ($1,$2,$3,'pricing','Old title','Old desc','New title')`, [siteId, draftId, PAGE]),
+    });
+    assert.equal(r.impact.delta.verdict, 'impact-negative');
+    const { rows: recs } = await query(`SELECT recommendation_type, risk_tier, params FROM recommendations WHERE site_id = $1`, [r.siteId]);
+    assert.equal(recs.length, 1);
+    assert.equal(recs[0].recommendation_type, 'meta-title');
+    assert.deepEqual([recs[0].params.restore.title, recs[0].params.restore.description], ['Old title', 'Old desc']);
+    const { rows: t } = await query(`SELECT status FROM protected_title_trials WHERE site_id = $1`, [r.siteId]);
+    assert.equal(t[0].status, 'restore-queued');
   });
 });

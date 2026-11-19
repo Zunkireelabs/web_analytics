@@ -1,5 +1,6 @@
 import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
 import { callLLMForJson } from '../llm.js';
+import { llmFailure } from './lib/llm-error.js';
 
 export const meta = {
   id: 'translation',
@@ -37,8 +38,8 @@ export async function generate({ siteId, params }) {
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 1500, generatorId: meta.id, siteId });
-  } catch {
-    throw Object.assign(new Error('Translation generation failed: model did not return valid JSON'), { status: 400 });
+  } catch (err) {
+    throw llmFailure(err, 'Translation generation failed: model did not return valid JSON', { status: 400 });
   }
 
   const content = {

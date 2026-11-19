@@ -11,6 +11,7 @@ import { loadExpandStructurePrior } from '../design-agent/lib/expand-structure-l
 import { structurePlanText } from '../design-agent/lib/expand-structure-spec.js';
 import { classifyPageType } from '../design-agent/live-analysis/schema.js';
 import { findContentIssues, describeIssues } from './lib/output-guard.js';
+import { llmFailure } from './lib/llm-error.js';
 
 // Real citation search is opt-in, separate from TAVILY_API_KEY simply being
 // set — citation search would silently start spending Tavily's quota the
@@ -379,8 +380,8 @@ export async function generate({ siteId, params }) {
         raw = await callLLMForJson(system, prompt, {
           task: 'content', maxTokens: 1200, generatorId: meta.id, siteId, pageUrl: page, validate: Array.isArray,
         });
-      } catch {
-        throw Object.assign(new Error('Content expansion failed: model did not return valid JSON'), { status: 400, userFacing: true });
+      } catch (err) {
+        throw llmFailure(err, 'Content expansion failed: model did not return valid JSON', { status: 400, userFacing: true });
       }
       return raw
         .filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string')

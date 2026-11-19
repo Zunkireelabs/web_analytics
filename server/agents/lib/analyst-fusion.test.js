@@ -141,3 +141,16 @@ describe('generatorForDecliningPage', () => {
     assert.equal(generatorId, 'expand-content');
   });
 });
+
+// A title fix needs the query it is written for; without one generators/meta-title.js throws, so the action must carry it or not exist.
+import { withRequiredQuery } from './analyst-fusion.js';
+test('withRequiredQuery fills the page\'s top query for a title fix, and drops the action when none is on record', async () => {
+  const page = 'https://x.test/a';
+  const found = await withRequiredQuery(1, { generatorId: 'meta-title', params: { page } }, [], async () => 'seo report');
+  assert.deepEqual(found.params, { page, query: 'seo report' });
+  assert.equal(await withRequiredQuery(1, { generatorId: 'meta-title', params: { page } }, [], async () => null), null);
+  const known = await withRequiredQuery(1, { generatorId: 'meta-title', params: { page } }, ['known q'], async (s, p, k) => k[0]);
+  assert.equal(known.params.query, 'known q');
+  const other = { generatorId: 'expand-content', params: { page } };
+  assert.equal(await withRequiredQuery(1, other, [], async () => { throw new Error('must not look up'); }), other);
+});

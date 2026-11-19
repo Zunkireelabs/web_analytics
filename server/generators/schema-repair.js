@@ -1,6 +1,12 @@
 import { analyzePageUrl } from '../agents/lib/page-content.js';
 import { callLLMForJson } from '../llm.js';
 import { findSchemaIssues } from './lib/schema-structure-guard.js';
+import { llmFailure } from './lib/llm-error.js';
+import { getSiteById } from '../store/read.js';
+import { resolveFile } from '../implementers/lib/url-file-map.js';
+import { getFileContent } from '../github/client.js';
+import { baseBranch } from '../implementers/lib/github-ops.js';
+import { countOccurrences } from '../implementers/lib/exact-match-patch.js';
 
 // Handles BOTH 'Invalid structured data' (a real <script type=
 // "application/ld+json"> block on the page failed to parse) and 'Duplicate
@@ -26,6 +32,41 @@ const SYSTEM = 'You are a structured-data specialist. The JSON-LD block given be
   'preserving every real value it already contains exactly as-is. Never add, remove, or change any actual field ' +
   'value — if a value looks incomplete or ambiguous even after fixing syntax, keep it as close to the original ' +
   'literal text as possible rather than guessing what it "should" say. Respond with ONLY the corrected JSON-LD object.';
+
+// The patch step (implementers/lib/schema-repair-inject.js) only applies when
+// `originalRaw` — the block's text as the LIVE, RENDERED page shows it — is
+// found exactly once, verbatim, in the site's SOURCE file. For a templated
+// site (Nunjucks/Liquid/PHP) the source holds `{{ ... }}` / `{% for %}` where
+// the page shows values, so the text is simply not there; the draft was
+// generated, paid for, approved, and then failed at apply with "anchor(s) no
+// longer found verbatim" — six times on 2026-11-18 for one page, each logged
+// as the generator's own logic error. Checking the same condition BEFORE the
+// model is called turns that into an honest, free refusal.
+//
+// Best effort by design: if the site or source cannot be read here, the
+// check is skipped and the apply step stays the authority, exactly as before.
+// Exported for tests; `deps` lets them avoid the DB and GitHub.
+export async function assertAnchorPatchable(siteId, page, originalRaw, deps = {}) {
+  const { fetchSite = getSiteById, resolve = resolveFile, fetchFile = getFileContent, branchOf = baseBranch } = deps;
+  let site; let filePath; let file;
+  try {
+    site = await fetchSite(siteId);
+    filePath = site ? resolve(site, page) : null;
+    file = filePath ? await fetchFile(site, filePath, branchOf(site)) : null;
+  } catch {
+    return; // cannot check — leave the decision to the apply step
+  }
+  if (!file || typeof file.content !== 'string') return;
+  const count = countOccurrences(file.content, originalRaw);
+  if (count === 1) return;
+  const why = count === 0
+    ? `the block as rendered on ${page} is not found verbatim in ${filePath} (the page is generated from a template, or the source changed since detection)`
+    : `the block appears ${count} times in ${filePath}, so the one to change cannot be told apart`;
+  throw Object.assign(
+    new Error(`Cannot patch the structured data on ${page} automatically: ${why}. Edit ${filePath} by hand.`),
+    { status: 400, userFacing: true, refusal: true, reason: 'source-anchor-not-found' },
+  );
+}
 
 // params: { page: string }
 export async function generate({ siteId, params }) {
@@ -57,11 +98,12 @@ export async function generate({ siteId, params }) {
         { status: 400, userFacing: true },
       );
     }
+    await assertAnchorPatchable(siteId, page, originalRaw);
     let jsonLd;
     try {
       jsonLd = await callLLMForJson(SYSTEM, originalRaw, { task: 'content', maxTokens: 700, generatorId: meta.id, siteId });
-    } catch {
-      throw Object.assign(new Error('Schema repair failed: model did not return valid JSON'), { status: 400 });
+    } catch (err) {
+      throw llmFailure(err, 'Schema repair failed: model did not return valid JSON', { status: 400 });
     }
     const issues = findSchemaIssues({ jsonLd });
     if (issues.length) {
@@ -88,6 +130,7 @@ export async function generate({ siteId, params }) {
     if (!originalRaw) {
       throw Object.assign(new Error(`Could not isolate a removable duplicate "${duplicateType}" block on ${page} — it may have changed since detection.`), { status: 400, userFacing: true });
     }
+    await assertAnchorPatchable(siteId, page, originalRaw);
     return {
       content: { page, fixType: 'remove-duplicate', duplicateType, originalRaw },
       summary: `Remove duplicate "${duplicateType}" JSON-LD block on ${page}`,

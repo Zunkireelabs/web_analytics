@@ -11,6 +11,7 @@ import GrowthProjectionCard from '../components/GrowthProjectionCard.jsx';
 import SiteAuditSummaryCard from '../components/SiteAuditSummaryCard.jsx';
 import GrowthPlanNarrativeCard from '../components/GrowthPlanNarrativeCard.jsx';
 import BaselineReportCard from '../components/BaselineReportCard.jsx';
+import RunBaselineCard from '../components/RunBaselineCard.jsx';
 
 // The baseline half of the Reports page (its "Baseline" tab; this used to be the Milestones page):
 // "how much have we actually grown you" — real data only, strictly anchored to the site's real onboarding
@@ -20,7 +21,7 @@ import BaselineReportCard from '../components/BaselineReportCard.jsx';
 //
 // It always shows the session's own project. A platform admin looks at a client's by switching into that
 // project (the workspace switcher), not through a picker here. `siteId` is only used so staff can generate
-// a missing baseline report for the project they are in.
+// a missing baseline report for the project they are in, and so a project with no baseline yet can start one here.
 export function GrowthReportBody({ isInternal = false, siteId }) {
   const [data, setData] = useState(null); // null = loading
   const [error, setError] = useState(false);
@@ -68,6 +69,9 @@ export function GrowthReportBody({ isInternal = false, siteId }) {
         <div className="rounded-card bg-[#fdecec] text-[#b42318] text-sm px-4 py-3">Unable to load your growth report right now.</div>
       ) : data === null ? (
         <KpiStrip cols={3} loading items={[{}, {}, {}]} />
+      ) : !data.available && data.reason === 'no-baseline' ? (
+        // No baseline yet (setup finished late, or the first run failed): offer to run it here.
+        <RunBaselineCard siteId={siteId} message={data.message} onDone={() => { load(); loadBaselineReport(); }} />
       ) : !data.available ? (
         <div className="tray"><div className="tray-card px-4 py-10 text-center text-sm text-text">{data.message}</div></div>
       ) : (

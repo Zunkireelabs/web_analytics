@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { buildExtractionPrompt, parseExtractionResponse } from './extraction-prompt.js';
+import { domainsFromUrls } from './citations.js';
 
 // Perplexity's Sonar API is OpenAI-SDK-compatible (same client, different
 // baseURL/key) — reusing the `openai` package instead of a bespoke HTTP
@@ -43,11 +44,15 @@ export async function ask(prompt) {
     max_tokens: 600,
     messages: [{ role: 'user', content: prompt }],
   });
+  const citations = res.citations || [];
+  const searchResults = res.search_results || [];
+  const urls = citations.length ? citations : searchResults.map((r) => r?.url);
   return {
     raw: res.choices[0]?.message?.content?.trim() || '',
     model: MODEL,
-    citations: res.citations || [],
-    searchResults: res.search_results || [],
+    citations,
+    searchResults,
+    citedDomains: domainsFromUrls(urls),
   };
 }
 

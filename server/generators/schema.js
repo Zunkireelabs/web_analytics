@@ -2,6 +2,7 @@ import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-conte
 import { callLLMForJson } from '../llm.js';
 import { getSiteById } from '../store/read.js';
 import { hasAuthorProfile, authorJsonLd } from './lib/author-profile.js';
+import { llmFailure } from './lib/llm-error.js';
 
 export const meta = {
   id: 'schema',
@@ -86,8 +87,8 @@ async function draftJsonLd(schemaType, title, bodyText, siteId) {
   const user = `Page title: ${title}\nPage text: ${bodyText.slice(0, 3000)}`;
   try {
     return await callLLMForJson(system, user, { task: 'content', maxTokens: 800, generatorId: meta.id, siteId });
-  } catch {
-    throw Object.assign(new Error('Schema generation failed: model did not return valid JSON'), { status: 400 });
+  } catch (err) {
+    throw llmFailure(err, 'Schema generation failed: model did not return valid JSON', { status: 400 });
   }
 }
 

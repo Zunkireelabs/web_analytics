@@ -1,6 +1,7 @@
 import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
 import { callLLMForJson } from '../llm.js';
 import { sanitizeTable } from './expand-content.js';
+import { llmFailure } from './lib/llm-error.js';
 
 // Distinct from expand-content.js: expand-content only ever ADDS new
 // subtopics the page has never covered. This generator's job is the
@@ -28,18 +29,21 @@ const SYSTEM_REFRESH = 'You are a content strategist. A page\'s real search perf
   'page text and the real decline numbers given — never invent a new fact, price, feature, or date not present in either. ' +
   'If nothing in the given text looks outdated, write a section that reinforces the page\'s strongest existing claim with ' +
   'more depth instead of inventing a "what changed" narrative that isn\'t there. ' +
+  'When official facts are given, they are real and confirmed: update the outdated statement to match them, use their wording for any number, fee or date, and add nothing beyond them. ' +
   'Respond with ONLY a JSON array of exactly one item: [{"heading": "...", "body": "..."}]';
 
 // params: { page: string, query?: string, trend?: { priorClicks, recentClicks, priorPosition, recentPosition, dropPct } }
 export async function generate({ siteId, params }) {
-  const { page, query, trend } = params || {};
+  const { page, query, trend, officialFacts } = params || {};
   if (!page) throw Object.assign(new Error('page is required'), { status: 400, userFacing: true });
 
   const fetched = await analyzePageUrl(page);
   if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400, userFacing: true });
   requireGroundedContent(fetched.analysis, { generatorId: meta.id });
 
-  const trendLine = trend
+  const trendLine = officialFacts
+    ? `Reason for this update: an official source changed a rule this page covers. ${officialFacts}`
+    : trend
     ? `Real decline evidence: clicks went from ${trend.priorClicks} to ${trend.recentClicks} (${trend.dropPct}% drop)` +
       (trend.priorPosition != null && trend.recentPosition != null
         ? `, average position moved from #${Number(trend.priorPosition).toFixed(1)} to #${Number(trend.recentPosition).toFixed(1)}.`
@@ -53,8 +57,8 @@ export async function generate({ siteId, params }) {
     sections = await callLLMForJson(SYSTEM_REFRESH, user, {
       task: 'content', maxTokens: 500, generatorId: meta.id, siteId, validate: Array.isArray,
     });
-  } catch {
-    throw Object.assign(new Error('Content refresh failed: model did not return valid JSON'), { status: 400, userFacing: true });
+  } catch (err) {
+    throw llmFailure(err, 'Content refresh failed: model did not return valid JSON', { status: 400, userFacing: true });
   }
   sections = sections
     .filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string')

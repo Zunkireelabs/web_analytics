@@ -1,5 +1,6 @@
 import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
 import { callLLMForJson } from '../llm.js';
+import { llmFailure } from './lib/llm-error.js';
 
 export const meta = {
   id: 'qa-content',
@@ -29,8 +30,8 @@ export async function generate({ siteId, params }) {
   try {
     items = await callLLMForJson(SYSTEM, user, { task: 'content', maxTokens: 1000, generatorId: meta.id, siteId, pageUrl: page });
     if (!Array.isArray(items)) throw new Error('not an array');
-  } catch {
-    throw Object.assign(new Error('Q&A content generation failed: model did not return valid JSON'), { status: 400 });
+  } catch (err) {
+    throw llmFailure(err, 'Q&A content generation failed: model did not return valid JSON', { status: 400 });
   }
   // Enforce the real "?" contract server-side — never trust the model alone
   // to have followed the question-phrasing instruction, since this content's

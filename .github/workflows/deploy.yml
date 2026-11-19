@@ -105,6 +105,16 @@ jobs:
             # so a Claude key alone never starts paid probe calls.
             AI_RECOMMENDATION_ANTHROPIC_ENABLED=true
 
+            # ── DataForSEO (keywords, backlinks, real AI answers) ───────────
+            # Was only in deploy-staging.yml, and this block rewrites .env on every deploy, so production had no DataForSEO
+            # at all. Every call goes through the per-project monthly budget (providers/dataforseo/client.js, migration 231).
+            DATAFORSEO_LOGIN=${{ secrets.DATAFORSEO_LOGIN }}
+            DATAFORSEO_PASSWORD=${{ secrets.DATAFORSEO_PASSWORD }}
+            # Real ChatGPT / Gemini / Google AI Overview answers with their cited sources (agents/lib/model-providers/
+            # dataforseo-ai.js). Its own switch, so the credentials above never start paid citation probes by themselves.
+            AI_CITATION_TRACKING_ENABLED=true
+            AI_CITATION_ENGINES=chatgpt,gemini,google_ai_overview
+
             # ── Shipping time (owner decision 2026-11-06) ───────────────────
             # Fixes are drafted and pull requests opened ONCE a day at 11:00 (server time, TZ above), after the 07:00 detection run.
             # SHIP_CRON_SCHEDULE moves shipping out of the 07:00 pass; SHIP_HOUR_LOCAL tells the "was today's run missed" checks the

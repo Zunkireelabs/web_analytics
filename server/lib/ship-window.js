@@ -157,3 +157,11 @@ export function checkShipStall({ site, shipped, now = new Date() }) {
     findingIds: [],
   };
 }
+
+// Staff are told only once a stall is a PATTERN, not a bad morning: a stall
+// event today, not already announced today, and an earlier stall notification
+// within the last 3 days (so this is at least the second day running). Pure so
+// the rule is testable; job.js supplies the two database facts.
+export function shouldNotifyStaffOfStall({ stallEvent, alreadyNotifiedToday, stalledEarlier }) {
+  return Boolean(stallEvent) && !alreadyNotifiedToday && Boolean(stalledEarlier);
+}

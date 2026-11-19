@@ -295,6 +295,7 @@ export default function ActionCenter({ scope }) {
   const [generatingId, setGeneratingId] = useState(null);
   const [activeDraft, setActiveDraft] = useState(null);
   const [error, setError] = useState(null);
+  const [queuedNote, setQueuedNote] = useState(null);
   const [executingSafeFixes, setExecutingSafeFixes] = useState(false);
   const [executionResult, setExecutionResult] = useState(null);
   const [executionJobDetail, setExecutionJobDetail] = useState(null);
@@ -631,10 +632,16 @@ export default function ActionCenter({ scope }) {
   const approveAndShip = async (item) => {
     setShippingId(item.id);
     setError(null);
+    setQueuedNote(null);
     setExecutionResult(null);
     try {
       const draft = await api.actionCenter.approveAndShip(item.id, siteId);
-      setExecutionResult({ shipped: 1, failed: 0, job: { pr_url: draft.pr_url, pr_number: draft.pr_number } });
+      if (draft?.queued) {
+        // Keywords and blogs wait for the project's next blog day instead of shipping on the spot.
+        setQueuedNote(draft.scheduledFor ? `Approved. It ships on ${draft.scheduledFor}, the next blog day.` : 'Approved. It ships on the next blog day.');
+      } else {
+        setExecutionResult({ shipped: 1, failed: 0, job: { pr_url: draft.pr_url, pr_number: draft.pr_number } });
+      }
       setSelectedRecommendation(null);
       setDrawerOpen(false);
       loadRecs();
@@ -823,6 +830,9 @@ export default function ActionCenter({ scope }) {
   // exactly the same banners, the same details panel and the same draft editor.
   const banners = (
     <>
+      {queuedNote && (
+        <div className="rounded-card bg-[#e8f5ee] text-[#05603a] text-sm px-4 py-3 mb-6">{queuedNote}</div>
+      )}
       {error && (
         <div className="rounded-card bg-[#fdecec] text-[#b42318] text-sm px-4 py-3 mb-6 flex items-start gap-2">
           <AlertTriangle size={14} className="shrink-0 mt-0.5" />
@@ -1054,7 +1064,7 @@ export default function ActionCenter({ scope }) {
                         <Button variant="primary" onClick={() => sel.riskTier === 'safe' ? approveAndShip(sel) : generate(sel)}
                           disabled={generatingId === sel.id || shippingId === sel.id}>
                           {sel.riskTier === 'safe' ? (
-                            <><Zap size={14} /> {shippingId === sel.id ? 'Shipping…' : 'Approve & ship'}</>
+                            <><Zap size={14} /> {shippingId === sel.id ? 'Shipping…' : (sel.generatorId === 'blog-outline' || sel.params?.fromGapId ? 'Approve: ships on the next blog day' : 'Approve & ship')}</>
                           ) : (
                             generatingId === sel.id ? (isContent ? 'Writing…' : 'Drafting fix…') : (isContent ? 'Write this draft' : 'Generate solution draft')
                           )}

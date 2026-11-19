@@ -2,8 +2,8 @@ import cron from 'node-cron';
 import { masterTick } from './lib/master-agent.js';
 import { getMasterMode, recordPlanError } from './lib/master-agent-control.js';
 import { RUN_WINDOW_MS } from './lib/site-run.js';
-import { runCompetitorGrowthCycleForAllSites, runCompetitorOutcomeLearningForAllSites, runRankTrackingForAllSites, runPosthogIngestForAllSites } from './job.js';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, runAiVisibilityShipForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, checkDesignChangesForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites, runTrendRadarIfDueForAllSites } from './job.js';
+import { runCompetitorGrowthCycleForAllSites, runCompetitorOutcomeLearningForAllSites, runRankTrackingForAllSites, runPosthogIngestForAllSites, runGscScreenRefreshForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runNightlyIssueRecheckForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runKeywordScheduleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, runAiVisibilityShipForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, checkDesignChangesForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites, runTrendRadarIfDueForAllSites, runNewsPostsIfDueForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -222,6 +222,24 @@ export function startCron() {
 
   console.log(`[cron] daily job scheduled "${schedule}" (${tz})`);
   schedulePipelineCron({ cron, locked });
+
+  // Search Console's own screen totals (migration 253), so the Overview matches the Search Console screen with no lag. Free
+  // (the Search Console API has no charge); re-reads the last days every few hours because fresh numbers move until Google
+  // finalises them. Locked so two schedulers cannot overlap.
+  const gscScreenSchedule = process.env.GSC_SCREEN_CRON_SCHEDULE || '15 */3 * * *';
+  if (!cron.validate(gscScreenSchedule)) {
+    console.error(`[cron] invalid GSC_SCREEN_CRON_SCHEDULE "${gscScreenSchedule}" — Search Console screen refresh NOT scheduled.`);
+  } else {
+    cron.schedule(gscScreenSchedule, () => locked('gsc-screen-refresh', async () => {
+      try {
+        const results = await runGscScreenRefreshForAllSites();
+        console.log(`[cron] gsc screen refresh finished — ${results.filter((r) => r.ok).length} ok, ${results.filter((r) => !r.ok).length} failed`);
+      } catch (err) {
+        console.error('[cron] gsc screen refresh error:', err.message);
+      }
+    }), { timezone: tz });
+    console.log(`[cron] gsc screen refresh scheduled "${gscScreenSchedule}" (${tz})`);
+  }
 
   // Weekly Google Doc report — default Thursday 08:00, covering the previous Mon–Sun week.
   const weekly = process.env.WEEKLY_CRON_SCHEDULE || '0 8 * * 4';
@@ -519,6 +537,18 @@ export function startCron() {
   }
 
 
+  // Nightly issue re-check: the agent re-reads the live page behind every open issue and closes what is fixed, so tomorrow's
+  // list holds only new problems. Default 04:30 (site time), well before the 07:00 detection and 11:00 shipping.
+  const recheckSchedule = process.env.NIGHTLY_RECHECK_CRON_SCHEDULE || '30 4 * * *';
+  if (!cron.validate(recheckSchedule)) {
+    console.error(`[cron] invalid NIGHTLY_RECHECK_CRON_SCHEDULE "${recheckSchedule}" — nightly issue re-check NOT scheduled.`);
+  } else {
+    cron.schedule(recheckSchedule, () => locked('nightly-issue-recheck', async () => {
+      try { await runNightlyIssueRecheckForAllSites(); } catch (err) { console.error('[cron] nightly issue re-check error:', err.message); }
+    }), { timezone: tz });
+    console.log(`[cron] nightly issue re-check scheduled "${recheckSchedule}" (${tz})`);
+  }
+
   // Verify stage — independent of the hourly catch-up guard above (that one
   // is a per-site "has today's report run" check; this is a per-row
   // "is this fix_verifications check due" check). Fires every hour, every
@@ -675,7 +705,8 @@ export function startCron() {
   // 01:30 UTC (07:00 Asia/Kolkata) morning run so the week's first batch of
   // opportunity-derived recommendations is already sitting in Action Center
   // before that run opens the day's PRs.
-  const growthOppsSync = process.env.GROWTH_OPPORTUNITIES_SYNC_CRON_SCHEDULE || '0 0 * * 1';
+  // Daily since 2026-11-18 (was Monday-only): low-click pages are found and queued for a better title every day, not once a week.
+  const growthOppsSync = process.env.GROWTH_OPPORTUNITIES_SYNC_CRON_SCHEDULE || '0 0 * * *';
   if (!cron.validate(growthOppsSync)) {
     console.error(`[cron] invalid GROWTH_OPPORTUNITIES_SYNC_CRON_SCHEDULE "${growthOppsSync}" — growth opportunities sync NOT scheduled.`);
   } else {
@@ -688,6 +719,17 @@ export function startCron() {
       } catch (err) {
         console.error('[cron] growth opportunities sync error:', err.message);
       }
+
+      // The keyword schedule (agents/lib/keyword-schedule.js) replaces the old Monday keyword-gap ship cycle: per project, gather for
+      // 30 days, then every 14 days queue the next half, book each blog its day, and count how the last batch did. Daily, so a
+      // project reaches its day 31 / 45 / 59 ... on the day it falls, whenever that is. The weekly refresh of evidence below stays.
+      try {
+        const { ran } = await withJobLock(jobKeyFor('keyword-schedule', 'all-sites'), () => runKeywordScheduleForAllSites());
+        if (!ran) console.log('[cron] keyword schedule skipped: another process holds the lock');
+      } catch (err) {
+        console.error('[cron] keyword schedule error:', err.message);
+      }
+      if (new Date().getUTCDay() !== 1) return;
 
       // Content-gap autonomous shipping, same Monday slot — deliberately NOT
       // a second cron.schedule call: discovery/observation refresh and
@@ -702,12 +744,8 @@ export function startCron() {
       }
       // The ship cycle writes real drafts and PRs, so a double-run here costs
       // duplicated content, not just duplicated reads.
-      try {
-        const { ran } = await withJobLock(jobKeyFor('keyword-gap-ship', 'all-sites'), () => runKeywordGapShipCycleForAllSites());
-        if (!ran) console.log('[cron] keyword-gap ship cycle skipped — another process holds the lock');
-      } catch (err) {
-        console.error('[cron] keyword-gap ship cycle error:', err.message);
-      }
+      // The old Monday ship cycle (runKeywordGapShipCycleForAllSites) is no longer run: keywords now ship only through the schedule above.
+      // Its code stays, and an operator can still call it by hand.
     }, { timezone: 'UTC' });
     console.log(`[cron] growth opportunities -> Action Center sync scheduled "${growthOppsSync}" (UTC)`);
   }
@@ -759,6 +797,23 @@ export function startCron() {
       }
     }), { timezone: tz });
     console.log(`[cron] trend radar scheduled "${trendRadarSchedule}" (${tz})`);
+  }
+
+  // News-based posts (agents/news-posts.js): every morning at 06:45 each project with a news config switched on is asked
+  // whether its interval (weekly by default) has passed. Projects with no config cost one indexed query. NEWS_POSTS_CRON_SCHEDULE overrides.
+  const newsPostsSchedule = process.env.NEWS_POSTS_CRON_SCHEDULE || '45 6 * * *';
+  if (!cron.validate(newsPostsSchedule)) {
+    console.error(`[cron] invalid NEWS_POSTS_CRON_SCHEDULE "${newsPostsSchedule}" — news posts NOT scheduled.`);
+  } else {
+    cron.schedule(newsPostsSchedule, () => locked('news-posts', async () => {
+      try {
+        const results = (await runNewsPostsIfDueForAllSites()).filter(Boolean);
+        console.log(`[cron] news posts finished — ${results.length} site(s) checked`);
+      } catch (err) {
+        console.error('[cron] news posts error:', err.message);
+      }
+    }), { timezone: tz });
+    console.log(`[cron] news posts scheduled "${newsPostsSchedule}" (${tz})`);
   }
 
   // Competitor growth cycle — market discovery, rival footprints, and scored opportunities into the EXISTING

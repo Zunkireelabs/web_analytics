@@ -53,7 +53,7 @@ export function textSafe(hex) {
 }
 
 // Grey and near-white accents make a lifeless report band, so they are skipped like a missing colour.
-const usable = (hex) => {
+export const usable = (hex) => {
   if (!hex) return false;
   const [r, g, b] = toRgb(hex);
   return Math.max(r, g, b) - Math.min(r, g, b) >= 40 && lum(hex) < 0.85;

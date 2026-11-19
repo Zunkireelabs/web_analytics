@@ -314,6 +314,12 @@ export function gapDraftEligibility(gap) {
         shapeHint: [competitorGroundingNote(gap), CONTENT_FACT_RULES].filter(Boolean).join(' '),
       };
     }
+    // The keyword schedule (keyword-schedule.js) marks the keywords it is shipping with _scheduled. A keyword an existing
+    // page already covers is added to THAT page (expand-content on it) instead of producing nothing, which is what an
+    // unscheduled covered keyword still does. Same placement rule as above: never into a designed page.
+    if (gap._scheduled && shape !== 'comparison' && mayInsertContentBlock('expand-content', gap.existing_page_match).allowed) {
+      return { eligible: true, generatorId: 'expand-content', findingId, existingPage: gap.existing_page_match, shapeHint: CONTENT_FACT_RULES };
+    }
     return null;
   }
 
@@ -670,10 +676,17 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
   // faq.js), not the topic-only shape blog-outline/landing-page take.
   const params = eligibility.generatorId === 'faq'
     ? { page: eligibility.existingPage, query: gap.topic }
-    : {
+    : eligibility.generatorId === 'expand-content'
+      // expand-content requires the page it extends (generators/expand-content.js); the keyword is both its query and its focus,
+      // so two keywords added to one page are two separate recommendations.
+      ? { page: eligibility.existingPage, query: gap.topic, focus: gap.topic, fromGapId: gap.id, ...(eligibility.shapeHint ? { context: eligibility.shapeHint } : {}) }
+      : {
         topic: gap.topic,
         context: eligibility.shapeHint ? `${reason} ${eligibility.shapeHint}` : reason,
         ...(clientRequested ? { clientRequested: true } : {}),
+        // The day the keyword schedule gave this blog (keyword-schedule.js); the shipping loop holds it until then.
+        ...(gap._scheduledFor ? { scheduledFor: gap._scheduledFor } : {}),
+        fromGapId: gap.id,
       };
 
   const page = recommendationPageKey({ generatorId: eligibility.generatorId, params });
@@ -1011,12 +1024,14 @@ export async function syncGrowthOpportunitiesToActionCenter(siteId, { site } = {
   let corroborated = 0;
 
   const gates = createRecommendationGates(siteId, resolvedSite);
+  const reportedKeys = new Set(); // what the detector reports today; anything else it raised before has resolved
 
   for (const opp of opportunities || []) {
     const action = opportunityDraftEligibility(resolvedSite, opp);
     if (!action) { ineligible++; continue; }
 
     const page = recommendationPageKey({ generatorId: action.generatorId, params: action.params });
+    reportedKeys.add(`${action.generatorId}::${page}`);
     const existing = await findOpenRecommendation(siteId, page, action.generatorId);
     if (existing) { skipped++; continue; }
 
@@ -1046,7 +1061,12 @@ export async function syncGrowthOpportunitiesToActionCenter(siteId, { site } = {
     });
     created++;
   }
-  return { created, skipped, ineligible, dropped, blocked };
+  let resolved = 0;
+  if (Array.isArray(opportunities)) {
+    try { resolved = (await (await import('./nightly-recheck.js')).closeUnreportedOpportunities(siteId, reportedKeys)).closed || 0; }
+    catch (err) { console.error(`[growth-opportunities] site ${siteId}: could not close resolved opportunities:`, err.message); }
+  }
+  return { created, skipped, ineligible, dropped, blocked, resolved };
 }
 
 // Content-gap autonomous shipping, weekly half: for every still-pending gap,

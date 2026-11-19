@@ -13,6 +13,7 @@ import { getSiteProfile } from '../store/data-analyst.js';
 import { tenantIndustries } from '../agents/lib/seo-tenant-context.js';
 import { tenantContextTextFor } from '../lib/tenant-context.js';
 import { attributionNote, globalGrowthNote, agencyCreditLine } from '../agents/lib/zunkireelabs-growth-policy.js';
+import { llmFailure } from './lib/llm-error.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
 // changed 2026-08-07 because that shape was shipping straight into a real PR
@@ -247,8 +248,8 @@ export async function generate({ siteId, params }) {
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 2500, generatorId: meta.id, siteId });
-  } catch {
-    throw Object.assign(new Error('Blog post generation failed: model did not return valid JSON'), { status: 400 });
+  } catch (err) {
+    throw llmFailure(err, 'Blog post generation failed: model did not return valid JSON', { status: 400 });
   }
 
   const suggestedInternalLinks = (Array.isArray(parsed.suggestedInternalLinks) ? parsed.suggestedInternalLinks : [])

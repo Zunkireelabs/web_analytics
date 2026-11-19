@@ -7,6 +7,7 @@ import { tenantContextTextFor } from '../lib/tenant-context.js';
 import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
 import { usedPhotoIds } from './lib/blog-image-usage.js';
 import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
+import { llmFailure } from './lib/llm-error.js';
 
 // New file, not an extension of blog-outline.js — blog-outline's content
 // shape is explicitly an OUTLINE (sections of heading+notes, no real prose),
@@ -114,8 +115,8 @@ export async function generate({ siteId, params }) {
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 900, generatorId: meta.id, siteId });
-  } catch {
-    throw Object.assign(new Error('Direct-answer generation failed: model did not return valid JSON'), { status: 400 });
+  } catch (err) {
+    throw llmFailure(err, 'Direct-answer generation failed: model did not return valid JSON', { status: 400 });
   }
 
   let directAnswer = parsed.directAnswer || '';

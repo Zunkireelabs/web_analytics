@@ -579,7 +579,7 @@ export async function run({ siteId, start, end, pageCache, params, dryRun = fals
     }));
 
   // A heading level skipped on the way down breaks the outline screen readers and search engines read the page by.
-  const headingSkipFindings = rows
+  const headingSkipFindings = pageResults
     .map((r) => ({ r, skips: detectHeadingOrderSkips(r.analysis?.headingOutline) }))
     .filter(({ skips }) => skips.skips.length)
     .slice(0, 10)
@@ -593,7 +593,7 @@ export async function run({ siteId, start, end, pageCache, params, dryRun = fals
     }));
 
   // A page with no internal links out is a dead end: a crawler reaching it finds nowhere to go next.
-  const deadEndFindings = rows
+  const deadEndFindings = pageResults
     .map((r) => ({ r, out: detectNoOutgoingLinks(r.page, r.analysis?.internalLinks) }))
     .filter(({ out }) => out.deadEnd)
     .slice(0, 10)
@@ -609,7 +609,7 @@ export async function run({ siteId, start, end, pageCache, params, dryRun = fals
   // Two pages sharing a meta description compete for the same snippet. The duplicate-TITLE check already existed;
   // this is the same check for descriptions.
   const duplicateMeta = detectDuplicateMetaDescriptions(
-    rows.map((r) => ({ url: r.page, metaDescription: r.analysis?.metaDescription }))
+    pageResults.map((r) => ({ url: r.page, metaDescription: r.analysis?.metaDescription }))
   );
   const duplicateMetaFindings = duplicateMeta.duplicates.slice(0, 10).map((d) => makeFinding({
     id: `technical-seo:duplicate-meta-description:${d.urls[0]}`,

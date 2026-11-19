@@ -138,6 +138,8 @@ export const api = {
     workspaces: () => req('/platform/workspaces'),
     // Agent instances, read only: one row per project, and one project's counts and statuses (never its content).
     instances: () => req('/platform/instances'),
+    // AI crawler visits for every client, side by side (platform admins only).
+    aiCrawlers: (days = 28) => req(`/platform/ai-crawlers?days=${days}`),
     instance: (siteId) => req(`/platform/instances/${siteId}`),
     masterAgent: () => req('/platform/master-agent'),
     // Industry sets (what the platform knows up front about each industry). A saved set replaces the built-in default; reset restores it.
@@ -324,6 +326,11 @@ export const api = {
     board: () => req('/ai-visibility'),
     addPrompt: (text) => req('/ai-visibility/prompts', { method: 'POST', body: JSON.stringify({ text }) }),
     ship: (promptIds, now) => req('/ai-visibility/ship', { method: 'POST', body: JSON.stringify({ promptIds, now }) }),
+  },
+
+  // AI crawler visits for the active project (server/routes/ai-crawlers.js). days: 7 | 28 | 90.
+  aiCrawlers: {
+    summary: (days = 28) => req(`/ai-crawlers/summary?days=${days}`),
   },
 
   notifications: {

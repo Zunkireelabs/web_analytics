@@ -3,7 +3,7 @@ import { loadDeclines } from './decline-detection.js';
 import { buildGrowthOpportunities } from './growth-opportunities.js';
 import { getRecentPageInsights } from '../../store/data-analyst.js';
 import { checkAnalystFreshness, gate as freshnessGate } from './analyst-freshness.js';
-import { loadVerifiedCapabilities, mapPageToProduct, describeMapping } from './analyst-product-mapping.js';
+import { loadVerifiedCapabilities, mapPageToProduct, describeMapping, topQueryForPage } from './analyst-product-mapping.js';
 import { getSearchDemandProvider } from '../../providers/search-demand/registry.js';
 import { scoreConclusion, dedupeConclusions } from './analyst-scoring.js';
 import { upsertAnalystEvidence } from '../../store/analyst-evidence.js';
@@ -130,6 +130,16 @@ export function generatorForDecliningPage(decline, page) {
   return { generatorId: 'expand-content', params: { page } };
 }
 
+// Generators that cannot run without the search query they write for (each throws 'query is required'). An action for one of
+// them gets the page's own top Search Console query; with none on record the action is dropped (the conclusion stays a
+// finding) instead of queueing work that can only fail.
+export const QUERY_REQUIRED_GENERATORS = new Set(['meta-title', 'direct-answer']);
+export async function withRequiredQuery(siteId, action, knownQueries = [], lookup = topQueryForPage) {
+  if (!action || !QUERY_REQUIRED_GENERATORS.has(action.generatorId) || action.params?.query) return action;
+  const query = await lookup(siteId, action.params?.page, knownQueries);
+  return query ? { ...action, params: { ...action.params, query } } : null;
+}
+
 // Exported for testing (analyst-fusion.test.js) — same reasoning as
 // familiesForDecliningPage/generatorForDecliningPage above: pure, no
 // database, directly exercisable.
@@ -180,7 +190,7 @@ async function fuseDecliningPages(site, { declines, pageInsights, capabilities, 
     const gate = freshnessGate(freshness);
     const verdict = !clearsEvidenceBar ? 'monitor' : (gate.allowAutonomous ? 'act' : 'monitor');
 
-    const action = verdict === 'act' ? generatorForDecliningPage(decline, page) : null;
+    const action = verdict === 'act' ? await withRequiredQuery(site.id, generatorForDecliningPage(decline, page), mapping.topQueries) : null;
     const impact = decline.impressionsLost + Math.round(decline.impressionsAtRisk * 0.5);
     const urgent = decline.reasons.some((r) => r.startsWith('position'));
 
@@ -230,7 +240,7 @@ async function fuseLeadingIndicators(site, { leading, pageInsights, capabilities
     // that needs a measured query gap this lane does not have.
     const ctrShaped = warning.families.includes('ctr-decay-leading');
     const action = verdict === 'act'
-      ? { generatorId: ctrShaped ? 'meta-title' : 'expand-content', params: { page } }
+      ? await withRequiredQuery(site.id, { generatorId: ctrShaped ? 'meta-title' : 'expand-content', params: { page } }, mapping.topQueries)
       : null;
 
     const findingId = `analyst-fusion:early-warning:${page}`;

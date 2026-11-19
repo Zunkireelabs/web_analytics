@@ -8,18 +8,21 @@ describe('date ranges', () => {
     assert.equal(shiftYmd('2026-03-01', 1), '2026-02-28');
   });
   test('presets count back from the newest day', () => {
-    assert.deepEqual(presetRange('2026-11-03', '28'), { start: '2026-10-06', end: '2026-11-03' });
+    assert.deepEqual(presetRange('2026-11-03', '28'), { start: '2026-10-07', end: '2026-11-03' }); // 28 days including the newest, as Search Console
+    assert.deepEqual(presetRange('2026-11-03', '7'), { start: '2026-10-28', end: '2026-11-03' });
+    assert.deepEqual(presetRange('2026-11-17', '90'), { start: '2026-08-18', end: '2026-11-17' }); // 3 calendar months
     assert.deepEqual(presetRange('2026-11-03', '1'), { start: '2026-11-03', end: '2026-11-03' }); // 24 hours: the newest day
-    assert.deepEqual(presetRange('2026-11-03', '545'), { start: '2025-05-07', end: '2026-11-03' }); // 18 months
+    assert.deepEqual(presetRange('2026-11-03', '545'), { start: '2025-05-04', end: '2026-11-03' }); // 18 calendar months
+    assert.deepEqual(presetRange('2026-05-31', '90'), { start: '2026-03-01', end: '2026-05-31' }); // month-end safe
     assert.equal(presetRange('2026-11-03', 'all', '2025-01-01'), null); // no "All time" any more
     assert.equal(presetRange('2026-11-03', 'nope'), null);
   });
   test('rangeKeyFor finds the preset or says custom', () => {
-    assert.equal(rangeKeyFor('2026-10-06', '2026-11-03', '2026-11-03', null), '28');
-    assert.equal(rangeKeyFor('2026-10-07', '2026-11-03', '2026-11-03', null), 'custom');
+    assert.equal(rangeKeyFor('2026-10-07', '2026-11-03', '2026-11-03', null), '28');
+    assert.equal(rangeKeyFor('2026-10-08', '2026-11-03', '2026-11-03', null), 'custom');
     assert.equal(rangeKeyFor('2026-10-06', '2026-11-02', '2026-11-03', null), 'custom');
     assert.equal(rangeKeyFor('2026-11-03', '2026-11-03', '2026-11-03', null), '1');
-    assert.equal(rangeKeyFor('2025-05-07', '2026-11-03', '2026-11-03', null), '545');
+    assert.equal(rangeKeyFor('2025-05-04', '2026-11-03', '2026-11-03', null), '545');
     assert.equal(rangeKeyFor('2026-10-31', '2026-11-03', '2026-11-03', null), 'custom'); // 3 days is no longer a preset
   });
   test('compare: previous period has the same length and ends the day before', () => {

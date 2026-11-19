@@ -90,7 +90,7 @@ const GENERATORS = {
     title: 'Let AI crawlers read your site',
     language: 'text',
     where: `Add to ${new URL('/robots.txt', r.finalUrl)}`,
-    code: ['GPTBot', 'ChatGPT-User', 'OAI-SearchBot', 'ClaudeBot', 'PerplexityBot', 'Google-Extended'].map((b) => `User-agent: ${b}\nAllow: /`).join('\n\n'),
+    code: ['ChatGPT-User', 'OAI-SearchBot', 'Claude-User', 'Claude-SearchBot', 'PerplexityBot', 'Perplexity-User'].map((b) => `User-agent: ${b}\nAllow: /`).join('\n\n'),
     note: 'Only if you want to appear in AI answers. Review with your team before publishing.',
   }),
   'robots-txt': (r) => ({ title: 'Add a robots.txt', language: 'text', where: `Save as ${new URL('/robots.txt', r.finalUrl)}`, code: `User-agent: *\nAllow: /\n\nSitemap: ${new URL('/sitemap.xml', r.finalUrl)}`, note: 'Add Disallow lines for any private areas.' }),

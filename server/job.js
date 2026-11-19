@@ -10,7 +10,7 @@ import { competitorProviderConfigured } from './ingest/competitor-providers/inde
 import { upsertGsc, upsertGa4, saveNarrative, saveCompetitorRankings, saveHealthScoreSnapshot, recordIntegrationCheck } from './store/upsert.js';
 import { getDay, getNarrative, listSites, getCompetitorRankingDates, getHealthScoreOnOrBefore } from './store/read.js';
 import { generateNarrative } from './report/narrative.js';
-import { sendDailyEmail } from './report/email.js';
+import { sendDailyEmail, sendStaffShipStallEmail } from './report/email.js';
 import { runWeeklyDocReport } from './report/weekly-doc.js';
 import { runExecutiveDocReport } from './report/executive-doc.js';
 import { runMonthlyDocReport } from './report/monthly-doc.js';
@@ -27,7 +27,7 @@ import { detectNotificationEvents } from './notifications/detect.js';
 import { notifyDesignCaptureHeld } from './notifications/design-blocked.js';
 import { designCaptureNeedsPerson } from './implementers/lib/onboarding-readiness.js';
 import { deliverToAllChannels } from './notifications/channels/index.js';
-import { hasRecentNotification } from './store/notifications.js';
+import { hasRecentNotification, recentFailureCauses } from './store/notifications.js';
 import { buildRecommendations } from './agents/lib/recommendations.js';
 import { repairSiteTemplates } from './agents/lib/template-repair.js';
 import { syncFromGrounded, refreshBlockedRecommendations } from './agents/lib/recommendation-coordinator.js';
@@ -49,7 +49,7 @@ import { checkFaqOnboardingCoverage } from './agents/lib/faq-onboarding-check.js
 import { getImplementedFindingIds, countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
 import { countShippedFileEditsTodayAllSites } from './store/shipping-queue.js';
 import { AUTONOMOUS_DRAFT_SOURCES } from './lib/autonomous-quota.js';
-import { isShippable, isActiveSite, isShipCatchupOwed, checkShipStall, SHIP_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './lib/ship-window.js';
+import { isShippable, isActiveSite, isShipCatchupOwed, checkShipStall, shouldNotifyStaffOfStall, SHIP_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './lib/ship-window.js';
 import { rateLimitKey } from './github/client.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
 
@@ -187,6 +187,20 @@ export async function runDailyIngestForSite(site) {
   await backfillGa4Pages(site);
 
   return { site, reportDate: gscEnd };
+}
+
+// Search Console's own screen totals for every connected project (migration 253), refreshed every few hours by cron so the
+// Overview matches the Search Console screen. Failures are recorded per project and never stop the rest.
+export async function runGscScreenRefreshForAllSites() {
+  const { refreshScreenDaysForSite } = await import('./ingest/gsc-screen.js');
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    const r = await refreshScreenDaysForSite(site);
+    if (!r.ok) console.error(`[gsc-screen] site ${site.id} "${site.name}" failed: ${r.error}`);
+    results.push(r);
+  }
+  return results;
 }
 
 // Ingest the standard daily window for the single env-configured site.
@@ -644,6 +658,28 @@ export async function runTrendRadarIfDue(site) {
   const output = await runAgent('trend-radar', { siteId: site.id }, { persist: true });
   console.log(`[trend-radar] site ${site.id}: fortnightly run complete (status: ${output.status}).`);
   return { status: output.status, findingsCount: output.facts?.findings?.length || 0 };
+}
+
+// News-based posts: weekly by default per project (site_news_config.interval_days), only for projects with a news config
+// switched on. Same shape as trend radar: the cron fires daily and this decides, so a failed day is retried the next morning.
+export async function runNewsPostsIfDue(site) {
+  const { getNewsConfig } = await import('./store/site-news-config.js');
+  const config = await getNewsConfig(site.id);
+  if (!config?.enabled) return null;
+  const [lastRun] = await getLatestAgentRuns(site.id, ['news-posts']);
+  if (!trendRadarDue(lastRun, { timeZone: site.timezone || 'UTC', intervalDays: config.interval_days || 7 })) return null;
+  const output = await runAgent('news-posts', { siteId: site.id }, { persist: true });
+  console.log(`[news-posts] site ${site.id}: run complete (status: ${output.status}, confirmed ${output.facts?.confirmed ?? 0}, dropped ${output.facts?.dropped?.length ?? 0}).`);
+  return { status: output.status, findingsCount: output.facts?.findings?.length || 0 };
+}
+
+export async function runNewsPostsIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try { results.push(await runNewsPostsIfDue(site)); } catch (err) { console.error(`[job] news-posts run failed for site ${site.id} "${site.name}":`, err.message); }
+  }
+  return results;
 }
 
 export async function runTrendRadarIfDueForAllSites() {
@@ -1137,6 +1173,16 @@ export async function runGrowthOpportunitiesSyncForAllSites() {
   for (const site of sites) {
     try {
       const result = await syncGrowthOpportunitiesToActionCenter(site.id, { site });
+      // Pages Google never shows get a link from a related page that earns clicks (agents/lib/zero-impression-pages.js).
+      // Its own try: a failure here must not lose the growth sync's result for this site.
+      try {
+        const { syncZeroImpressionPages } = await import('./agents/lib/zero-impression-pages.js');
+        const z = await syncZeroImpressionPages(site.id);
+        if (z.created) console.log(`[job] zero-impression pages: site ${site.id} "${site.name}" queued ${z.created} link fix(es) (${z.invisible} invisible page(s)).`);
+        result.created += z.created || 0;
+      } catch (err) {
+        console.error(`[job] zero-impression pages failed for site ${site.id} "${site.name}":`, err.message);
+      }
       totals.sites++;
       totals.created += result.created;
       totals.skipped += result.skipped;
@@ -1149,6 +1195,26 @@ export async function runGrowthOpportunitiesSyncForAllSites() {
     }
   }
   if (totals.created) console.log(`[job] growth opportunities sync complete — ${totals.created} recommendation(s) across ${totals.sites} site(s).`);
+  return totals;
+}
+
+// The keyword schedule (agents/lib/keyword-schedule.js): per project, gather for the first 30 days, then every 14 days queue the
+// next half of the keywords, book each blog its day, and count how the last batch did. Runs daily in the growth-sync cron slot.
+export async function runKeywordScheduleForAllSites({ listAllSites = listConnectedSites } = {}) {
+  const { runKeywordScheduleForSite, measureKeywordImpressions } = await import('./agents/lib/keyword-schedule.js');
+  const totals = { sites: 0, queued: 0, booked: 0, measured: 0 };
+  for (const site of await listAllSites()) {
+    try {
+      const { getSiteById } = await import('./store/read.js');
+      const fresh = (await getSiteById(site.id)) || site;
+      const r = await runKeywordScheduleForSite(site.id, fresh);
+      const m = await measureKeywordImpressions(site.id);
+      totals.sites++; totals.queued += r.queued; totals.booked += r.booked; totals.measured += m.measured;
+      if (r.queued || r.booked || m.measured) console.log(`[job] keyword schedule: site ${site.id} "${site.name}" ${r.phase} (day ${r.day}): queued ${r.queued}, booked ${r.booked} blog day(s), measured ${m.measured} keyword(s).`);
+    } catch (err) {
+      console.error(`[job] keyword schedule failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
   return totals;
 }
 
@@ -1553,13 +1619,24 @@ async function alertIfDesignCaptureHeld(site) {
 }
 
 const SHIP_STALL_COOLDOWN_DAYS = 1;
+const SHIP_STALL_STAFF_LOOKBACK_DAYS = 3;
 async function alertIfShipStalled(site, shipped) {
   const stallEvent = checkShipStall({ site, shipped });
   if (!stallEvent) return;
   const alreadyNotified = await hasRecentNotification(site.id, stallEvent.type, SHIP_STALL_COOLDOWN_DAYS);
+  // Read BEFORE today's notification is written below, so a row found here is an earlier day's.
+  const stalledEarlier = alreadyNotified ? false : await hasRecentNotification(site.id, stallEvent.type, SHIP_STALL_STAFF_LOOKBACK_DAYS);
   if (alreadyNotified) return;
   await deliverToAllChannels(site.id, [stallEvent])
     .catch((err) => console.error(`[job] ship-stall alert delivery failed for site ${site.id}:`, err.message));
+  if (shouldNotifyStaffOfStall({ stallEvent, alreadyNotifiedToday: alreadyNotified, stalledEarlier })) {
+    try {
+      const causes = await recentFailureCauses(site.id);
+      await sendStaffShipStallEmail({ siteName: site.name, days: 2, causes: causes.map((c) => ({ reason: c.reason, n: c.n })) });
+    } catch (err) {
+      console.error(`[job] staff ship-stall email failed for site ${site.id}:`, err.message);
+    }
+  }
 }
 
 // drainOnly: ship only what the shared queues already hold (repairs, learned repairs); generate nothing new inline. Used by the
@@ -1967,6 +2044,26 @@ export async function queueConsistencyScanForAllSites({
   }
   if (queued) console.log(`[job] design-agent: queued ${queued} whole-site consistency scan(s)`);
   return { queued };
+}
+
+// Every night: re-read the live page behind every open issue and close the ones that are fixed (agents/lib/nightly-recheck.js).
+// Never throws; one project's failure is logged and the rest continue.
+export async function runNightlyIssueRecheckForAllSites() {
+  const { recheckOpenIssuesForSite } = await import('./agents/lib/nightly-recheck.js');
+  const sites = (await listConnectedSites()).filter(isActiveSite);
+  const results = [];
+  for (const site of sites) {
+    try {
+      const r = await recheckOpenIssuesForSite(site.id);
+      const ideas = await (await import('./agents/lib/nightly-recheck.js')).closeSatisfiedIdeasForSite(site.id).catch(() => ({ closed: 0 }));
+      r.ideasClosed = ideas.closed;
+      console.log(`[nightly-recheck] site ${site.id}: ${r.fixed} fixed, ${r.stillOpen} still open, ${r.unverified} not verified, ${r.ideasClosed} idea(s) already covered, ${r.errors} error(s)`);
+      results.push(r);
+    } catch (err) {
+      console.error(`[nightly-recheck] site ${site.id} failed:`, err.message);
+    }
+  }
+  return results;
 }
 
 export async function runFixVerificationsForAllSites() {

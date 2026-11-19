@@ -256,6 +256,37 @@ export function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// Staff-only heads-up that a project's autonomous fixes have shipped nothing for
+// two or more days running. The per-project 'ship-stall' notification goes to the
+// project's own bell and recipients, which is how a 10-day OpenAI-credit outage
+// (2026-11-07..18) went unactioned: the people who could fix it were not the
+// people told. `causes` is [{ reason, n }] — what the failed attempts said.
+export async function sendStaffShipStallEmail({ siteName, days, causes = [] }) {
+  const transporter = getTransporter();
+  if (!transporter) {
+    console.log('[email] SMTP not fully configured — skipping staff ship-stall email.');
+    return false;
+  }
+  const rows = causes.length
+    ? causes.map((c) => `<tr><td style="padding:4px 12px 4px 0;color:#888">${escapeHtml(c.n)}×</td><td>${escapeHtml(c.reason)}</td></tr>`).join('')
+    : '<tr><td colspan="2" style="color:#888">No failed attempts were recorded — nothing was eligible, or the run did not start.</td></tr>';
+  const html = `
+  <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px">
+    <h2 style="margin:0 0 4px">Auto-fixes have stalled: ${escapeHtml(siteName)}</h2>
+    <p style="margin:0 0 16px;color:#555">No fixes shipped for ${escapeHtml(days)} days running. Most common reasons in the last 24 hours:</p>
+    <table style="border-collapse:collapse">${rows}</table>
+    <p style="margin:18px 0 0;color:#555">If a reason mentions credits or quota, top up the AI provider account; the next scheduled run resumes by itself.</p>
+  </div>`;
+  await transporter.sendMail({
+    from: process.env.REPORT_EMAIL_FROM || process.env.SMTP_USER,
+    to: staffNoticeRecipients(),
+    subject: `Auto-fixes stalled: ${siteName}`,
+    html,
+  });
+  console.log(`[email] staff ship-stall notice for "${siteName}" sent to ${staffNoticeRecipients().join(', ')}`);
+  return true;
+}
+
 export async function sendContactLeadEmail({ companyName, websiteDomain, contactEmail, message }) {
   const transporter = getTransporter();
   if (!transporter) {

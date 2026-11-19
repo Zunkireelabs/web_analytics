@@ -30,6 +30,16 @@ export async function loadVerifiedCapabilities(siteId) {
   return getProductCapabilities(siteId, 'verified');
 }
 
+// The page's own top Search Console query over the last 90 days (known top queries first, if the caller already has them).
+// Null when Search Console has none on record for the page.
+export async function topQueryForPage(siteId, page, known = []) {
+  if (known?.length) return known[0];
+  const end = new Date().toISOString().slice(0, 10);
+  const start = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+  const rows = await getQueriesForPage(siteId, start, end, page, 1).catch(() => []);
+  return rows[0]?.query || null;
+}
+
 // A page's own real top queries (GSC — not modelled) are what tie it to a
 // capability. `days`/`limit` mirror getQueriesForPage's own defaults except
 // widened slightly (8 not 3) so a thin page still has enough queries to

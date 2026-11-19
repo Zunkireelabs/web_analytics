@@ -33,6 +33,9 @@ export const FAILURE_KIND = {
 // matching prose is how a classifier quietly stops recognising the thing it
 // was written for — lib/failure-classification.js says so itself.
 const SYSTEMIC_MESSAGE_PATTERNS = [
+  /\bno credits remaining\b/i,      // OpenAI 429 when the account has no credit
+  /\binsufficient[_ ]quota\b/i,
+  /\bcredit balance is too low\b/i, // Anthropic's equivalent
   /\bbad credentials\b/i,           // GitHub 401: the PAT is dead
   /\brequires authentication\b/i,
   /\btoken .*(expired|revoked)\b/i,
@@ -73,6 +76,13 @@ export function classifyShipFailure(err, { isRefusal = false } = {}) {
   // signatures below so a refusal whose text happens to mention a repo or a
   // connection can't be misread as infrastructure.
   if (isRefusal) return { kind: FAILURE_KIND.ITEM, reason: 'refusal' };
+
+  // The LLM provider itself is unusable (out of credit, or the key is dead).
+  // Tagged by generators/lib/llm-error.js. Every remaining item would fail the
+  // same way and cost a call each, so this stops the run. Checked before the
+  // GitHub-shaped rules below: a provider 401/429 is not a GitHub 401/429.
+  if (err?.llmQuota === true) return { kind: FAILURE_KIND.SYSTEMIC, reason: 'llm provider out of credit/quota' };
+  if (err?.llmAuth === true) return { kind: FAILURE_KIND.SYSTEMIC, reason: 'llm provider authentication failed' };
 
   // classifyFailure is authoritative where it CAN decide: it already marks
   // deployment/external-service classes as infrastructure. Its CLIENT_REPO

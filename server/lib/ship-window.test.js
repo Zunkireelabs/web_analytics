@@ -239,3 +239,13 @@ describe('isActiveSite / isShippable and project status', () => {
     assert.equal(isShippable({ status: 'active' }), false);
   });
 });
+
+import { shouldNotifyStaffOfStall } from './ship-window.js';
+
+test('staff are told only on the second stalled day running, once', () => {
+  const stallEvent = { type: 'ship-stall' };
+  assert.equal(shouldNotifyStaffOfStall({ stallEvent, alreadyNotifiedToday: false, stalledEarlier: true }), true);
+  assert.equal(shouldNotifyStaffOfStall({ stallEvent, alreadyNotifiedToday: false, stalledEarlier: false }), false); // first bad day
+  assert.equal(shouldNotifyStaffOfStall({ stallEvent, alreadyNotifiedToday: true, stalledEarlier: true }), false);   // already told today
+  assert.equal(shouldNotifyStaffOfStall({ stallEvent: null, alreadyNotifiedToday: false, stalledEarlier: true }), false); // healthy day
+});

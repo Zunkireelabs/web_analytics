@@ -52,16 +52,20 @@ export async function getCheckedAtForPrompts(siteId, promptIds) {
 // behaves identically without passing it explicitly.
 export async function saveAiPromptRun(siteId, {
   promptId, provider = 'openai', model, runDate, rawResponse, mentioned, approximatePosition, competitorsMentioned, sentiment, recommendationStrength,
+  citedDomains = null,
 }) {
+  // cited_domains (migration 075): the real sources the answer cited, only from a probe that can cite (web search,
+  // Perplexity, DataForSEO). null for a memory-only probe, never an invented empty list.
   const { rows } = await query(
     `INSERT INTO ai_prompt_runs (
        site_id, prompt_id, provider, model, run_date, raw_response, mentioned,
-       approximate_position, competitors_mentioned, sentiment, recommendation_strength
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       approximate_position, competitors_mentioned, sentiment, recommendation_strength, cited_domains
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      RETURNING *`,
     [
       siteId, promptId, provider, model, runDate, rawResponse, mentioned,
       approximatePosition ?? null, JSON.stringify(competitorsMentioned ?? []), sentiment ?? null, recommendationStrength ?? null,
+      Array.isArray(citedDomains) ? JSON.stringify(citedDomains) : null,
     ]
   );
   return rows[0];

@@ -179,3 +179,29 @@ export async function fetchGscForDate(site, date) {
 
   return { date, totals, queries, pages, devices, countries, queryPages };
 }
+
+// The numbers Search Console's own screen shows: every page and subdomain of the property (NO own-domain filter, unlike
+// fetchGscForDate), the fresh 'all' data state (the screen's default, so the newest days are included), one row per day.
+// One call covers the whole window (a day is one row, far below the 25,000-row ceiling). Pure of any database.
+export async function fetchGscScreenDays(site, startDate, endDate) {
+  const sc = await getSearchConsole(site);
+  const res = await sc.searchanalytics.query({
+    siteUrl: site.gsc_property,
+    requestBody: { startDate, endDate, dimensions: ['date'], rowLimit: 25000, dataState: 'all' },
+  });
+  return (res.data.rows || []).map((r) => ({
+    date: r.keys?.[0],
+    clicks: Math.round(r.clicks ?? 0),
+    impressions: Math.round(r.impressions ?? 0),
+    ctr: r.ctr ?? 0,
+    position: r.position ?? 0,
+  })).filter((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.date || '')).filter(keepScreenDay(endDate));
+}
+
+// Search Console answers with an empty row for a day that has barely started (seen live: today = 0). An empty row on one of
+// the last two days is "no data yet", not a real zero, so it is not stored and the Overview shows nothing for it.
+export const keepScreenDay = (endDate) => (r) => {
+  if (r.impressions > 0 || r.clicks > 0) return true;
+  const cutoff = new Date(`${endDate}T00:00:00Z`); cutoff.setUTCDate(cutoff.getUTCDate() - 1);
+  return r.date < cutoff.toISOString().slice(0, 10);
+};

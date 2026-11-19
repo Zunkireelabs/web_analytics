@@ -14,7 +14,7 @@ import LockedCard from '../components/access/LockedCard.jsx';
 import { useAccess } from '../lib/access.jsx';
 import { fmtDay, fmtRange } from '../lib/format.js';
 import {
-  shiftYmd, compareRange, pctDelta, compact, seriesTotals, buildInsights, buildVisitorInsights, behaviorTotals, denseSeries, daysBetween,
+  shiftYmd, presetRange, compareRange, pctDelta, compact, seriesTotals, buildInsights, buildVisitorInsights, behaviorTotals, denseSeries, daysBetween,
 } from '../lib/overview-view.js';
 
 const TABLE_LIMIT = 50; // rows asked of the server for the Queries and Pages table, which it pages through itself
@@ -55,10 +55,12 @@ export default function Overview({ siteId }) {
     setError(false);
     api.range(siteId).then((r) => {
       setRange(r);
-      const latest = r.latest_visitor || r.freshest;
-      if (r.freshest) {
+      // Anchored on the newest Search Console day, as Search Console's own "Last 28 days" is (it used to be the newest
+      // Analytics day, which shifted the search window off the screen's).
+      const latest = r.freshest || r.latest_visitor;
+      if (latest) {
         setEnd(latest);
-        setStart(shiftYmd(latest, 28));
+        setStart(presetRange(latest, '28').start);
       }
     }).catch(() => setError(true)).finally(() => setRangeReady(true));
   }, [siteId]);
@@ -101,7 +103,7 @@ export default function Overview({ siteId }) {
     return () => { cancelled = true; };
   }, [siteId, start, end, cmp, rangeReady]);
 
-  const anchor = range?.latest_visitor || range?.freshest || daysAgo(1);
+  const anchor = range?.freshest || range?.latest_visitor || daysAgo(1);
 
   const cur = useMemo(() => seriesTotals(series), [series]);
   const prev = useMemo(() => (compareSeries ? seriesTotals(compareSeries) : null), [compareSeries]);

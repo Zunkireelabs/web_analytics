@@ -442,7 +442,7 @@ export default function NewProjectModal({ workspace, first = false, project: exi
   // ...but only when it can mean something: it is built from Google's real data, so
   // with Google not connected yet it waits rather than starting and failing.
   useEffect(() => {
-    if (!isOpen || step !== 6 || baseline !== 'idle' || !project?.id || connect === null) return;
+    if (!isOpen || step !== 7 || baseline !== 'idle' || !project?.id || connect === null) return;
     if (connect?.state?.google?.connected) runBaseline();
     else setBaseline('waiting');
   }, [isOpen, step, baseline, project?.id, connect]);
