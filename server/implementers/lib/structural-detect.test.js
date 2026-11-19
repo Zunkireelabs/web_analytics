@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectInsertionPoint, isJsxFile, isHtmlLikeFile, isVueFile, isSvelteFile } from './structural-detect.js';
+import { detectInsertionPoint, detectWithTrustedContainer, isJsxFile, isHtmlLikeFile, isVueFile, isSvelteFile } from './structural-detect.js';
 
 describe('file-type routing', () => {
   test('isJsxFile / isHtmlLikeFile', () => {
@@ -250,5 +250,93 @@ describe('JSX/TSX (React/Next.js)', () => {
     const result = detectInsertionPoint(file, 'page.jsx');
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'self-closing-root-no-body');
+  });
+});
+
+
+// ---- a page with no <main> whose own source carries the footer (REAL: mobilise-website-11ty src/about-us/index.njk, 2026-11-19) ----
+// Its JSON-style front matter holds "documentStart": "<!DOCTYPE html>\n<html lang=...>" (data, not a wrapper), it has sections but no <main>, and it ends with
+// `<div id="footer-placeholder">{% include "components/footer.njk" %}</div>`. End of file would be BELOW the footer.
+describe('last resort: place content just before the page footer', () => {
+  const FM = `---
+{
+  "layout": "layouts/base.njk",
+  "permalink": "/about-us/index.html",
+  "headInclude": "heads/about-us-index.njk",
+  "title": "About MOBILISE | Global B2B Marketing Agency",
+  "bodyAttributes": " class=\"theme-black\"",
+  "documentStart": "<!DOCTYPE html>\n<html lang=\"en\">\n\n",
+  "headBodyGap": "\n\n",
+  "documentEnd": "\n\n</html>\n",
+  "description": "MOBILISE is a global B2B marketing agency based in Bangalore, serving enterprise technology and industrial brands across APAC, EMEA and the Americas.",
+  "componentBase": "../"
+}
+---`;
+  const TAIL = `        </div>
+    </section>
+    <section class="faq-sec" id="faq">
+        <div class="container">
+            <span class="eyebrow">FAQ</span>
+            <h2>Frequently asked questions</h2>
+<details><summary>What is MOBILISE?</summary><p>MOBILISE is a global B2B marketing agency built for technology, industrial and transformation-led brands, helping enterprise teams turn complex ideas into clear, credible and market-ready programs.</p></details>
+<details><summary>When was MOBILISE founded?</summary><p>MOBILISE was founded in 2015.</p></details>
+<details><summary>Where is MOBILISE based?</summary><p>MOBILISE is headquartered in Bangalore, India, with teams across Singapore, the Middle East and North America.</p></details>
+<details><summary>How does MOBILISE win new clients?</summary><p>For over a decade, every client relationship has come through word of mouth, earned through disciplined delivery and technical fluency.</p></details>
+<details><summary>What does MOBILISE deliver?</summary><p>Go-to-market planning, account-based marketing, content and creative, marketing automation, sales enablement, creative production and global marketing operations.</p></details>
+        </div>
+    </section>
+
+    <section class="section cta-sec" data-theme="white">
+        <div class="container">
+            <div class="cta-box">
+                <a href="../contact/" class="cta-title-link">
+                    <h2 class="cta-title">Let’s make <br><span class="z">B2B interesting.</span></h2>
+                </a>
+                <p>Whether you’re scaling a regional launch or driving global demand, MOBILISE helps you move faster —
+                    with clarity, confidence, and reliable delivery.</p>
+                <div class="btn-group">
+                    <a href="../contact/" class="btn btn-teal">Connect with us</a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <div id="footer-placeholder" data-rendered="true" data-path="../footer.html">{% include "components/footer.njk" %}</div>
+`;
+  const ABOUT = `${FM}\n\n    <section class="section hero-sec"><div class="container"><h1>About MOBILISE</h1><p>A global B2B marketing agency built for technology, industrial and professional services brands across the world.</p></div></section>\n${TAIL}`;
+
+  test('resolves to the line just before the footer include, after the last section', () => {
+    const r = detectInsertionPoint(ABOUT, 'src/about-us/index.njk');
+    assert.equal(r.ok, true);
+    assert.equal(r.fileKind, 'html-before-footer');
+    const before = ABOUT.slice(0, r.insertBeforeOffset);
+    const after = ABOUT.slice(r.insertBeforeOffset);
+    assert.match(before.trimEnd(), /<\/section>$/);
+    assert.match(after, /^\s*<div id="footer-placeholder"/);
+  });
+
+  test('the trusted-strategy path (another page on the same template) uses the same rule, not end of file', () => {
+    const r = detectWithTrustedContainer(ABOUT, 'src/about-us/index.njk', 'html-before-footer', 'the page content, just before its footer');
+    assert.equal(r.ok, true);
+    assert.ok(r.insertBeforeOffset < ABOUT.indexOf('footer-placeholder'));
+  });
+
+  test('a page that already resolves through an earlier strategy is untouched by it (<main> present: the same answer as before)', () => {
+    const withMain = '---\nlayout: base.njk\n---\n<main><h1>Title</h1><p>Plenty of real words here to be a substantial container for the detector.</p></main>\n<div id="footer-placeholder">{% include "components/footer.njk" %}</div>\n';
+    const r = detectInsertionPoint(withMain, 'src/x/index.njk');
+    assert.equal(r.ok, true);
+    assert.notEqual(r.fileKind, 'html-before-footer');
+  });
+
+  test('refuses a full document, a page with no footer, and a footer with nothing substantial before it', () => {
+    assert.notEqual(detectInsertionPoint('<html><body><div class="site-footer">f</div></body></html>', 'a.njk').fileKind, 'html-before-footer');
+    assert.equal(detectInsertionPoint('---\n{}\n---\n<section><p>Some real content, but this page has no footer anywhere in its own source at all.</p></section>\n', 'a.njk').fileKind === 'html-before-footer', false);
+    const thin = detectInsertionPoint('---\n{ "x": 1 }\n---\n<div id="footer">f</div>\n', 'a.njk');
+    assert.equal(thin.ok, false);
+  });
+
+  test('the html tag inside the FRONT MATTER does not make the page a full document', () => {
+    assert.match(FM, /<html lang=/);
+    assert.equal(detectInsertionPoint(ABOUT, 'src/about-us/index.njk').ok, true);
   });
 });

@@ -392,6 +392,29 @@ function detectLayoutFragmentContainer(fileContent, { minText = MIN_CONTAINER_TE
   };
 }
 
+// LAST RESORT for an HTML-like page with no <main>/<article> and no layout reference this detector can read, whose own source carries the site chrome:
+// its sections sit between a navigation include and a FOOTER (`<footer>`, an element whose id/class says footer, or `{% include "...footer..." %}`).
+// End of file is then AFTER the footer, so a visible block placed there would render below it. The safe place is just before the footer.
+// Tried only after every other strategy has failed, so a page that resolves today keeps resolving exactly as before. mobilise.agency's /about-us/:
+// no <main>, a footer include at the end, a JSON-style `"layout"` in its front matter.
+const FOOTER_START = [/<footer\b/i, /<[a-z][\w-]*\b[^>]*\b(?:id|class)=["'][^"']*footer/i, /\{%-?\s*include\s+["'][^"']*footer[^"']*["']/i];
+function detectBeforeFooterContainer(fileContent, { minText = MIN_CONTAINER_TEXT } = {}) {
+  const fm = /^---\r?\n[\s\S]*?\r?\n---\r?\n/.exec(fileContent);
+  const bodyStart = fm ? fm[0].length : 0;
+  const body = fileContent.slice(bodyStart);
+  // The BODY decides, not the whole file: a converted site keeps `"documentStart": "<!DOCTYPE html><html lang=...>"` in its front matter, and that is data, not a wrapper.
+  if (hasFullDocumentWrapper(body)) return { ok: false, reason: 'not-a-fragment', error: 'This file wraps its own full <html> document.' };
+  let at = -1;
+  for (const re of FOOTER_START) { const m = re.exec(body); if (m && (at === -1 || m.index < at)) at = m.index; }
+  if (at === -1) return { ok: false, reason: 'no-footer', error: 'No footer was found in this file to place content before.' };
+  // The footer element may itself be wrapped on its own line: insert at the start of that line when only whitespace precedes it.
+  const lineStartOffset = body.lastIndexOf('\n', at - 1) + 1;
+  const insertBody = /^[ \t]*$/.test(body.slice(lineStartOffset, at)) ? lineStartOffset : at;
+  const before = stripMarkerComments(body.slice(0, insertBody)).replace(/\{%[\s\S]*?%\}|\{\{[\s\S]*?\}\}|<[^>]*>/g, ' ');
+  if (before.replace(/\s+/g, ' ').trim().length < minText) return { ok: false, reason: 'no-content-before-footer', error: 'There is no substantial content before the footer to anchor to.' };
+  return { ok: true, fileKind: 'html-before-footer', insertBeforeOffset: bodyStart + insertBody, containerDescription: 'the page content, just before its footer' };
+}
+
 // Single entry point — an ordered fallback CHAIN, not a single strategy
 // keyed off file extension. This is what lets an unrecognized/custom
 // template shape still resolve: try the detector best-suited to what the
@@ -415,6 +438,7 @@ export function detectInsertionPoint(fileContent, filePath) {
     // its OWN file at all, so EOF here is genuinely safe (see
     // detectLayoutFragmentContainer's comment).
     attempts.push(() => detectLayoutFragmentContainer(fileContent));
+    attempts.push(() => detectBeforeFooterContainer(fileContent));   // last resort: only reached when everything above failed
   }
 
   // A RECOGNIZED component-shaped extension (.jsx/.tsx/.vue/.svelte) never
@@ -477,6 +501,9 @@ export function detectWithTrustedContainer(fileContent, filePath, fileKind, cont
   }
   if (fileKind === 'html-fragment') {
     return detectLayoutFragmentContainer(fileContent, { minText: 1 });
+  }
+  if (fileKind === 'html-before-footer') {
+    return detectBeforeFooterContainer(fileContent, { minText: 1 });
   }
   if (fileKind === 'vue' || fileKind === 'svelte') {
     const extracted = extractComponentTemplateBlock(fileContent, filePath);
