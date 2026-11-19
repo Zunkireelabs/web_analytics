@@ -22,11 +22,18 @@ export async function refreshScreenDaysForSite(site, { now = new Date(), deps = 
     const query = deps.query || (await import('../db.js')).query;
     const fetchDays = deps.fetchDays || (await import('./gsc.js')).fetchGscScreenDays;
     const upsert = deps.upsert || (await import('../store/upsert.js')).upsertGscScreenDays;
+    const deleteAfter = deps.deleteAfter || (await import('../store/upsert.js')).deleteGscScreenDaysAfter;
     const { rows } = await query('SELECT 1 FROM gsc_screen_daily WHERE site_id = $1 LIMIT 1', [site.id]);
     const { start, end } = screenWindow({ hasRows: rows.length > 0, now });
     const days = await fetchDays(site, start, end);
     await upsert(site.id, days);
-    return { siteId: site.id, ok: true, days: days.length, start, end };
+    // Only when Google answered with something: an empty answer is "nothing known", never "delete what we have".
+    let removed = 0;
+    if (days.length) {
+      const lastFinal = days.map((d) => d.date).sort().pop();
+      removed = await deleteAfter(site.id, lastFinal);
+    }
+    return { siteId: site.id, ok: true, days: days.length, start, end, removed };
   } catch (err) {
     return { siteId: site.id, ok: false, error: operatorDetail(err, 300) };
   }

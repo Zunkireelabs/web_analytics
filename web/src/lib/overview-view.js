@@ -91,12 +91,19 @@ export function isYmd(v) {
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
 }
 
-// 54200 -> "54.2K", 1470 -> "1,470", 2_300_000 -> "2.3M"
+// Same as Search Console's own figures: from 1,000 up the number is shortened to K, M or B, rounded to 3 significant digits.
+// 999 -> "999", 1000 -> "1K", 1470 -> "1.47K", 54200 -> "54.2K", 147000 -> "147K", 2300000 -> "2.3M", 1234567 -> "1.23M".
+// It used to switch to K only at 10,000, so a client with fewer than 10,000 impressions saw "1,470" where Search Console shows "1.47K".
+// Tables keep exact numbers (Search Console does too); this is for the headline tiles, the chart axis and the sentences.
 export function compact(n) {
   const v = Number(n || 0);
-  if (Math.abs(v) >= 1e6) return `${(v / 1e6).toFixed(1).replace(/\.0$/, '')}M`;
-  if (Math.abs(v) >= 1e4) return `${(v / 1e3).toFixed(1).replace(/\.0$/, '')}K`;
-  return Math.round(v).toLocaleString('en-US');
+  const a = Math.abs(v);
+  if (a < 1000) return Math.round(v).toLocaleString('en-US');
+  const units = [['K', 1e3], ['M', 1e6], ['B', 1e9]];
+  let i = a >= 1e9 ? 2 : a >= 1e6 ? 1 : 0;
+  let scaled = Number((a / units[i][1]).toPrecision(3));
+  if (scaled >= 1000 && i < units.length - 1) { i += 1; scaled = Number((a / units[i][1]).toPrecision(3)); } // 999,500 -> "1M", not "1000K"
+  return `${v < 0 ? '-' : ''}${scaled}${units[i][0]}`;
 }
 
 // Relative change in %, rounded to 1 decimal. null when there is nothing to compare with.
