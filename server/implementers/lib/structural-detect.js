@@ -42,6 +42,9 @@ const HTML_CONTAINER_SELECTORS = ['main', 'article', '[role="main"]', '#content'
 // guards against for content INSPECTION (lib/render-inspector.js).
 const MIN_CONTAINER_TEXT = 40;
 
+// An ancestor with one of these in its class means the match sits inside a repeating strip, not the page's own content.
+const CARD_AREA_CLASS = /(^|[\s_-])(carousel|slider|swiper|marquee|slick|splide|glide|ticker)([\s_-]|$)|__track\b|__viewport\b/i;
+
 export function isJsxFile(filePath) {
   return /\.(jsx|tsx)$/i.test(filePath || '');
 }
@@ -114,10 +117,14 @@ function detectHtmlContainer(fileContent, offsetBase = 0, { minText = MIN_CONTAI
   const selectors = onlySelector ? [onlySelector] : HTML_CONTAINER_SELECTORS;
   for (const selector of selectors) {
     let el;
+    // A bare `article` is the page's own content only when it is the ONLY one: several of them are cards (a testimonial carousel, a post list), and
+    // placing content inside one card would show it inside that card. Nothing inside a carousel / slider / marquee / track is ever the page's container.
+    if (selector === 'article' && $('article').length > 1) continue;
     try {
       el = $(selector).toArray().find((node) => {
         const loc = node.sourceCodeLocation;
-        return loc && loc.endTag && stripMarkerComments($(node).text()).trim().length >= minText;
+        if (!(loc && loc.endTag && stripMarkerComments($(node).text()).trim().length >= minText)) return false;
+        return !$(node).parents().toArray().some((a) => CARD_AREA_CLASS.test(String(a.attribs?.class || '')));
       });
     } catch {
       continue; // an invalid CSS selector for this parse (unlikely) — try the next candidate rather than fail the whole detection
@@ -348,6 +355,19 @@ function detectMarkdownContainer(fileContent, { minText = MIN_CONTAINER_TEXT } =
   };
 }
 
+// The page's own footer, strongest evidence first: a <footer> element or a footer include. Only when neither exists does an element whose id/class merely
+// SAYS footer count, because a page has many of those that are not the page footer (a card footer, `dash-card__footer`, `insights-footer`).
+const FOOTER_STRONG = [/<footer\b/i, /\{%-?\s*include\s+["'][^"']*footer[^"']*["']/i];
+const FOOTER_WEAK = [/<[a-z][\w-]*\b[^>]*\b(?:id|class)=["'][^"']*footer/i];
+// The LAST match of the first group that has any: the site footer closes the page, and earlier matches are card or section footers.
+function lastFooterIndex(body) {
+  for (const group of [FOOTER_STRONG, FOOTER_WEAK]) {
+    let at = -1;
+    for (const re of group) { const g = new RegExp(re.source, 'gi'); let m; while ((m = g.exec(body))) at = Math.max(at, m.index); }
+    if (at !== -1) return at;
+  }
+  return -1;
+}
 function hasFrontMatterLayout(fileContent) {
   const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(fileContent);
   return !!fm && /^layout:\s*\S/m.test(fm[1]);
@@ -381,6 +401,11 @@ function detectLayoutFragmentContainer(fileContent, { minText = MIN_CONTAINER_TE
   const frontMatterMatch = /^---\r?\n[\s\S]*?\r?\n---\r?\n/.exec(fileContent);
   const bodyStart = frontMatterMatch ? frontMatterMatch[0].length : 0;
   const body = stripMarkerComments(fileContent.slice(bodyStart));
+  // The fragment carries its own footer (a page that includes `_footer.njk` itself): the end of the file is BELOW that footer, so a visible block
+  // placed there would render under it. Say no here and let the before-the-footer strategy place it.
+  if (FOOTER_STRONG.some((re) => re.test(body))) {
+    return { ok: false, reason: 'footer-inside-fragment', error: 'This fragment includes its own footer, so the end of the file is below it.' };
+  }
   if (body.trim().length < minText) {
     return { ok: false, reason: 'no-fragment-body', error: 'This layout fragment has no substantial body content to anchor to.' };
   }
@@ -397,15 +422,20 @@ function detectLayoutFragmentContainer(fileContent, { minText = MIN_CONTAINER_TE
 // End of file is then AFTER the footer, so a visible block placed there would render below it. The safe place is just before the footer.
 // Tried only after every other strategy has failed, so a page that resolves today keeps resolving exactly as before. mobilise.agency's /about-us/:
 // no <main>, a footer include at the end, a JSON-style `"layout"` in its front matter.
-const FOOTER_START = [/<footer\b/i, /<[a-z][\w-]*\b[^>]*\b(?:id|class)=["'][^"']*footer/i, /\{%-?\s*include\s+["'][^"']*footer[^"']*["']/i];
 function detectBeforeFooterContainer(fileContent, { minText = MIN_CONTAINER_TEXT } = {}) {
   const fm = /^---\r?\n[\s\S]*?\r?\n---\r?\n/.exec(fileContent);
   const bodyStart = fm ? fm[0].length : 0;
   const body = fileContent.slice(bodyStart);
   // The BODY decides, not the whole file: a converted site keeps `"documentStart": "<!DOCTYPE html><html lang=...>"` in its front matter, and that is data, not a wrapper.
   if (hasFullDocumentWrapper(body)) return { ok: false, reason: 'not-a-fragment', error: 'This file wraps its own full <html> document.' };
-  let at = -1;
-  for (const re of FOOTER_START) { const m = re.exec(body); if (m && (at === -1 || m.index < at)) at = m.index; }
+  let at = lastFooterIndex(body);
+  if (at !== -1) {
+    // The footer include may sit directly inside a footer WRAPPER opened on the same line (`<div id="footer-placeholder">{% include "footer.njk" %}</div>`):
+    // the blocks belong before the wrapper, not inside it.
+    const lineStart = body.lastIndexOf('\n', at - 1) + 1;
+    const wrapper = /<[a-z][\w-]*\b[^>]*\b(?:id|class)=["'][^"']*footer[^"']*["'][^>]*>\s*$/i.exec(body.slice(lineStart, at));
+    if (wrapper) at = lineStart + wrapper.index;
+  }
   if (at === -1) return { ok: false, reason: 'no-footer', error: 'No footer was found in this file to place content before.' };
   // The footer element may itself be wrapped on its own line: insert at the start of that line when only whitespace precedes it.
   const lineStartOffset = body.lastIndexOf('\n', at - 1) + 1;
@@ -413,6 +443,23 @@ function detectBeforeFooterContainer(fileContent, { minText = MIN_CONTAINER_TEXT
   const before = stripMarkerComments(body.slice(0, insertBody)).replace(/\{%[\s\S]*?%\}|\{\{[\s\S]*?\}\}|<[^>]*>/g, ' ');
   if (before.replace(/\s+/g, ' ').trim().length < minText) return { ok: false, reason: 'no-content-before-footer', error: 'There is no substantial content before the footer to anchor to.' };
   return { ok: true, fileKind: 'html-before-footer', insertBeforeOffset: bodyStart + insertBody, containerDescription: 'the page content, just before its footer' };
+}
+
+// ASTRO page whose <main> only renders a PREBUILT body (`<main><Fragment set:html={body} /></main>`, the body imported as raw HTML): there is no text in the
+// source to judge, and the page's own content is exactly that blob, so the marker blocks go inside <main>, after it. Tried only after every other strategy
+// failed, and only when <main> holds nothing but one `set:html` element, so a page that has real content in <main> never reaches this.
+function detectAstroPrebuiltBody(fileContent, filePath) {
+  if (!/\.astro$/i.test(filePath || '')) return { ok: false, reason: 'not-astro', error: 'Not an Astro page.' };
+  const fm = /^---\r?\n[\s\S]*?\r?\n---\r?\n/.exec(fileContent);
+  const bodyStart = fm ? fm[0].length : 0;
+  const body = fileContent.slice(bodyStart);
+  const m = /<main\b[^>]*>([\s\S]*?)<\/main>/i.exec(body);
+  if (!m) return { ok: false, reason: 'no-main', error: 'No <main> element in this Astro page.' };
+  if (!/^\s*<([A-Z][\w.]*|[a-z][\w-]*)\b[^>]*\bset:html=\{[^}]*\}[^>]*\/>\s*$/.test(m[1])) return { ok: false, reason: 'main-has-other-content', error: '<main> holds more than one prebuilt body.' };
+  const closeAt = m.index + m[0].lastIndexOf('</main>');
+  const lineStart = body.lastIndexOf('\n', closeAt - 1) + 1;
+  const insertBody = /^[ \t]*$/.test(body.slice(lineStart, closeAt)) ? lineStart : closeAt;
+  return { ok: true, fileKind: 'astro-prebuilt-body', insertBeforeOffset: bodyStart + insertBody, containerDescription: 'main (its prebuilt body, after it)' };
 }
 
 // Single entry point — an ordered fallback CHAIN, not a single strategy
@@ -439,6 +486,7 @@ export function detectInsertionPoint(fileContent, filePath) {
     // detectLayoutFragmentContainer's comment).
     attempts.push(() => detectLayoutFragmentContainer(fileContent));
     attempts.push(() => detectBeforeFooterContainer(fileContent));   // last resort: only reached when everything above failed
+    attempts.push(() => detectAstroPrebuiltBody(fileContent, filePath));   // last resort for an Astro page whose <main> only renders a prebuilt body
   }
 
   // A RECOGNIZED component-shaped extension (.jsx/.tsx/.vue/.svelte) never
@@ -504,6 +552,9 @@ export function detectWithTrustedContainer(fileContent, filePath, fileKind, cont
   }
   if (fileKind === 'html-before-footer') {
     return detectBeforeFooterContainer(fileContent, { minText: 1 });
+  }
+  if (fileKind === 'astro-prebuilt-body') {
+    return detectAstroPrebuiltBody(fileContent, filePath);
   }
   if (fileKind === 'vue' || fileKind === 'svelte') {
     const extracted = extractComponentTemplateBlock(fileContent, filePath);

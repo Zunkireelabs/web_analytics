@@ -340,3 +340,121 @@ describe('last resort: place content just before the page footer', () => {
     assert.equal(detectInsertionPoint(ABOUT, 'src/about-us/index.njk').ok, true);
   });
 });
+
+// ---- placement bugs found on real pages (zennly.io and mobilise.agency home pages, superrank.si product pages), 2026-11-19 ----
+const long = 'A testimonial from a salon owner about how booking and daily reconciliation changed the way the whole business runs every day.';
+const HOME_WITH_CARDS = `---
+layout: base.njk
+title: "Spa & Salon Booking Software in Nepal | Free Demo | Zennly"
+---
+<section class="v2-stories"><div class="v2-stories__viewport"><div class="v2-stories__track">
+  <article class="v2-story"><img src="a.webp" alt="Spa owner"><div class="v2-story__txt"><span>${long}</span></div></article>
+  <article class="v2-story"><img src="b.webp" alt="Studio manager"><div class="v2-story__txt"><span>${long}</span></div></article>
+</div></div></section>
+<section class="v2-section"><h2>Questions owners ask before they switch to one system for every branch</h2></section>
+  {% include "_footer-v2.njk" %}
+</div><!-- /#v2-root -->
+`;
+
+describe('cards and carousels are never the page container', () => {
+  test('several <article> cards: not the container; the page resolves just before its footer instead', () => {
+    const r = detectInsertionPoint(HOME_WITH_CARDS, 'src/index.njk');
+    assert.equal(r.ok, true);
+    assert.equal(r.fileKind, 'html-before-footer');
+    assert.ok(r.insertBeforeOffset > HOME_WITH_CARDS.lastIndexOf('</article>'), 'after the last card');
+    assert.ok(r.insertBeforeOffset <= HOME_WITH_CARDS.indexOf('{% include "_footer-v2.njk" %}'), 'not after the footer');
+  });
+
+  test('a single <article> inside a carousel track is not the container either', () => {
+    const one = `<div class="v2-stories__track"><article class="v2-story"><p>${long}</p></article></div>\n{% include "_footer.njk" %}\n`;
+    const r = detectInsertionPoint(`---\nlayout: base.njk\n---\n${one}`, 'a.njk');
+    assert.notEqual(r.fileKind, 'html');
+  });
+
+  test('a lone <article> that is the page (a blog post) is still the container, exactly as before', () => {
+    const post = `<main><article class="post"><p>${long}</p></article></main>`;
+    const r = detectInsertionPoint(post, 'post.html');
+    assert.equal(r.ok, true);
+    assert.equal(r.containerDescription, 'main');
+  });
+});
+
+describe('a layout fragment that carries its own footer', () => {
+  test('is placed before that footer, not at the end of the file below it', () => {
+    const frag = `---\nlayout: base.njk\n---\n<section><p>${long}</p></section>\n{% include "_footer-v2.njk" %}\n`;
+    const r = detectInsertionPoint(frag, 'a.njk');
+    assert.equal(r.fileKind, 'html-before-footer');
+    assert.ok(r.insertBeforeOffset < frag.length);
+  });
+
+  test('a layout fragment with no footer of its own still resolves at the end of the file, as before', () => {
+    const frag = `---\nlayout: base.njk\n---\n<section><p>${long}</p></section>\n`;
+    const r = detectInsertionPoint(frag, 'a.njk');
+    assert.equal(r.fileKind, 'html-fragment');
+  });
+});
+
+// superrank.si/product/content-gaps, as it is in the repository
+const ASTRO_PREBUILT = `---
+import Layout from '../../layouts/Layout.astro';
+import body from '../../product-pages/content-gaps.html?raw';
+---
+<Layout title="Content Gap Analysis for AI Search and SEO | SuperRank" description="Find the topics competitors rank and get cited for.">
+
+<main>
+<Fragment set:html={body} />
+</main>
+
+<Fragment slot="scripts">
+<script src="../../scripts/product.js"></script>
+</Fragment>
+</Layout>
+`;
+
+describe('an Astro page whose <main> only renders a prebuilt body', () => {
+  test('resolves inside <main>, after the body, on its own line', () => {
+    const r = detectInsertionPoint(ASTRO_PREBUILT, 'src/pages/product/content-gaps.astro');
+    assert.equal(r.ok, true);
+    assert.equal(r.fileKind, 'astro-prebuilt-body');
+    assert.ok(ASTRO_PREBUILT.slice(r.insertBeforeOffset).startsWith('</main>'));
+    assert.ok(ASTRO_PREBUILT.slice(0, r.insertBeforeOffset).endsWith('<Fragment set:html={body} />\n'));
+  });
+
+  test('a <main> with real content of its own never takes this path', () => {
+    const real = ASTRO_PREBUILT.replace('<Fragment set:html={body} />', `<h1>Content gaps</h1><p>${long}</p>`);
+    const r = detectInsertionPoint(real, 'src/pages/product/content-gaps.astro');
+    assert.equal(r.fileKind, 'html');
+  });
+
+  test('a <main> with a prebuilt body AND something else is refused, not guessed', () => {
+    const mixed = ASTRO_PREBUILT.replace('<Fragment set:html={body} />', '<Fragment set:html={body} /><Newsletter />');
+    assert.equal(detectInsertionPoint(mixed, 'src/pages/a.astro').ok, false);
+  });
+
+  test('only an .astro page', () => {
+    assert.equal(detectInsertionPoint(ASTRO_PREBUILT, 'src/pages/a.njk').fileKind === 'astro-prebuilt-body', false);
+  });
+
+  test('the trusted path finds the same place again', () => {
+    const r = detectWithTrustedContainer(ASTRO_PREBUILT, 'src/pages/x.astro', 'astro-prebuilt-body', 'main (its prebuilt body, after it)');
+    assert.equal(r.ok, true);
+  });
+});
+
+describe('the page footer is not any element that has "footer" in its class', () => {
+  const SECTION = `---\nlayout: base.njk\n---\n<section class="v2-ind"><p>${long}</p><div class="v2-ind-footer"><a href="/solutions/">All solutions</a></div></section>\n<section class="v2-last"><p>${long}</p></section>\n  {% include "_footer-v2.njk" %}\n`;
+  test('a section footer earlier on the page is skipped; the footer include closes the page', () => {
+    const r = detectInsertionPoint(SECTION, 'src/index.njk');
+    assert.equal(r.fileKind, 'html-before-footer');
+    assert.ok(SECTION.slice(r.insertBeforeOffset).startsWith('  {% include "_footer-v2.njk" %}'));
+  });
+  test('a <footer> element is preferred over a class that only says footer, and the last one wins', () => {
+    const c = `---\nlayout: base.njk\n---\n<section><p>${long}</p><footer class="card-meta">by us</footer></section>\n<section><p>${long}</p></section>\n<footer class="site">f</footer>\n`;
+    const r = detectInsertionPoint(c, 'a.njk');
+    assert.ok(c.slice(r.insertBeforeOffset).startsWith('<footer class="site">'));
+  });
+  test('with nothing stronger, an element whose class says footer is still used', () => {
+    const c = `---\n{ "x": 1 }\n---\n<section><p>${long}</p></section>\n<div class="site-footer">f</div>\n`;
+    assert.equal(detectInsertionPoint(c, 'a.njk').fileKind, 'html-before-footer');
+  });
+});
