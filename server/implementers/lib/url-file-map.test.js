@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isPageMapped, resolveFile, resolveHostScope, resolveNewContentTarget, resolveNewContentUrl, resolveNewContentLayout,
-  resolveMarkers, resolveTranslationTarget, resolveActionFile, resolvePlacement,
+  resolveMarkers, resolveTranslationTarget, resolveActionFile, resolvePlacement, resolveLineKeys,
 } from './url-file-map.js';
 
 describe('resolveTranslationTarget', () => {
@@ -346,5 +346,18 @@ describe('resolveActionFile: per-action-type target file', () => {
     const d = { website_domain: 'x.com', url_file_map: { pages: { '/p': { file: 'src/p.njk' } }, defaults: { placements: { 'open-graph': { file: 'src/head.njk' } } } } };
     assert.equal(resolveActionFile(d, 'https://x.com/p', 'open-graph'), 'src/head.njk');
     assert.equal(resolveActionFile(d, 'https://x.com/missing', 'faq'), null);
+  });
+});
+
+
+describe('lineKeys placement', () => {
+  const site = { website_domain: 'zennly.io', url_file_map: { pages: { '/a': { file: 'src/a.njk' } }, defaults: { placements: { 'meta-title': { lineKeys: { description: 'metaDescription' } } } } } };
+  test('a site-wide lineKeys setting is returned for that action type only, and markers fall back to the platform defaults', () => {
+    assert.deepEqual(resolveLineKeys(site, 'https://zennly.io/a', 'meta-title'), { description: 'metaDescription' });
+    assert.equal(resolveLineKeys(site, 'https://zennly.io/a', 'faq'), null);
+    assert.deepEqual(resolveMarkers(site, 'https://zennly.io/a', 'meta-title'), { title: 'TITLE', description: 'METADESCRIPTION' });
+  });
+  test('no setting: no keys, as before', () => {
+    assert.equal(resolveLineKeys({ website_domain: 'x.com', url_file_map: { pages: { '/p': { file: 'p.md' } } } }, 'https://x.com/p', 'meta-title'), null);
   });
 });

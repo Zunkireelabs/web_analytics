@@ -1,5 +1,5 @@
 import { hasMarker } from './marker-merge.js';
-import { resolveFile, resolveActionFile, resolveMarkers, resolveAdapter } from './url-file-map.js';
+import { resolveFile, resolveActionFile, resolveMarkers, resolveAdapter, resolveLineKeys } from './url-file-map.js';
 import { adoptHeadTags, sameTagsIgnoringOrder } from './head-tag-adopt.js';
 import { resolveInsertion } from './insertion-engine.js';
 import * as github from '../../github/client.js';
@@ -27,7 +27,10 @@ const PAGE_LIMIT = 5000; // every page, not a sample: the point is a pathway for
 // Every marker spelling the platform writes: HTML block comments, JSX block comments, and the trailing line comment used for
 // front-matter fields (`title: "x" # SEOAI:TITLE`).
 const MARKER_TOKEN = /<!--\s*SEOAI:[\w-]+:(?:START|END)\s*-->|\{\/\*\s*SEOAI:[\w-]+:(?:START|END)\s*\*\/\}|[ \t]#[ \t]*SEOAI:[\w-]+/gi;
-const strip = (s) => String(s ?? '').replace(MARKER_TOKEN, '').replace(/\s+/g, '');
+// An attribute marker (Astro: `title={/* SEOAI:TITLE */ "x"}`) is first turned back into the plain attribute it wraps (`title="x"`), so removing the marker gives
+// the original file again; then the marker comments are stripped as before.
+const ATTR_MARKER = /=\{\s*\/\*\s*SEOAI:[\w-]+\s*\*\/\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\s*\}/g;
+const strip = (s) => String(s ?? '').replace(ATTR_MARKER, '=$1').replace(MARKER_TOKEN, '').replace(/\s+/g, '');
 
 // The safety rule of this whole feature: after removing every marker token, the new file must equal the old file (ignoring the
 // whitespace the markers sit on). A change that is anything more than markers is never shipped.
@@ -56,7 +59,7 @@ const DEFAULT_DEPS = {
     const f = await github.getFileContent(site, path, ref);
     return f ? f.content : null;
   },
-  resolveFile, resolveActionFile, resolveMarkers, resolveAdapter, resolveInsertion,
+  resolveFile, resolveActionFile, resolveMarkers, resolveAdapter, resolveLineKeys, resolveInsertion,
   layoutFile: (site) => site?.url_file_map?.siteRoot?.layoutTemplate || null,
   baseRef: (site) => github.defaultBranchName(site),
 };
@@ -96,8 +99,9 @@ export async function planSetupPr(site, deps = {}) {
       // open-graph and canonical). The same lookup the daily run's apply uses, so a marker is placed where the fix will look for it.
       const path = pageFile ? d.resolveActionFile(site, page, actionType) : null;
       if (!markers || !path) continue;
-      const entry = byFile.get(path) || { markerMap: {} };
+      const entry = byFile.get(path) || { markerMap: {}, lineKeys: {} };
       Object.assign(entry.markerMap, markers);
+      Object.assign(entry.lineKeys, d.resolveLineKeys(site, page, actionType) || {});
       byFile.set(path, entry);
       needs.set(path, [...(needs.get(path) || []), ...Object.values(markers)]);
     }
@@ -109,7 +113,7 @@ export async function planSetupPr(site, deps = {}) {
     sitewide: { layout: layoutPath, markers: Object.values(sitewideMap), layoutMissing: !layoutPath && Object.keys(sitewideMap).length > 0 } };
   const finalContent = new Map(); // path -> the file as it will be after this PR (or as it is, when untouched); absent = unreadable
 
-  for (const [path, { markerMap }] of byFile) {
+  for (const [path, { markerMap, lineKeys }] of byFile) {
     let before;
     try { before = await d.readFile(site, path, ref); } catch { plan.skipped.push({ path, reason: 'could not be read' }); continue; }
     if (before == null) { plan.skipped.push({ path, reason: 'not found in the repository' }); continue; }
@@ -133,7 +137,7 @@ export async function planSetupPr(site, deps = {}) {
         plan.skipped.push({ path, markerName, reason: 'moving its existing tags into the marker would have changed more than their position, so it was left alone' });
         continue;
       }
-      const { content: next, unresolved } = await d.resolveInsertion(site, content, path, { [field]: markerName });
+      const { content: next, unresolved } = await d.resolveInsertion(site, content, path, { [field]: markerName }, { lineKeys });
       for (const u of unresolved) plan.unresolved.push({ path, markerName: u.markerName, reason: u.reason });
       if (!hasMarker(next, markerName)) continue;
       if (!(moved ? sameTagsIgnoringOrder(before, next) : onlyMarkersAdded(before, next))) { plan.skipped.push({ path, markerName, reason: 'creating it would add a value, not only a marker, so it is left for the first real fix' }); continue; }
@@ -161,6 +165,24 @@ export async function planSetupPr(site, deps = {}) {
     if (unknown) coverage.unknown++; else if (missing) coverage.partial++; else coverage.ready++;
   }
   plan.coverage = coverage;
+
+  // Page by page, marker by marker: what is placed (now or already) and, for each one that is not, WHY. The completeness gate reads this; a count can hide a
+  // missing marker, a list of named gaps cannot. A reason comes from what the planner recorded for that file and marker; with none recorded it says so.
+  const reasonFor = new Map();
+  for (const u of plan.unresolved) reasonFor.set(`${u.path}::${u.markerName}`, u.reason);
+  for (const s of plan.skipped) if (s.markerName) reasonFor.set(`${s.path}::${s.markerName}`, s.reason);
+  const gaps = []; let placed = 0;
+  for (const { page, needs } of pageNeeds) {
+    for (const [path, names] of needs) {
+      const content = finalContent.get(path);
+      for (const name of [...new Set(names)]) {
+        if (content != null && hasMarker(content, name)) { placed++; continue; }
+        gaps.push({ page, path, marker: name, reason: content == null ? 'file-could-not-be-read' : (reasonFor.get(`${path}::${name}`) || (plan.truncated ? 'left-out-of-this-pr-by-the-file-cap' : 'not-placed')) });
+      }
+    }
+  }
+  plan.gaps = gaps;
+  plan.placedCount = placed;
   return plan;
 }
 

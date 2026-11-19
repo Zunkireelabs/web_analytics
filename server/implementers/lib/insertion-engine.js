@@ -1,4 +1,4 @@
-import { ensureMarkers, hasMarker, isHeadScopedField, isLineConventionField } from './marker-merge.js';
+import { ensureMarkers, hasMarker, isHeadScopedField, isLineConventionField, isAttrFile, explainAttrGap } from './marker-merge.js';
 import { detectHeadRegion, isJsxFile } from './structural-detect.js';
 import { getOrDetectStrategy } from './strategy-registry.js';
 import { refineMarkerPlacement } from './expand-placement.js';
@@ -65,7 +65,7 @@ export async function resolveInsertion(site, fileContent, filePath, markerMap, o
   // Pass 1: today's safe, structural-detection-free self-heals — LINE
   // (front-matter) fields, and HEAD-scoped fields when the HEAD region
   // already exists.
-  let content = ensureMarkers(fileContent, markerMap, filePath).content;
+  let content = ensureMarkers(fileContent, markerMap, filePath, { lineKeys: options.lineKeys }).content;
 
   const stillMissingHeadScoped = Object.entries(markerMap)
     .filter(([field, markerName]) => isHeadScopedField(field) && !hasMarker(content, markerName));
@@ -76,7 +76,7 @@ export async function resolveInsertion(site, fileContent, filePath, markerMap, o
   // (not just the one currently being applied) nests into it in one shot.
   if (stillMissingHeadScoped.length) {
     const headResult = ensureHeadRegion(content, filePath);
-    if (headResult.ok) content = ensureMarkers(headResult.content, markerMap, filePath).content;
+    if (headResult.ok) content = ensureMarkers(headResult.content, markerMap, filePath, { lineKeys: options.lineKeys }).content;
   }
 
   // Pass 3: every field still missing at this point falls into exactly one
@@ -100,7 +100,9 @@ export async function resolveInsertion(site, fileContent, filePath, markerMap, o
       continue;
     }
     if (isLineConventionField(field)) {
-      unresolved.push({ field, markerName, reason: 'no-front-matter', error: `No safe front-matter value for "${field}" could be found/annotated in ${filePath}.` });
+      // An Astro page has no front matter to hold the value: say what stopped the attribute marker (title is an expression, no layout tag, ...).
+      const reason = (isAttrFile(filePath) && explainAttrGap(content, field)) || 'no-front-matter';
+      unresolved.push({ field, markerName, reason, error: `No safe place for "${field}" could be found/annotated in ${filePath} (${reason}).` });
       continue;
     }
     const result = await ensureBodyMarker(site, content, filePath, markerName);

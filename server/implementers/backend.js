@@ -1,4 +1,4 @@
-import { resolveFile, resolveActionFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, isPageMapped, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
+import { resolveFile, resolveActionFile, resolveLineKeys, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, isPageMapped, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, resolveBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, getRepoTree } from '../github/client.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
@@ -1454,7 +1454,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   const placement = expandPrior && componentField
     ? { field: componentField, beforeRoles: expandPrior.placement.before }
     : null;
-  const { content: ensuredContent, unresolved } = await resolveInsertion(site, file.content, filePath, markerMap, { placement });
+  const { content: ensuredContent, unresolved } = await resolveInsertion(site, file.content, filePath, markerMap, { placement, lineKeys: resolveLineKeys(site, page, draft.action_type) });
 
   const spliced = spliceMarkers(ensuredContent, markerMap, built.values);
   // Per this platform's daily-batch contract: a field that couldn't be

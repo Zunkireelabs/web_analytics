@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { ensureMarkers, spliceMarkers, isHeadScopedField, isNoEofInsertField, buildMergeValues, findMarkerCorruption, renderExpandedHtml, sanitizeCapturedTemplate } from './marker-merge.js';
+import { explainAttrGap, hasMarker, classifyMarkerGap, ensureMarkers, spliceMarkers, isHeadScopedField, isNoEofInsertField, buildMergeValues, findMarkerCorruption, renderExpandedHtml, sanitizeCapturedTemplate } from './marker-merge.js';
 
 // Regression coverage for the zunkireelabs-web PR #87 incident: two
 // independent title drafts (one landed on main, one on the batch branch)
@@ -1625,5 +1625,137 @@ describe('JSON-style front matter: a quoted key and a trailing comma', () => {
     const r = ensureMarkers(yml, { title: 'TITLE' }, 'p.md');
     assert.equal(r.content, '---\ntitle: "A post" # SEOAI:TITLE\nexcerpt: "x"\n---\nBody\n');
     assert.equal(spliceMarkers(r.content, { title: 'TITLE' }, { title: 'B' }).newContent, '---\ntitle: "B" # SEOAI:TITLE\nexcerpt: "x"\n---\nBody\n');
+  });
+});
+
+
+// ---- ATTRIBUTE markers on an Astro page's layout tag (REAL excerpts, Zunkireelabs/superrank-web src/pages/*.astro, 2026-11-19) ----
+describe('Astro: title and description markers on the layout tag', () => {
+  // pricing.astro: an expression attribute (jsonLd) BEFORE title/description, and later a component whose title contains `<br>` and `>` characters.
+  const PRICING = `---
+import { softwareBrands } from '../lib/seo.js';
+import Layout from '../layouts/Layout.astro';
+import '../styles/styles.css';
+import CtaSection from '../components/CtaSection.astro';
+import '../styles/pricing.css';
+---
+<Layout jsonLd={[softwareBrands]} title="SuperRank Pricing: AI Search Visibility Plans from $95/mo" description="SuperRank pricing for brands. Track, measure and improve your brand's performance in AI search. Unlimited users on every plan." bodyClass="page-pricing">
+<main>
+<CtaSection title="Find out what AI says<br><span class='muted-line'>about your brand</span>" text="Connect your site, pick your prompts and see how ChatGPT, Gemini and Google talk about you." link="Talk to Sales" note="14-day trial · Cancel anytime">
+</main>`;
+  // book-demo.astro: a bare flag attribute (faqOnly) before title.
+  const BOOK = `---
+import Layout from '../layouts/Layout.astro';
+import '../styles/styles.css';
+import '../styles/book-demo.css';
+import Faq from '../components/Faq.astro';
+const faq = [
+  ["What happens on the demo?", "It is a 30-minute live call on your own site. We show you where you are missing from Google and AI answers, and you watch the agent write a fix."],
+  ["How long is the demo?", "30 minutes, with no slides."],
+  ["Do I need to prepare anything?", "No. Give us your name, work email and website. We audit your site and the prompts your buyers ask before the call."],
+  ["What do I get after the call?", "The same day, you get the audit, your first fixes and a plan that fits."],
+  ["What if I am not ready for a call?", "You can <a href=\"/get-started\">start a free trial</a> or <a href=\"/talk-to-us\">talk to us</a>."],
+  ["How is my information used?", "We only use it to prepare your call. No spam."],
+];
+---
+<Layout faqOnly title="Book a SuperRank Demo: AI Search Visibility Audit" description="Book a 30-minute SuperRank demo on your own site. We show you where you are missing from Google and AI answers, and what the agent would fix first." bodyClass="page-demo">`;
+  const PRIVACY = `---
+import Layout from '../layouts/Layout.astro';
+import '../styles/styles.css';
+import '../styles/legal.css';
+
+const updated = 'October 28, 2026';
+const sections = [
+  { id: 'who', title: 'Who we are' },
+  { id: 'collect', title: 'What we collect' },
+  { id: 'google-data', title: 'Google user data' },
+  { id: 'use', title: 'How we use it' },
+  { id: 'limited-use', title: 'Google API Services User Data Policy' },
+  { id: 'security', title: 'How we protect it' },
+  { id: 'sharing', title: 'Who we share it with' },
+  { id: 'retention', title: 'Keeping and deleting data' },
+  { id: 'rights', title: 'Your rights' },
+  { id: 'cookies', title: 'Cookies and analytics' },
+  { id: 'transfers', title: 'Where data is processed' },
+  { id: 'children', title: 'Children' },
+  { id: 'changes', title: 'Changes to this policy' },
+  { id: 'contact', title: 'Contact' },
+];
+---
+<Layout title="Privacy Policy | SuperRank" description="How SuperRank collects, uses and protects your data, including the Google data you choose to connect.">`;
+
+  test('the layout tag\'s literal title and description get an attribute marker; removing it gives the file back exactly', () => {
+    for (const src of [PRICING, BOOK, PRIVACY]) {
+      const r = ensureMarkers(src, { title: 'TITLE', description: 'METADESCRIPTION' }, 'src/pages/x.astro');
+      assert.deepEqual(r.inserted.sort(), ['METADESCRIPTION', 'TITLE']);
+      assert.match(r.content, /title=\{\/\* SEOAI:TITLE \*\/ "[^"]+"\}/);
+      assert.match(r.content, /description=\{\/\* SEOAI:METADESCRIPTION \*\/ "[^"]+"\}/);
+      assert.equal(r.content.replace(/=\{\/\* SEOAI:\w+ \*\/ ("[^"]*")\}/g, '=$1'), src);
+    }
+  });
+
+  test('only the layout tag is touched: the later component\'s own title attribute (with <br> in it) is left alone', () => {
+    const r = ensureMarkers(PRICING, { title: 'TITLE' }, 'src/pages/pricing.astro');
+    assert.equal((r.content.match(/SEOAI:/g) || []).length, 1);
+    assert.match(r.content, /<CtaSection title="Find out what AI says<br>/);
+  });
+
+  test('applying a new title rewrites only the quoted value, keeps the expression and the marker, and escapes a quote', () => {
+    const marked = ensureMarkers(BOOK, { title: 'TITLE', description: 'METADESCRIPTION' }, 'x.astro').content;
+    const out = spliceMarkers(marked, { title: 'TITLE', description: 'METADESCRIPTION' }, { title: 'Book a "live" demo | SuperRank', description: 'A new description.' });
+    assert.equal(out.ok, true);
+    assert.match(out.newContent, /title=\{\/\* SEOAI:TITLE \*\/ "Book a \\"live\\" demo \| SuperRank"\}/);
+    assert.match(out.newContent, /description=\{\/\* SEOAI:METADESCRIPTION \*\/ "A new description\."\}/);
+    assert.match(out.newContent, /<Layout faqOnly title=/);
+  });
+
+  test('a second run changes nothing, and the markers are counted once each (no corruption)', () => {
+    const once = ensureMarkers(PRIVACY, { title: 'TITLE', description: 'METADESCRIPTION' }, 'x.astro').content;
+    assert.equal(ensureMarkers(once, { title: 'TITLE', description: 'METADESCRIPTION' }, 'x.astro').content, once);
+    assert.deepEqual(findMarkerCorruption(once), []);
+    assert.equal(hasMarker(once, 'TITLE'), true);
+  });
+
+  test('refuses, with the reason, instead of guessing: an expression title, no layout tag, layout not first, and non-Astro files', () => {
+    const expr = '---\nconst t = "x";\n---\n<Layout title={t} description="d">\n</Layout>\n';
+    assert.equal(explainAttrGap(expr, 'title'), 'title-is-an-expression');
+    assert.equal(ensureMarkers(expr, { title: 'TITLE' }, 'x.astro').content, expr);
+    assert.equal(explainAttrGap('---\n---\n<div>no component</div>\n', 'title'), 'no-component-tag');
+    assert.equal(explainAttrGap('---\n---\n<Layout bodyClass="a">\n</Layout>\n', 'title'), 'layout-tag-has-no-title-and-description');
+    // a component that is NOT the first one carrying the literals is never chosen
+    const notFirst = '---\n---\n<Layout bodyClass="a">\n<Hero title="T" description="D" />\n</Layout>\n';
+    assert.equal(explainAttrGap(notFirst, 'title'), 'layout-tag-has-no-title-and-description');
+    assert.equal(ensureMarkers(PRIVACY, { title: 'TITLE' }, 'src/pages/x.jsx').content.includes('SEOAI:TITLE */'), false);   // attribute markers are Astro-only
+  });
+
+  test('classifyMarkerGap and the real engine agree: this page self-heals, an expression-title page does not', () => {
+    assert.equal(classifyMarkerGap('title', 'src/pages/privacy.astro', PRIVACY), 'self-heals');
+    assert.equal(classifyMarkerGap('title', 'src/pages/x.astro', '---\nconst t=1;\n---\n<Layout title={t} description="d"></Layout>\n'), 'fatal-no-front-matter');
+  });
+});
+
+
+// ---- a front-matter key that differs from the field's name (REAL: Zunkireelabs/web-zenly src/blog/discount-leakage.njk, layout reads `metaDescription`) ----
+describe('lineKeys: description lives under another key', () => {
+  const ZENNLY = '---\nlayout: layouts/blog-article.njk\ntitle: "Discount Leakage: Hidden Cost of Staff Discounts | Zennly"\nh1: "The real cost of undocumented staff discounts"\nmetaDescription: "Unapproved staff discounts quietly drain margins in spas, salons and multi-branch businesses."\ndatePublished: "2026-07-17"\n---\n<p>Body</p>\n';
+
+  test('without the alias the description has no marker; with it the real key gets one', () => {
+    assert.equal(ensureMarkers(ZENNLY, { title: 'TITLE', description: 'METADESCRIPTION' }, 'x.njk').inserted.join(), 'TITLE');
+    const r = ensureMarkers(ZENNLY, { title: 'TITLE', description: 'METADESCRIPTION' }, 'x.njk', { lineKeys: { description: 'metaDescription' } });
+    assert.deepEqual(r.inserted.sort(), ['METADESCRIPTION', 'TITLE']);
+    assert.match(r.content, /^metaDescription: "Unapproved staff discounts[^"]*" # SEOAI:METADESCRIPTION$/m);
+    assert.equal(r.content.replace(/ # SEOAI:\w+/g, ''), ZENNLY);                       // comments only
+  });
+
+  test('a fix then rewrites that key by marker name; the key and the comment stay', () => {
+    const marked = ensureMarkers(ZENNLY, { description: 'METADESCRIPTION' }, 'x.njk', { lineKeys: { description: 'metaDescription' } }).content;
+    const out = spliceMarkers(marked, { description: 'METADESCRIPTION' }, { description: 'A better description.' });
+    assert.match(out.newContent, /^metaDescription: "A better description\." # SEOAI:METADESCRIPTION$/m);
+  });
+
+  test('an alias for a different field does not touch the title, and no alias behaves exactly as before', () => {
+    const r = ensureMarkers(ZENNLY, { title: 'TITLE' }, 'x.njk', { lineKeys: { description: 'metaDescription' } });
+    assert.match(r.content, /^title: "Discount Leakage[^"]*" # SEOAI:TITLE$/m);
+    assert.equal(ensureMarkers(ZENNLY, { title: 'TITLE' }, 'x.njk').content, r.content);
   });
 });

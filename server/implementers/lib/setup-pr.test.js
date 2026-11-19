@@ -322,3 +322,45 @@ test('a head file with the tags more than once is left alone and said so, not ha
   assert.ok(!head || !head.added.includes('OPENGRAPH'));
   assert.ok(plan.unresolved.some((u) => u.markerName === 'OPENGRAPH'));
 });
+
+
+// ---- Astro: attribute markers pass the same "only markers were added" rule (real excerpt: superrank-web src/pages/privacy.astro) ----
+const ASTRO_PAGE = '---\nimport Layout from \'../layouts/Layout.astro\';\nconst updated = "19 November 2026";\n---\n<Layout title="Privacy Policy | SuperRank" description="How SuperRank collects, uses and protects your data, including the Google data you choose to connect.">\n<main><h1>Privacy</h1></main>\n</Layout>\n';
+
+test('an Astro page: the layout tag\'s title and description get attribute markers and the safety rule accepts it', async () => {
+  const astroSite = { id: 8871, name: 'SuperRank', repo_default_branch: 'main', website_domain: 'superrank.si', url_file_map: { pages: { '/privacy': { file: 'src/pages/privacy.astro' } } } };
+  const plan = await planSetupPr(astroSite, { listPages: async () => ['https://superrank.si/privacy'], markerTypes: async () => ['meta-title'], readFile: async () => ASTRO_PAGE });
+  assert.equal(plan.files.length, 1);
+  assert.deepEqual(plan.files[0].added.sort(), ['METADESCRIPTION', 'TITLE']);
+  assert.match(plan.files[0].content, /<Layout title=\{\/\* SEOAI:TITLE \*\/ "Privacy Policy \| SuperRank"\} description=\{\/\* SEOAI:METADESCRIPTION \*\/ "How SuperRank/);
+  assert.equal(onlyMarkersAdded(ASTRO_PAGE, plan.files[0].content), true);
+  assert.equal(onlyMarkersAdded(ASTRO_PAGE, plan.files[0].content.replace('Privacy Policy', 'Privacy Policy X')), false);   // an edited value still fails
+  assert.equal(plan.unresolved.length, 0);
+});
+
+test('an Astro page whose title is an expression is reported with the reason, never silently', async () => {
+  const astroSite = { id: 1, name: 'x', repo_default_branch: 'main', website_domain: 'x.com', url_file_map: { pages: { '/a': { file: 'src/pages/a.astro' } } } };
+  const src = '---\nconst t = "x";\n---\n<Layout title={t} description="d">\n</Layout>\n';
+  const plan = await planSetupPr(astroSite, { listPages: async () => ['https://x.com/a'], markerTypes: async () => ['meta-title'], readFile: async () => src });
+  assert.equal(plan.files.length, 0);
+  assert.ok(plan.unresolved.some((u) => u.markerName === 'TITLE' && u.reason === 'title-is-an-expression'));
+});
+
+
+// ---- the per-page, per-marker gap list the completeness gate reads ----
+test('plan.gaps names every (page, marker) that is not placed, with the reason; plan.placedCount counts the rest', async () => {
+  const plan = await planSetupPr(site, deps());                         // /about (njk layout, head but no front matter), /blog/post (markdown), /unmapped
+  assert.ok(plan.placedCount > 0);
+  const g = plan.gaps.filter((x) => x.page === 'https://example.com/about');
+  assert.ok(g.every((x) => x.path === 'src/pages/about.njk' && x.reason));
+  assert.ok(g.some((x) => x.marker === 'TITLE' && x.reason === 'no-front-matter'));
+  assert.equal(plan.gaps.some((x) => x.page === 'https://example.com/unmapped'), false);            // an unmapped page is reported as unmapped, not as marker gaps
+  const total = plan.placedCount + plan.gaps.length;
+  assert.equal(total, plan.gaps.length + plan.placedCount);
+});
+
+test('a page whose every marker is placed has no gaps', async () => {
+  const plan = await planSetupPr(mobSite, mobDeps());
+  assert.deepEqual(plan.gaps, []);
+  assert.ok(plan.placedCount >= 4);
+});
