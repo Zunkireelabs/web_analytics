@@ -617,6 +617,14 @@ export async function retargetPullRequest(site, prNumber, base) {
   return { number: data.number, url: data.html_url, base: data.base?.ref ?? base };
 }
 
+// Changes an open pull request's title and/or body (PATCH /pulls/:n). Used by the setup PR when it is rebuilt in place.
+export async function updatePullRequest(site, prNumber, { title, body }) {
+  const res = await githubRequest(site, 'PATCH', `/repos/${repoPath(site)}/pulls/${prNumber}`, { ...(title != null ? { title } : {}), ...(body != null ? { body } : {}) });
+  if (!res.ok) throw new Error(`updatePullRequest failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  return { number: data.number, url: data.html_url };
+}
+
 // Real-evidence read for the "Check PR Status" action — reports GitHub's own
 // merged/state, never inferred locally. Also surfaces GitHub's own
 // mergeable/mergeable_state (previously discarded here) — the only signal

@@ -62,9 +62,14 @@ function jsxBlockRegex(name) {
 // Matches a line ending in a trailing `# SEOAI:<name>` (or `<!-- SEOAI:<name> -->`,
 // for a YAML/HTML-comment-style single-line marker) comment, capturing the
 // quoted value earlier on that same line so it can be replaced in place.
+//
+// A comma may sit between the closing quote and the comment: `"title": "x", # SEOAI:TITLE` is the JSON-style front matter that
+// Eleventy sites converted from static HTML use (mobilise.agency: the whole block between the `---` fences is `{ "layout": ..., "title":
+// ..., }`). It is valid YAML (a flow mapping, and comments are allowed after a comma), and the comma stays in the captured suffix, so a
+// rewrite of the value never touches it. Before this, such a line could not carry or be found by a marker at all.
 function lineRegex(name) {
   const marker = `(?:#\\s*SEOAI:${escapeRegExp(name)}\\s*|<!--\\s*SEOAI:${escapeRegExp(name)}\\s*-->)`;
-  return new RegExp(`^(.*?)(["'])((?:(?!\\2)[^\\\\]|\\\\.)*)\\2(\\s*${marker}\\s*)$`, 'm');
+  return new RegExp(`^(.*?)(["'])((?:(?!\\2)[^\\\\]|\\\\.)*)\\2(\\s*,?\\s*${marker}\\s*)$`, 'm');
 }
 
 function findMarker(fileContent, name) {
@@ -422,6 +427,17 @@ function insertLineMarker(fileContent, field, markerName) {
   if (fmLen == null) return null;
   const frontMatter = fileContent.slice(0, fmLen);
   const rest = fileContent.slice(fmLen);
+
+  // JSON-style front matter (see lineRegex): `  "title": "x",` with a quoted key and an optional trailing comma. Only when the key appears
+  // exactly ONCE in the block, so a nested object that also has a "title" can never be annotated by mistake.
+  const jsonKey = new RegExp(`"${escapeRegExp(field)}"\\s*:`, 'g');
+  if ((frontMatter.match(jsonKey) || []).length === 1) {
+    const jsonRe = new RegExp(`^(\\s*"${escapeRegExp(field)}"\\s*:\\s*)"((?:[^"\\\\]|\\\\.)*)"(\\s*,?)[ \\t]*$`, 'm');
+    if (jsonRe.test(frontMatter)) {
+      const newFrontMatter = frontMatter.replace(jsonRe, (_m, prefix, val, comma) => `${prefix}"${val}"${comma} # SEOAI:${markerName}`);
+      return newFrontMatter + rest;
+    }
+  }
 
   const quotedRe = new RegExp(`^(${escapeRegExp(field)}:\\s*)(["'])((?:(?!\\2)[^\\\\]|\\\\.)*)\\2\\s*$`, 'm');
   if (quotedRe.test(frontMatter)) {

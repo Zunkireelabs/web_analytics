@@ -16,7 +16,11 @@ import * as github from '../../github/client.js';
 // Never merged by the platform: merging is always a human, on GitHub.
 
 export const SETUP_BRANCH_PREFIX = 'seoai/setup-markers';
-export const MAX_FILES = 60;     // a reviewable PR; anything beyond is left for the first real PRs, which self-heal as before
+export const MAX_FILES = 150;    // still a reviewable PR (every change is a comment); anything beyond is left for the first real PRs, which self-heal as before
+// Action types that are installed ONCE, sitewide, into the shared layout (backend.js computeMarkerMerge routes analytics-install to
+// siteRoot.layoutTemplate, not to the page). They are never asked of each page: doing so (the first version did) made every page look
+// partly ready because a per-page file has no <head> for a sitewide script.
+export const SITEWIDE_TYPES = ['analytics-install'];
 const PAGE_LIMIT = 5000; // every page, not a sample: the point is a pathway for ALL pages. Pages share templates, so files stay few
 
 // Every marker spelling the platform writes: HTML block comments, JSX block comments, and the trailing line comment used for
@@ -52,6 +56,7 @@ const DEFAULT_DEPS = {
     return f ? f.content : null;
   },
   resolveFile, resolveMarkers, resolveAdapter, resolveInsertion,
+  layoutFile: (site) => site?.url_file_map?.siteRoot?.layoutTemplate || null,
   baseRef: (site) => github.defaultBranchName(site),
 };
 
@@ -69,11 +74,21 @@ export async function planSetupPr(site, deps = {}) {
   const byFile = new Map(); // path -> { markerMap: { field: name } }
   const pageNeeds = []; // { page, path, names: [markerName] } for every page that has a file
   const unmappedPages = [];
+  // Sitewide markers go to the shared layout, once, and only when the project has one mapped.
+  const layoutPath = d.layoutFile(site);
+  const sitewideMap = {};
+  for (const t of SITEWIDE_TYPES) {
+    if (![...types].includes(t)) continue;
+    Object.assign(sitewideMap, d.resolveMarkers(site, pages[0] || '', t) || {});
+  }
+  if (layoutPath && Object.keys(sitewideMap).length) byFile.set(layoutPath, { markerMap: { ...sitewideMap } });
+
   for (const page of pages) {
     const path = d.resolveFile(site, page);
     const names = [];
     let adapterRouted = false;
     for (const actionType of types) {
+      if (SITEWIDE_TYPES.includes(actionType)) continue; // installed once in the layout, never asked of a page
       if (d.resolveAdapter(site, page, actionType)) { adapterRouted = true; continue; } // adapter-routed pages own their own data path, not a marker gap
       const markers = d.resolveMarkers(site, page, actionType);
       if (!markers || !path) continue;
@@ -86,7 +101,8 @@ export async function planSetupPr(site, deps = {}) {
     else if (!adapterRouted) unmappedPages.push(page);
   }
 
-  const plan = { files: [], alreadyComplete: 0, unresolved: [], skipped: [], pagesSeen: pages.length, filesSeen: byFile.size, truncated: false };
+  const plan = { files: [], alreadyComplete: 0, unresolved: [], skipped: [], pagesSeen: pages.length, filesSeen: byFile.size, truncated: false,
+    sitewide: { layout: layoutPath, markers: Object.values(sitewideMap), layoutMissing: !layoutPath && Object.keys(sitewideMap).length > 0 } };
   const finalContent = new Map(); // path -> the file as it will be after this PR (or as it is, when untouched); absent = unreadable
 
   for (const [path, { markerMap }] of byFile) {
@@ -155,9 +171,22 @@ export function setupPrBody(site, plan, { stack = null } = {}) {
     ...plan.files.map((f) => `- \`${f.path}\`: ${f.added.join(', ')}`),
   ];
   if (plan.truncated) lines.push('', `This PR is capped at ${MAX_FILES} files. The remaining templates get their markers inside the first real fix that needs them.`);
+  if (plan.sitewide?.layoutMissing) {
+    lines.push('', `**Sitewide analytics markers were not added:** this project has no shared layout file mapped yet, and the analytics script is installed once in the layout, not on each page.`);
+  } else if (plan.sitewide?.layout && plan.sitewide.markers.length) {
+    lines.push('', `**Sitewide:** analytics markers go in the shared layout, \`${plan.sitewide.layout}\`, once.`);
+  }
   if (plan.unresolved.length) {
-    const unique = [...new Map(plan.unresolved.map((u) => [`${u.path}::${u.markerName}`, u])).values()];
-    lines.push('', '**Not added (no safe place was found):**', ...unique.slice(0, 30).map((u) => `- \`${u.path}\` (${u.markerName}): ${u.reason}`),
+    // Grouped by what could not be placed and why, with a few example files, so a big site does not produce a wall of lines.
+    const groups = new Map();
+    for (const u of new Map(plan.unresolved.map((x) => [`${x.path}::${x.markerName}`, x])).values()) {
+      const key = `${u.markerName}: ${u.reason}`;
+      const g = groups.get(key) || { n: 0, examples: [] };
+      g.n++; if (g.examples.length < 3) g.examples.push(u.path);
+      groups.set(key, g);
+    }
+    lines.push('', '**Not added (no safe place was found):**',
+      ...[...groups].sort((a, b) => b[1].n - a[1].n).slice(0, 15).map(([k, g]) => `- ${k} in ${g.n} file${g.n === 1 ? '' : 's'} (e.g. ${g.examples.map((e) => `\`${e}\``).join(', ')})`),
       '', 'These are not guessed at. The platform team will look at them; they need no action from you.');
   }
   lines.push('', 'Review and merge when you are ready. SuperRank never merges it for you.');
@@ -183,4 +212,36 @@ export async function openSetupPr(site, plan, { dryRun = false, stack = null, da
     body: setupPrBody(site, plan, { stack }),
   });
   return { ok: true, opened: true, branch, prNumber: pr.number, prUrl: pr.url, files: plan.files.length };
+}
+
+// The commit subject every setup PR commit carries, so a rebuild can tell its own work from anyone else's.
+const OWN_SUBJECT = /^Setup: add SuperRank markers/;
+
+// Rebuilds an EXISTING setup PR in place: the plan is made again from the default branch as it is now (the mapping and the engine may have
+// improved since the PR opened), the branch is reset to ONE new commit on the default branch's tip, and the PR keeps its number, its
+// reviewers and its comments; only its diff, title and description change. No second PR is opened.
+//
+// Refuses when anyone else has added a commit to the branch (anything whose subject is not ours): their work would be overwritten.
+// dryRun reads and plans and writes nothing.
+export async function refreshSetupPr(site, { branch, prNumber, dryRun = false, stack = null, gh = github, plan = null } = {}) {
+  if (!branch || !prNumber) return { ok: false, reason: 'missing-branch-or-pr' };
+  const subjects = await gh.listCommitSubjectsAheadOfBase(site, branch);
+  if (subjects == null) return { ok: false, reason: 'branch-gone' };
+  const foreign = subjects.filter((s) => !OWN_SUBJECT.test(s));
+  if (foreign.length) return { ok: false, reason: 'branch-has-other-commits', foreign: foreign.slice(0, 3) };
+
+  const next = plan || await planSetupPr(site);
+  if (!next.files.length) return { ok: true, refreshed: false, reason: 'nothing-to-add', plan: next };
+  const summary = { files: next.files.length, markers: next.files.reduce((n, f) => n + f.added.length, 0), coverage: next.coverage };
+  if (dryRun) return { ok: true, refreshed: false, dryRun: true, branch, prNumber, summary, plan: next };
+
+  const baseSha = await gh.getDefaultBranchSha(site);
+  const message = `Setup: add SuperRank markers to ${next.files.length} template${next.files.length === 1 ? '' : 's'}`;
+  const sha = await gh.createCommitObject(site, baseSha, next.files.map((f) => ({ path: f.path, content: f.content })), message);
+  await gh.updateRef(site, branch, sha, { force: true });
+  await gh.updatePullRequest(site, prNumber, {
+    title: `SuperRank setup: add markers to ${next.files.length} template${next.files.length === 1 ? '' : 's'}`,
+    body: setupPrBody(site, next, { stack }),
+  });
+  return { ok: true, refreshed: true, branch, prNumber, summary, plan: next };
 }

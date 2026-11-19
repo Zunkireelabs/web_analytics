@@ -44,6 +44,11 @@ export async function recordSetupPrDone(siteId, result, now = new Date()) {
     [siteId, now, JSON.stringify(result ?? {})]);
 }
 
+// A rebuilt setup PR: the stored summary is replaced; the done time and the PR stay as they were.
+export async function updateSetupPrResult(siteId, result) {
+  await query('UPDATE sites SET setup_pr_result = $2::jsonb WHERE id = $1', [siteId, JSON.stringify(result ?? {})]);
+}
+
 // Not ready yet (GitHub not connected, Auto-fixes off, baseline not done): looked at again later, and NOT counted as a failed attempt.
 export async function deferSetupPr(siteId, reason, retryAt) {
   await query('UPDATE sites SET setup_pr_last_error = $2, setup_pr_due_at = $3 WHERE id = $1', [siteId, String(reason || '').slice(0, 300), retryAt]);

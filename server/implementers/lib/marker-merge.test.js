@@ -1567,3 +1567,63 @@ designChoiceTest('buildMergeValues: a picked template is used for the FAQ, and a
   assertDesignChoice.match(build({ designTemplate: 'internalLinks' }, { faq, internalLinks: links }).values.faq, /faq-list/, 'a template that cannot show FAQ items is ignored');
   assertDesignChoice.match(build({ designTemplate: 'qaContent' }, { faq }).values.faq, /faq-list/, 'a template the site does not have is ignored');
 });
+
+// ---- JSON-style front matter (mobilise.agency, copied from src/services/index.njk on 2026-11-19) ----
+describe('JSON-style front matter: a quoted key and a trailing comma', () => {
+  const MOBILISE = `---
+{
+  "layout": "layouts/base.njk",
+  "permalink": "/services/index.html",
+  "headInclude": "heads/services-index.njk",
+  "title": "B2B Marketing Services & Creative Production | MOBILISE",
+  "bodyAttributes": " class=\\"theme-black\\"",
+  "description": "B2B marketing services from MOBILISE: full-service marketing",
+  "componentBase": "../"
+}
+---
+
+
+    <main id="smooth-wrapper"><h1>Services</h1></main>
+`;
+
+  test('title and description each get their marker comment after the comma, and nothing else changes', () => {
+    const r = ensureMarkers(MOBILISE, { title: 'TITLE', description: 'METADESCRIPTION' }, 'src/services/index.njk');
+    assert.match(r.content, /^ {2}"title": "B2B Marketing Services & Creative Production \| MOBILISE", # SEOAI:TITLE$/m);
+    assert.match(r.content, /^ {2}"description": "B2B marketing services from MOBILISE: full-service marketing", # SEOAI:METADESCRIPTION$/m);
+    assert.equal(r.content.replace(/ # SEOAI:\w+/g, ''), MOBILISE);          // removing the two comments gives the original file back exactly
+    assert.deepEqual(r.inserted.sort(), ['METADESCRIPTION', 'TITLE']);
+  });
+
+  test('a second run changes nothing (the marker is found, not added again)', () => {
+    const once = ensureMarkers(MOBILISE, { title: 'TITLE' }, 'src/services/index.njk').content;
+    assert.equal(ensureMarkers(once, { title: 'TITLE' }, 'src/services/index.njk').content, once);
+  });
+
+  test('applying a new title rewrites only the value; the comma, the key and the comment stay', () => {
+    const marked = ensureMarkers(MOBILISE, { title: 'TITLE' }, 'x.njk').content;
+    const out = spliceMarkers(marked, { title: 'TITLE' }, { title: 'New "quoted" title | MOBILISE' });
+    assert.equal(out.ok, true);
+    assert.match(out.newContent, /^ {2}"title": "New \\"quoted\\" title \| MOBILISE", # SEOAI:TITLE$/m);
+    assert.equal(out.newContent.split('\n').length, marked.split('\n').length);   // same number of lines
+  });
+
+  test('a key that appears twice (a nested object with its own title) is left alone, never guessed at', () => {
+    const nested = MOBILISE.replace('"componentBase": "../"', '"componentBase": "../",\n  "og": { "title": "x" }');
+    const r = ensureMarkers(nested, { title: 'TITLE' }, 'x.njk');
+    assert.equal(r.content, nested);
+    assert.deepEqual(r.inserted, []);
+  });
+
+  test('the key on the LAST line with no comma also takes the comment', () => {
+    const last = MOBILISE.replace('"componentBase": "../"', '"title": "Last"').replace('  "title": "B2B Marketing Services & Creative Production | MOBILISE",\n', '');
+    const r = ensureMarkers(last, { title: 'TITLE' }, 'x.njk');
+    assert.match(r.content, /^ {2}"title": "Last" # SEOAI:TITLE$/m);
+  });
+
+  test('plain YAML front matter behaves exactly as before', () => {
+    const yml = '---\ntitle: "A post"\nexcerpt: "x"\n---\nBody\n';
+    const r = ensureMarkers(yml, { title: 'TITLE' }, 'p.md');
+    assert.equal(r.content, '---\ntitle: "A post" # SEOAI:TITLE\nexcerpt: "x"\n---\nBody\n');
+    assert.equal(spliceMarkers(r.content, { title: 'TITLE' }, { title: 'B' }).newContent, '---\ntitle: "B" # SEOAI:TITLE\nexcerpt: "x"\n---\nBody\n');
+  });
+});

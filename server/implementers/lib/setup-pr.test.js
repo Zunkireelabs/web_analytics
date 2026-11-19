@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planSetupPr, openSetupPr, onlyMarkersAdded, setupBranchName, setupPrBody, MAX_FILES } from './setup-pr.js';
+import { planSetupPr, openSetupPr, refreshSetupPr, onlyMarkersAdded, setupBranchName, setupPrBody, MAX_FILES } from './setup-pr.js';
 
 // Real resolvers (url-file-map.js, insertion-engine.js, marker-merge.js); only the repository reads and the page list are faked.
 // Head-scoped and front-matter markers need no structural detection, so these tests need no database.
@@ -92,7 +92,7 @@ test('the PR is capped at MAX_FILES and says so', async () => {
   }));
   assert.equal(plan.files.length, MAX_FILES);
   assert.equal(plan.truncated, true);
-  assert.match(setupPrBody(big, plan), /capped at 60 files/);
+  assert.match(setupPrBody(big, plan), new RegExp(`capped at ${MAX_FILES} files`));
 });
 
 test('dry run writes nothing; nothing-to-add opens nothing; a real run pushes one branch, one commit, one PR', async () => {
@@ -142,4 +142,94 @@ test('a page whose template already holds every marker counts as ready without a
   const again = await planSetupPr(site, deps({ markerTypes: async () => ['canonical', 'open-graph'], readFile: async (s, p) => (p in done ? done[p] : files[p] ?? null) }));
   assert.equal(again.files.length, 0);
   assert.ok(again.coverage.ready >= 1);
+});
+
+// ---- sitewide analytics markers: in the shared layout once, never asked of a page ----
+const withLayout = { ...site, url_file_map: { ...site.url_file_map, siteRoot: { layoutTemplate: 'src/layouts/base.njk' } } };
+const filesWithLayout = { ...files, 'src/layouts/base.njk': LAYOUT };
+
+test('analytics markers are never asked of a page: a page file with no <head> is not left "partly ready" because of them', async () => {
+  const plan = await planSetupPr(site, deps({ markerTypes: async () => ['analytics-install'] }));
+  assert.equal(plan.unresolved.length, 0);
+  assert.equal(plan.files.length, 0);
+  assert.equal(plan.sitewide.layoutMissing, true);            // no layout mapped: said so, once
+  assert.match(setupPrBody(site, plan), /Sitewide analytics markers were not added/);
+});
+
+test('with a shared layout mapped, the analytics markers go in the layout, once', async () => {
+  const plan = await planSetupPr(withLayout, deps({ markerTypes: async () => ['analytics-install'], readFile: async (s, p) => (p in filesWithLayout ? filesWithLayout[p] : null) }));
+  assert.equal(plan.files.length, 1);
+  assert.equal(plan.files[0].path, 'src/layouts/base.njk');
+  assert.match(plan.files[0].content, /SEOAI:ANALYTICSSCRIPTGA4/);
+  assert.equal(onlyMarkersAdded(plan.files[0].before, plan.files[0].content), true);
+  assert.deepEqual(plan.sitewide.layout, 'src/layouts/base.njk');
+  assert.match(setupPrBody(withLayout, plan), /analytics markers go in the shared layout/);
+});
+
+test('page coverage ignores the layout and the sitewide markers', async () => {
+  const plan = await planSetupPr(withLayout, deps({ markerTypes: async () => ['analytics-install', 'canonical'], readFile: async (s, p) => (p in filesWithLayout ? filesWithLayout[p] : null) }));
+  const c = plan.coverage;
+  assert.equal(c.ready + c.partial + c.unmapped + c.unknown, plan.pagesSeen);
+  assert.ok(c.ready >= 1);                                    // the .njk page holds its canonical marker and nothing sitewide is demanded of it
+});
+
+test('the "not added" list is grouped by marker and reason with examples, not one line per file', async () => {
+  const many = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`/q${i}`, { file: `src/q${i}.md` }]));
+  const bigSite = { ...site, url_file_map: { pages: many } };
+  const plan = await planSetupPr(bigSite, deps({
+    listPages: async () => Object.keys(many).map((p) => `https://example.com${p}`),
+    markerTypes: async () => ['open-graph'],
+    readFile: async () => POST,           // markdown with front matter and no <head>
+  }));
+  const body = setupPrBody(bigSite, plan);
+  assert.match(body, /OPENGRAPH: no-head-region in 12 files \(e\.g\. `src\/q\d+\.md`/);
+  assert.equal((body.match(/OPENGRAPH/g) || []).length, 1);   // one grouped line, not twelve
+});
+
+// ---- rebuilding an existing setup PR in place (no second PR) ----
+const OWN = 'Setup: add SuperRank markers to 10 templates';       // the subject openSetupPr writes
+const fakeGh = (over = {}) => {
+  const calls = [];
+  const gh = {
+    listCommitSubjectsAheadOfBase: async () => [OWN],
+    getDefaultBranchSha: async () => { calls.push('baseSha'); return 'base123'; },
+    createCommitObject: async (site, parent, files, msg) => { calls.push(`commit:${parent}:${files.length}:${msg}`); return 'new456'; },
+    updateRef: async (site, branch, sha, opts) => { calls.push(`ref:${branch}:${sha}:force=${opts?.force}`); },
+    updatePullRequest: async (site, n, body) => { calls.push(`pr:${n}`); gh.lastBody = body; return { number: n }; },
+    ...over,
+  };
+  return { gh, calls };
+};
+const readyPlan = async () => planSetupPr(site, deps());
+
+test('refresh: the branch is reset to ONE commit on the default tip, the same PR is updated, and no PR is opened', async () => {
+  const plan = await readyPlan();
+  const { gh, calls } = fakeGh();
+  const r = await refreshSetupPr(site, { branch: 'seoai/setup-markers-77-2026-11-19', prNumber: 7, gh, plan });
+  assert.equal(r.refreshed, true);
+  assert.deepEqual(calls.map((c) => c.split(':')[0]), ['baseSha', 'commit', 'ref', 'pr']);
+  assert.match(calls[1], new RegExp(`^commit:base123:${plan.files.length}:Setup: add SuperRank markers`));
+  assert.equal(calls[2], 'ref:seoai/setup-markers-77-2026-11-19:new456:force=true');
+  assert.equal(calls[3], 'pr:7');
+  assert.match(gh.lastBody.body, /one-time setup pull request/);
+  assert.equal(gh.openPullRequest, undefined);                    // a second PR is never opened
+});
+
+test('refresh: anyone else\'s commit on the branch stops it, and nothing is written', async () => {
+  const { gh, calls } = fakeGh({ listCommitSubjectsAheadOfBase: async () => [OWN, 'Fix the header spacing'] });
+  const r = await refreshSetupPr(site, { branch: 'b', prNumber: 7, gh, plan: await readyPlan() });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'branch-has-other-commits');
+  assert.deepEqual(r.foreign, ['Fix the header spacing']);
+  assert.deepEqual(calls, []);
+});
+
+test('refresh: dry run, a deleted branch, nothing to add and a missing PR number all write nothing', async () => {
+  const dry = fakeGh();
+  const d = await refreshSetupPr(site, { branch: 'b', prNumber: 7, gh: dry.gh, plan: await readyPlan(), dryRun: true });
+  assert.equal(d.dryRun, true);
+  assert.deepEqual(dry.calls, []);
+  assert.equal((await refreshSetupPr(site, { branch: 'b', prNumber: 7, gh: fakeGh({ listCommitSubjectsAheadOfBase: async () => null }).gh, plan: await readyPlan() })).reason, 'branch-gone');
+  assert.equal((await refreshSetupPr(site, { branch: 'b', prNumber: 7, gh: fakeGh().gh, plan: { files: [] } })).reason, 'nothing-to-add');
+  assert.equal((await refreshSetupPr(site, { branch: null, prNumber: null, gh: fakeGh().gh })).reason, 'missing-branch-or-pr');
 });
