@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isPageMapped, resolveFile, resolveHostScope, resolveNewContentTarget, resolveNewContentUrl, resolveNewContentLayout,
-  resolveMarkers, resolveTranslationTarget,
+  resolveMarkers, resolveTranslationTarget, resolveActionFile, resolvePlacement, resolveLineKeys,
 } from './url-file-map.js';
 
 describe('resolveTranslationTarget', () => {
@@ -301,5 +301,63 @@ describe('resolveNewContentLayout', () => {
   test('a target with no layout key at all falls back to the site default', () => {
     const site = withLayout({ newContentTargets: { 'landing-page': { dir: 'src/pages', extension: '.njk' } } });
     assert.equal(resolveNewContentLayout(site, 'landing-page'), 'base.njk');
+  });
+});
+
+// ---- a fix type can name its own target file (MOBILISE: the <head> lives in a per-page include; real file names from the repo) ----
+describe('resolveActionFile: per-action-type target file', () => {
+  const site = {
+    website_domain: 'mobilise.agency',
+    url_file_map: {
+      pages: {
+        '/services': { file: 'src/services/index.njk', placements: { 'open-graph': { file: 'src/_includes/heads/services-index.njk' }, canonical: { file: 'src/_includes/heads/services-index.njk', markers: { canonical: 'CANONICAL' } } } },
+        '/about-us': { file: 'src/about-us/index.njk' },
+      },
+      patterns: [{ match: '^/blog/([^/]+)/?$', file: 'src/blog/$1/index.njk', placements: { 'open-graph': { file: 'src/_includes/heads/blog-$1-index.njk' } } }],
+    },
+  };
+
+  test('a page with a configured file for the action type sends it there; every other type, and every other page, stays on the page file', () => {
+    assert.equal(resolveActionFile(site, 'https://mobilise.agency/services/', 'open-graph'), 'src/_includes/heads/services-index.njk');
+    assert.equal(resolveActionFile(site, 'https://mobilise.agency/services/', 'meta-title'), 'src/services/index.njk');
+    assert.equal(resolveActionFile(site, 'https://mobilise.agency/about-us/', 'open-graph'), 'src/about-us/index.njk');
+    assert.equal(resolveFile(site, 'https://mobilise.agency/services/'), 'src/services/index.njk');   // resolveFile itself is unchanged
+  });
+
+  test('a pattern-level file fills its $1 from the pattern\'s own match: one entry covers every blog post', () => {
+    assert.equal(resolveActionFile(site, 'https://mobilise.agency/blog/dark-social-attribution/', 'open-graph'), 'src/_includes/heads/blog-dark-social-attribution-index.njk');
+    assert.equal(resolveActionFile(site, 'https://mobilise.agency/blog/dark-social-attribution/', 'faq'), 'src/blog/dark-social-attribution/index.njk');
+  });
+
+  test('a placement that names a file but no markers gets the platform default marker names, not "no markers configured"', () => {
+    assert.deepEqual(resolveMarkers(site, 'https://mobilise.agency/services/', 'open-graph'), { openGraph: 'OPENGRAPH' });
+    assert.deepEqual(resolveMarkers(site, 'https://mobilise.agency/services/', 'canonical'), { canonical: 'CANONICAL' });
+  });
+
+  test('a project with no configured file behaves exactly as before, for every page and type', () => {
+    const plain = { website_domain: 'example.com', url_file_map: { pages: { '/a': { file: 'src/a.njk' } }, patterns: [{ match: '^/blog/([^/]+)$', file: 'src/blog/$1.md' }] } };
+    for (const [url, type] of [['https://example.com/a', 'faq'], ['https://example.com/blog/x', 'canonical'], ['https://example.com/none', 'meta-title']]) {
+      assert.equal(resolveActionFile(plain, url, type), resolveFile(plain, url));
+    }
+    assert.deepEqual(resolvePlacement(plain, 'https://example.com/a', 'faq').file, null);
+  });
+
+  test('a site-wide default file applies to pages with no entry of their own; an unmapped page still resolves to null', () => {
+    const d = { website_domain: 'x.com', url_file_map: { pages: { '/p': { file: 'src/p.njk' } }, defaults: { placements: { 'open-graph': { file: 'src/head.njk' } } } } };
+    assert.equal(resolveActionFile(d, 'https://x.com/p', 'open-graph'), 'src/head.njk');
+    assert.equal(resolveActionFile(d, 'https://x.com/missing', 'faq'), null);
+  });
+});
+
+
+describe('lineKeys placement', () => {
+  const site = { website_domain: 'zennly.io', url_file_map: { pages: { '/a': { file: 'src/a.njk' } }, defaults: { placements: { 'meta-title': { lineKeys: { description: 'metaDescription' } } } } } };
+  test('a site-wide lineKeys setting is returned for that action type only, and markers fall back to the platform defaults', () => {
+    assert.deepEqual(resolveLineKeys(site, 'https://zennly.io/a', 'meta-title'), { description: 'metaDescription' });
+    assert.equal(resolveLineKeys(site, 'https://zennly.io/a', 'faq'), null);
+    assert.deepEqual(resolveMarkers(site, 'https://zennly.io/a', 'meta-title'), { title: 'TITLE', description: 'METADESCRIPTION' });
+  });
+  test('no setting: no keys, as before', () => {
+    assert.equal(resolveLineKeys({ website_domain: 'x.com', url_file_map: { pages: { '/p': { file: 'p.md' } } } }, 'https://x.com/p', 'meta-title'), null);
   });
 });

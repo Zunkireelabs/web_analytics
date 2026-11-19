@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { planSetupPr, openSetupPr, refreshSetupPr, onlyMarkersAdded, setupBranchName, setupPrBody, MAX_FILES } from './setup-pr.js';
+import { sameLinesIgnoringOrder } from './head-tag-adopt.js';
 
 // Real resolvers (url-file-map.js, insertion-engine.js, marker-merge.js); only the repository reads and the page list are faked.
 // Head-scoped and front-matter markers need no structural detection, so these tests need no database.
@@ -232,4 +233,134 @@ test('refresh: dry run, a deleted branch, nothing to add and a missing PR number
   assert.equal((await refreshSetupPr(site, { branch: 'b', prNumber: 7, gh: fakeGh({ listCommitSubjectsAheadOfBase: async () => null }).gh, plan: await readyPlan() })).reason, 'branch-gone');
   assert.equal((await refreshSetupPr(site, { branch: 'b', prNumber: 7, gh: fakeGh().gh, plan: { files: [] } })).reason, 'nothing-to-add');
   assert.equal((await refreshSetupPr(site, { branch: null, prNumber: null, gh: fakeGh().gh })).reason, 'missing-branch-or-pr');
+});
+
+
+// ---- head tags in a per-page head include (MOBILISE): title/description on the page file, open-graph and canonical in the include ----
+// REAL files: mobilise-website-11ty src/services/index.njk front matter and src/_includes/heads/services-index.njk (staging, 2026-11-19).
+const MOB_PAGE = `---
+{
+  "layout": "layouts/base.njk",
+  "permalink": "/services/index.html",
+  "headInclude": "heads/services-index.njk",
+  "title": "B2B Marketing Services & Creative Production | MOBILISE",
+  "description": "B2B marketing services from MOBILISE: full-service marketing",
+  "componentBase": "../"
+}
+---
+
+    <main id="smooth-wrapper"><h1>Services</h1></main>
+`;
+const MOB_HEAD = `
+    
+    <script defer src="../analytics.js"></script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title | escape }}</title>
+    <meta name="description"
+        content="{{ description | escape }}">
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+    <meta name="theme-color" content="#0A919B">
+    <link rel="canonical" href="https://mobilise.agency/services/">
+    <meta property="og:type" content="website">
+    <meta property="og:locale" content="en_GB">
+    <meta property="og:site_name" content="MOBILISE Agency">
+    <meta property="og:title" content="B2B Marketing Services &amp; Creative Production | MOBILISE">
+    <meta property="og:description" content="B2B strategy, creative production, design and development, sales enablement, and full-service campaign execution for global brands.">
+    <meta property="og:url" content="https://mobilise.agency/services/">
+    <meta property="og:image" content="https://mobilise.agency/images/Thumbnail.jpg">
+    <meta property="og:image:width" content="2350">
+    <meta property="og:image:height" content="588">
+    <meta property="og:image:alt" content="MOBILISE B2B marketing services">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="B2B Marketing Services | MOBILISE">
+    <meta name="twitter:description" content="Strategy, creative production, sales enablement and campaign execution for global B2B brands.">
+    <meta name="twitter:image" content="https://mobilise.agency/images/Thumbnail.jpg">
+    <link rel="icon" type="image/png" href="../images/favicon.png">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;700;800&amp;family=Manrope:wght@400;700;800&amp;display=swap"
+`;
+const mobSite = {
+  id: 8874, name: 'MOBILISE', repo_default_branch: 'main', website_domain: 'mobilise.agency',
+  url_file_map: { pages: { '/services': { file: 'src/services/index.njk', placements: {
+    'open-graph': { file: 'src/_includes/heads/services-index.njk' },
+    canonical: { file: 'src/_includes/heads/services-index.njk' },
+  } } } },
+};
+const mobFiles = { 'src/services/index.njk': MOB_PAGE, 'src/_includes/heads/services-index.njk': MOB_HEAD };
+const mobDeps = (over = {}) => ({ listPages: async () => ['https://mobilise.agency/services/'], markerTypes: async () => ['meta-title', 'open-graph', 'canonical'], readFile: async (s, p) => mobFiles[p] ?? null, ...over });
+
+test('head include: each fix type is placed in ITS OWN file, the existing tags are adopted, and the page is fully ready', async () => {
+  const plan = await planSetupPr(mobSite, mobDeps());
+  const byPath = Object.fromEntries(plan.files.map((f) => [f.path, f]));
+  assert.deepEqual(byPath['src/services/index.njk'].added.sort(), ['METADESCRIPTION', 'TITLE']);
+  assert.deepEqual(byPath['src/_includes/heads/services-index.njk'].added.sort(), ['CANONICAL', 'OPENGRAPH']);
+  assert.equal(plan.unresolved.length, 0);
+  assert.deepEqual([plan.coverage.ready, plan.coverage.partial, plan.coverage.unmapped], [1, 0, 0]);
+});
+
+test('head include: nothing is lost or duplicated, and every tag the generators do not write stays exactly where it was', async () => {
+  const plan = await planSetupPr(mobSite, mobDeps());
+  const head = plan.files.find((f) => f.path === 'src/_includes/heads/services-index.njk');
+  assert.equal(sameLinesIgnoringOrder(head.before, head.content), true);
+  for (const keep of ['og:type', 'og:url', 'og:image', 'og:image:alt', 'twitter:image']) assert.equal(head.content.split('\n').filter((l) => l.includes(`"${keep}"`)).length, 1, keep);
+  assert.equal(onlyMarkersAdded(MOB_PAGE, plan.files.find((f) => f.path === 'src/services/index.njk').content), true);   // the page file: comments only
+});
+
+test('without the per-action file setting the same page behaves as before: open-graph and canonical are reported, not guessed', async () => {
+  const plain = { ...mobSite, url_file_map: { pages: { '/services': { file: 'src/services/index.njk' } } } };
+  const plan = await planSetupPr(plain, mobDeps());
+  assert.deepEqual(plan.files.map((f) => f.path), ['src/services/index.njk']);                       // title and description only
+  assert.ok(plan.unresolved.some((u) => u.markerName === 'OPENGRAPH'));
+  assert.deepEqual([plan.coverage.ready, plan.coverage.partial], [0, 1]);
+});
+
+test('a head file with the tags more than once is left alone and said so, not half-moved', async () => {
+  const dup = { ...mobFiles, 'src/_includes/heads/services-index.njk': MOB_HEAD + '<meta property="og:title" content="again">\n' };
+  const plan = await planSetupPr(mobSite, mobDeps({ readFile: async (s, p) => dup[p] ?? null }));
+  const head = plan.files.find((f) => f.path === 'src/_includes/heads/services-index.njk');
+  assert.ok(!head || !head.added.includes('OPENGRAPH'));
+  assert.ok(plan.unresolved.some((u) => u.markerName === 'OPENGRAPH'));
+});
+
+
+// ---- Astro: attribute markers pass the same "only markers were added" rule (real excerpt: superrank-web src/pages/privacy.astro) ----
+const ASTRO_PAGE = '---\nimport Layout from \'../layouts/Layout.astro\';\nconst updated = "19 November 2026";\n---\n<Layout title="Privacy Policy | SuperRank" description="How SuperRank collects, uses and protects your data, including the Google data you choose to connect.">\n<main><h1>Privacy</h1></main>\n</Layout>\n';
+
+test('an Astro page: the layout tag\'s title and description get attribute markers and the safety rule accepts it', async () => {
+  const astroSite = { id: 8871, name: 'SuperRank', repo_default_branch: 'main', website_domain: 'superrank.si', url_file_map: { pages: { '/privacy': { file: 'src/pages/privacy.astro' } } } };
+  const plan = await planSetupPr(astroSite, { listPages: async () => ['https://superrank.si/privacy'], markerTypes: async () => ['meta-title'], readFile: async () => ASTRO_PAGE });
+  assert.equal(plan.files.length, 1);
+  assert.deepEqual(plan.files[0].added.sort(), ['METADESCRIPTION', 'TITLE']);
+  assert.match(plan.files[0].content, /<Layout title=\{\/\* SEOAI:TITLE \*\/ "Privacy Policy \| SuperRank"\} description=\{\/\* SEOAI:METADESCRIPTION \*\/ "How SuperRank/);
+  assert.equal(onlyMarkersAdded(ASTRO_PAGE, plan.files[0].content), true);
+  assert.equal(onlyMarkersAdded(ASTRO_PAGE, plan.files[0].content.replace('Privacy Policy', 'Privacy Policy X')), false);   // an edited value still fails
+  assert.equal(plan.unresolved.length, 0);
+});
+
+test('an Astro page whose title is an expression is reported with the reason, never silently', async () => {
+  const astroSite = { id: 1, name: 'x', repo_default_branch: 'main', website_domain: 'x.com', url_file_map: { pages: { '/a': { file: 'src/pages/a.astro' } } } };
+  const src = '---\nconst t = "x";\n---\n<Layout title={t} description="d">\n</Layout>\n';
+  const plan = await planSetupPr(astroSite, { listPages: async () => ['https://x.com/a'], markerTypes: async () => ['meta-title'], readFile: async () => src });
+  assert.equal(plan.files.length, 0);
+  assert.ok(plan.unresolved.some((u) => u.markerName === 'TITLE' && u.reason === 'title-is-an-expression'));
+});
+
+
+// ---- the per-page, per-marker gap list the completeness gate reads ----
+test('plan.gaps names every (page, marker) that is not placed, with the reason; plan.placedCount counts the rest', async () => {
+  const plan = await planSetupPr(site, deps());                         // /about (njk layout, head but no front matter), /blog/post (markdown), /unmapped
+  assert.ok(plan.placedCount > 0);
+  const g = plan.gaps.filter((x) => x.page === 'https://example.com/about');
+  assert.ok(g.every((x) => x.path === 'src/pages/about.njk' && x.reason));
+  assert.ok(g.some((x) => x.marker === 'TITLE' && x.reason === 'no-front-matter'));
+  assert.equal(plan.gaps.some((x) => x.page === 'https://example.com/unmapped'), false);            // an unmapped page is reported as unmapped, not as marker gaps
+  const total = plan.placedCount + plan.gaps.length;
+  assert.equal(total, plan.gaps.length + plan.placedCount);
+});
+
+test('a page whose every marker is placed has no gaps', async () => {
+  const plan = await planSetupPr(mobSite, mobDeps());
+  assert.deepEqual(plan.gaps, []);
+  assert.ok(plan.placedCount >= 4);
 });

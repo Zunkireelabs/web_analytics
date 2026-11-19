@@ -72,11 +72,20 @@ function lineRegex(name) {
   return new RegExp(`^(.*?)(["'])((?:(?!\\2)[^\\\\]|\\\\.)*)\\2(\\s*,?\\s*${marker}\\s*)$`, 'm');
 }
 
+// ATTRIBUTE marker (Astro, JSX): `title={/* SEOAI:TITLE */ "the value"}`. A component tag's attribute value, wrapped in an expression that carries the
+// marker as a comment. It renders exactly as `title="the value"` did (the comment is inside the expression), and a fix rewrites only the quoted value.
+// This is how a static Astro page's `<Layout title="..." description="...">` gets a title and description marker without any front matter.
+function attrRegex(name) {
+  return new RegExp(`(=\\{\\s*\\/\\*\\s*SEOAI:${escapeRegExp(name)}\\s*\\*\\/\\s*)(["'])((?:(?!\\2)[^\\\\]|\\\\.)*)\\2(\\s*\\})`);
+}
+
 function findMarker(fileContent, name) {
   const block = blockRegex(name).exec(fileContent);
   if (block) return { kind: 'block', old: block[2] };
   const jsx = jsxBlockRegex(name).exec(fileContent);
   if (jsx) return { kind: 'jsx', old: jsx[2] };
+  const attr = attrRegex(name).exec(fileContent);
+  if (attr) return { kind: 'attr', old: attr[3] };
   const line = lineRegex(name).exec(fileContent);
   if (line) return { kind: 'line', old: line[3] };
   return null;
@@ -93,7 +102,7 @@ export function hasMarker(fileContent, name) {
 // file, regardless of convention — the generic union of lineRegex/blockRegex/
 // jsxBlockRegex's marker syntax above, used only to COUNT occurrences rather
 // than to capture a value for replacement.
-const ANY_MARKER_TOKEN_RE = /#\s*SEOAI:([A-Za-z0-9_-]+)(?::(START|END))?|<!--\s*SEOAI:([A-Za-z0-9_-]+)(?::(START|END))?\s*-->|\{\/\*\s*SEOAI:([A-Za-z0-9_-]+)(?::(START|END))?\s*\*\/\}/g;
+const ANY_MARKER_TOKEN_RE = /#\s*SEOAI:([A-Za-z0-9_-]+)(?::(START|END))?|<!--\s*SEOAI:([A-Za-z0-9_-]+)(?::(START|END))?\s*-->|\{\/\*\s*SEOAI:([A-Za-z0-9_-]+)(?::(START|END))?\s*\*\/\}|\/\*\s*SEOAI:([A-Za-z0-9_-]+)\s*\*\//g;
 
 // Detects a marker left in a structurally invalid state: a LINE marker
 // (title's `field: "value" # SEOAI:NAME` convention) appearing more than
@@ -126,8 +135,8 @@ export function findMarkerCorruption(fileContent) {
   let m;
   ANY_MARKER_TOKEN_RE.lastIndex = 0;
   while ((m = ANY_MARKER_TOKEN_RE.exec(fileContent))) {
-    const name = m[1] ?? m[3] ?? m[5];
-    const kind = m[2] ?? m[4] ?? m[6]; // 'START' | 'END' | undefined (LINE marker)
+    const name = m[1] ?? m[3] ?? m[5] ?? m[7];
+    const kind = m[2] ?? m[4] ?? m[6]; // 'START' | 'END' | undefined (LINE or ATTRIBUTE marker)
     if (!kind) {
       lineCounts.set(name, (lineCounts.get(name) || 0) + 1);
     } else {
@@ -278,6 +287,9 @@ export function isLineConventionField(field) {
 // silently claiming something self-heals that was never actually checked.
 export function classifyMarkerGap(field, filePath, fileContent, detectors = {}) {
   if (LINE_CONVENTION_FIELDS.has(field)) {
+    // An .astro file's `---` fence holds JavaScript, not data: it counts as a place for the value only when an attribute marker or a real
+    // `title:` line can actually be created there, the same two things ensureMarkers tries.
+    if (isAttrFile(filePath)) return (insertAttrMarker(fileContent, field, 'X') || insertLineMarker(fileContent, field, 'X')) ? 'self-heals' : 'fatal-no-front-matter';
     return frontMatterLength(fileContent) != null ? 'self-heals' : 'fatal-no-front-matter';
   }
   if (HEAD_SCOPED_FIELDS.has(field)) {
@@ -455,6 +467,110 @@ function insertLineMarker(fileContent, field, markerName) {
   return null;
 }
 
+
+// ---- ATTRIBUTE markers on an Astro page's layout tag ---------------------------------------------------------------------------------------------
+// A static Astro page gives its title and description to the shared layout as attributes: `<Layout title="..." description="..." >`. There is no
+// front matter to hold a marker, so the marker goes on the value itself: `title={/* SEOAI:TITLE */ "..."}` (see attrRegex). Only the FIRST component
+// in the template is considered, and only when it carries BOTH attributes as plain string literals; anything else is refused with a reason.
+
+export const isAttrFile = (filePath) => /\.astro$/i.test(filePath || '');
+
+// Reads one `<Name attr="x" other={expr} flag>` starting at src[start] === '<'. Returns null when it is not a well-formed component tag.
+function parseComponentTag(src, start) {
+  let i = start + 1;
+  const nm = /^[A-Z][\w.:-]*/.exec(src.slice(i, i + 80));
+  if (!nm) return null;
+  const name = nm[0]; i += name.length;
+  const attrs = [];
+  const skipWs = () => { while (i < src.length && /\s/.test(src[i])) i++; };
+  for (;;) {
+    skipWs();
+    if (i >= src.length) return null;
+    if (src[i] === '>') return { name, attrs, start, end: i + 1 };
+    if (src[i] === '/' && src[i + 1] === '>') return { name, attrs, start, end: i + 2 };
+    const an = /^[A-Za-z_:@][\w:.@-]*/.exec(src.slice(i, i + 120));
+    if (!an) {
+      if (src[i] === '{') { const e = skipBraces(src, i); if (e == null) return null; i = e; continue; }   // {...spread}
+      return null;
+    }
+    const attr = { name: an[0], kind: 'flag' }; i += an[0].length;
+    skipWs();
+    if (src[i] === '=') {
+      i++; skipWs();
+      const c = src[i];
+      if (c === '"' || c === "'") {
+        let j = i + 1;
+        while (j < src.length && src[j] !== c) { if (src[j] === '\\') j++; j++; }
+        if (j >= src.length) return null;
+        Object.assign(attr, { kind: 'string', quote: c, value: src.slice(i + 1, j), valueStart: i, valueEnd: j + 1 });
+        i = j + 1;
+      } else if (c === '{') {
+        const e = skipBraces(src, i); if (e == null) return null;
+        // A value already wrapped by OUR marker (`{/* SEOAI:TITLE */ "x"}`) is still a literal: the second field must not refuse because of the first.
+        const marked = /^\{\s*\/\*\s*SEOAI:[\w-]+\s*\*\/\s*(["'])(?:(?!\1)[^\\]|\\.)*\1\s*\}$/.test(src.slice(i, e));
+        Object.assign(attr, { kind: marked ? 'marked' : 'expr', valueStart: i, valueEnd: e }); i = e;
+      } else {
+        const bare = /^[^\s>]+/.exec(src.slice(i)); if (!bare) return null;
+        Object.assign(attr, { kind: 'bare' }); i += bare[0].length;
+      }
+    }
+    attrs.push(attr);
+  }
+}
+
+// Index just past the `}` that closes the `{` at src[i], skipping braces inside strings and template literals.
+function skipBraces(src, i) {
+  let depth = 0;
+  for (let j = i; j < src.length; j++) {
+    const c = src[j];
+    if (c === '"' || c === "'" || c === '`') { const q = c; j++; while (j < src.length && src[j] !== q) { if (src[j] === '\\') j++; j++; } continue; }
+    if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) return j + 1; }
+  }
+  return null;
+}
+
+// The template part of an .astro file: everything after the closing `---` of its frontmatter fence (or the whole file when it has none).
+function astroTemplateStart(content) {
+  const m = /^---\r?\n[\s\S]*?\r?\n---[ \t]*\r?\n/.exec(content);
+  return m ? m[0].length : 0;
+}
+
+function firstComponentTag(content) {
+  const from = astroTemplateStart(content);
+  const re = /<([A-Z][\w.:-]*)/g; re.lastIndex = from;
+  let m;
+  while ((m = re.exec(content))) {
+    const tag = parseComponentTag(content, m.index);
+    if (tag) return tag;
+  }
+  return null;
+}
+
+// Why an attribute marker cannot be placed, in words a report can use; null when it can be.
+export function explainAttrGap(content, field) {
+  const tag = firstComponentTag(content);
+  if (!tag) return 'no-component-tag';
+  const t = tag.attrs.find((a) => a.name === 'title'); const d = tag.attrs.find((a) => a.name === 'description');
+  if (!t || !d) return 'layout-tag-has-no-title-and-description';
+  const literal = (a) => a.kind === 'string' || a.kind === 'marked';
+  const target = field === 'title' ? t : d;
+  if (!literal(target)) return `${field}-is-an-expression`;
+  if (!(literal(t) && literal(d))) return 'title-or-description-is-an-expression';
+  return null;
+}
+
+// Wraps the layout tag's literal `title="x"` / `description="x"` value in the marker expression. Null when it cannot be done safely.
+export function insertAttrMarker(content, field, markerName) {
+  if (explainAttrGap(content, field)) return null;
+  const tag = firstComponentTag(content);
+  const a = tag.attrs.find((x) => x.name === field);
+  if (a.kind === 'marked') return null;                                   // already carries a marker
+  const before = content.slice(0, a.valueStart); const after = content.slice(a.valueEnd);
+  const literal = content.slice(a.valueStart, a.valueEnd);              // "x" or 'x', quotes included, byte for byte
+  return `${before}{/* SEOAI:${markerName} */ ${literal}}${after}`;
+}
+
 // Appends an empty block marker at the very end of the file — purely
 // additive, so it can never disturb existing template syntax, front
 // matter, or layout regardless of framework. The same position every
@@ -477,13 +593,16 @@ function insertBlockMarker(fileContent, markerName, filePath) {
 // that can't be safely placed (see insertLineMarker) is simply skipped,
 // leaving spliceMarkers()'s existing "marker not found" failure as the
 // honest fallback for that one field.
-export function ensureMarkers(fileContent, markerMap, filePath) {
+export function ensureMarkers(fileContent, markerMap, filePath, { lineKeys = null } = {}) {
   let content = fileContent;
   const inserted = [];
   for (const [field, markerName] of Object.entries(markerMap)) {
     if (hasMarker(content, markerName)) continue;
     if (LINE_CONVENTION_FIELDS.has(field)) {
-      const updated = insertLineMarker(content, field, markerName);
+      // The key the value lives under: the field's own name unless the site's layout reads it from another (lineKeys). An Astro attribute is always
+      // named by the field (`title=`, `description=`), because the layout's props are.
+      const key = lineKeys?.[field] || field;
+      const updated = (isAttrFile(filePath) ? insertAttrMarker(content, field, markerName) : null) ?? insertLineMarker(content, key, markerName);
       if (updated) { content = updated; inserted.push(markerName); }
       continue;
     }
@@ -544,6 +663,12 @@ function applyMarker(fileContent, name, newValue) {
   const jsx = jsxBlockRegex(name);
   if (jsx.test(fileContent)) {
     return fileContent.replace(jsx, (_m, start, _old, end) => `${start}${jsxSafeWrap(newValue)}${end}`);
+  }
+  const attr = attrRegex(name).exec(fileContent);
+  if (attr) {
+    const q = attr[2];
+    const escapedValue = String(newValue).replace(/\\/g, '\\\\').replace(new RegExp(q, 'g'), `\\${q}`);
+    return fileContent.slice(0, attr.index) + attr[1] + q + escapedValue + q + attr[4] + fileContent.slice(attr.index + attr[0].length);
   }
   const line = lineRegex(name);
   const match = line.exec(fileContent);

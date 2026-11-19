@@ -267,24 +267,62 @@ export function resolvePlacement(site, pageUrl, actionType) {
   const defaultSlot = DEFAULT_SLOT_BY_ACTION_TYPE[actionType] || null;
   const entry = getPageEntry(site, pageUrl);
 
+  // A configured placement may also name the FILE this action type is written to (`file`, with $1-style groups when it sits on a pattern) and
+  // the front-matter KEY a line field lives under when it is not the field's own name (`lineKeys: { description: 'metaDescription' }`: a site whose
+  // layout renders `<meta name="description" content="{{ metaDescription }}">`). Read only from configuration, never from the platform defaults, so a
+  // project that sets none behaves exactly as before. A placement that names a file or keys but no markers gets the platform's default marker names.
+  const fromConfigured = (c) => ({
+    slot: c.slot || defaultSlot,
+    markers: c.markers || ((c.file || c.lineKeys) ? (PLATFORM_DEFAULT_MARKERS[actionType] || null) : null),
+    file: c.file || null,
+    lineKeys: c.lineKeys || null,
+  });
+
   const pageConfigured = entry?.placements?.[actionType];
-  if (pageConfigured) {
-    return { slot: pageConfigured.slot || defaultSlot, markers: pageConfigured.markers || null };
-  }
+  if (pageConfigured) return fromConfigured(pageConfigured);
 
   const patternConfigured = getMatchingPattern(site, pageUrl)?.placements?.[actionType];
-  if (patternConfigured) {
-    return { slot: patternConfigured.slot || defaultSlot, markers: patternConfigured.markers || null };
-  }
+  if (patternConfigured) return fromConfigured(patternConfigured);
 
   const siteConfigured = site.url_file_map?.defaults?.placements?.[actionType];
-  if (siteConfigured) {
-    return { slot: siteConfigured.slot || defaultSlot, markers: siteConfigured.markers || null };
+  if (siteConfigured) return fromConfigured(siteConfigured);
+
+  if (entry?.markers) return { slot: defaultSlot, markers: entry.markers, file: null, lineKeys: null };
+
+  return { slot: defaultSlot, markers: PLATFORM_DEFAULT_MARKERS[actionType] || null, file: null, lineKeys: null };
+}
+
+// The file a marker-merge draft of THIS action type is written to. The page's own file (resolveFile) unless a configured placement names
+// another one: an Eleventy site whose `<head>` lives in a per-page include (`src/_includes/heads/<page>.njk`) sends open-graph and canonical
+// there, and the title, which lives in the page's front matter, stays on the page file. `$1`-style groups in a pattern-level file are
+// filled from that pattern's own match, so one entry covers a family of pages. No configured file: exactly resolveFile.
+export function resolveActionFile(site, pageUrl, actionType) {
+  const placement = resolvePlacementFile(site, pageUrl, actionType);
+  return placement || resolveFile(site, pageUrl);
+}
+
+function resolvePlacementFile(site, pageUrl, actionType) {
+  const entry = getPageEntry(site, pageUrl);
+  const pageFile = entry?.placements?.[actionType]?.file;
+  if (pageFile) return pageFile;
+
+  const pattern = getMatchingPattern(site, pageUrl);
+  const patternFile = pattern?.placements?.[actionType]?.file;
+  if (patternFile) {
+    let path;
+    try { path = new URL(pageUrl).pathname; } catch { path = String(pageUrl); }
+    const normalized = path.length > 1 ? path.replace(/\/+$/, '') : path;
+    const re = new RegExp(pattern.match);
+    const m = normalized.match(re) || path.match(re);
+    return m ? patternFile.replace(/\$(\d+)/g, (_, n) => m[Number(n)] ?? '') : null;
   }
 
-  if (entry?.markers) return { slot: defaultSlot, markers: entry.markers };
+  return site.url_file_map?.defaults?.placements?.[actionType]?.file || null;
+}
 
-  return { slot: defaultSlot, markers: PLATFORM_DEFAULT_MARKERS[actionType] || null };
+// The front-matter key a LINE field is written under when it differs from the field's own name (`description` -> `metaDescription`), or null.
+export function resolveLineKeys(site, pageUrl, actionType) {
+  return resolvePlacement(site, pageUrl, actionType).lineKeys;
 }
 
 // Marker names for a splice-based merge (meta-title/faq — see

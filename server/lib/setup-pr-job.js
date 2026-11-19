@@ -61,8 +61,14 @@ const DEFAULT_DEPS = {
     const { withJobLock, jobKeyFor } = await import('./job-lock.js');
     return withJobLock(jobKeyFor('setup-pr', siteId), fn);
   },
-  async learn(site) { return (await import('../discovery/run-discovery.js')).runDiscovery(site); },
-  async plan(site) { return (await import('../implementers/lib/setup-pr.js')).planSetupPr(site); },
+  // The whole readiness pass (readiness/run.js): learn the stack, complete the page list, map every page, plan the markers, the completeness gate, the design
+  // capture. apply: the inferred mapping is saved (read back, restored on any difference) and the design capture is queued if the project has none.
+  async readiness(site) {
+    const { runSiteReadiness, summarizeReadiness } = await import('../readiness/run.js');
+    const r = await runSiteReadiness(site, { apply: true });
+    return { ...r, summary: summarizeReadiness(r) };
+  },
+  async saveReadiness(id, summary) { return (await import('../store/readiness.js')).saveReadinessResult(id, summary); },
   async open(site, plan, opts) { return (await import('../implementers/lib/setup-pr.js')).openSetupPr(site, plan, opts); },
 };
 
@@ -77,6 +83,7 @@ export function notReadyReason(site) {
 }
 
 const summarize = (plan, extra = {}) => ({
+  gaps: plan.gaps ? plan.gaps.length : null,
   files: plan.files.length,
   markers: plan.files.reduce((n, f) => n + f.added.length, 0),
   coverage: plan.coverage || null,
@@ -99,17 +106,16 @@ export async function runSetupPrForSite(siteId, { now = new Date(), deps = {}, l
       return { siteId, status: 'not-ready', reason: notReady };
     }
     try {
-      // Learn first. A discovery failure is not fatal: the plan still works from the mapping already saved.
-      let stack = null;
-      try {
-        const found = await d.learn(site);
-        stack = found?.technology?.framework?.name || null;
-        site = (await d.getSite(siteId)) || site; // discovery may have saved a fuller page-to-file mapping
-      } catch (err) {
-        log.error?.(`[setup-pr] site ${siteId}: discovery before planning failed, using the saved mapping:`, err?.message);
+      // The whole readiness pass first: the platform learns the project (stack, every page, every template file, the layout's own keys), saves what it
+      // inferred and read back, queues the design capture if there is none, and plans the markers from that. A failure is recorded and retried.
+      const ready = await d.readiness(site);
+      if (ready.reason) {
+        await d.defer(siteId, `not ready: ${ready.reason}`, new Date(now.getTime() + 60 * 60 * 1000));
+        return { siteId, status: 'not-ready', reason: ready.reason };
       }
-
-      const plan = await d.plan(site);
+      const stack = ready.stack || null;
+      const plan = ready.plan;
+      await d.saveReadiness(siteId, ready.summary).catch((err) => log.error?.(`[setup-pr] site ${siteId}: could not store the readiness result:`, err?.message));
       if (!plan.files.length) {
         const result = summarize(plan, { status: 'nothing-to-add' });
         await d.recordDone(siteId, result, now);

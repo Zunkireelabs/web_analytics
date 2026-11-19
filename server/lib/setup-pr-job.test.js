@@ -11,14 +11,16 @@ const quiet = { log() {}, error() {} };
 
 function harness(over = {}) {
   const calls = [];
-  const state = { site: ready(), plan: plan(), opened: { ok: true, opened: true, prNumber: 7, prUrl: 'https://github.com/x/y/pull/7', branch: 'seoai/setup-markers-8874-2026-11-19' } };
+  const state = { site: ready(), plan: plan(), opened: { ok: true, opened: false }, ...{} };
+  state.opened = { ok: true, opened: true, prNumber: 7, prUrl: 'https://github.com/x/y/pull/7', branch: 'seoai/setup-markers-8874-2026-11-19' };
   const deps = {
     enabled: () => true,
     listDueSiteIds: async (now, limit) => { calls.push(`list:${limit}`); return state.due ?? [8874]; },
     getSite: async () => state.site,
     withLock: async (id, fn) => ({ ran: true, result: await fn() }),
-    learn: async () => { calls.push('learn'); return { ok: true, technology: { framework: { name: 'Eleventy' } } }; },
-    plan: async () => { calls.push('plan'); return state.plan; },
+    // the whole readiness pass: learn, complete the page list, map, plan, gate, design capture
+    readiness: async () => { calls.push('readiness'); return { stack: 'Eleventy (11ty)', plan: state.plan, reason: state.readinessReason, summary: { ready: false, gate: { markersComplete: true } } }; },
+    saveReadiness: async (id, summary) => { calls.push('saveReadiness'); state.readinessSaved = summary; },
     open: async (site, p, opts) => { calls.push(`open:${opts.stack}`); return state.opened; },
     recordDone: async (id, result) => { calls.push(`done:${result.status}`); state.done = result; },
     recordFailure: async (id, error, retryAt) => { calls.push(`fail:${error}`); state.failedAt = retryAt; },
@@ -28,10 +30,10 @@ function harness(over = {}) {
   return { deps, calls, state };
 }
 
-test('a ready project: learns first, then plans, then opens, and records the PR', async () => {
+test('a ready project: the readiness pass first, its result stored, then the PR opened and recorded', async () => {
   const { deps, calls, state } = harness();
   const r = await runSetupPrForSite(8874, { now: NOW, deps, log: quiet });
-  assert.deepEqual(calls, ['learn', 'plan', 'open:Eleventy', 'done:opened']);
+  assert.deepEqual(calls, ['readiness', 'saveReadiness', 'open:Eleventy (11ty)', 'done:opened']);
   assert.equal(r.status, 'opened');
   assert.equal(state.done.prUrl, 'https://github.com/x/y/pull/7');
   assert.equal(state.done.files, 2);
@@ -54,7 +56,7 @@ test('not ready is deferred, never counted as a failure, and nothing is opened',
   }
 });
 
-test('a missing design profile or a spend cap does not matter: the job never asks for either', async () => {
+test('a missing design profile or a spend cap does not hold the PR: markers are comments, the job only asks readiness to QUEUE the capture', async () => {
   const site = ready({ design_profile: null }); // no profile at all
   assert.equal(notReadyReason(site), null);
   const h = harness(); h.state.site = site;
@@ -84,11 +86,26 @@ test('a GitHub failure is recorded and retried in 30 minutes; the job never thro
   assert.equal(h.state.failedAt.getTime(), NOW.getTime() + RETRY_AFTER_MS);
 });
 
-test('a discovery failure is not fatal: planning goes ahead from the saved mapping', async () => {
-  const h = harness({ learn: async () => { throw new Error('tree too large'); } });
+test('a readiness failure is recorded and retried in 30 minutes; nothing is opened; the job never throws', async () => {
+  const h = harness({ readiness: async () => { throw new Error('GitHub tree unavailable'); } });
+  const r = await runSetupPrForSite(8874, { now: NOW, deps: h.deps, log: quiet });
+  assert.equal(r.status, 'failed');
+  assert.ok(h.calls.includes('fail:GitHub tree unavailable'));
+  assert.ok(!h.calls.some((c) => c.startsWith('open')));
+  assert.equal(h.state.failedAt.getTime(), NOW.getTime() + RETRY_AFTER_MS);
+});
+
+test('readiness saying the project has no repository is a deferral, not a failure', async () => {
+  const h = harness(); h.state.readinessReason = 'no-repository-connected';
+  const r = await runSetupPrForSite(8874, { now: NOW, deps: h.deps, log: quiet });
+  assert.equal(r.status, 'not-ready');
+  assert.ok(h.calls.includes('defer:not ready: no-repository-connected'));
+});
+
+test('a failure to STORE the readiness result does not stop the PR', async () => {
+  const h = harness({ saveReadiness: async () => { throw new Error('db down'); } });
   const r = await runSetupPrForSite(8874, { now: NOW, deps: h.deps, log: quiet });
   assert.equal(r.status, 'opened');
-  assert.ok(h.calls.includes('open:null'));
 });
 
 test('the cron pass takes one project at a time, honours the off switch, and skips a locked project', async () => {
