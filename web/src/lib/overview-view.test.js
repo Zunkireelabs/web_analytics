@@ -49,10 +49,20 @@ describe('date ranges', () => {
 
 describe('numbers', () => {
   test('compact', () => {
-    assert.equal(compact(1470), '1,470');
+    // Search Console's own style: K from 1,000, 3 significant digits (the old rule printed "1,470" below 10,000)
+    assert.equal(compact(1470), '1.47K');
     assert.equal(compact(54200), '54.2K');
     assert.equal(compact(2300000), '2.3M');
     assert.equal(compact(null), '0');
+    assert.equal(compact(999), '999');
+    assert.equal(compact(1000), '1K');
+    assert.equal(compact(9990), '9.99K');
+    assert.equal(compact(12345), '12.3K');
+    assert.equal(compact(147000), '147K');
+    assert.equal(compact(999500), '1M');
+    assert.equal(compact(1234567), '1.23M');
+    assert.equal(compact(3400000000), '3.4B');
+    assert.equal(compact(0), '0');
   });
   test('pctDelta', () => {
     assert.equal(pctDelta(112, 100), 12);

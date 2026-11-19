@@ -181,13 +181,17 @@ export async function fetchGscForDate(site, date) {
 }
 
 // The numbers Search Console's own screen shows: every page and subdomain of the property (NO own-domain filter, unlike
-// fetchGscForDate), the fresh 'all' data state (the screen's default, so the newest days are included), one row per day.
-// One call covers the whole window (a day is one row, far below the 25,000-row ceiling). Pure of any database.
-export async function fetchGscScreenDays(site, startDate, endDate) {
-  const sc = await getSearchConsole(site);
+// fetchGscForDate), the FINALIZED data state, one row per day. One call covers the whole window (a day is one row, far below the
+// 25,000-row ceiling). Pure of any database.
+//
+// 'final', not 'all': measured on SuperRank on 2026-11-19, the Search Console screen's "last 28 days" ended on 17 Nov (1,083
+// impressions = its "1.08K"), the last finalized day. 'all' also returns the next, still-changing day (18 Nov), which made the
+// Overview read 1,105 against Search Console's 1.08K. Same data as the screen means the same days as the screen.
+export async function fetchGscScreenDays(site, startDate, endDate, { client = null } = {}) {
+  const sc = client || await getSearchConsole(site);
   const res = await sc.searchanalytics.query({
     siteUrl: site.gsc_property,
-    requestBody: { startDate, endDate, dimensions: ['date'], rowLimit: 25000, dataState: 'all' },
+    requestBody: { startDate, endDate, dimensions: ['date'], rowLimit: 25000, dataState: 'final' },
   });
   return (res.data.rows || []).map((r) => ({
     date: r.keys?.[0],

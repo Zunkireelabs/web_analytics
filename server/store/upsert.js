@@ -241,6 +241,13 @@ export async function markDailyDocDone(siteId, date) {
 }
 
 // Search Console's screen totals (migration 253). A re-read REPLACES the day: fresh numbers move until Google finalises them.
+// Days NEWER than `lastFinalDate` are not on Search Console's screen yet. An earlier version of the fetch stored the fresh, still-changing
+// day as well; it would otherwise stay in the table and be added to every total. Returns how many rows were removed.
+export async function deleteGscScreenDaysAfter(siteId, lastFinalDate) {
+  const { rowCount } = await query('DELETE FROM gsc_screen_daily WHERE site_id = $1 AND date > $2::date', [siteId, lastFinalDate]);
+  return rowCount;
+}
+
 export async function upsertGscScreenDays(siteId, days) {
   for (const d of days) {
     await query(
