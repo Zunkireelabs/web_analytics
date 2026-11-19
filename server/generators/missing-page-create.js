@@ -1,6 +1,7 @@
 import { getSiteById } from '../store/read.js';
 import { callLLMForJson } from '../llm.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
+import { llmFailure } from './lib/llm-error.js';
 
 // Writes the page a dead internal link was already pointing at, in the shape
 // the site's existing sibling pages already use.
@@ -120,8 +121,8 @@ export async function generate({ siteId, params }) {
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 2500, generatorId: meta.id, siteId });
-  } catch {
-    throw Object.assign(new Error('Missing-page generation failed: model did not return valid JSON'), { status: 400 });
+  } catch (err) {
+    throw llmFailure(err, 'Missing-page generation failed: model did not return valid JSON', { status: 400 });
   }
 
   let sections = (Array.isArray(parsed.sections) ? parsed.sections : [])

@@ -229,7 +229,9 @@ describe('redirected URLs are not live pages', () => {
 });
 describe('detectDuplicateTitles host normalisation', () => {
   test('www and apex of the same page are not duplicates of each other', async () => {
-    const groups = await detectDuplicateTitles(1, [
+    // -1 is a site id no database has: with a real local database, site 1's stored page titles would otherwise be
+    // read in as well and the answer would depend on what happens to be in that database.
+    const groups = await detectDuplicateTitles(-1, [
       { page: 'https://x.com/', technicalAudit: { title: 'Home' }, impressions: 1 },
       { page: 'https://www.x.com/', technicalAudit: { title: 'Home' }, impressions: 1 },
     ]).catch(() => null);

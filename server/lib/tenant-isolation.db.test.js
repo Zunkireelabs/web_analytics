@@ -54,11 +54,13 @@ const CLASSIFIED = {
   // D: platform tables, no tenant data
   alembic_version: { cls: 'D' }, schema_migrations: { cls: 'D' }, session: { cls: 'D' }, job_locks: { cls: 'D' }, rate_limits: { cls: 'D' },
   platform_activations: { cls: 'D' }, signup_recovery_settings: { cls: 'D' }, contact_requests: { cls: 'D' }, free_audit_reports: { cls: 'D' },
-  model_registry: { cls: 'D' }, model_registry_log: { cls: 'D', via: 'model_registry' }, training_datasets: { cls: 'D' }, login_codes: { cls: 'D' },
+  platform_settings: { cls: 'D' }, platform_setting_changes: { cls: 'D' }, model_registry: { cls: 'D' }, model_registry_log: { cls: 'D', via: 'model_registry' }, training_datasets: { cls: 'D' }, login_codes: { cls: 'D' },
   // B: shared knowledge by design (aggregate or public)
   industry_knowledge: { cls: 'B' }, industry_knowledge_log: { cls: 'B', via: 'industry_knowledge' },
   commoncrawl_backlink_domains: { cls: 'B' }, commoncrawl_backlink_summary: { cls: 'B' }, commoncrawl_graph_releases: { cls: 'B' },
   metrics_catalog: { cls: 'B' }, metric_dimension_support: { cls: 'B', via: 'metrics_catalog' },
+  // AI crawler vendors' published IP lists (migration 250): public vendor data, one copy for every project, no project data.
+  ai_crawler_ip_lists: { cls: 'B' },
   // Roots
   workspaces: { cls: 'ROOT', via: 'sites' }, clients: { cls: 'ROOT' },
   // NEEDS A DECISION (docs/architecture/p1-isolation-audit.md section 1.4): listed so a change in their status is noticed.

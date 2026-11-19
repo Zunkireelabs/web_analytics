@@ -3,6 +3,7 @@ import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-conte
 import { ownDomains, filterOwnDomainPages, hostnameOf } from '../agents/lib/site-domain.js';
 import { callLLMForJson } from '../llm.js';
 import { findLinkSuggestionIssues } from './lib/output-guard.js';
+import { llmFailure } from './lib/llm-error.js';
 
 export const meta = {
   id: 'internal-links',
@@ -71,8 +72,8 @@ export async function generate({ siteId, params }) {
   try {
     suggestions = await callLLMForJson(system, user, { task: 'content', maxTokens: 600, generatorId: meta.id, siteId, pageUrl: page });
     if (!Array.isArray(suggestions)) throw new Error('not an array');
-  } catch {
-    throw Object.assign(new Error('Internal links generation failed: model did not return valid JSON'), { status: 400 });
+  } catch (err) {
+    throw llmFailure(err, 'Internal links generation failed: model did not return valid JSON', { status: 400 });
   }
 
   // Deterministic safety check — never trust the model's URL alone: drop

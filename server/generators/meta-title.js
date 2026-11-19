@@ -2,6 +2,7 @@ import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/pag
 import { callLLM, callLLMForJson } from '../llm.js';
 import { getSiteById } from '../store/read.js';
 import { searchClaimsFor } from './lib/visible-claim-guard.js';
+import { llmFailure } from './lib/llm-error.js';
 
 export const meta = {
   id: 'meta-title',
@@ -42,12 +43,25 @@ export async function generate({ siteId, params }) {
   const { page, query } = params;
   if (!query) throw Object.assign(new Error('query is required'), { status: 400 });
 
+  // A restore (agents/lib/protected-title-trials.js): put back the exact title and description an automatic change
+  // replaced. No model call and no length rewriting, because the point is the page's own previous wording, unchanged.
+  if (params.restore) {
+    const { title, description } = params.restore;
+    if (!title) throw Object.assign(new Error('restore needs the previous title'), { status: 400 });
+    const content = { query, page: page || null, titles: [title], selectedTitle: title, metaDescription: description || '', restoreOfDraftId: params.restore.ofDraftId ?? null };
+    return { content, summary: `Restore the previous title for "${query}"` };
+  }
+
   let pageContext = null;
+  let previous = null;
   if (page) {
     const fetched = await analyzePageUrl(page);
     // Same "thin extraction treated as failed fetch" rule as faq.js — falls
     // through to this generator's existing "no page content given" mode
     // rather than grounding the title/description in leftover boilerplate.
+    // What the page has now, kept on the draft so an automatic change on a protected page can be put back
+    // (protected-title-trials.js). Recorded even when the page is too thin to ground a rewrite.
+    if (fetched.ok) previous = { title: fetched.analysis.title || null, description: fetched.analysis.metaDescription || null };
     if (fetched.ok && hasSufficientGroundingContent(fetched.analysis)) {
       pageContext = { currentTitle: fetched.analysis.title, bodyExcerpt: fetched.analysis.bodyText.slice(0, 1500) };
     }
@@ -78,8 +92,8 @@ export async function generate({ siteId, params }) {
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 400, generatorId: meta.id, siteId });
-  } catch {
-    throw Object.assign(new Error('Meta title generation failed: model did not return valid JSON'), { status: 400 });
+  } catch (err) {
+    throw llmFailure(err, 'Meta title generation failed: model did not return valid JSON', { status: 400 });
   }
 
   const rawTitles = Array.isArray(parsed.titles) ? parsed.titles.slice(0, 3) : [];
@@ -89,6 +103,6 @@ export async function generate({ siteId, params }) {
   const rawDescription = typeof parsed.metaDescription === 'string' ? parsed.metaDescription : '';
   const metaDescription = await enforceLength(rawDescription, 'meta description', DESC_MIN, DESC_MAX, query, meta.id, siteId);
 
-  const content = { query, page: page || null, titles, metaDescription };
+  const content = { query, page: page || null, titles, metaDescription, ...(previous ? { previous } : {}) };
   return { content, summary: `${content.titles.length} title option(s) + meta description for "${query}"` };
 }

@@ -7,12 +7,18 @@ import SeenList from '../components/ai-visibility/SeenList.jsx';
 import MissingList from '../components/ai-visibility/MissingList.jsx';
 import AddPrompt from '../components/ai-visibility/AddPrompt.jsx';
 import WordsToAdd from '../components/ai-visibility/WordsToAdd.jsx';
+import CrawlersTab from '../components/ai-crawlers/CrawlersTab.jsx';
+import SegmentedTabs from '../components/SegmentedTabs.jsx';
+import { useSearchParams } from 'react-router-dom';
 import { engineLabel } from '../components/ai-visibility/engines.js';
 
 // AI visibility: how often AI engines name this brand for buyer-style prompts, which prompts they do
 // not, and what to add so they would. The SEO / AEO / GEO score row lives on the Agents page, not here.
 // Everything below the top strip is real, already-persisted agent output (server/routes/ai-visibility.js).
 export default function AiVisibility() {
+  const [params, setParams] = useSearchParams();
+  const view = params.get('view') === 'crawlers' ? 'crawlers' : 'answers';
+  const setView = (v) => setParams(v === 'crawlers' ? { view: 'crawlers' } : {}, { replace: true });
   const [ccData, setCcData] = useState(null); // null = loading
   const [board, setBoard] = useState(null);   // null = loading
   const [engine, setEngine] = useState('all');
@@ -71,7 +77,9 @@ export default function AiVisibility() {
 
   return (
     <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12 fade-up">
-      <PageIntro title="AI visibility" subtitle="How often AI engines recommend you when buyers ask" />
+      <PageIntro title="AI visibility" subtitle={view === 'crawlers' ? 'Which AI bots read your website' : 'How often AI engines recommend you when buyers ask'} />
+      <div className="mb-3"><SegmentedTabs options={[{ value: 'answers', label: 'Answers' }, { value: 'crawlers', label: 'Crawlers' }]} value={view} onChange={setView} /></div>
+      {view === 'crawlers' ? <CrawlersTab /> : <>
 
       {ccData !== null && !ai
         ? <AiRecommendationCard aiRecommendation={null} meta={ccData?.aiRecommendationMeta} loading={false} />
@@ -103,6 +111,7 @@ export default function AiVisibility() {
         <AddPrompt suggestions={board?.suggestions || []} onAdd={addPrompt} />
         <WordsToAdd words={board?.words || []} loading={loading} />
       </div>
+      </>}
     </div>
   );
 }

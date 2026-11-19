@@ -32,6 +32,7 @@ import onboardingRouter from './routes/onboarding.js';
 import signupRecoveryRouter from './routes/signup-recovery.js';
 import commoncrawlBacklinksRouter, { clientBacklinksRouter } from './routes/commoncrawl-backlinks.js';
 import mcpTokensRouter from './routes/mcp-tokens.js';
+import aiCrawlersRouter, { crawlerDashboardRouter } from './routes/ai-crawlers.js';
 import { apiBridgeRouter, rootBridgeRouter } from './routes/mcp-bridge.js';
 import webhooksRouter from './routes/webhooks.js';
 import crmWebhookRouter from './routes/crm-webhook.js';
@@ -154,6 +155,9 @@ app.use('/api', webhooksRouter);
 app.use('/api', crmWebhookRouter);
 // Same token/boundary shape, for "see it live" trial-signup reporting.
 app.use('/api', trialSignupRouter);
+// Public, per-project-bearer-token-authenticated (the hourly access-log shipping script, deploy/ai-crawler-shipper/). The project
+// comes from the token only. Same mount-order hazard as crmWebhookRouter above.
+app.use('/api', aiCrawlersRouter);
 app.use(rootBridgeRouter);
 // Reverse-proxies data-analyst-agent/ under this app's own domain — /data-agent
 // is a root path, not under /api (see routes/data-agent.js), and must be
@@ -168,6 +172,7 @@ app.use('/api', actionCenterRouter);
 app.use('/api', reportsRouter);
 app.use('/api', commandCenterRouter);
 app.use('/api', aiVisibilityRouter);
+app.use('/api', crawlerDashboardRouter);
 app.use('/api', growthReportRouter);
 // Client-facing mirrors of three staff-only routers (keywords, the Analyst,
 // backlinks): the same handlers, always against the session's own site. Their

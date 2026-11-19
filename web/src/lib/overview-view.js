@@ -18,21 +18,32 @@ export function daysBetween(startYmd, endYmd) {
 // "24 hours" is the newest day: the data here is daily, so there is no hourly view to show.
 // Search Console keeps about 16 months and Google Analytics 14, so "18 months" shows whatever exists before that.
 export const PRESETS = [
-  { key: '1', label: '24 hours', days: 0 },
+  { key: '1', label: '24 hours', days: 1 },
   { key: '7', label: '7 days', days: 7 },
   { key: '28', label: '28 days', days: 28 },
-  { key: '90', label: '3 months', days: 90 },
-  { key: '180', label: '6 months', days: 180 },
-  { key: '365', label: '12 months', days: 365 },
-  { key: '545', label: '18 months', days: 545 },
+  { key: '90', label: '3 months', months: 3 },
+  { key: '180', label: '6 months', months: 6 },
+  { key: '365', label: '12 months', months: 12 },
+  { key: '545', label: '18 months', months: 18 },
 ];
 // The ones shown in the bar. The rest live under "More", next to Custom dates.
 export const BAR_KEYS = ['1', '7', '28', '90'];
 
+// Counted the way Search Console counts: "28 days" is 28 days INCLUDING the newest one (it used to be 29 here, which alone
+// made every total bigger than the screen), and the month ranges are calendar months back, the day after.
 export function presetRange(anchor, key) {
   const p = PRESETS.find((x) => x.key === key);
   if (!p) return null;
-  return { start: shiftYmd(anchor, p.days), end: anchor };
+  if (p.months) {
+    const d = new Date(`${anchor}T00:00:00Z`);
+    const day = d.getUTCDate();
+    d.setUTCDate(1);
+    d.setUTCMonth(d.getUTCMonth() - p.months);
+    const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+    d.setUTCDate(Math.min(day, last));
+    return { start: shiftYmd(d.toISOString().slice(0, 10), -1), end: anchor };
+  }
+  return { start: shiftYmd(anchor, p.days - 1), end: anchor };
 }
 
 // Which preset a start/end pair is, or 'custom'.

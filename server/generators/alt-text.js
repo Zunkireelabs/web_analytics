@@ -1,5 +1,6 @@
 import { analyzePageUrl } from '../agents/lib/page-content.js';
 import { callLLMForJson } from '../llm.js';
+import { llmFailure } from './lib/llm-error.js';
 
 // 'safe' risk tier (risk-tiers.js) — implementers/lib/alt-text-inject.js
 // patches alt="" into each image's real <img> tag by finding its exact
@@ -45,8 +46,8 @@ export async function generate({ siteId, params }) {
   try {
     altTexts = await callLLMForJson(SYSTEM, user, { task: 'content', maxTokens: 500, generatorId: meta.id, siteId });
     if (!Array.isArray(altTexts)) throw new Error('not an array');
-  } catch {
-    throw Object.assign(new Error('Alt text generation failed: model did not return valid JSON'), { status: 400 });
+  } catch (err) {
+    throw llmFailure(err, 'Alt text generation failed: model did not return valid JSON', { status: 400 });
   }
 
   const items = images

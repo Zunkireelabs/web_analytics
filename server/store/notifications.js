@@ -84,3 +84,18 @@ export async function hasNotificationToday(siteId, timezone = 'UTC') {
   );
   return rows.length > 0;
 }
+
+// What the last 24h of failed autonomous-fix attempts said, grouped by reason
+// (first 140 chars), most common first. Feeds the staff ship-stall email so it
+// names the cause instead of just "0 of 60".
+export async function recentFailureCauses(siteId, limit = 5) {
+  const { rows } = await query(
+    `SELECT left(abandoned_reason, 140) AS reason, count(*)::int AS n
+       FROM drafts
+      WHERE site_id = $1 AND abandoned_reason IS NOT NULL
+        AND abandoned_at >= now() - interval '24 hours'
+      GROUP BY 1 ORDER BY n DESC LIMIT $2`,
+    [siteId, limit]
+  );
+  return rows;
+}

@@ -5,7 +5,7 @@ import {
   getSiteById, getDailySeries,
   getMonthlyTotals, getRangeTotals,
   getGscBreakdownRange, getGa4BreakdownRange, getTopMovers, getTopPagePerQuery, getTopDeviceCountryPerQuery,
-  getDataRange, getChannelsRange,
+  getDataRange, getScreenDataRange, getChannelsRange,
   getAiCompareCache, saveAiCompareCache,
 } from '../store/read.js';
 import { requireAuth } from './login.js';
@@ -85,7 +85,7 @@ router.get('/report-brand', async (req, res, next) => {
 // Available data date range (earliest, freshest-complete, latest visitor day).
 router.get('/range', async (req, res, next) => {
   try {
-    res.json(await getDataRange(req.siteId));
+    res.json(await getScreenDataRange(req.siteId));
   } catch (e) { next(e); }
 });
 

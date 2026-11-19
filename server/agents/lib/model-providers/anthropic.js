@@ -30,14 +30,19 @@ const MODEL = process.env.AI_RECOMMENDATION_ANTHROPIC_MODEL || 'claude-haiku-4-5
 // steering the answer, matching the OpenAI probe's "observe what it says
 // unprompted" design. Returns the raw text verbatim; callers verify facts
 // about it in JS rather than trusting any self-report from a second call.
-export async function ask(prompt) {
+// The request body for a probe. `country` ({iso, name}, from site-locations.js probeCountry) says where the asker is,
+// the same hint openai.js gives (see buildProbeRequest there for why): only where the user is, nothing about the client.
+// No country = exactly the old request. Pure, so it is testable without a network call.
+export function buildProbeRequest(prompt, { country = null } = {}) {
+  const body = { model: MODEL, max_tokens: 600, messages: [{ role: 'user', content: prompt }] };
+  if (country?.name) body.system = `The user is located in ${country.name}.`;
+  return body;
+}
+
+export async function ask(prompt, { country = null } = {}) {
   if (!configured()) throw new Error('ANTHROPIC_API_KEY / AI_RECOMMENDATION_ANTHROPIC_ENABLED are not both set — AI Recommendation Claude probes cannot run.');
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const msg = await client.messages.create({
-    model: MODEL,
-    max_tokens: 600,
-    messages: [{ role: 'user', content: prompt }],
-  });
+  const msg = await client.messages.create(buildProbeRequest(prompt, { country }));
   const raw = msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim();
   return { raw, model: MODEL };
 }

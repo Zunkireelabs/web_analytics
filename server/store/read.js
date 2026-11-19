@@ -37,13 +37,17 @@ export async function getSiteStatus(id) {
 
 // Combined GSC + GA4 daily series for a site over an inclusive date range.
 export async function getDailySeries(siteId, start, end) {
+  // Search figures come from Search Console's screen totals (gsc_screen_daily) where we have them, else the final own-domain
+  // totals (gsc_daily): the Overview shows what Search Console shows.
   const { rows } = await query(
     `SELECT
         to_char(d, 'YYYY-MM-DD') AS date,
-        g.clicks, g.impressions, g.ctr, g.position,
+        COALESCE(s.clicks, g.clicks) AS clicks, COALESCE(s.impressions, g.impressions) AS impressions,
+        COALESCE(s.ctr, g.ctr) AS ctr, COALESCE(s.position, g.position) AS position,
         a.users, a.new_users, a.sessions, a.engaged_sessions,
         a.avg_engagement_time, a.conversions, a.bounce_rate
      FROM generate_series($2::date, $3::date, '1 day') AS d
+     LEFT JOIN gsc_screen_daily s ON s.site_id = $1 AND s.date = d::date
      LEFT JOIN gsc_daily g ON g.site_id = $1 AND g.date = d::date
      LEFT JOIN ga4_daily a ON a.site_id = $1 AND a.date = d::date
      ORDER BY d`,
@@ -211,6 +215,21 @@ export async function getDataRange(siteId) {
         to_char(max(g.date), 'YYYY-MM-DD') AS freshest,
         (SELECT to_char(max(date), 'YYYY-MM-DD') FROM ga4_daily WHERE site_id = $1) AS latest_visitor
        FROM gsc_daily g WHERE g.site_id = $1`,
+    [siteId]
+  );
+  return rows[0] || { earliest: null, freshest: null, latest_visitor: null };
+}
+
+// The Overview's range: the same, but a day counts as soon as Search Console's screen shows it (gsc_screen_daily), not only
+// once it is final. Used by the dashboard route only; reports and the Analyst keep getDataRange above.
+export async function getScreenDataRange(siteId) {
+  const { rows } = await query(
+    `SELECT
+        to_char(min(d), 'YYYY-MM-DD') AS earliest,
+        to_char(max(d), 'YYYY-MM-DD') AS freshest,
+        (SELECT to_char(max(date), 'YYYY-MM-DD') FROM ga4_daily WHERE site_id = $1) AS latest_visitor
+       FROM (SELECT date AS d FROM gsc_daily WHERE site_id = $1
+             UNION SELECT date FROM gsc_screen_daily WHERE site_id = $1) x`,
     [siteId]
   );
   return rows[0] || { earliest: null, freshest: null, latest_visitor: null };
@@ -642,16 +661,17 @@ export async function getMonthlyDocUrl(siteId) {
 export async function getRangeTotals(siteId, start, end) {
   const { rows } = await query(
     `SELECT
-        COALESCE(SUM(g.clicks),0)       AS clicks,
-        COALESCE(SUM(g.impressions),0)  AS impressions,
-        CASE WHEN SUM(g.impressions) > 0
-             THEN ROUND(SUM(g.position * g.impressions) / SUM(g.impressions), 2)
+        COALESCE(SUM(COALESCE(s.clicks, g.clicks)),0)       AS clicks,
+        COALESCE(SUM(COALESCE(s.impressions, g.impressions)),0)  AS impressions,
+        CASE WHEN SUM(COALESCE(s.impressions, g.impressions)) > 0
+             THEN ROUND(SUM(COALESCE(s.position, g.position) * COALESCE(s.impressions, g.impressions)) / SUM(COALESCE(s.impressions, g.impressions)), 2)
              ELSE NULL END              AS avg_position,
         COALESCE(SUM(a.users),0)        AS users,
         COALESCE(SUM(a.new_users),0)    AS new_users,
         COALESCE(SUM(a.sessions),0)     AS sessions,
         COALESCE(SUM(a.conversions),0)  AS conversions
      FROM generate_series($2::date, $3::date, '1 day') AS d
+     LEFT JOIN gsc_screen_daily s ON s.site_id = $1 AND s.date = d::date
      LEFT JOIN gsc_daily g ON g.site_id = $1 AND g.date = d::date
      LEFT JOIN ga4_daily a ON a.site_id = $1 AND a.date = d::date`,
     [siteId, start, end]
@@ -664,16 +684,17 @@ export async function getMonthlyTotals(siteId, year, month) {
   const start = `${year}-${String(month).padStart(2, '0')}-01`;
   const { rows } = await query(
     `SELECT
-        COALESCE(SUM(g.clicks),0)       AS clicks,
-        COALESCE(SUM(g.impressions),0)  AS impressions,
-        CASE WHEN SUM(g.impressions) > 0
-             THEN ROUND(SUM(g.position * g.impressions) / SUM(g.impressions), 2)
+        COALESCE(SUM(COALESCE(s.clicks, g.clicks)),0)       AS clicks,
+        COALESCE(SUM(COALESCE(s.impressions, g.impressions)),0)  AS impressions,
+        CASE WHEN SUM(COALESCE(s.impressions, g.impressions)) > 0
+             THEN ROUND(SUM(COALESCE(s.position, g.position) * COALESCE(s.impressions, g.impressions)) / SUM(COALESCE(s.impressions, g.impressions)), 2)
              ELSE NULL END              AS avg_position,
         COALESCE(SUM(a.users),0)        AS users,
         COALESCE(SUM(a.new_users),0)    AS new_users,
         COALESCE(SUM(a.sessions),0)     AS sessions,
         COALESCE(SUM(a.conversions),0)  AS conversions
      FROM generate_series($2::date, ($2::date + interval '1 month' - interval '1 day'), '1 day') AS d
+     LEFT JOIN gsc_screen_daily s ON s.site_id = $1 AND s.date = d::date
      LEFT JOIN gsc_daily g ON g.site_id = $1 AND g.date = d::date
      LEFT JOIN ga4_daily a ON a.site_id = $1 AND a.date = d::date`,
     [siteId, start]

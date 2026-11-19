@@ -4,6 +4,7 @@ import { getSiteById } from '../store/read.js';
 import { findRealFaqDataSource } from './lib/faq-data-source.js';
 import { pageStructureGuidance } from './lib/design-aware-composer.js';
 import { tenantContextTextFor } from '../lib/tenant-context.js';
+import { llmFailure } from './lib/llm-error.js';
 
 export const meta = {
   id: 'faq',
@@ -77,8 +78,8 @@ export async function generateFaqItemsFromEvidence({ siteId, subject, bodyExcerp
   try {
     items = await callLLMForJson(system, user, { task: 'content', maxTokens: 900, generatorId: meta.id, siteId });
     if (!Array.isArray(items)) throw new Error('not an array');
-  } catch {
-    throw Object.assign(new Error('FAQ generation failed: model did not return valid JSON'), { status: 400 });
+  } catch (err) {
+    throw llmFailure(err, 'FAQ generation failed: model did not return valid JSON', { status: 400 });
   }
   return items.filter((i) => i && typeof i.question === 'string' && typeof i.answer === 'string').slice(0, expectedCount || 8);
 }

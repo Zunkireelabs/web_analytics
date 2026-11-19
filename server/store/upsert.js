@@ -239,3 +239,17 @@ export async function markDailyDocDone(siteId, date) {
     [siteId, date]
   );
 }
+
+// Search Console's screen totals (migration 253). A re-read REPLACES the day: fresh numbers move until Google finalises them.
+export async function upsertGscScreenDays(siteId, days) {
+  for (const d of days) {
+    await query(
+      `INSERT INTO gsc_screen_daily (site_id, date, clicks, impressions, ctr, position, fetched_at)
+       VALUES ($1, $2, $3, $4, $5, $6, now())
+       ON CONFLICT (site_id, date) DO UPDATE SET
+         clicks = EXCLUDED.clicks, impressions = EXCLUDED.impressions, ctr = EXCLUDED.ctr, position = EXCLUDED.position, fetched_at = now()`,
+      [siteId, d.date, d.clicks, d.impressions, d.ctr, d.position]
+    );
+  }
+  return days.length;
+}

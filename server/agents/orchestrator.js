@@ -15,7 +15,7 @@ import { tenantContextTextForSiteId } from '../lib/tenant-context.js';
 // the caller itself, and trend-radar has its own monthly cadence (job.js's
 // runTrendRadarIfDue) — running it here would add feed fetches and an LLM call
 // to every executive report / refresh.
-const EXCLUDED_FROM_DEFAULT_FANOUT = new Set(['executive-report', 'trend-radar']);
+const EXCLUDED_FROM_DEFAULT_FANOUT = new Set(['executive-report', 'trend-radar', 'news-posts']);
 
 export const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 

@@ -58,6 +58,26 @@ export const LOCATION_NAMES = {
   2528: 'the Netherlands', 2276: 'Germany',
 };
 
+// ISO 3166-1 alpha-2 codes for the same markets: the form a model API's own location hint takes (OpenAI web search
+// `user_location.country`). An unlisted code has no entry, so the caller sends no location rather than a wrong one.
+export const LOCATION_ISO = {
+  2840: 'US', 2826: 'GB', 2356: 'IN', 2036: 'AU', 2124: 'CA', 2524: 'NP', 2756: 'CH', 2528: 'NL', 2276: 'DE',
+};
+
+// The single country an AI-answer probe should be asked from, or null. Only a site whose own configuration resolves to
+// exactly one real country gets one: a local business (target_scope 'local' with its own country_code) or an explicit
+// one-market list. A global, hybrid or multi-market site, or a local site with no country_code (which would otherwise
+// fall back to the US default), gets null and keeps being asked with no location at all, exactly as before.
+export function probeCountry(site) {
+  const hasExplicit = Array.isArray(site?.target_markets) && site.target_markets.length;
+  if (!hasExplicit && !(site?.target_scope === 'local' && site?.country_code)) return null;
+  const codes = [...new Set(resolveSiteLocations(site).map((l) => Number(l.locationCode)))];
+  if (codes.length !== 1) return null;
+  const iso = LOCATION_ISO[codes[0]];
+  const name = LOCATION_NAMES[codes[0]];
+  return iso && name ? { iso, name } : null;
+}
+
 // The markets a site actually sells into, as readable names — empty for a site
 // with no market configuration (nothing to say, so callers add no market text).
 export function targetMarketNames(site) {

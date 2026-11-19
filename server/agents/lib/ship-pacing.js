@@ -120,22 +120,11 @@ export async function applyPacing(site, candidates, { recentDraftCheck = hasRece
   async function paceLane({ items: matching, gapDays, label, filter }, { gapColumn }) {
     if (matching.length === 0) return;
 
-    // A blog someone explicitly asked for on the Analyst page ("write a blog
-    // on this keyword?") is a request, not the agent's own choice of what to
-    // publish next — so the cadence gap, which exists to stop the agent
-    // publishing on its own initiative too often, does not apply to it. What
-    // DOES still apply is the one-per-run rule below: a client clicking Yes on
-    // three keywords gets three blogs on three consecutive days, never three
-    // at once. Requested items also win the single slot outright, so a pending
-    // request is never postponed behind an agent-chosen topic.
-    const requested = matching.filter((r) => r.params?.clientRequested === true);
-    if (requested.length > 0) {
-      for (const r of matching) if (r.id !== requested[0].id) dropped.add(r.id);
-      const heldNote = matching.length > 1 ? ` ${matching.length - 1} other candidate(s) wait for a later run.` : '';
-      notes.push(`${label}: shipping 1 explicitly requested topic ("${requested[0].params?.topic ?? 'unknown'}") — the ${gapColumn}=${gapDays} cadence gap does not apply to a requested blog.${heldNote}`);
-      return;
-    }
-
+    // A blog someone asked for by hand is queued like every other blog and takes the project's next free blog day
+    // (agents/lib/keyword-schedule.js assignBlogSlots, which books hand-added ones first). It no longer jumps the cadence gap:
+    // one calendar for every source, so a project never gets more than one blog per gap. When several are waiting without a
+    // booked day, a requested one is simply first in line.
+    matching = [...matching.filter((r) => r.params?.clientRequested === true), ...matching.filter((r) => r.params?.clientRequested !== true)];
     if (await recentDraftCheck(site.id, matching[0].recommendation_type, gapDays, timezone, filter)) {
       for (const r of matching) dropped.add(r.id);
       notes.push(`${label}: ${matching.length} candidate(s) held — one was published within the last ${gapDays} day(s) (${gapColumn}=${gapDays}).`);
@@ -153,20 +142,38 @@ export async function applyPacing(site, candidates, { recentDraftCheck = hasRece
     const all = candidates.filter((r) => r.recommendation_type === generatorId);
     if (all.length === 0) continue;
 
-    // TREND LANE. Trend-radar posts (filed under the 'Insights' category) are
-    // paced on their OWN clock, separate from every other blog. Sharing one
-    // clock meant a fortnight's 4-5 trend posts competed with the keyword
-    // blogs for the same one-per-gap slot, so whichever lane the ordering
-    // favoured starved the other — a client could get no trend posts for a
-    // month, or no keyword blogs. Each lane now keeps its own gap, its own
-    // one-per-run rule and its own history. Only blog-outline has a trend lane.
+    // ONE BLOG LANE (owner's decision, 2026-11-18). Trend posts, keyword blogs and hand-added topics share a single calendar and a
+    // single gap (the site's blog_min_gap_days), so a project publishes at most one blog per gap whatever its source. The old
+    // separate trend lane let a project reach about ten posts a fortnight.
+    //
+    // Booked days: keyword-schedule.js gives each open blog a day (params.scheduledFor), already one gap apart. A blog is held
+    // until its day, and on or after it ships WITHOUT the gap check (the booking is the gap), earliest day first, one per run.
+    // A blog with no booked day (the booking job not yet run, or beyond its horizon) is paced by the gap as before.
     const ordinaryGap = site[gapColumn] ?? defaultGapDays;
-    const lanes = generatorId === 'blog-outline'
-      ? [
-        { items: all.filter(isTrendBlog), gapDays: TREND_BLOG_GAP_DAYS, label: `${generatorId} (trend)`, filter: { contentCategory: TREND_CATEGORY } },
-        { items: all.filter((r) => !isTrendBlog(r)), gapDays: ordinaryGap, label: generatorId, filter: { excludeContentCategory: TREND_CATEGORY } },
-      ]
-      : [{ items: all, gapDays: ordinaryGap, label: generatorId, filter: undefined }];
+    let lanes;
+    if (generatorId === 'blog-outline') {
+      const today = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      const booked = all.filter((r) => r.params?.scheduledFor);
+      const unbooked = all.filter((r) => !r.params?.scheduledFor);
+      const due = booked.filter((r) => r.params.scheduledFor <= today).sort((a, b) => a.params.scheduledFor.localeCompare(b.params.scheduledFor) || a.id - b.id);
+      for (const r of booked.filter((x) => x.params.scheduledFor > today)) dropped.add(r.id);
+      if (booked.length) {
+        for (const r of due.slice(1)) dropped.add(r.id);
+        if (due.length) {
+          for (const r of unbooked) dropped.add(r.id);       // today's slot is taken by a booked blog
+          notes.push(`blog-outline: shipping the blog booked for ${due[0].params.scheduledFor}${due.length > 1 ? `; ${due.length - 1} other overdue one(s) follow on later runs` : ''}.`);
+          lanes = [];
+        } else {
+          for (const r of unbooked) dropped.add(r.id);       // nothing is due and the calendar is booked: unbooked blogs wait their turn
+          notes.push(`blog-outline: ${booked.length} blog(s) booked for later days; ${unbooked.length} unbooked wait.`);
+          lanes = [];
+        }
+      } else {
+        lanes = [{ items: unbooked, gapDays: ordinaryGap, label: generatorId, filter: undefined }];
+      }
+    } else {
+      lanes = [{ items: all, gapDays: ordinaryGap, label: generatorId, filter: undefined }];
+    }
 
     for (const lane of lanes) await paceLane(lane, { gapColumn });
   }

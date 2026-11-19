@@ -78,3 +78,28 @@ describe('computeDelta', () => {
     assert.equal(d.impressionsPct, 0);
   });
 });
+
+// ── click rate and visibility verdicts (2026-11-18) ──
+import { classifyCtrEvidence, classifyVisibility, MIN_CTR_IMPRESSIONS } from './fix-impact.js';
+describe('click-rate verdict', () => {
+  const site = (c, i) => ({ clicks: c, impressions: i });
+  const flatSite = { before: site(1000, 50000), after: site(1000, 50000) };
+  test('a real rise on a page that had no clicks before is judged (clicks alone cannot)', () => {
+    const v = classifyCtrEvidence(site(0, 800), site(24, 800), flatSite);
+    assert.equal(v.verdict, 'ctr-up');
+  });
+  test('a real fall beyond noise and beyond the site is a drop', () => {
+    assert.equal(classifyCtrEvidence(site(60, 1000), site(25, 1000), flatSite).verdict, 'ctr-down');
+  });
+  test('a small change is noise', () => assert.equal(classifyCtrEvidence(site(30, 1000), site(34, 1000), flatSite).reason, 'within-noise'));
+  test('the same move as the whole site is not credited to the fix', () => {
+    const siteFell = { before: site(1000, 50000), after: site(420, 50000) };
+    assert.equal(classifyCtrEvidence(site(60, 1000), site(25, 1000), siteFell).reason, 'moved-with-site');
+  });
+  test(`needs ${MIN_CTR_IMPRESSIONS}+ impressions on each side`, () => assert.equal(classifyCtrEvidence(site(0, 50), site(10, 900), flatSite).reason, 'too-few-impressions'));
+});
+describe('visibility verdict for pages Google was not showing', () => {
+  test('shown now', () => assert.equal(classifyVisibility(null, { impressions: 40 }).verdict, 'now-visible'));
+  test('a stray impression is not visibility', () => assert.equal(classifyVisibility(null, { impressions: 3 }).verdict, 'still-invisible'));
+  test('a page with a baseline is judged elsewhere', () => assert.equal(classifyVisibility({ impressions: 5 }, { impressions: 9 }), null));
+});

@@ -30,6 +30,7 @@ import { listByState as listQueueItemsByState, markShipped as markQueueItemShipp
 import { recordFixOutcome } from '../../agent-memory.js';
 import { getProtectedPageSet } from '../../store/protected-pages.js';
 import { getSuppressionSet, isSuppressed, isSuppressionEnforcing } from '../../store/fix-suppressions.js';
+import { makeAllowance, countTrialsThisWeek, isRestore, recordTrial } from './protected-title-trials.js';
 import { checkPreconditions, isPreconditionsEnforcing } from './preconditions.js';
 import { splitProtectedQueueItems, splitProtectedFileEdits, protectedFilePaths } from './protected-pages.js';
 import { sanitizeForCustomer } from '../../lib/errors.js';
@@ -142,6 +143,8 @@ const CREDENTIAL_RETRY_DELAY_MS = Number(process.env.CREDENTIAL_RETRY_DELAY_MS ?
 //
 // `finish` records the run in auto_remediation_runs; the pipeline passes a no-op because selecting is not a shipping run.
 // Returns { done } when the run ends before any item is attempted, otherwise { ctx } with everything the shipping loop needs.
+const REJECTED_OK = (r) => !['unfixable', 'dismissed', 'superseded'].includes(r.status);
+
 export async function selectRemediationCandidates(site, siteId, { globalRemaining = Infinity, onboardingAnalysisPending = isOnboardingAnalysisPending, finish = (r) => r, clientLabel } = {}) {
   if (!site.auto_remediation_enabled) return { done: finish({ attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'disabled' }) };
 
@@ -258,9 +261,15 @@ export async function selectRemediationCandidates(site, siteId, { globalRemainin
     return true;
   };
 
+  // Protected-page title changes: a few a week ship on their own and are put back if they cost clicks
+  // (protected-title-trials.js). Read once per run; a failed count means no allowance this run, never an unlimited one.
+  const titleAllowance = makeAllowance(await countTrialsThisWeek(siteId).catch(() => Infinity));
   const eligible = rows.filter((r) => {
     if (r.finding_ids.some((fid) => draftedFindingIds.has(fid))) return false;
     if (pendingDraftFilePaths.has(resolveFile(site, r.page))) return false;
+    // Putting back a title we changed is always allowed: not protected-gated, not suppressed (the bad measurement that
+    // queued it is exactly what wrote the suppression), never counted against the allowance.
+    if (isRestore(r) && r.recommendation_type === 'meta-title' && !r.blocked_reason && REJECTED_OK(r)) return true;
     // A fix measured to have made THIS page worse (fix_impact -> migration
     // 182). learnedMap below is site-wide per generator and structurally
     // cannot express this, which is why a harmful-but-successful fix used to
@@ -271,8 +280,9 @@ export async function selectRemediationCandidates(site, siteId, { globalRemainin
     if (suppressionsEnforced && isSuppressed(suppressions, {
       scope: 'page', scopeKey: r.params?.page || r.page, generatorId: r.recommendation_type,
     })) return false;
-    const decision = classifyRecommendation(r, learnedMap, protectedPages).decision;
-    if (decision === AUTONOMY_DECISION.SAFE_TO_AUTO_EXECUTE) return true;
+    const classified = classifyRecommendation(r, learnedMap, protectedPages);
+    if (classified.decision === AUTONOMY_DECISION.SAFE_TO_AUTO_EXECUTE) return true;
+    if (titleAllowance.allow(r, classified)) return true;
     return isProbationProbe(r);
   });
   for (const generatorId of probedGeneratorIds) {
@@ -485,7 +495,7 @@ export async function selectRemediationCandidates(site, siteId, { globalRemainin
     console.log(`[auto-remediation] ${clientLabel}: ${candidates.length} eligible, taking ${budgeted.length} within today's budget (${spentToday}/${dailyLimit} already used); ${candidates.length - budgeted.length} deferred to tomorrow.`);
   }
 
-  return { ctx: { budgeted, candidates, ceiling, dailyLimit, eligible, fileEditsQueueItems, learnedRepairQueueItems, now, preconditionsEnforced, queue, remaining, rows, selection, selectionDeferred, spentToday, surge } };
+  return { ctx: { titleAllowance, budgeted, candidates, ceiling, dailyLimit, eligible, fileEditsQueueItems, learnedRepairQueueItems, now, preconditionsEnforced, queue, remaining, rows, selection, selectionDeferred, spentToday, surge } };
 }
 
 export async function autoRemediateSafeRecommendations(siteId, {
@@ -522,7 +532,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
 
   const selection_ = await selectRemediationCandidates(site, siteId, { globalRemaining, onboardingAnalysisPending, finish, clientLabel });
   if (selection_.done) return selection_.done;
-  const { budgeted, candidates, ceiling, dailyLimit, eligible, fileEditsQueueItems, learnedRepairQueueItems, now, preconditionsEnforced, queue: selectedQueue, remaining, rows, selection, selectionDeferred: selectedDeferred, spentToday, surge } = selection_.ctx;
+  const { titleAllowance, budgeted, candidates, ceiling, dailyLimit, eligible, fileEditsQueueItems, learnedRepairQueueItems, now, preconditionsEnforced, queue: selectedQueue, remaining, rows, selection, selectionDeferred: selectedDeferred, spentToday, surge } = selection_.ctx;
   const queue = drainOnly ? [] : selectedQueue;
   const selectionDeferred = drainOnly ? [] : selectedDeferred;
 
@@ -1193,6 +1203,10 @@ export async function autoRemediateSafeRecommendations(siteId, {
         // logging problem must not turn a real shipped fix into a reported
         // failure. recordOutcome already swallows its own errors internally.
         recordOutcome(siteId, rec.recommendation_type, 'shipped', { recommendationId: rec.id, draftId: draft.id }).catch(() => {});
+        if (titleAllowance.granted.has(rec.id)) {
+          const full = draft.content ? draft : await getDraft(siteId, draft.id).catch(() => draft);
+          await recordTrial(siteId, rec, full);
+        }
         if (learnedRepairQueueId) {
           markQueueItemShipped(learnedRepairQueueId).catch(() => {});
           recordFixOutcome({ memoryRefId, outcome: 'success', agentId: 'learned-repair', generatorId: rec.recommendation_type, siteId }).catch(() => {});

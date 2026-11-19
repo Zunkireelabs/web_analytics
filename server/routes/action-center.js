@@ -2018,6 +2018,10 @@ export async function approveAndShipRecommendation(siteId, recommendationId, { u
     err.status = 400;
     throw err;
   }
+  // Blogs and keyword-driven page additions never ship on the spot: they wait for the project's next blog day, so one
+  // schedule decides everything (titles, schema and other fixes below keep their instant ship).
+  const queued = await queueForNextBlogDay(siteId, rec);
+  if (queued) return queued;
   const job = await createExecutionJob(siteId, { trigger: 'single', requestedBy: userId });
   const result = await shipRecommendation(siteId, rec, { userId, jobId: job.id });
   await finishExecutionJob(job.id, {
@@ -2026,6 +2030,22 @@ export async function approveAndShipRecommendation(siteId, recommendationId, { u
   });
   if (!result.ok) { const err = new Error(result.error); err.status = 422; throw err; }
   return result.draft;
+}
+
+export function isKeywordOrBlogRec(rec) {
+  return rec?.recommendation_type === 'blog-outline' || Boolean(rec?.params?.fromGapId);
+}
+
+// Books the recommendation's blog day and answers "ships on <date>" instead of shipping now. Returns null for anything
+// that is not a keyword or blog item, so the caller carries on with the instant path.
+export async function queueForNextBlogDay(siteId, rec) {
+  if (!isKeywordOrBlogRec(rec)) return null;
+  const { assignBlogSlots } = await import('../agents/lib/keyword-schedule.js');
+  const { getSiteById } = await import('../store/read.js');
+  const site = await getSiteById(siteId);
+  if (rec.recommendation_type === 'blog-outline') await assignBlogSlots(siteId, site);
+  const fresh = await getRecommendationById(siteId, rec.id);
+  return { queued: true, recommendationId: rec.id, scheduledFor: fresh?.params?.scheduledFor || null, status: fresh?.status || rec.status };
 }
 
 // Responds as soon as selection is done (prepareSafeFixesJob — DB reads plus
@@ -2214,7 +2234,9 @@ async function finalizeImplemented(siteId, draftId, site, { deployment = null } 
       }
       await scheduleImpactMeasurement(siteId, {
         draftId: draft.id,
-        pageUrl: draft.content?.page || draft.input?.page || null,
+        // A fix can name the page it is FOR when that is not the page it edits: a link added to page A to help invisible
+        // page B (agents/lib/zero-impression-pages.js) is judged on B.
+        pageUrl: draft.input?.measurePage || draft.content?.page || draft.input?.page || null,
         generatorId: draft.action_type,
         mergedAt: new Date(),
         goalId,

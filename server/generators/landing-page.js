@@ -5,6 +5,7 @@ import { loadProductFactsFor } from './lib/product-facts.js';
 import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
 import { usedPhotoIds } from './lib/blog-image-usage.js';
 import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
+import { llmFailure } from './lib/llm-error.js';
 
 export const meta = {
   id: 'landing-page',
@@ -62,8 +63,8 @@ export async function generate({ siteId, params }) {
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 900, generatorId: meta.id, siteId });
-  } catch {
-    throw Object.assign(new Error('Landing page generation failed: model did not return valid JSON'), { status: 400 });
+  } catch (err) {
+    throw llmFailure(err, 'Landing page generation failed: model did not return valid JSON', { status: 400 });
   }
 
   // Best-effort, same reasoning as blog-outline.js's own image search: a

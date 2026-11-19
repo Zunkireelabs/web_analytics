@@ -10,6 +10,15 @@ import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncodi
 // already-fixed "robots.txt blocks AI crawlers" finding on every
 // subsequent audit run.
 
+describe('robotsAllowsAiCrawlers RFC 9309 rules (shared evaluator)', () => {
+  test('honours Allow rules, own groups and longest match (the old line scan did not)', () => {
+    assert.equal(robotsAllowsAiCrawlers('User-agent: *\nDisallow: /\nAllow: /'), true);
+    assert.equal(robotsAllowsAiCrawlers('User-agent: *\nDisallow: /\n\nUser-agent: GPTBot\nAllow: /'), false); // the other bots still fall under *
+    assert.equal(robotsAllowsAiCrawlers('User-agent: GPTBot\nDisallow: /\nAllow: /public/'), false); // root still closed
+    assert.equal(robotsAllowsAiCrawlers('User-agent: GPTBot\nDisallow: /private/'), true);
+  });
+});
+
 describe('robotsAllowsAiCrawlers', () => {
   test('true when every real answer-engine crawler is explicitly allowed, even if Bytespider is disallowed', () => {
     const robotsTxt = [
