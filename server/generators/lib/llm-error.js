@@ -14,7 +14,7 @@
 
 const INVALID_JSON_PREFIX = 'Model did not return valid JSON';
 
-const QUOTA_PATTERN = /no credits remaining|insufficient[_ ]quota|exceeded your current quota|billing|credit balance is too low|payment required/i;
+const QUOTA_PATTERN = /no credits remaining|enforced spend limit|insufficient[_ ]quota|exceeded your current quota|billing|credit balance is too low|payment required/i;
 const AUTH_PATTERN = /invalid[_ ]api[_ ]key|incorrect api key|authentication[_ ]error|unauthorized|x-api-key/i;
 
 export function isInvalidJsonError(err) {

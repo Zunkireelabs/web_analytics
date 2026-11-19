@@ -64,6 +64,13 @@ describe('evaluateAutonomy', () => {
     assert.equal(v.ready, true);
   });
 
+  test('a healthy own Google connection is stored as status "ok" (the column default), and must pass; a dead one must fail', () => {
+    const ok = green(); ok.google = { mode: 'own', status: 'ok', error: null };
+    assert.equal(statusOf(evaluateAutonomy(ok, NOW), 'Google sign-in still valid'), 'ok');
+    const dead = green(); dead.google = { mode: 'own', status: 'reauth_required', error: 'invalid_grant' };
+    assert.equal(statusOf(evaluateAutonomy(dead, NOW), 'Google sign-in still valid'), 'fail');
+  });
+
   test('the shared Google account is a warning, never a failure', () => {
     const f = green(); f.google = { mode: 'shared', status: null, error: null };
     const v = evaluateAutonomy(f, NOW);

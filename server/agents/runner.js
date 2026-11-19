@@ -17,6 +17,10 @@ import { runAsDryRun } from './lib/dry-run-context.js';
 // the nightly cron, or the orchestrator's fan-out, passes through here, so
 // this is the one spot that can honestly say "an agent actually started/
 // finished" for the orchestration page's live diagram.
+// lib/browser-slots.js throws BrowserCapacityError (code BROWSER_CAPACITY, transient: true) when all global browser slots stay busy
+// for the whole wait. It is the one error the runner treats as "try again later" and not as a failed run.
+export const isBrowserBusyError = (err) => err?.code === 'BROWSER_CAPACITY' || err?.name === 'BrowserCapacityError';
+
 export async function runAgent(id, input, { persist = true, dryRun = false } = {}) {
   const agent = await getAgent(id);
   if (!agent) {
@@ -58,12 +62,17 @@ export async function runAgent(id, input, { persist = true, dryRun = false } = {
       : await agent.run(input);
   } catch (err) {
     const tookMs = Date.now() - startedAt;
-    emitAgentDone(input.siteId, agent.meta.id, { status: 'error', tookMs });
+    // A browser agent that found every browser slot busy did nothing wrong and nothing is broken: it is recorded as skipped, so it
+    // is not counted as an agent error (the readiness check and the dashboards read 'error') and runs again on the next pass.
+    const busy = isBrowserBusyError(err);
+    emitAgentDone(input.siteId, agent.meta.id, { status: busy ? 'skipped' : 'error', tookMs });
     if (persist) {
-      const { message } = safeMessage(`runner.runAgent:${id}`, err, 'this run did not complete');
+      const { message } = busy
+        ? { message: 'Skipped — every browser slot was busy. It runs again on the next pass.' }
+        : safeMessage(`runner.runAgent:${id}`, err, 'this run did not complete');
       await saveAgentRun({
         siteId: input.siteId, agentId: agent.meta.id, agentVersion: agent.meta.version,
-        input, status: 'error', facts: null, narrative: null,
+        input, status: busy ? 'skipped' : 'error', facts: null, narrative: null,
         error: message, tookMs,
       }).catch((e) => console.error(`[agents] failed to log error run for "${id}":`, e.message));
     }

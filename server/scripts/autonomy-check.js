@@ -25,8 +25,8 @@ export function evaluateAutonomy(f, now = Date.now()) {
   add('1 Connect', 'Search Console + GA4 saved', f.site.gsc && f.site.ga4 ? 'ok' : 'fail',
     f.site.gsc && f.site.ga4 ? `${f.site.gsc} / GA4 ${f.site.ga4}` : 'no property pair saved', 'connect Google in Add project');
   if (f.google.mode === 'own') {
-    add('1 Connect', 'Google sign-in still valid', f.google.status === 'active' || f.google.status == null ? 'ok' : 'fail',
-      `status: ${f.google.status || 'active'}${f.google.error ? ` (${f.google.error})` : ''}`, 'the client reconnects Google');
+    add('1 Connect', 'Google sign-in still valid', f.google.status === 'ok' || f.google.status === 'active' || f.google.status == null ? 'ok' : 'fail',
+      `status: ${f.google.status || 'ok'}${f.google.error ? ` (${f.google.error})` : ''}`, 'the client reconnects Google');
   } else {
     add('1 Connect', 'Google credential', 'warn', 'using the shared SuperRank Google account, not the client\'s own');
   }
