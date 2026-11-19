@@ -173,7 +173,10 @@ export async function runFullSiteAudit(siteId, {
 
     if (!pages.length) {
       await completeAuditRun(auditRun.id, { status: 'completed', agentIdsRun: [] });
-      if (triggeredBy === 'onboarding') await topUpOnboardingBaseline(siteId);
+      if (triggeredBy === 'onboarding') {
+      await topUpOnboardingBaseline(siteId);
+      await scheduleSetupPrAfterAudit(siteId);
+    }
       return { auditRunId: auditRun.id, pagesDiscovered: 0, pagesAudited: 0, findingsWritten: 0 };
     }
 
@@ -304,6 +307,20 @@ export async function runFullSiteAudit(siteId, {
     const { message } = safeMessage(`bulk-audit:${auditRun.id}`, err, 'This audit run could not finish — our team has been notified.');
     await completeAuditRun(auditRun.id, { status: 'failed', errorMessage: message }).catch(() => {});
     throw err;
+  }
+}
+
+// The onboarding audit is finished: the project's setup PR (implementers/lib/setup-pr.js) becomes due one hour from now, and the
+// platform keeps learning the project in between. A project whose setup PR is already done is left alone (the store refuses it), so a
+// staff re-run of a baseline cannot open a second one. Best-effort: scheduling must never fail an audit.
+export const SETUP_PR_DELAY_MS = 60 * 60 * 1000;
+async function scheduleSetupPrAfterAudit(siteId, now = Date.now()) {
+  try {
+    const { scheduleSetupPr } = await import('../../store/setup-pr.js');
+    const due = await scheduleSetupPr(siteId, new Date(now + SETUP_PR_DELAY_MS));
+    if (due) console.log(`[bulk-audit] site ${siteId}: setup PR due at ${new Date(due).toISOString()}`);
+  } catch (err) {
+    console.error(`[bulk-audit] site ${siteId} could not schedule the setup PR:`, err.message);
   }
 }
 

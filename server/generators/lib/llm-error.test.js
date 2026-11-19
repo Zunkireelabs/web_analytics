@@ -54,3 +54,11 @@ test('a provider error is not scored against the generator', () => {
   const r = classifyAbandonReason('LLM provider error: 429 You have no credits remaining');
   assert.equal(r.retryPolicy, RETRY_POLICY.RETRY);
 });
+
+test('the OpenAI project spend-limit 429 (real text from prod, 2026-11-19) is a quota failure, kept with its real message', () => {
+  const src = Object.assign(new Error('429 Your project has reached its configured enforced spend limit. Update your limit at https://platform.openai.com/settings/proj_x/limits.'), { status: 429 });
+  const e = llmFailure(src, 'fallback text');
+  assert.match(e.message, /enforced spend limit/);
+  assert.equal(e.llmQuota, true);
+  assert.equal(classifyShipFailure(new Error(src.message)).kind, FAILURE_KIND.SYSTEMIC);
+});

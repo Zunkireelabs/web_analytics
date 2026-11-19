@@ -13,6 +13,7 @@ import { withJobLock, jobKeyFor } from './lib/job-lock.js';
 import { runLearningUpdateAfterOutcomes, runDailyLearningUpdate } from './lib/learning-cycle.js';
 import { expireStaleClaims } from './agents/lib/work-claims.js';
 import { schedulePipelineCron, pipelineOwnsMorning } from './lib/daily-pipeline/cron.js';
+import { runSetupPrsDue } from './lib/setup-pr-job.js';
 
 // Every scheduled lane runs under a database-backed lease keyed by its name, so two app instances (staging
 // and production sharing a database, a second worker, a laptop left running) can never run the same lane at
@@ -442,6 +443,14 @@ export function startCron() {
     }
   }, { timezone: tz });
   console.log('[cron] hourly catch-up guard scheduled (fires at :05 each hour)');
+
+  // SETUP PR (lib/setup-pr-job.js): every five minutes, the oldest project whose setup PR is due, one at a time. Nothing here is due until a
+  // project's onboarding audit finished and an hour passed, or staff scheduled it (scripts/schedule-setup-pr.js), so on an ordinary day
+  // the pass reads one empty query. SETUP_PR_ENABLED=false switches it off.
+  cron.schedule('*/5 * * * *', async () => {
+    try { await runSetupPrsDue(); } catch (err) { console.error('[cron] setup-pr pass error:', err.message); }
+  });
+  console.log('[cron] setup-PR pass scheduled (every 5 minutes)');
 
   // MASTER AGENT (lib/master-agent.js). The schedules are ALWAYS registered and each pass reads the mode when it runs
   // (lib/master-agent-control.js getMasterMode: the Platform page's choice, clamped by the MASTER_AGENT_MODE ceiling), so switching

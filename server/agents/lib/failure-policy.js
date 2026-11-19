@@ -34,6 +34,7 @@ export const FAILURE_KIND = {
 // was written for — lib/failure-classification.js says so itself.
 const SYSTEMIC_MESSAGE_PATTERNS = [
   /\bno credits remaining\b/i,      // OpenAI 429 when the account has no credit
+  /\benforced spend limit\b/i,      // OpenAI 429 when the PROJECT's own spend cap is reached (2026-11-19; credit can be fine)
   /\binsufficient[_ ]quota\b/i,
   /\bcredit balance is too low\b/i, // Anthropic's equivalent
   /\bbad credentials\b/i,           // GitHub 401: the PAT is dead

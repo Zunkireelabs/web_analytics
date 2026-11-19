@@ -12,6 +12,8 @@ import SiteAuditSummaryCard from '../components/SiteAuditSummaryCard.jsx';
 import GrowthPlanNarrativeCard from '../components/GrowthPlanNarrativeCard.jsx';
 import BaselineReportCard from '../components/BaselineReportCard.jsx';
 import RunBaselineCard from '../components/RunBaselineCard.jsx';
+import IncompleteBaselineBanner from '../components/IncompleteBaselineBanner.jsx';
+import { baselineGaps } from '../lib/baseline-gaps.js';
 
 // The baseline half of the Reports page (its "Baseline" tab; this used to be the Milestones page):
 // "how much have we actually grown you" — real data only, strictly anchored to the site's real onboarding
@@ -77,6 +79,12 @@ export function GrowthReportBody({ isInternal = false, siteId }) {
       ) : (
         <>
           <KpiStrip cols={3} items={kpis} />
+
+          {isInternal && siteId && baselineGaps(baselineReport).length > 0 && (
+            <div className="mt-3">
+              <IncompleteBaselineBanner gaps={baselineGaps(baselineReport)} siteId={siteId} onChanged={() => { load(); loadBaselineReport(); }} />
+            </div>
+          )}
 
           <div className="mt-3">
             <BaselineReportCard report={baselineReport} siteId={isInternal ? siteId : undefined}

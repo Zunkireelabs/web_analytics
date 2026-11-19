@@ -13,12 +13,22 @@ const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // logo_data_url is TEXT with no DB-sid
 
 const LOGO_IMG_SELECTOR = 'img[class*="logo" i], img[id*="logo" i], img[alt*="logo" i]';
 
-function firstCandidate($, baseUrl) {
-  const headerImg = $('header, nav').find(LOGO_IMG_SELECTOR).first().attr('src');
+// Pictures of OTHER companies that sit on a site: customer, client, partner and testimonial logos. mobilise.agency marks them
+// class="testi-logo", which contains "logo", so the any-image step used to pick a customer's logo (Salesforce) as MOBILISE's own.
+// This is the only change from the original order of steps: such images are skipped, nothing else about the search moved.
+const OTHERS_LOGO = /testi|client|customer|partner|sponsor|trusted|brands?-(wall|strip|list)|press|as-seen|featured/i;
+
+const isOthersLogo = ($, el) => OTHERS_LOGO.test(`${$(el).attr('class') || ''} ${$(el).attr('id') || ''}`)
+  || $(el).closest('[class*="testi" i], [class*="client" i], [class*="partner" i], [class*="customer" i], [class*="sponsor" i]').length > 0;
+
+export function firstCandidate($, baseUrl) {
+  const own = (i, el) => !isOthersLogo($, el);
+
+  const headerImg = $('header, nav').find(LOGO_IMG_SELECTOR).filter(own).first().attr('src');
   const resolvedHeaderImg = resolve(headerImg, baseUrl);
   if (resolvedHeaderImg) return { url: resolvedHeaderImg, source: 'img.logo (header)' };
 
-  const anyImg = $(LOGO_IMG_SELECTOR).first().attr('src');
+  const anyImg = $(LOGO_IMG_SELECTOR).filter(own).first().attr('src');
   const resolvedAnyImg = resolve(anyImg, baseUrl);
   if (resolvedAnyImg) return { url: resolvedAnyImg, source: 'img.logo' };
 
