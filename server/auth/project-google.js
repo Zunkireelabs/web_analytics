@@ -94,7 +94,10 @@ export async function getProjectGoogleAuth(site) {
     } catch (err) {
       // This process cannot read ANY project's connection (no/invalid key). Say so, but never write it onto the project: the
       // 2026-11 incident marked three healthy connections 'unreadable' this way and every later run refused them.
-      if (isKeyProblem(err?.message)) throw Object.assign(new Error(`This server cannot read stored Google connections: ${err.message}`), { code: 'SECRETS_KEY_UNAVAILABLE' });
+      if (isKeyProblem(err?.message)) {
+        console.error('[project-google] this server cannot read stored Google connections:', err.message);
+        throw Object.assign(new Error('This server cannot read stored Google connections.'), { code: 'SECRETS_KEY_UNAVAILABLE' });
+      }
       console.error(`[project-google] site ${siteId}: stored Google connection could not be used: ${err.message}`);
       await markGoogleConnectionStatus(siteId, 'unreadable', err.message).catch(() => {});
       throw new ProjectGoogleAuthError(siteId, 'unreadable');

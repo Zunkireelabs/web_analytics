@@ -58,12 +58,12 @@ export async function mergeStagePr(site, prNumber, { userId } = {}, deps = {}) {
   const stage = stageBranchOf(site);
   if (!stage) return refuse('no-stage', 'This site has no stage branch, so there is nothing safe to merge into. The PR waits for a person on GitHub.');
   let pr;
-  try { pr = await getPr(site, prNumber); } catch (e) { return refuse('github-error', `GitHub could not be reached just now, so nothing was merged. (${e.message})`); }
+  try { pr = await getPr(site, prNumber); } catch (e) { console.error('[ship-flow] could not read the pull request:', e.message); return refuse('github-error', 'GitHub could not be reached just now, so nothing was merged.'); }
   if (!pr || pr.state !== 'open' || pr.merged) return refuse('not-open', 'That pull request is not open.');
   if (pr.base !== stage) return refuse('not-stage', `That pull request goes to "${pr.base}", not the stage branch. Only stage is merged from here; main is merged by a person on GitHub.`);
   if (pr.mergeable === false) return refuse('conflicts', 'GitHub says this cannot be merged cleanly yet.');
   let checks = [];
-  try { checks = await getChecks(site, pr.headSha); } catch (e) { return refuse('checks-pending', `The checks could not be read: ${e.message}`); }
+  try { checks = await getChecks(site, pr.headSha); } catch (e) { console.error('[ship-flow] could not read the checks:', e.message); return refuse('checks-pending', 'The checks could not be read yet, so nothing was merged. Try again in a minute.'); }
   if (checks.some((c) => c.status !== 'completed')) return refuse('checks-pending', 'The checks are still running.');
   if (checks.some((c) => !GOOD.has(c.conclusion))) return refuse('checks-failed', 'A check failed, so it was not merged.');
   const out = await merge(site, prNumber, { sha: pr.headSha });

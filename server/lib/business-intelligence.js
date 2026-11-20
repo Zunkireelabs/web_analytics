@@ -111,7 +111,8 @@ export async function collectEvidence(site, deps = {}) {
     const more = await Promise.all([...linked, ...inv].slice(0, MAX_PAGES - 1).map((u) => fetchPage(u).then((r) => readPage(r.html, r.finalUrl.toString())).catch(() => null)));
     pages.push(...more.filter(Boolean));
   } catch (err) {
-    return { pages: [], queries: [], capabilities: [], onboarding: null, problem: 'fetch-failed', error: String(err?.message || err).slice(0, 160) };
+    console.error('[business-intelligence] could not read the site:', err?.message);
+    return { pages: [], queries: [], capabilities: [], onboarding: null, problem: 'fetch-failed', error: 'The site could not be read.' };
   }
 
   const queries = deps.topQueries ? (await deps.topQueries(site.id, SEARCH_DAYS, TOP_QUERIES).catch(() => [])).map((q) => clean(q)).filter(Boolean) : [];
