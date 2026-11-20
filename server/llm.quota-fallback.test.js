@@ -78,9 +78,81 @@ describe('OpenAI quota breaker', () => {
 
 import { fallbackMaxTokens } from './llm.js';
 describe('fallbackMaxTokens', () => {
-  test('doubles the OpenAI-sized budget for Claude, with a sane floor and ceiling', () => {
-    assert.equal(fallbackMaxTokens(1500), 3000);
-    assert.equal(fallbackMaxTokens(undefined), 1000);
+  test('quadruples the OpenAI-sized budget for Claude, with a sane floor and ceiling', () => {
+    assert.equal(fallbackMaxTokens(1500), 6000);
+    assert.equal(fallbackMaxTokens(2500), 10000);
+    assert.equal(fallbackMaxTokens(undefined), 2000);
     assert.equal(fallbackMaxTokens(20000), 16000);
+  });
+});
+
+import { runAnthropic, llmUsageTotals, llmCostUsd, _resetLlmUsageForTest, FALLBACK_HARD_CAP } from './llm.js';
+const fakeClient = (replies) => { const calls = []; return { calls, messages: { create: async (req) => { calls.push(req); return replies[calls.length - 1]; } } }; };
+const reply = (text, out, stop = 'end_turn', inp = 100) => ({ content: [{ type: 'text', text }], stop_reason: stop, usage: { input_tokens: inp, output_tokens: out } });
+
+describe('Claude fallback ceiling', () => {
+  beforeEach(() => _resetLlmUsageForTest());
+
+  test('Chayce-style blog outline (2500 budget) gets a 10000 ceiling and completes', async () => {
+    const c = fakeClient([reply('{"outline":"..."}', 7200)]);
+    const out = await runAnthropic('s', [{ role: 'user', content: 'u' }], { model: 'claude-haiku-4-5', maxTokens: fallbackMaxTokens(2500), fallback: true, client: c });
+    assert.equal(out, '{"outline":"..."}');
+    assert.equal(c.calls[0].max_tokens, 10000);
+    assert.equal(c.calls.length, 1);
+  });
+
+  test('a short task records only what it used, not the ceiling', async () => {
+    const c = fakeClient([reply('ok', 12)]);
+    await runAnthropic('s', [{ role: 'user', content: 'u' }], { model: 'claude-haiku-4-5', maxTokens: fallbackMaxTokens(500), fallback: true, client: c });
+    const [t] = llmUsageTotals();
+    assert.equal(t.outputTokens, 12);
+    assert.equal(c.calls.length, 1);
+  });
+
+  test('a normal (non-fallback) Anthropic call keeps the caller budget and never continues', async () => {
+    const c = fakeClient([reply('partial', 500, 'max_tokens')]);
+    await runAnthropic('s', [{ role: 'user', content: 'u' }], { model: 'claude-haiku-4-5', maxTokens: 500, fallback: false, client: c });
+    assert.equal(c.calls[0].max_tokens, 500);
+    assert.equal(c.calls.length, 1);
+  });
+
+  test('a fallback reply cut off at the ceiling is continued once, within the hard cap', async () => {
+    const c = fakeClient([reply('AAA', 10000, 'max_tokens'), reply('BBB', 900)]);
+    const out = await runAnthropic('s', [{ role: 'user', content: 'u' }], { model: 'claude-haiku-4-5', maxTokens: 10000, fallback: true, client: c });
+    assert.equal(out, 'AAABBB');
+    assert.equal(c.calls.length, 2);
+    assert.equal(c.calls[1].max_tokens, FALLBACK_HARD_CAP - 10000);
+    assert.equal(c.calls[1].messages.at(-2).content, 'AAA');
+    assert.equal(llmUsageTotals()[0].continuations, 1);
+  });
+
+  test('at the hard cap there is no room, so no continuation (no unbounded generation)', async () => {
+    const c = fakeClient([reply('AAA', 16000, 'max_tokens')]);
+    const out = await runAnthropic('s', [{ role: 'user', content: 'u' }], { model: 'claude-haiku-4-5', maxTokens: 16000, fallback: true, client: c });
+    assert.equal(out, 'AAA');
+    assert.equal(c.calls.length, 1);
+  });
+
+  test('it never continues more than once', async () => {
+    const c = fakeClient([reply('A', 5000, 'max_tokens'), reply('B', 6000, 'max_tokens'), reply('C', 1)]);
+    await runAnthropic('s', [{ role: 'user', content: 'u' }], { model: 'claude-haiku-4-5', maxTokens: 5000, fallback: true, client: c });
+    assert.equal(c.calls.length, 2);
+  });
+});
+
+describe('usage and cost recording', () => {
+  beforeEach(() => _resetLlmUsageForTest());
+  test('records actual input/output tokens and cost per model', async () => {
+    const c = fakeClient([reply('x', 2000, 'end_turn', 1000)]);
+    await runAnthropic('s', [{ role: 'user', content: 'u' }], { model: 'claude-haiku-4-5', maxTokens: 4000, fallback: true, client: c });
+    const [t] = llmUsageTotals();
+    assert.deepEqual([t.inputTokens, t.outputTokens, t.fallback, t.model], [1000, 2000, true, 'claude-haiku-4-5']);
+    assert.ok(Math.abs(t.costUsd - (1000 * 1 + 2000 * 5) / 1e6) < 1e-9);
+  });
+  test('an unknown model records tokens but no invented cost', () => {
+    assert.equal(llmCostUsd('some-new-model', 100, 100, {}), null);
+  });
+  test('prices can be overridden by env', () => {
+    assert.equal(llmCostUsd('claude-haiku-4-5', 1e6, 0, { LLM_PRICE_CLAUDE_HAIKU_4_5_IN: '2' }), 2);
   });
 });

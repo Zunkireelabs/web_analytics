@@ -173,7 +173,7 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
 
   if (provider === 'openai') {
     const route = openAiRoute();
-    if (route === 'fallback') return callAnthropicText(system, user, { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens) });
+    if (route === 'fallback') return callAnthropicText(system, user, { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens), fallback: true });
     try {
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
       const res = await withRetry(() => openai.chat.completions.create({
@@ -185,11 +185,12 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
         ],
       }));
       noteOpenAiHealthy();
+      recordLlmUsage({ provider: 'openai', model: resolvedModel, usage: res.usage });
       return res.choices[0]?.message?.content?.trim() || '';
     } catch (err) {
       if (fallbackAvailable() && isQuotaExhaustedError(err)) {
         noteOpenAiQuotaExhausted(err);
-        return callAnthropicText(system, user, { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens) });
+        return callAnthropicText(system, user, { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens), fallback: true });
       }
       throw err;
     }
@@ -199,16 +200,9 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
 }
 
 // The Anthropic text call, shared by the normal Anthropic path and the OpenAI-quota fallback above.
-async function callAnthropicText(system, user, { model, maxTokens }) {
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: LLM_TIMEOUT_MS });
-  const msg = await withRetry(() => anthropic.messages.create({
-    model,
-    max_tokens: maxTokens,
-    system,
-    messages: [{ role: 'user', content: user }],
-  }));
-  warnIfTruncated(msg, model, maxTokens);
-  return msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim();
+// `fallback` marks the quota-fallback path: only that path may continue a cut-off reply (see runAnthropic).
+function callAnthropicText(system, user, { model, maxTokens, fallback = false }) {
+  return runAnthropic(system, [{ role: 'user', content: user }], { model, maxTokens, fallback });
 }
 
 // An OpenAI model name (or REPORT_MODEL_*) must never be sent to Anthropic: the fallback always uses Anthropic's own tier default.
@@ -216,9 +210,14 @@ const fallbackModel = (tier) => MODEL_DEFAULTS.anthropic[tier === 'monthly' ? 'm
 
 // Callers size maxTokens for OpenAI's tokenizer. Claude spends more tokens on the same text (much more for Nepali,
 // Hindi and other non-Latin scripts), so a fallback call with the same budget was cut off mid-JSON: verified
-// 2026-11-20, translation stopped at 1500/1500 tokens and failed as "invalid JSON". The fallback doubles the budget.
+// 2026-11-20, translation stopped at 1500/1500 tokens and failed as "invalid JSON", and a 2500-token blog outline was still cut
+// off at 5000. The fallback gives 4x the budget (capped). A bigger ceiling costs nothing unless the reply actually uses it.
+// 4x is the most Claude MAY use, not a target: it is only ever a max_tokens ceiling, and a short reply stops early and is billed for
+// what it used. Only the Claude fallback gets it; OpenAI calls keep the caller's own maxTokens.
+export const FALLBACK_TOKEN_FACTOR = 4;
+export const FALLBACK_HARD_CAP = 16000;
 export function fallbackMaxTokens(maxTokens) {
-  return Math.min(Math.max(Number(maxTokens) || 500, 1) * 2, 16000);
+  return Math.min(Math.max(Number(maxTokens) || 500, 1) * FALLBACK_TOKEN_FACTOR, FALLBACK_HARD_CAP);
 }
 
 function warnIfTruncated(msg, model, maxTokens) {
@@ -252,7 +251,7 @@ export async function callLLMWithImages(system, user, images, { model, maxTokens
     ...imageList.map((data) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } })),
   ];
   if (provider === 'openai') {
-    if (openAiRoute() === 'fallback') return callAnthropicBlocks(system, anthropicContent(), { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens) });
+    if (openAiRoute() === 'fallback') return callAnthropicBlocks(system, anthropicContent(), { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens), fallback: true });
     try {
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
       const content = [
@@ -268,11 +267,12 @@ export async function callLLMWithImages(system, user, images, { model, maxTokens
         ],
       }));
       noteOpenAiHealthy();
+      recordLlmUsage({ provider: 'openai', model: resolvedModel, usage: res.usage });
       return res.choices[0]?.message?.content?.trim() || '';
     } catch (err) {
       if (fallbackAvailable() && isQuotaExhaustedError(err)) {
         noteOpenAiQuotaExhausted(err);
-        return callAnthropicBlocks(system, anthropicContent(), { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens) });
+        return callAnthropicBlocks(system, anthropicContent(), { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens), fallback: true });
       }
       throw err;
     }
@@ -281,17 +281,64 @@ export async function callLLMWithImages(system, user, images, { model, maxTokens
   return callAnthropicBlocks(system, anthropicContent(), { model: resolvedModel, maxTokens });
 }
 
-async function callAnthropicBlocks(system, content, { model, maxTokens }) {
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: LLM_TIMEOUT_MS });
-  const msg = await withRetry(() => anthropic.messages.create({
-    model,
-    max_tokens: maxTokens,
-    system,
-    messages: [{ role: 'user', content }],
-  }));
-  warnIfTruncated(msg, model, maxTokens);
-  return msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim();
+function callAnthropicBlocks(system, content, { model, maxTokens, fallback = false }) {
+  return runAnthropic(system, [{ role: 'user', content }], { model, maxTokens, fallback });
 }
+
+// One Anthropic request, with usage recorded. On the fallback path only, a reply cut off at max_tokens is continued ONCE
+// (the partial reply is sent back and Claude is asked to carry on) instead of the whole task being rerun. The continuation
+// can never push total output past FALLBACK_HARD_CAP, so the ceiling stays a ceiling: it is never a target and never unbounded.
+export async function runAnthropic(system, messages, { model, maxTokens, fallback, client }) {
+  const anthropic = client || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: LLM_TIMEOUT_MS });
+  const send = (msgs, max) => withRetry(() => anthropic.messages.create({ model, max_tokens: max, system, messages: msgs }));
+  const textOf = (m) => m.content.map((b) => (b.type === 'text' ? b.text : '')).join('');
+
+  let msg = await send(messages, maxTokens);
+  recordLlmUsage({ provider: 'anthropic', model, usage: msg?.usage, fallback });
+  let text = textOf(msg);
+
+  if (fallback && msg?.stop_reason === 'max_tokens') {
+    const room = FALLBACK_HARD_CAP - (msg?.usage?.output_tokens || maxTokens);
+    if (room > 0) {
+      const next = await send([...messages, { role: 'assistant', content: text }, { role: 'user', content: 'Your reply was cut off. Continue exactly where you stopped, with no preamble and no repetition.' }], room);
+      recordLlmUsage({ provider: 'anthropic', model, usage: next?.usage, fallback, continuation: true });
+      text += textOf(next);
+      msg = next;
+    }
+  }
+  warnIfTruncated(msg, model, fallback ? FALLBACK_HARD_CAP : maxTokens);
+  return text.trim();
+}
+
+// Actual tokens and estimated cost per provider/model, kept for the life of the process and logged per call, so a bigger
+// fallback ceiling can be checked against what was really spent. Prices are USD per million tokens; they are estimates
+// (override with LLM_PRICE_<MODEL>_IN / _OUT), and an unknown model is counted in tokens with cost null, never guessed.
+const PRICE_PER_MTOK = {
+  'gpt-4o-mini': [0.15, 0.6], 'gpt-4o': [2.5, 10],
+  'claude-haiku-4-5': [1, 5], 'claude-opus-4-8': [5, 25],
+};
+const usageTotals = new Map();
+export function llmCostUsd(model, inputTokens, outputTokens, env = process.env) {
+  const key = String(model).toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+  const inP = Number(env[`LLM_PRICE_${key}_IN`]) || PRICE_PER_MTOK[model]?.[0];
+  const outP = Number(env[`LLM_PRICE_${key}_OUT`]) || PRICE_PER_MTOK[model]?.[1];
+  if (inP == null || outP == null) return null;
+  return (inputTokens * inP + outputTokens * outP) / 1e6;
+}
+export function recordLlmUsage({ provider, model, usage, fallback = false, continuation = false }) {
+  const inputTokens = usage?.input_tokens ?? usage?.prompt_tokens ?? 0;
+  const outputTokens = usage?.output_tokens ?? usage?.completion_tokens ?? 0;
+  const cost = llmCostUsd(model, inputTokens, outputTokens);
+  const k = `${provider}|${model}|${fallback ? 'fallback' : 'primary'}`;
+  const t = usageTotals.get(k) || { provider, model, fallback, calls: 0, continuations: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, costKnown: true };
+  t.calls += 1; if (continuation) t.continuations += 1;
+  t.inputTokens += inputTokens; t.outputTokens += outputTokens;
+  if (cost == null) t.costKnown = false; else t.costUsd += cost;
+  usageTotals.set(k, t);
+  console.log(`[llm-usage] ${provider}/${model}${fallback ? ' (fallback)' : ''}${continuation ? ' (continuation)' : ''} in=${inputTokens} out=${outputTokens} cost=${cost == null ? 'unknown' : '$' + cost.toFixed(5)}`);
+}
+export const llmUsageTotals = () => [...usageTotals.values()];
+export const _resetLlmUsageForTest = () => usageTotals.clear();
 
 // Strips a markdown code fence wrapper (```json ... ``` or ``` ... ```) if
 // present — models frequently wrap JSON in one despite an explicit
