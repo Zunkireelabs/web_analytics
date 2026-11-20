@@ -61,8 +61,57 @@ const BASE_DELAY_MS = 500;
 // own `new OpenAI(...)` client gets the same ceiling.
 export const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 60_000;
 
+// ---------------------------------------------------------------------------------------------------------------------------------
+// OpenAI quota fallback.
+//
+// When the OpenAI project's spend limit (or credit) is exhausted every call fails with a 429 whose code is insufficient_quota /
+// project_spend_limit_exceeded. That is not a rate limit that clears in a second: the whole project is blocked until someone raises
+// the limit. Before this, every agent and generator then failed ("model did not return valid JSON", "took too long to compute").
+//
+// Now a quota failure (a) is not retried, (b) is answered by the same call on Anthropic, if ANTHROPIC_API_KEY is set, and (c) opens a
+// breaker so the next calls go straight to Anthropic for LLM_QUOTA_COOLDOWN_MS (default 15 min). When the cooldown ends ONE call
+// probes OpenAI again; if it works the breaker resets and everything is back on OpenAI by itself, if it is still blocked the cooldown
+// restarts. Set LLM_FALLBACK_ON_QUOTA=off to disable. Without an Anthropic key behaviour is exactly what it was.
+// ---------------------------------------------------------------------------------------------------------------------------------
+const QUOTA_CODE_RE = /insufficient_quota|project_spend_limit_exceeded|billing_hard_limit_reached/i;
+const QUOTA_TEXT_RE = /enforced spend limit|exceeded your current quota|insufficient[_ ]quota|no credits remaining|billing/i;
+export function isQuotaExhaustedError(err) {
+  if (!err) return false;
+  const status = err.status ?? err.response?.status;
+  if (status != null && status !== 429 && status !== 402) return false;
+  const code = err.code ?? err.error?.code ?? err.error?.type ?? '';
+  return QUOTA_CODE_RE.test(String(code)) || QUOTA_TEXT_RE.test(String(err.message || ''));
+}
+
+const quotaBreaker = { blockedUntil: 0 };
+const PROBE_LEASE_MS = 60_000; // while one call probes OpenAI, every other call keeps using the fallback
+const quotaCooldownMs = () => Number(process.env.LLM_QUOTA_COOLDOWN_MS) || 15 * 60_000;
+export function fallbackAvailable(env = process.env) {
+  return String(env.LLM_FALLBACK_ON_QUOTA || '').toLowerCase() !== 'off' && Boolean(env.ANTHROPIC_API_KEY);
+}
+// 'openai' = call OpenAI normally; 'probe' = the cooldown just ended, this call tests OpenAI; 'fallback' = go to Anthropic.
+export function openAiRoute(now = Date.now(), env = process.env) {
+  if (!fallbackAvailable(env) || quotaBreaker.blockedUntil === 0) return 'openai';
+  if (now < quotaBreaker.blockedUntil) return 'fallback';
+  quotaBreaker.blockedUntil = now + PROBE_LEASE_MS;
+  return 'probe';
+}
+export function noteOpenAiQuotaExhausted(err, now = Date.now()) {
+  const wasClosed = quotaBreaker.blockedUntil === 0;
+  quotaBreaker.blockedUntil = now + quotaCooldownMs();
+  if (wasClosed) console.warn(`[llm] OpenAI quota exhausted (${String(err?.message || err).slice(0, 140)}) — routing LLM calls to Anthropic; OpenAI is re-tested every ${Math.round(quotaCooldownMs() / 60000)} min and used again as soon as it works.`);
+}
+export function noteOpenAiHealthy() {
+  if (quotaBreaker.blockedUntil !== 0) { quotaBreaker.blockedUntil = 0; console.log('[llm] OpenAI is working again — back on OpenAI.'); }
+}
+export function llmFallbackState() { return { blockedUntil: quotaBreaker.blockedUntil, active: quotaBreaker.blockedUntil !== 0 }; }
+export function _resetQuotaBreakerForTest() { quotaBreaker.blockedUntil = 0; }
+
 export function isRetryable(err) {
   const status = err?.status ?? err?.response?.status;
+  // A spent quota is not a transient hiccup: retrying it three times only burns the call timeout and, with 27 agents running at once,
+  // is what turned an exhausted OpenAI project into agents that "took too long to compute".
+  if (isQuotaExhaustedError(err)) return false;
   if (status === 429 || status >= 500) return true;
   if (!status && ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN'].includes(err?.code)) return true;
   return false;
@@ -123,26 +172,57 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
   const { provider, model: resolvedModel } = resolveProviderAndModel({ task, tier, model, promoted });
 
   if (provider === 'openai') {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
-    const res = await withRetry(() => openai.chat.completions.create({
-      model: resolvedModel,
-      max_tokens: maxTokens,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
-    }));
-    return res.choices[0]?.message?.content?.trim() || '';
+    const route = openAiRoute();
+    if (route === 'fallback') return callAnthropicText(system, user, { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens) });
+    try {
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
+      const res = await withRetry(() => openai.chat.completions.create({
+        model: resolvedModel,
+        max_tokens: maxTokens,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      }));
+      noteOpenAiHealthy();
+      return res.choices[0]?.message?.content?.trim() || '';
+    } catch (err) {
+      if (fallbackAvailable() && isQuotaExhaustedError(err)) {
+        noteOpenAiQuotaExhausted(err);
+        return callAnthropicText(system, user, { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens) });
+      }
+      throw err;
+    }
   }
 
+  return callAnthropicText(system, user, { model: resolvedModel, maxTokens });
+}
+
+// The Anthropic text call, shared by the normal Anthropic path and the OpenAI-quota fallback above.
+async function callAnthropicText(system, user, { model, maxTokens }) {
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: LLM_TIMEOUT_MS });
   const msg = await withRetry(() => anthropic.messages.create({
-    model: resolvedModel,
+    model,
     max_tokens: maxTokens,
     system,
     messages: [{ role: 'user', content: user }],
   }));
+  warnIfTruncated(msg, model, maxTokens);
   return msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim();
+}
+
+// An OpenAI model name (or REPORT_MODEL_*) must never be sent to Anthropic: the fallback always uses Anthropic's own tier default.
+const fallbackModel = (tier) => MODEL_DEFAULTS.anthropic[tier === 'monthly' ? 'monthly' : 'daily'];
+
+// Callers size maxTokens for OpenAI's tokenizer. Claude spends more tokens on the same text (much more for Nepali,
+// Hindi and other non-Latin scripts), so a fallback call with the same budget was cut off mid-JSON: verified
+// 2026-11-20, translation stopped at 1500/1500 tokens and failed as "invalid JSON". The fallback doubles the budget.
+export function fallbackMaxTokens(maxTokens) {
+  return Math.min(Math.max(Number(maxTokens) || 500, 1) * 2, 16000);
+}
+
+function warnIfTruncated(msg, model, maxTokens) {
+  if (msg?.stop_reason === 'max_tokens') console.warn(`[llm] ${model} reply was cut off at max_tokens=${maxTokens}; the output is incomplete.`);
 }
 
 // callLLM, but for a prompt that also needs to show the model real images —
@@ -167,34 +247,49 @@ export async function callLLMWithImages(system, user, images, { model, maxTokens
   const { provider, model: resolvedModel } = resolveProviderAndModel({ task, tier, model });
   const imageList = Array.isArray(images) ? images : [];
 
-  if (provider === 'openai') {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
-    const content = [
-      { type: 'text', text: user },
-      ...imageList.map((data) => ({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${data}` } })),
-    ];
-    const res = await withRetry(() => openai.chat.completions.create({
-      model: resolvedModel,
-      max_tokens: maxTokens,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content },
-      ],
-    }));
-    return res.choices[0]?.message?.content?.trim() || '';
-  }
-
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: LLM_TIMEOUT_MS });
-  const content = [
+  const anthropicContent = () => [
     { type: 'text', text: user },
     ...imageList.map((data) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } })),
   ];
+  if (provider === 'openai') {
+    if (openAiRoute() === 'fallback') return callAnthropicBlocks(system, anthropicContent(), { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens) });
+    try {
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
+      const content = [
+        { type: 'text', text: user },
+        ...imageList.map((data) => ({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${data}` } })),
+      ];
+      const res = await withRetry(() => openai.chat.completions.create({
+        model: resolvedModel,
+        max_tokens: maxTokens,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content },
+        ],
+      }));
+      noteOpenAiHealthy();
+      return res.choices[0]?.message?.content?.trim() || '';
+    } catch (err) {
+      if (fallbackAvailable() && isQuotaExhaustedError(err)) {
+        noteOpenAiQuotaExhausted(err);
+        return callAnthropicBlocks(system, anthropicContent(), { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens) });
+      }
+      throw err;
+    }
+  }
+
+  return callAnthropicBlocks(system, anthropicContent(), { model: resolvedModel, maxTokens });
+}
+
+async function callAnthropicBlocks(system, content, { model, maxTokens }) {
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: LLM_TIMEOUT_MS });
   const msg = await withRetry(() => anthropic.messages.create({
-    model: resolvedModel,
+    model,
     max_tokens: maxTokens,
     system,
     messages: [{ role: 'user', content }],
   }));
+  warnIfTruncated(msg, model, maxTokens);
   return msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim();
 }
 

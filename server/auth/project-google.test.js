@@ -7,7 +7,7 @@ let rows = [];
 let marked = [];
 mock.module(resolve('../db.js'), { namedExports: { query: async () => ({ rows }) } });
 mock.module(resolve('../lib/secret-box.js'), {
-  namedExports: { decryptSecret: (v) => { if (v === 'BAD') throw new Error('bad key'); return `rt:${v}`; } },
+  namedExports: { decryptSecret: (v) => { if (v === 'BAD') throw new Error('bad key'); if (v === 'NOKEY') throw new Error('SECRETS_ENCRYPTION_KEY is not set.'); return `rt:${v}`; } },
 });
 mock.module(resolve('../integrations/google-connect.js'), { namedExports: { connectClientCreds: () => ({ id: 'id', secret: 'secret' }) } });
 mock.module(resolve('../store/project-google.js'), {
@@ -58,4 +58,29 @@ test("one project's dead connection does not affect another's", async () => {
   await assert.rejects(() => getProjectGoogleAuth({ id: 5 }), ProjectGoogleAuthError);
   rows = [{ refresh_token_enc: 'ok', status: 'ok' }];
   assert.ok(await getProjectGoogleAuth({ id: 6 }));
+});
+
+test('a process with no SECRETS_ENCRYPTION_KEY throws a config error and does NOT mark the project unreadable', async () => {
+  rows = [{ refresh_token_enc: 'NOKEY', status: 'ok' }];
+  await assert.rejects(() => getProjectGoogleAuth({ id: 20 }), (e) => e.code === 'SECRETS_KEY_UNAVAILABLE' && !(e instanceof ProjectGoogleAuthError));
+  assert.deepEqual(marked, []);
+});
+
+test('a connection wrongly flagged unreadable by a key-less process heals itself once a process with the key reads it', async () => {
+  rows = [{ refresh_token_enc: 'ok', status: 'unreadable', status_error: 'SECRETS_ENCRYPTION_KEY is not set.' }];
+  const client = await getProjectGoogleAuth({ id: 21 });
+  assert.ok(client && typeof client.refreshTokenNoCache === 'function');
+  assert.deepEqual(marked, [[21, 'ok', null]]);
+});
+
+test('a key-less process looking at a wrongly flagged connection changes nothing', async () => {
+  rows = [{ refresh_token_enc: 'NOKEY', status: 'unreadable', status_error: 'SECRETS_ENCRYPTION_KEY is not set.' }];
+  await assert.rejects(() => getProjectGoogleAuth({ id: 22 }), (e) => e.code === 'SECRETS_KEY_UNAVAILABLE');
+  assert.deepEqual(marked, []);
+});
+
+test('a genuinely unreadable token (not a key problem) stays unreadable and is not retried', async () => {
+  rows = [{ refresh_token_enc: 'ok', status: 'unreadable', status_error: 'bad key' }];
+  await assert.rejects(() => getProjectGoogleAuth({ id: 23 }), ProjectGoogleAuthError);
+  assert.deepEqual(marked, []);
 });
