@@ -75,3 +75,12 @@ describe('OpenAI quota breaker', () => {
     assert.equal(openAiRoute(probeAt + 16 * 60_000, withKey), 'probe');
   });
 });
+
+import { fallbackMaxTokens } from './llm.js';
+describe('fallbackMaxTokens', () => {
+  test('doubles the OpenAI-sized budget for Claude, with a sane floor and ceiling', () => {
+    assert.equal(fallbackMaxTokens(1500), 3000);
+    assert.equal(fallbackMaxTokens(undefined), 1000);
+    assert.equal(fallbackMaxTokens(20000), 16000);
+  });
+});

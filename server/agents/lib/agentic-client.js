@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
-import { LLM_TIMEOUT_MS, MODEL_DEFAULTS, openAiRoute, noteOpenAiQuotaExhausted, noteOpenAiHealthy, fallbackAvailable, isQuotaExhaustedError } from '../../llm.js';
+import { LLM_TIMEOUT_MS, MODEL_DEFAULTS, fallbackMaxTokens, openAiRoute, noteOpenAiQuotaExhausted, noteOpenAiHealthy, fallbackAvailable, isQuotaExhaustedError } from '../../llm.js';
 
 // A chat client for agentic-orchestrator.js's tool-calling loop that looks exactly like the OpenAI SDK's
 // `client.chat.completions.create(params)` (same params in, same response shape out), so the loop is unchanged, but which provider
@@ -78,7 +78,7 @@ export function makeAgenticClient({ openai, anthropic, env = process.env } = {})
     if (params.tools?.length) lastTools = params.tools;
     const { system, messages } = toAnthropicRequest(params.messages);
     const tools = params.tools?.length ? params.tools : (hasToolBlocks(params.messages) ? lastTools : null);
-    const req = { model: anthropicModel(env), max_tokens: params.max_tokens || 500, messages, ...(system ? { system } : {}) };
+    const req = { model: anthropicModel(env), max_tokens: fallbackMaxTokens(params.max_tokens || 500), messages, ...(system ? { system } : {}) };
     if (tools?.length) {
       req.tools = toAnthropicTools(tools);
       req.tool_choice = params.tools?.length ? { type: 'auto' } : { type: 'none' };

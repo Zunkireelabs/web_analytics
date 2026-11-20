@@ -173,7 +173,7 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
 
   if (provider === 'openai') {
     const route = openAiRoute();
-    if (route === 'fallback') return callAnthropicText(system, user, { model: fallbackModel(tier), maxTokens });
+    if (route === 'fallback') return callAnthropicText(system, user, { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens) });
     try {
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
       const res = await withRetry(() => openai.chat.completions.create({
@@ -189,7 +189,7 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
     } catch (err) {
       if (fallbackAvailable() && isQuotaExhaustedError(err)) {
         noteOpenAiQuotaExhausted(err);
-        return callAnthropicText(system, user, { model: fallbackModel(tier), maxTokens });
+        return callAnthropicText(system, user, { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens) });
       }
       throw err;
     }
@@ -207,11 +207,23 @@ async function callAnthropicText(system, user, { model, maxTokens }) {
     system,
     messages: [{ role: 'user', content: user }],
   }));
+  warnIfTruncated(msg, model, maxTokens);
   return msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim();
 }
 
 // An OpenAI model name (or REPORT_MODEL_*) must never be sent to Anthropic: the fallback always uses Anthropic's own tier default.
 const fallbackModel = (tier) => MODEL_DEFAULTS.anthropic[tier === 'monthly' ? 'monthly' : 'daily'];
+
+// Callers size maxTokens for OpenAI's tokenizer. Claude spends more tokens on the same text (much more for Nepali,
+// Hindi and other non-Latin scripts), so a fallback call with the same budget was cut off mid-JSON: verified
+// 2026-11-20, translation stopped at 1500/1500 tokens and failed as "invalid JSON". The fallback doubles the budget.
+export function fallbackMaxTokens(maxTokens) {
+  return Math.min(Math.max(Number(maxTokens) || 500, 1) * 2, 16000);
+}
+
+function warnIfTruncated(msg, model, maxTokens) {
+  if (msg?.stop_reason === 'max_tokens') console.warn(`[llm] ${model} reply was cut off at max_tokens=${maxTokens}; the output is incomplete.`);
+}
 
 // callLLM, but for a prompt that also needs to show the model real images —
 // added for visual-quality.js (server/agents/visual-quality.js), the first
@@ -240,7 +252,7 @@ export async function callLLMWithImages(system, user, images, { model, maxTokens
     ...imageList.map((data) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } })),
   ];
   if (provider === 'openai') {
-    if (openAiRoute() === 'fallback') return callAnthropicBlocks(system, anthropicContent(), { model: fallbackModel(tier), maxTokens });
+    if (openAiRoute() === 'fallback') return callAnthropicBlocks(system, anthropicContent(), { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens) });
     try {
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
       const content = [
@@ -260,7 +272,7 @@ export async function callLLMWithImages(system, user, images, { model, maxTokens
     } catch (err) {
       if (fallbackAvailable() && isQuotaExhaustedError(err)) {
         noteOpenAiQuotaExhausted(err);
-        return callAnthropicBlocks(system, anthropicContent(), { model: fallbackModel(tier), maxTokens });
+        return callAnthropicBlocks(system, anthropicContent(), { model: fallbackModel(tier), maxTokens: fallbackMaxTokens(maxTokens) });
       }
       throw err;
     }
@@ -277,6 +289,7 @@ async function callAnthropicBlocks(system, content, { model, maxTokens }) {
     system,
     messages: [{ role: 'user', content }],
   }));
+  warnIfTruncated(msg, model, maxTokens);
   return msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim();
 }
 
