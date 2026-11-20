@@ -185,6 +185,15 @@ function buildTransporter() {
 // Builds a small HTML morning email from the day's metrics + AI narrative.
 // Skips silently (returns false) if SMTP is not configured, so the rest of the
 // pipeline still succeeds.
+// The written summary comes from the LLM. When that call failed the email used to go out with an empty paragraph,
+// which reads as "nothing to say" rather than "the summary could not be written" (11 of 12 daily emails, Nov 2026).
+export const MISSING_SUMMARY_TEXT = 'The written summary could not be generated for this day. The numbers above are complete; open the dashboard for details.';
+export function dailySummaryHtml(narrative) {
+  const text = String(narrative || '').trim();
+  if (!text) return `<em style="color:#777">${MISSING_SUMMARY_TEXT}</em>`;
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+}
+
 export async function sendDailyEmail(site, reportDate, day, narrative) {
   const recipient = site.report_email_to || process.env.REPORT_EMAIL_TO;
   const transporter = getTransporter();
@@ -210,7 +219,7 @@ export async function sendDailyEmail(site, reportDate, day, narrative) {
       ${card('Users', n(day?.users))}
       ${card('Sessions', n(day?.sessions))}
     </tr></table>
-    <p style="margin:18px 0;line-height:1.5;color:#222">${(narrative || '').replace(/\n/g, '<br>')}</p>
+    <p style="margin:18px 0;line-height:1.5;color:#222">${dailySummaryHtml(narrative)}</p>
     <p style="color:#999;font-size:12px">Automated report. Open the dashboard for charts and history.</p>
   </div>`;
 
