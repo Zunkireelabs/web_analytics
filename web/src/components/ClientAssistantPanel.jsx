@@ -87,7 +87,7 @@ export default function ClientAssistantPanel({ open, onClose, raise = [], onRais
   // Shown once when the panel is open: record it so the same items are not raised again straight away.
   // The panel keeps its own copy, because `raise` empties once they are recorded as shown.
   const [shown, setShown] = useState([]);
-  const hello = greeting(shown, ship); // the short "left for your approval" line at the top
+  const hello = greeting(shown, ship) || (siteName ? `Hi, nothing is waiting for you on ${siteName}. Ask me anything about your site.` : 'Hi, nothing is waiting for you. Ask me anything about your site.'); // the short line at the top
   const shownRef = useRef(null);
   useEffect(() => {
     if (!open) { shownRef.current = null; setShown([]); return; }
