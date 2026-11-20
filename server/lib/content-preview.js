@@ -118,3 +118,48 @@ export async function previewsFor(site, catalog, deps = {}) {
   }
   return out;
 }
+
+// A real DRAFT (not a sample option) drawn the same way: its own words, in the site's own look. Used by the side panel the client opens
+// from Drafted and History, so they see the page as it will read on their site. Returns null for a kind that is not a page of copy
+// (a meta title, a schema block): those are shown another way. Everything from the draft is escaped.
+export function renderDraft(draft, k) {
+  const c = draft?.content || {};
+  const type = draft?.action_type;
+  const paras = (t) => String(t || '').split(/\n{2,}/).map((x) => x.trim()).filter(Boolean).map((x) => p(k, x)).join('');
+  let body = '';
+  if (type === 'blog-outline') {
+    if (!c.title) return null;
+    body = `${h1(k, c.title)}${c.metaDescription ? p(k, c.metaDescription) : ''}${(c.sections || []).map((s) => `${h2(k, s.heading || '')}${paras(s.body)}`).join('')}`
+      + (c.suggestedFaqTopics?.length ? `${h2(k, 'Questions readers ask')}${c.suggestedFaqTopics.map((q) => `<div style="border-bottom:1px solid ${k.border};padding:14px 0"><h3 style="${k.h3};font-size:18px">${esc(q)}</h3></div>`).join('')}` : '');
+  } else if (type === 'landing-page') {
+    if (!c.headline) return null;
+    const secs = c.sections || [];
+    body = `${h1(k, c.headline)}${c.subheadline ? p(k, c.subheadline) : ''}${c.cta ? `<div style="margin:6px 0 32px">${btn(k, c.cta)}</div>` : ''}`
+      + (secs.length ? `<div class="pv-grid ${secs.length >= 3 ? 'pv-3' : 'pv-2'}" style="margin-bottom:28px">${secs.map((s) => card(k, s.heading || '', s.body || '')).join('')}</div>` : '');
+  } else if (type === 'translation') {
+    if (!c.translatedTitle && !c.translatedContent) return null;
+    body = `${c.translatedTitle ? h1(k, c.translatedTitle) : ''}${c.translatedMetaDescription ? p(k, c.translatedMetaDescription) : ''}${paras(c.translatedContent)}`;
+  } else if (type === 'faq') {
+    if (!c.items?.length) return null;
+    body = `${h2(k, 'Frequently asked questions')}${c.items.map((q) => `<div style="border-bottom:1px solid ${k.border};padding:16px 0"><h3 style="${k.h3};font-size:19px;margin-bottom:6px">${esc(q.question || '')}</h3>${p(k, q.answer || '')}</div>`).join('')}`;
+  } else if (type === 'meta-title') {
+    const title = c.selectedTitle || (c.titles || [])[0];
+    if (!title) return null;
+    const page = draft?.input?.page || '';
+    // Not the client's design: this is Google's own result card, which is what a title is for.
+    body = `<div style="font-family:Arial,sans-serif;max-width:640px"><div style="font-size:14px;color:#202124;margin-bottom:4px">${esc(String(page).replace(/^https?:\/\//, ''))}</div>`
+      + `<div style="font-size:21px;line-height:1.3;color:#1a0dab;margin-bottom:4px">${esc(title)}</div>`
+      + (c.metaDescription ? `<div style="font-size:14px;line-height:1.58;color:#4d5156">${esc(c.metaDescription)}</div>` : '') + '</div>';
+  } else return null;
+  return `<div class="pv">${body}</div>`;
+}
+
+// The full document for a draft, in the site's own design (its stylesheets, fonts and colours), or null when there is nothing to draw.
+export async function draftPreviewFor(site, draft, deps = {}) {
+  const kit = designKitFor(site);
+  const html = renderDraft(draft, kit);
+  if (!html) return null;
+  const { origin, hrefs } = await getSiteStylesheets(site, deps.fetchImpl);
+  const head = `<!doctype html><meta charset="utf-8">${origin ? `<base href="${esc(origin)}/">` : ''}${hrefs.slice(0, 4).map((h) => `<link rel="stylesheet" href="${esc(h)}">`).join('')}<style>${LAYOUT_CSS}</style>`;
+  return head + html;
+}

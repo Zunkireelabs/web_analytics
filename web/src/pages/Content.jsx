@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Fragment, useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Check, LayoutTemplate, Languages, PenLine } from 'lucide-react';
 import { api } from '../api.js';
 import Button from '../components/Button.jsx';
@@ -7,6 +7,12 @@ import Badge from '../components/Badge.jsx';
 import OptionPreview from '../components/content/OptionPreview.jsx';
 import RealPreview from '../components/content/RealPreview.jsx';
 import ApproveBar from '../components/ApproveBar.jsx';
+import ContentStages from '../components/content/ContentStages.jsx';
+import IdeaPanel from '../components/content/IdeaPanel.jsx';
+import ContentDrafts from '../components/content/ContentDrafts.jsx';
+import { viewFromParam } from '../lib/content-tabs.js';
+import { typeFromParam, stageCounts, CONTENT_TYPES } from '../lib/content-types.js';
+import { inDraftScope } from '../lib/draft-scope.js';
 
 // Content: what the agent found to write, as one list per kind (landing pages, translations, blog posts). Each found
 // idea shows its options right on the row. You SELECT one option on each, then press Approve ONCE at the bottom: that is
@@ -27,8 +33,12 @@ const findingOf = (item) => item.findingIds?.[0];
 
 export default function Content() {
   const [searchParams] = useSearchParams();
+  const view = viewFromParam(searchParams.get('view'));
   const siteId = searchParams.get('siteId') || undefined;
-  const [tab, setTab] = useState('landing');
+  const type = typeFromParam(searchParams.get('type'));
+  const tab = type === 'all' ? 'landing' : type; // the kind used when only one is shown
+  const [drafts, setDrafts] = useState(null);     // null = loading
+  const [draftsError, setDraftsError] = useState(false);
   const [recs, setRecs] = useState(null);          // null = loading
   const [picks, setPicks] = useState({});          // approved and saved: findingId -> { optionKey, status }
   const [selected, setSelected] = useState({});    // chosen on screen but NOT approved yet: findingId -> { generatorId, optionKey }
@@ -36,7 +46,11 @@ export default function Content() {
   const [previews, setPreviews] = useState({}); // each option drawn in this site's own look (server: lib/content-preview.js)
   const [builtToday, setBuiltToday] = useState(false); // today's daily run already happened: new approvals wait for tomorrow's
   const [busy, setBusy] = useState(null);
+  const [idea, setIdea] = useState(null); // { item, startKey }: the idea whose side panel is open
   const [error, setError] = useState(null);
+
+  const loadDrafts = () => api.actionCenter.drafts({}, siteId).then((all) => { setDrafts((all || []).filter((d) => inDraftScope(d.action_type, 'content'))); setDraftsError(false); }).catch(() => { setDrafts((d) => d || []); setDraftsError(true); });
+  useEffect(() => { loadDrafts(); }, [siteId]);
 
   useEffect(() => {
     let alive = true;
@@ -90,32 +104,13 @@ export default function Content() {
   };
 
   const current = TYPES.find((t) => t.type === tab);
-  const items = byType[tab] || [];
-  const options = catalog[current.generatorId]?.options || [];
 
-  return (
-    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-8 fade-up">
-      <div className="flex flex-wrap items-center gap-2 mb-5">
-        <div className="toggle" role="tablist" aria-label="Kind of content">
-          {TYPES.map((t) => (
-            <button key={t.type} type="button" role="tab" aria-selected={tab === t.type} className={tab === t.type ? 'is-on' : ''} onClick={() => setTab(t.type)} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              {t.label}
-              {recs && waitingIn(t) > 0 ? <Badge tone="red">{waitingIn(t)}</Badge> : <span className="text-faint">{byType[t.type].length}</span>}
-            </button>
-          ))}
-        </div>
-        <span className="hidden md:inline text-[13px] text-faint">Red counts are ideas waiting for your pick</span>
-        <Link to="/content/drafts" className="ml-auto text-[13px] text-text underline underline-offset-2 hover:text-fg">Drafts made the earlier way</Link>
-      </div>
-
-      <div className="rounded-[16px] px-6 py-5" style={{ background: 'linear-gradient(135deg,#fff3ea 0%,#fff 62%)', boxShadow: '0 0 0 1px var(--primary-ring)' }}>
-        <div className="text-[11px] font-semibold tracking-[.1em] uppercase text-primary">Content studio</div>
-        <h1 className="mt-2 text-fg text-[25px] leading-[31px] font-semibold tracking-[-0.025em]">{selectedCount ? `${selectedCount} selected. Approve them below.` : savedCount ? `${savedCount} approved for the next run.` : 'Select one option for each idea.'}</h1>
-        <p className="mt-2 text-sm leading-6 text-text max-w-[760px]">Select one option on each idea, then press Approve once at the bottom. The agent reads what you approved in its next run, builds exactly that and opens the pull request with the day's other fixes. Nothing reaches your site until someone merges it.</p>
-      </div>
-
-      {error && <div className="mt-3 rounded-card bg-[#fdecec] text-[#b42318] text-sm px-4 py-3">{error}</div>}
-
+  // One kind's list of found ideas with their options (the Content studio). All shows each kind in turn.
+  const section = (current) => {
+    const items = byType[current.type] || [];
+    const options = catalog[current.generatorId]?.options || [];
+    return (
+      <>
       <div className="mt-6 mb-3 flex flex-wrap items-end justify-between gap-2 px-1">
         <div>
           <h2 className="text-[17px] font-semibold tracking-[-0.015em] text-fg flex items-center gap-2"><span className="w-8 h-8 rounded-control grid place-items-center bg-muted text-text"><current.icon size={16} /></span>{current.label} found</h2>
@@ -157,7 +152,9 @@ export default function Content() {
                     const on = isSel || isApproved;
                     return (
                       <div key={o.key} className="rounded-[12px] bg-white overflow-hidden" style={{ boxShadow: `0 0 0 ${on ? 2 : 1}px ${on ? 'var(--primary)' : 'var(--border-2)'}` }}>
-                        <div className={`flex justify-center border-b border-border ${previews[current.generatorId]?.[o.key] ? '' : 'p-3'}`} style={{ background: '#faf9f7' }}>
+                        <div role="button" tabIndex={0} aria-label={`See Option ${o.key} on your site`} title="See it on your site" onClick={() => setIdea({ item, startKey: o.key })}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setIdea({ item, startKey: o.key }); }}
+                          className={`flex justify-center border-b border-border cursor-pointer ${previews[current.generatorId]?.[o.key] ? '' : 'p-3'}`} style={{ background: '#faf9f7' }}>
                           {previews[current.generatorId]?.[o.key] ? <RealPreview html={previews[current.generatorId][o.key]} title={o.name} height={460} /> : <OptionPreview type={current.type} optionKey={o.key} />}
                         </div>
                         <div className="px-3.5 pt-3 pb-3.5">
@@ -180,6 +177,45 @@ export default function Content() {
           })}
         </div>
       )}
+
+      </>
+    );
+  };
+
+  // The numbers for the toggle and the stage strip, per kind. Ideas waiting come from the recommendations, the rest from the drafts.
+  const counts = Object.fromEntries(CONTENT_TYPES.map((t) => [t.key, stageCounts(drafts, t.key, t.key === 'all' ? TYPES.reduce((n, x) => n + waitingIn(x), 0) : waitingIn(TYPES.find((x) => x.type === t.key)))]));
+
+  // Drafted and History are part of this page (?view=), not another page. All hooks are above this line.
+  if (view !== 'ideas') {
+    return (
+      <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-8 fade-up">
+        <ContentStages view={view} type={type} counts={counts} />
+        <ContentDrafts view={view} drafts={drafts} error={draftsError} type={type} siteId={siteId} onChanged={loadDrafts} openId={searchParams.get('openDraft')} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-8 fade-up">
+      <ContentStages view="ideas" type={type} counts={counts} />
+
+      <div className="rounded-[16px] px-6 py-5" style={{ background: 'linear-gradient(135deg,#fff3ea 0%,#fff 62%)', boxShadow: '0 0 0 1px var(--primary-ring)' }}>
+        <div className="text-[11px] font-semibold tracking-[.1em] uppercase text-primary">Content studio</div>
+        <h1 className="mt-2 text-fg text-[25px] leading-[31px] font-semibold tracking-[-0.025em]">{selectedCount ? `${selectedCount} selected. Approve them below.` : savedCount ? `${savedCount} approved for the next run.` : 'Select one option for each idea.'}</h1>
+        <p className="mt-2 text-sm leading-6 text-text max-w-[760px]">Select one option on each idea, then press Approve once at the bottom. The agent reads what you approved in its next run, builds exactly that and opens the pull request with the day's other fixes. Nothing reaches your site until someone merges it.</p>
+      </div>
+
+      {error && <div className="mt-3 rounded-card bg-[#fdecec] text-[#b42318] text-sm px-4 py-3">{error}</div>}
+
+      {(type === 'all' ? TYPES : [current]).map((t) => <Fragment key={t.type}>{section(t)}</Fragment>)}
+
+      {idea && (() => {
+        const t = TYPES.find((x) => x.generatorId === idea.item.generatorId) || TYPES[0];
+        const id = findingOf(idea.item);
+        return <IdeaPanel idea={{ item: idea.item, startKey: idea.startKey, title: titleOf(idea.item), url: urlOf(idea.item), options: catalog[t.generatorId]?.options || [], previews: previews[t.generatorId] || {},
+          selectedKey: selected[id]?.optionKey || (picks[id] && picks[id].status !== 'withdrawn' ? picks[id].optionKey : null), locked: Boolean(picks[id] && picks[id].status !== 'saved' && picks[id].status !== 'withdrawn') }}
+          onClose={() => setIdea(null)} onPick={(key) => select(idea.item, key)} />;
+      })()}
 
       <ApproveBar builtToday={builtToday} selected={selectedCount} approved={savedCount} busy={busy === 'all'} onApprove={approveAll} onClear={() => setSelected({})} noun="idea" />
     </div>

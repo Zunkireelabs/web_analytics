@@ -102,6 +102,11 @@ async function collectFacts(siteId) {
 
   const visibility = visibilityRuns[0]?.facts?.siteScore || null;
 
+  // A verified business profile supplies the company's own industry and subjects; the stored label and the profiler's topics (a guess
+  // from search queries) are used only when there is none.
+  const businessCtx = await (await import('../lib/tenant-context.js')).loadBusinessContext(siteId, { agent: 'keyword' }).catch(() => null);
+  const canonicalProfile = businessCtx?.canonical ? businessCtx.profile : null;
+
   // Same 90-day evidence window every other "which real page owns this"
   // decision in the codebase uses (lib/duplicate-evidence.js) — long enough
   // that zero real matches is trustworthy evidence, not a quiet week.
@@ -110,8 +115,8 @@ async function collectFacts(siteId) {
 
   return {
     facts: {
-      industry: profile?.industry ?? null,
-      mainTopics: profile?.main_topics ?? null,
+      industry: (canonicalProfile && businessCtx.ownIndustry) || (profile?.industry ?? null),
+      mainTopics: (canonicalProfile && canonicalProfile.fields.coreTopics.value) || (profile?.main_topics ?? null),
       siteType: profile?.site_type ?? null,
       keywordGaps: topGaps.map((g) => ({ topic: g.topic, reason: g.reason, priority: g.priority })),
       contentClusters: topClusters.map((c) => ({

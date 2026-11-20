@@ -10,7 +10,10 @@ import { INSIGHT_CATEGORY } from '../generators/lib/blog-image-policy.js';
 import { effortForGenerator } from './lib/page-content.js';
 import { feedsForTenant, fetchAllFeeds, recentItems, FEED_CATALOG_KEYS } from './lib/trend-feeds.js';
 import { getProductGrowthConfig } from '../store/product-growth-config.js';
-import { tenantContextTextFor } from '../lib/tenant-context.js';
+import { tenantContextTextFor, loadBusinessContext, businessContextPrompt } from '../lib/tenant-context.js';
+import { feedsForProfile } from './lib/profile-feeds.js';
+import { validateTopics as validateTopicRelevance } from './lib/topic-relevance.js';
+import { ownIndustryLabel, valueOf } from '../lib/business-profile.js';
 import { isTopicScorerEnabled } from './lib/topic-scorer.js';
 import { buildTopicQueue } from './lib/topic-queue.js';
 
@@ -264,33 +267,41 @@ export async function run({ siteId, params = {}, deps = {} }) {
     ? await getProductGrowthConfig(siteId).catch(() => null)
     : null;
 
-  let industries = trendIndustries(policy, profile, growthConfig?.industries);
-  let inferredIndustry = null;
-  if (!industries && site) {
-    inferredIndustry = await inferTrendIndustry(site, profile, deps);
-    if (inferredIndustry) industries = [inferredIndustry];
-  }
-  if (!industries) {
-    return insufficient(
-      site?.property_type === 'product'
-        ? 'No industry recorded for this product tenant, and none could be worked out from its homepage — set it in the product growth config (Clients console) or run the product onboarding script.'
-        : 'No industry known for this site yet, and none could be worked out from its homepage — set target industries in the SEO policy or let the site profile run first.',
-      { facts: { capabilityGap: 'industry-not-recorded' } },
-    );
-  }
-  const mainTopics = mainTopicNames(profile);
-  // The industries the business SERVES, from the owner's SEO policy
-  // (site_seo_policy.target_industries). trendIndustries() deliberately never
-  // lets this list REPLACE the business's own industry — trending on it alone
-  // hands an AI-agent company real-estate headlines — so it is added only as a
-  // secondary lens, and only when a primary industry already came from
-  // somewhere else. Feeds for it are capped per category (the catalog's own
-  // SECONDARY_FEEDS_PER_CATEGORY), so the primary field still leads.
-  const secondaryIndustries = (profile?.industry || growthConfig?.industries?.length) && Array.isArray(policy?.target_industries)
-    ? policy.target_industries.map((x) => String(x).trim()).filter(Boolean)
-    : [];
+  // The canonical business profile, when a verified one exists, replaces every independent guess below: the stored industry label,
+  // the homepage classifier and the SEO policy's list. It separates what the company SELLS (which picks the news feeds) from who it
+  // sells to (a secondary lens), so software sold to salons is read as software, not as a salon or wellness business.
+  const bc = await (deps.loadBusinessContext || loadBusinessContext)(siteId, { agent: 'trend-radar' }).catch(() => null);
+  const canonical = bc?.canonical ? bc : null;
 
-  const feeds = feedsForTenant({ industries, topics: [...mainTopics, ...secondaryIndustries], override: params.feeds });
+  let industries; let inferredIndustry = null; let mainTopics; let secondaryIndustries; let feeds;
+  if (canonical) {
+    industries = [ownIndustryLabel(canonical.profile)];
+    mainTopics = [...(valueOf(canonical.profile, 'coreTopics') || []), ...(valueOf(canonical.profile, 'productsServices') || []).map((x) => x.name)].slice(0, 20);
+    secondaryIndustries = valueOf(canonical.profile, 'targetCustomerIndustries') || [];
+    feeds = params.feeds ? feedsForTenant({ override: params.feeds }) : feedsForProfile(canonical.profile);
+  } else {
+    industries = trendIndustries(policy, profile, growthConfig?.industries);
+    if (!industries && site) {
+      inferredIndustry = await inferTrendIndustry(site, profile, deps);
+      if (inferredIndustry) industries = [inferredIndustry];
+    }
+    if (!industries) {
+      return insufficient(
+        site?.property_type === 'product'
+          ? 'No industry recorded for this product tenant, and none could be worked out from its homepage — set it in the product growth config (Clients console) or run the product onboarding script.'
+          : 'No industry known for this site yet, and none could be worked out from its homepage — set target industries in the SEO policy or let the site profile run first. This project also has no verified business profile (Business Intelligence page), which would supply it.',
+        { facts: { capabilityGap: 'industry-not-recorded', businessProfile: bc?.status || 'none' } },
+      );
+    }
+    mainTopics = mainTopicNames(profile);
+    // The industries the business SERVES, from the owner's SEO policy (site_seo_policy.target_industries). trendIndustries() deliberately
+    // never lets this list REPLACE the business's own industry: trending on it alone hands an AI-agent company real-estate headlines.
+    // It is added only as a secondary lens, and only when a primary industry already came from somewhere else.
+    secondaryIndustries = (profile?.industry || growthConfig?.industries?.length) && Array.isArray(policy?.target_industries)
+      ? policy.target_industries.map((x) => String(x).trim()).filter(Boolean)
+      : [];
+    feeds = feedsForTenant({ industries, topics: [...mainTopics, ...secondaryIndustries], override: params.feeds });
+  }
   if (!feeds.length) {
     // Distinct from "no industry": the industry IS recorded, it just is not
     // something the feed catalog can serve. Said plainly and with the real
@@ -316,7 +327,11 @@ export async function run({ siteId, params = {}, deps = {} }) {
     );
   }
 
-  const tenantContext = await tenantContextTextFor(site, { sections: ['goals', 'product'] });
+  const tenantContext = [
+    await tenantContextTextFor(site, { sections: ['goals', 'product'] }),
+    canonical ? businessContextPrompt(canonical) : '',
+    canonical ? 'Only propose topics that a customer of this company would search for or read in connection with what it sells or the problems it solves. News about its customers\' industries, or general technology or business news, is NOT relevant unless it directly changes how those customers would use this company\'s product.' : '',
+  ].filter(Boolean).join('\n\n');
   let llm;
   try {
     llm = await callLLMForJson(SYSTEM, buildUserPrompt({ site, industries, mainTopics, items, tenantContext, secondaryIndustries }), {
@@ -339,7 +354,24 @@ export async function run({ siteId, params = {}, deps = {} }) {
 
   const validated = validateTopics(llm.topics, items);
   const covered = validated.filter((t) => alreadyCovered(t.topic, pagePaths)).map((t) => t.topic);
-  const topics = validated.filter((t) => !alreadyCovered(t.topic, pagePaths)).slice(0, MAX_TOPICS);
+  let topics = validated.filter((t) => !alreadyCovered(t.topic, pagePaths)).slice(0, MAX_TOPICS);
+
+  // Relevance validation (agents/lib/topic-relevance.js): with a verified profile, a topic must relate to what the company sells and speak
+  // to its customers' problem or audience before it can become a finding. Rejected and held topics are recorded with their reasons.
+  // Without a verified profile there is nothing to judge against, so topics are produced as before and flagged unverified (and, by the
+  // risk tier, held for review rather than published).
+  let relevance = { checked: false, reason: bc?.status || 'no-profile' };
+  if (canonical && topics.length) {
+    const verdicts = await (deps.validateRelevance || validateTopicRelevance)(topics.map((t) => t.topic), canonical, { siteId });
+    relevance = {
+      checked: true,
+      accepted: verdicts.filter((v) => v.verdict === 'accept').length,
+      rejected: verdicts.filter((v) => v.verdict === 'reject').map((v) => ({ topic: v.topic, reasons: v.reasons })),
+      held: verdicts.filter((v) => v.verdict === 'unknown').map((v) => ({ topic: v.topic, reasons: v.reasons })),
+      profileVersion: canonical.version,
+    };
+    topics = topics.filter((_, i) => verdicts[i]?.verdict === 'accept');
+  }
 
   // Demand is asked of the provider layer so a future real provider lights up
   // here with no agent change; today it is the null provider and says so.
@@ -409,6 +441,7 @@ export async function run({ siteId, params = {}, deps = {} }) {
     feedsFailed: failed,
     headlinesConsidered: items.length,
     skippedAlreadyCovered: covered,
+    relevance,
     findings,
     ...(queued ? { topicQueue: { queued: queued.queued.length, dropped: queued.dropped.length } } : {}),
     ...(inferredIndustry ? { industryInferred: inferredIndustry } : {}),

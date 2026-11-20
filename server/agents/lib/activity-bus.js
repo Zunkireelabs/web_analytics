@@ -11,13 +11,23 @@ import { EventEmitter } from 'events';
 const bus = new EventEmitter();
 bus.setMaxListeners(200); // one listener per open browser tab watching a site's activity
 
+// What is running right now, per site: siteId -> Map(agentId -> ISO start time). Kept so a tab that opens in the middle
+// of a run (the sidebar's live agent list, the orchestration page) is told what is already running, instead of seeing
+// nothing until the next start event. In-process only, like the bus itself.
+const running = new Map();
+
 export function emitAgentStart(siteId, agentId) {
   if (!siteId) return;
+  if (!running.has(siteId)) running.set(siteId, new Map());
+  running.get(siteId).set(agentId, new Date().toISOString());
   bus.emit('activity', { siteId, type: 'start', agentId, at: new Date().toISOString() });
 }
 
 export function emitAgentDone(siteId, agentId, { status, findingsCount = 0, tookMs = null }) {
   if (!siteId) return;
+  const site = running.get(siteId);
+  site?.delete(agentId);
+  if (site && site.size === 0) running.delete(siteId);
   bus.emit('activity', { siteId, type: 'done', agentId, status, findingsCount, tookMs, at: new Date().toISOString() });
 }
 
@@ -27,4 +37,9 @@ export function subscribeActivity(siteId, handler) {
   const listener = (event) => { if (event.siteId === siteId) handler(event); };
   bus.on('activity', listener);
   return () => bus.off('activity', listener);
+}
+
+// The agents running right now on one site, oldest first: [{ agentId, at }]. Never another site's.
+export function runningAgentsFor(siteId) {
+  return [...(running.get(siteId) || new Map())].map(([agentId, at]) => ({ agentId, at }));
 }

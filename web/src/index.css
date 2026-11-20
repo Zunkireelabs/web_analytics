@@ -162,9 +162,9 @@
 
   /* ---- styles.css: toggle ---- */
   .toggle { display: inline-flex; padding: 3px; border-radius: 10px; background: var(--muted); box-shadow: inset 0 0 0 1px var(--border-2); }
-  .toggle button { height: 26px; padding: 0 12px; border-radius: 7px; font-size: 13px; font-weight: 500; color: var(--text); }
-  .toggle button { flex-shrink: 0; white-space: nowrap; }
-  .toggle button.is-on { background: #fff; color: var(--fg); box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 0 0 1px rgba(0, 0, 0, .04); }
+  .toggle button, .toggle a { display: inline-flex; align-items: center; height: 26px; padding: 0 12px; border-radius: 7px; font-size: 13px; font-weight: 500; color: var(--text); }
+  .toggle button, .toggle a { flex-shrink: 0; white-space: nowrap; }
+  .toggle button.is-on, .toggle a.is-on { background: #fff; color: var(--fg); box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 0 0 1px rgba(0, 0, 0, .04); }
 
   /* ---- styles.css: dropdown shell ---- */
   .dd { padding: 12px; background: #fff; border-radius: 20px;
@@ -495,3 +495,7 @@
 .ind-more{margin-top:22px;border-radius:12px;background:#fff;box-shadow:0 0 0 1px var(--input)}.ind-more summary{cursor:pointer;padding:13px 16px;font-size:13.5px;font-weight:500;color:var(--fg);list-style:none}
 .ind-more summary span{color:var(--faint);font-weight:400;margin-left:6px}.ind-more .it{display:block;padding:11px 16px;border-top:1px solid var(--border);text-decoration:none}
 .ind-more .it b{display:block;font-size:13.5px;font-weight:500;color:var(--fg);line-height:19px}.ind-more .it span{font-size:12px;color:var(--faint)}
+
+/* The agent's sign pulses while there is something new for the client */
+@keyframes agent-pulse { 0% { box-shadow: 0 12px 30px -8px rgba(213,78,0,.55), 0 0 0 0 rgba(213,78,0,.35); } 70% { box-shadow: 0 12px 30px -8px rgba(213,78,0,.55), 0 0 0 12px rgba(213,78,0,0); } 100% { box-shadow: 0 12px 30px -8px rgba(213,78,0,.55), 0 0 0 0 rgba(213,78,0,0); } }
+.agent-pulse { animation: agent-pulse 2.4s infinite; }

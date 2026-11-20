@@ -1,6 +1,15 @@
-// A titled tray holding one white card whose rows scroll inside it, so a long list never
-// stretches the page; the header and footer stay put.
-export default function ListCard({ title, subtitle, action, footer, empty, children, maxHeight = 340 }) {
+import { Children, useState } from 'react';
+import { ChevronDown } from 'lucide-react';
+import { DEFAULT_ROW_LIMIT, visibleRows } from './list-rows.js';
+
+// A titled tray holding one white card. A long list never gets its own scroll box (a scroll area inside a page that
+// already scrolls steals the wheel and cuts rows in half): it shows its first `limit` rows, and "Show all" opens the
+// rest in place, so the page has exactly one scroll. The header and footer stay put.
+export default function ListCard({ title, subtitle, action, footer, empty, children, limit = DEFAULT_ROW_LIMIT }) {
+  const [expanded, setExpanded] = useState(false);
+  const rows = Children.toArray(children);
+  const shown = visibleRows(rows, limit, expanded);
+  const hidden = rows.length - shown.length;
   return (
     <div className="tray">
       <div className="col-span-full flex items-end justify-between gap-3 px-2.5 pt-1.5 pb-1">
@@ -13,7 +22,15 @@ export default function ListCard({ title, subtitle, action, footer, empty, child
       <div className="tray-card overflow-hidden">
         {empty
           ? <div className="px-4 py-6 text-[13px] text-text">{empty}</div>
-          : <div className="custom-scrollbar overflow-y-auto" style={{ maxHeight }}>{children}</div>}
+          : <div>{shown}</div>}
+        {!empty && rows.length > limit && (
+          <button type="button" onClick={() => setExpanded((e) => !e)} aria-expanded={expanded}
+            className="w-full flex items-center justify-center gap-1.5 py-2.5 border-t border-border text-[13px] font-medium text-primary-strong hover:bg-muted">
+            {expanded ? 'Show fewer' : `Show all ${rows.length}`}
+            <ChevronDown size={14} className={expanded ? 'rotate-180' : ''} aria-hidden />
+            {!expanded && hidden > 0 && <span className="sr-only">({hidden} more)</span>}
+          </button>
+        )}
         {footer && <div className="tbl-foot">{footer}</div>}
       </div>
     </div>

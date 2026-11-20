@@ -270,7 +270,13 @@ export function requiresHumanReview(item) {
   // normal blog pacing, quality gate and design gates all still apply.
   // TREND_RADAR_REQUIRE_REVIEW=true restores the old always-review behaviour
   // without a deploy, should a bad post ever make that the right call.
-  if (item?.source === 'trend-radar' && process.env.TREND_RADAR_REQUIRE_REVIEW === 'true') return true;
+  //
+  // 2026-11-20, owner: that unattended default is suspended. Trend topics were found to be irrelevant to the business (fitness and
+  // supplements news for a salon-booking software company, battery and data-centre news for an AI SEO company), because they were
+  // chosen against a coarse industry label. Until topic-relevance and competitor-category validation (agents/lib/topic-relevance.js)
+  // are verified in production, no Trend Radar content is published without a person's approval. TREND_RADAR_AUTO_PUBLISH=true is the
+  // explicit opt-in that restores unattended publishing once that has been verified.
+  if (item?.source === 'trend-radar' && (process.env.TREND_RADAR_AUTO_PUBLISH !== 'true' || process.env.TREND_RADAR_REQUIRE_REVIEW === 'true')) return true;
   const fixType = item?.params?.fixType;
   return typeof fixType === 'string' && fixType.startsWith('typography-drift');
 }

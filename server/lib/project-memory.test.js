@@ -333,3 +333,35 @@ describe('snapshotProjectMemory: versioning', () => {
     assert.ok(log.rows.filter((r) => r.siteId === 2).every((r) => !JSON.stringify(r).includes('ALPHA')));
   });
 });
+
+describe('the business section and the canonical business profile', () => {
+  const bpFor = (label, sells) => ({ version: 3, status: 'detected', createdAt: '2026-11-20T00:00:00Z', pending: [{ field: 'ownIndustry' }],
+    profile: { fields: { ownIndustry: { value: { label } }, businessModel: { value: { model: 'saas' } }, productsServices: { value: sells.map((name) => ({ name })) }, targetCustomers: { value: [{ segment: 'Owners' }] } } } });
+
+  test('a project with a profile gets a compact summary of it, its version and how many changes await review', async () => {
+    const world = makeWorld();
+    world[1].ctx.businessProfile = bpFor('Software (SaaS)', ['Online booking']);
+    const m = await getProjectMemory(1, { deps: fakeDeps(world), now: NOW });
+    const bp = m.sections.business.data.businessProfile;
+    assert.deepEqual([bp.version, bp.state, bp.ownIndustry, bp.businessModel, bp.pendingChanges], [3, 'detected', 'Software (SaaS)', 'saas', 1]);
+    assert.deepEqual(bp.sells, ['Online booking']);
+    assert.ok(m.sections.business.provenance.sources.includes('business_profile_versions'));
+  });
+
+  test('a project without one has exactly the section it always had (no new key, same sources)', async () => {
+    const m = await getProjectMemory(2, { deps: fakeDeps(makeWorld()), now: NOW });
+    assert.equal('businessProfile' in m.sections.business.data, false);
+    assert.ok(!m.sections.business.provenance.sources.includes('business_profile_versions'));
+  });
+
+  test('projects never see each other’s profile', async () => {
+    const world = makeWorld();
+    world[1].ctx.businessProfile = bpFor('Software (SaaS)', ['Alpha thing']);
+    world[2].ctx.businessProfile = bpFor('Marketing services', ['Beta thing']);
+    const deps = fakeDeps(world);
+    const a = await getProjectMemory(1, { deps, now: NOW }); const b = await getProjectMemory(2, { deps, now: NOW });
+    assert.deepEqual(a.sections.business.data.businessProfile.sells, ['Alpha thing']);
+    assert.deepEqual(b.sections.business.data.businessProfile.sells, ['Beta thing']);
+    assert.ok(!JSON.stringify(a).includes('Beta thing') && !JSON.stringify(b).includes('Alpha thing'));
+  });
+});

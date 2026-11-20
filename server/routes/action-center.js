@@ -1,5 +1,7 @@
 import { Router } from 'express';
-import { previewsFor } from '../lib/content-preview.js';
+import { previewsFor, draftPreviewFor } from '../lib/content-preview.js';
+import { shipStep, mergeStagePr } from '../lib/ship-flow.js';
+import { promoteMergedStageBatches } from '../lib/stage-promotion.js';
 import { classify } from '../agents/lib/recommendation-taxonomy.js';
 import { requireAuth } from './login.js';
 import { runOrchestration } from '../agents/orchestrator.js';
@@ -1233,6 +1235,24 @@ async function recordApprovalLearning({ draft, siteId }) {
 
 }
 
+// The client's "Approve": records the approval and NOTHING else. It runs the same Quality Gate and the same human-approval step as
+// approveAndPublishDraft, but it does not push a branch and does not open a pull request: the day's approved drafts are put on
+// one branch, as one commit, and sent as one PR only when the client then says "yes, open the PR" (shipApprovedDrafts). A draft
+// still at draft/edited is submitted first, so one press is enough. Dependencies are injectable so this is tested without a database.
+export async function approveDraftOnly(siteId, draftId, { userId, renderMode } = {}, {
+  getDraftFn = getDraft, submitFn = submitDraftForApproval, validateFn = validateDraft, approveFn = approveDraft,
+} = {}) {
+  const current = await getDraftFn(siteId, draftId);
+  if (!current) throw httpError(404, 'Draft not found');
+  if (current.status === 'draft' || current.status === 'edited') {
+    if (!(await submitFn(siteId, draftId))) throw httpError(404, 'This draft is not in a state that can be approved');
+  }
+  const { draft } = await validateFn(siteId, draftId, { renderMode, afterQualityGate: recordApprovalLearning });
+  const approved = await approveFn(siteId, draft.id, userId);
+  if (!approved) throw httpError(404, 'Draft not found, or not submitted for approval');
+  return approved;
+}
+
 export async function approveAndPublishDraft(siteId, draftId, { userId, renderMode, deferPr = false } = {}) {
   const { draft, site, resolved } = await validateDraft(siteId, draftId, { renderMode, afterQualityGate: recordApprovalLearning });
   const approvedDraft = await approveDraft(siteId, draft.id, userId);
@@ -2151,6 +2171,109 @@ router.post('/action-center/recommendations/:id/approve-and-ship', async (req, r
   }
 });
 
+// ---------- The shipping flow: approved drafts -> one PR to stage -> merge to stage -> PR to main (opened, never merged) ----------
+
+// Step 1, "Yes, commit and push": every draft the client has approved (and that is not on a branch yet) goes onto the day's ONE batch
+// branch, as one commit and one push. No pull request is opened here: that is the next question. It reuses exactly what the safe-fix batch
+// uses (beginBatchPush, pushDraftBranch, endBatchPush), so there is no second way of pushing. A draft that cannot be applied is counted and
+// left alone; it never blocks the others. If the push fails, the drafts that were applied are left re-attemptable, not lost.
+export async function pushApprovedDrafts(siteId, { scope } = {}, deps = {}) {
+  const { siteFn = getSiteById, listFn = listDrafts, pushFn = pushDraftBranch, beginFn = beginBatchPush, endFn = endBatchPush, branchFn = batchBranchName, failFn = recordMergeFailure } = deps;
+  const site = await siteFn(siteId);
+  if (!site?.repo_owner || !site?.repo_name) throw httpError(400, 'This site has no repository configured yet, so there is nothing to push to.');
+  const approved = (await listFn(siteId, { status: 'approved' })).filter((d) => inDraftScope(d.action_type, scope));
+  if (!approved.length) return { ok: true, pushed: 0, failed: 0, errors: [] };
+
+  const branchName = branchFn(site);
+  beginFn(site, branchName);
+  const done = []; const errors = [];
+  for (const d of approved) {
+    try {
+      const r = await pushFn(siteId, d.id);
+      if (r?.status === 'branch_pushed') done.push(d.id); else errors.push(`Draft ${d.id} did not reach the branch.`);
+    } catch (e) { errors.push(e.message); }
+  }
+  const end = await endFn(site, branchName);
+  if (!end.ok) {
+    await Promise.all(done.map((id) => failFn(siteId, id, end.error).catch(() => {})));
+    return { ok: false, error: end.error, rateLimited: end.rateLimited === true, pushed: 0, failed: approved.length, errors };
+  }
+  return { ok: true, pushed: done.length, failed: errors.length, branchName, errors };
+}
+
+// Step 2, "Yes, open the PR": the commit is already on the branch, so this opens the ONE pull request for it (to the stage branch when the
+// site has one) and marks every draft on that branch as having that PR. Same helpers the batch finish uses (openDraftPr, markDraftPrOpened).
+export async function openPrForPushedDrafts(siteId, { scope } = {}, deps = {}) {
+  const { listFn = listDrafts, openFn = openDraftPr, markFn = markDraftPrOpened } = deps;
+  const pushed = (await listFn(siteId, { status: 'branch_pushed' })).filter((d) => inDraftScope(d.action_type, scope) && d.branch_name);
+  if (!pushed.length) return { ok: true, opened: 0, prNumber: null, prUrl: null };
+  try {
+    const first = await openFn(siteId, pushed[0].id);
+    for (const d of pushed.slice(1)) await markFn(siteId, d.id, { prNumber: first.pr_number, prUrl: first.pr_url, rollbackSnapshot: null });
+    return { ok: true, opened: pushed.length, prNumber: first.pr_number, prUrl: first.pr_url };
+  } catch (e) { return { ok: false, error: e.message, opened: 0 }; }
+}
+
+// Where the shipping flow is for one page ('fixes' or 'content'), read from the drafts and PRs themselves.
+export async function shipState(siteId, scope, deps = {}) {
+  const { siteFn = getSiteById, listFn = listDraftsForBoard, promoFn = (id) => pgQuery(`SELECT status, promotion_pr_number, promotion_pr_url FROM stage_promotions WHERE site_id = $1`, [id]).then((r) => r.rows) } = deps;
+  const [site, all, promotions] = await Promise.all([siteFn(siteId), listFn(siteId), promoFn(siteId).catch(() => [])]);
+  return shipStep({ drafts: (all || []).filter((d) => inDraftScope(d.action_type, scope)), site, promotions });
+}
+
+router.get('/action-center/ship/state', async (req, res, next) => {
+  try { res.json(await shipState(req.siteId, ['fixes', 'content'].includes(req.query.scope) ? req.query.scope : undefined)); } catch (e) { next(e); }
+});
+
+router.post('/action-center/ship/push-branch', async (req, res, next) => {
+  try {
+    const scope = ['fixes', 'content'].includes(req.body?.scope) ? req.body.scope : undefined;
+    const r = await pushApprovedDrafts(req.siteId, { scope });
+    res.status(r.ok ? 200 : 502).json(r);
+  } catch (e) { if (e.status) return sendHttpError(res, e); next(e); }
+});
+
+router.post('/action-center/ship/open-pr', async (req, res, next) => {
+  try {
+    const scope = ['fixes', 'content'].includes(req.body?.scope) ? req.body.scope : undefined;
+    const r = await openPrForPushedDrafts(req.siteId, { scope });
+    res.status(r.ok ? 200 : 502).json(r);
+  } catch (e) { next(e); }
+});
+
+// Merge the open PR into STAGE, only because a signed-in person pressed the button (req.userId), and only if every guard in
+// lib/ship-flow.js's mergeStagePr passes. Main is never merged here. On success each draft on that PR is re-read from GitHub so it shows as merged.
+router.post('/action-center/ship/merge-stage', async (req, res, next) => {
+  try {
+    const prNumber = Number(req.body?.prNumber);
+    if (!Number.isInteger(prNumber)) return res.status(400).json({ error: 'Say which pull request to merge.' });
+    const site = await getSiteById(req.siteId);
+    const r = await mergeStagePr(site, prNumber, { userId: req.userId });
+    if (!r.ok) return res.status(409).json(r);
+    const onPr = await pgQuery(`SELECT id FROM drafts WHERE site_id = $1 AND pr_number = $2 AND status = 'pr_opened'`, [req.siteId, prNumber]).then((x) => x.rows);
+    for (const { id } of onPr) await checkDraftPrStatus(req.siteId, id).catch(() => {});
+    res.json({ ok: true, merged: onPr.length, sha: r.sha });
+  } catch (e) { next(e); }
+});
+
+// "Open the PR to main": the existing stage promotion for this one site. It opens the PR (once stage's checks are green) and never merges it.
+router.post('/action-center/ship/open-main', async (req, res, next) => {
+  try {
+    const r = await promoteMergedStageBatches(req.siteId, { syncDrafts: async (siteId, ids) => { for (const id of ids) await checkDraftPrStatus(siteId, id).catch(() => {}); } });
+    res.json(r);
+  } catch (e) { next(e); }
+});
+
+// Approve only: records the client's approval, opens no PR (see approveDraftOnly).
+router.post('/action-center/drafts/:id/approve-only', async (req, res, next) => {
+  try {
+    res.json(await approveDraftOnly(req.siteId, req.params.id, { userId: req.userId, renderMode: req.body?.renderMode }));
+  } catch (e) {
+    if (e.status) return sendHttpError(res, e);
+    next(e);
+  }
+});
+
 router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
   try {
     res.json(await approveAndPublishDraft(req.siteId, req.params.id, { userId: req.userId, renderMode: req.body?.renderMode }));
@@ -2300,6 +2423,19 @@ router.post('/action-center/drafts/:id/implemented', async (req, res, next) => {
 // previewLiveMarkerContent), using whichever implementer/adapter actually
 // did the merge (resolveImplementerForMerge, same persisted-at-push-time
 // choice merge-to-stage itself uses) rather than re-resolving fresh.
+// A copy draft (blog post, landing page, translation, FAQ) drawn in the SITE'S OWN design, for the side panel. Reads only: it writes
+// nothing and needs no repository. 422 when the kind is not a page of copy (the panel then shows the change another way).
+router.get('/action-center/drafts/:id/design-preview', async (req, res, next) => {
+  try {
+    const draft = await getDraft(req.siteId, req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    const site = await getSiteById(req.siteId);
+    const html = await draftPreviewFor(site, draft);
+    if (!html) return res.status(422).json({ error: 'This kind of change has no page preview.', reason: 'no-page-preview' });
+    res.json({ html });
+  } catch (e) { next(e); }
+});
+
 router.get('/action-center/drafts/:id/preview', async (req, res, next) => {
   try {
     const draft = await getDraft(req.siteId, req.params.id);

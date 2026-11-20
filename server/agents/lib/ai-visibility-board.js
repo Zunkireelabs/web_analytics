@@ -81,8 +81,9 @@ export function buildBoard({ prompts, runs, pages = [] }) {
   for (const m of missing) {
     const phrase = keyPhrase(m.promptText);
     if (!phrase) continue;
-    const cur = phrases.get(phrase) || { phrase, covers: 0 };
+    const cur = phrases.get(phrase) || { phrase, covers: 0, promptIds: [] };
     cur.covers++;
+    cur.promptIds.push(m.id); // the missing questions this phrase would cover, so "Draft these" knows which to draft
     phrases.set(phrase, cur);
   }
   const words = [...phrases.values()]

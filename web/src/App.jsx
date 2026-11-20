@@ -1,5 +1,5 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
-import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { api, setReadOnlyAccess } from './api.js';
 import { AccessProvider, isOpenWhileLocked } from './lib/access.jsx';
 import { PosthogProvider } from './lib/posthog-state.jsx';
@@ -18,6 +18,11 @@ import SetupBanner, { setupGap } from './components/workspace/SetupBanner.jsx';
 import { ShellContext } from './components/shellContext.js';
 import { currentSiteOf } from './lib/nav.js';
 import ClientAssistantPanel from './components/ClientAssistantPanel.jsx';
+import useNeedsYou from './hooks/useNeedsYou.js';
+import useShipping from './hooks/useShipping.js';
+import { greeting } from './lib/agent-greeting.js';
+import AgentBubble from './components/AgentBubble.jsx';
+import { groupById } from './lib/agent-groups.js';
 
 // Lazy-loaded: none of these are needed for first paint. The internal-only
 // ones (AiGrowth/ActionCenter) also pull in heavy libraries
@@ -35,6 +40,8 @@ const Keywords = lazy(() => import('./pages/Keywords.jsx'));
 const Competitors = lazy(() => import('./pages/Competitors.jsx'));
 const AiVisibility = lazy(() => import('./pages/AiVisibility.jsx'));
 const Content = lazy(() => import('./pages/Content.jsx'));
+const Agents = lazy(() => import('./pages/Agents.jsx'));
+const SystemMap = lazy(() => import('./pages/SystemMap.jsx'));
 const Workspace = lazy(() => import('./pages/Workspace.jsx'));
 const OAuthAuthorize = lazy(() => import('./pages/OAuthAuthorize.jsx'));
 const Account = lazy(() => import('./pages/Account.jsx'));
@@ -174,6 +181,18 @@ export default function App() {
     setAuthed(false);
   };
 
+  // The Agent speaks first, quietly: when something needs the client (an approval, an issue it found, a decision it cannot
+  // make) a small sign appears bottom-right with the count, and pulses when there is something new. Pressing it opens the
+  // small chat with what it is and the buttons to deal with it. It does not open over the page by itself, and follows up on
+  // a growing interval until it is resolved. Not for staff browsing a client's project, and not while the project is locked.
+  // These hooks MUST stay above the early returns below: a hook after a return changes the hook count between renders.
+  const needsYou = useNeedsYou(siteId, { enabled: Boolean(authed && siteId && !noProject && role !== 'platform_admin' && !access?.locked) });
+  // The agent's questions about shipping approved work (commit and push, open the PR, merge to stage, open the PR to main) are asked in
+  // its popup. Each open question counts on the bubble. A PR waiting for a person to merge is information, not a question.
+  const shipping = useShipping(siteId, { enabled: Boolean(authed && siteId && !noProject && role !== 'platform_admin' && !access?.locked) });
+  const shipAsks = ['fixes', 'content'].filter((k) => shipping[k]?.step && shipping[k].step !== 'waiting').length;
+  const waitingCount = needsYou.items.reduce((n, i) => n + (i.count || 1), 0) + shipAsks;
+
   if (authed === null) return <div className="p-8 text-gray-400">Loading…</div>;
   // The approval email's Sign in button (/login?token=…) wins over a session that is already open: someone
   // still signed in as another account must reach their own "Your account is approved" page, not be sent
@@ -234,7 +253,6 @@ export default function App() {
         email={email} role={role} agentOpen={agentOpen} onAgent={setAssistantOpen} agentAvailable={agentAvailable} access={access} />
       <div className="flex-1 min-w-0 flex flex-col bg-white md:my-2 md:mr-2 md:rounded-[14px] md:shadow-[0_0_0_1px_var(--panel-ring)] md:overflow-y-auto md:overscroll-contain md:h-[calc(100vh-16px)]">
         <TopBar isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} isProduct={isProduct}
-          agentOpen={agentOpen} onAgent={setAssistantOpen} agentAvailable={agentAvailable}
           onOpenMenu={() => setMobileNavOpen(true)} />
         <ShellContext.Provider value={toolbarEl}>
           <div ref={setToolbarEl} className="page-toolbar flex flex-wrap items-center gap-2 px-4 md:px-6 py-2 bg-white border-b border-border-canvas" />
@@ -266,7 +284,7 @@ export default function App() {
               <Route path="/keywords" element={<Keywords isProduct={isProduct} />} />
               <Route path="/competitors" element={<Competitors />} />
               <Route path="/content" element={<Content />} />
-              <Route path="/content/drafts" element={<ActionCenter scope="content" />} />
+              <Route path="/content/drafts" element={<ContentDraftsRedirect />} />
               <Route path="/analyst" element={<Analyst siteId={siteId} isPlatformAdmin={isPlatformAdmin} />} />
               {/* /ai-orchestration is Orchestration — the agent runner console
                   and the orchestration diagram showing how the 10 specialist
@@ -277,7 +295,8 @@ export default function App() {
                   per-category detail cards, operations history, and the
                   admin agent taskforce/execution timeline/model status) was
                   migrated into this page instead of duplicating it. */}
-              <Route path="/ai-orchestration" element={<AiGrowth isInternal={isInternal} />} />
+              {/* The Agent view: the systems map by default, one group's live agents for ?group=. */}
+              <Route path="/ai-orchestration" element={<AgentsRoute isInternal={isInternal} />} />
               {/* The fixes side of the drafts board; the writing is on /content. */}
               <Route path="/action-center" element={<ActionCenter scope="fixes" />} />
               {/* Universal Product Growth mode's one new page — reachable by
@@ -354,10 +373,31 @@ export default function App() {
           capability registry (onboarding status, pending decisions, agent
           activity, safe fixes), not the cross-client analyst capability the
           staff-only Admin Assistant on /analyst has. */}
-      <ClientAssistantPanel open={agentOpen} onClose={() => setAssistantOpen(false)} />
+      <ClientAssistantPanel open={agentOpen} onClose={() => setAssistantOpen(false)}
+        raise={needsYou.items} onRaised={needsYou.ack} onResolved={needsYou.recheck} ship={shipping} siteId={siteId} />
+      {agentAvailable && !agentOpen && <AgentBubble count={waitingCount} pulse={needsYou.raise.length > 0 || shipAsks > 0} message={greeting(needsYou.items, shipping)} onOpen={() => setAssistantOpen(true)} />}
     </div>
     </IndustryProvider>
     </PosthogProvider>
     </AccessProvider>
   );
+}
+
+// The old drafts screen for content (/content/drafts) no longer exists: Drafted and History are part of the Content page. Old links
+// and bookmarks land there instead, and a ?openDraft= link opens that draft's side panel.
+function ContentDraftsRedirect() {
+  const [params] = useSearchParams();
+  const q = new URLSearchParams({ view: params.get('tab') === 'implemented' ? 'history' : 'review' });
+  if (params.get('openDraft')) q.set('openDraft', params.get('openDraft'));
+  if (params.get('siteId')) q.set('siteId', params.get('siteId'));
+  return <Navigate to={`/content?${q.toString()}`} replace />;
+}
+
+// /ai-orchestration: the Agent view's main page is the systems map, and nothing else. A group opened from the sidebar (?group=seo and
+// so on) shows that group's agents, live. The full run console (AiGrowth) is only for ?view=console and for a notification's
+// ?highlight= link, since that page knows how to ring a finding.
+function AgentsRoute({ isInternal }) {
+  const [params] = useSearchParams();
+  if (params.get('view') === 'console' || params.has('highlight')) return <AiGrowth isInternal={isInternal} />;
+  return groupById(params.get('group')) ? <Agents /> : <SystemMap />;
 }

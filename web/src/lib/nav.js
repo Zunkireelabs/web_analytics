@@ -6,29 +6,23 @@ import {
 // Single source for the Sidebar and the TopBar breadcrumbs.
 // ctx = { isProduct }
 //
-// One page per job, every one of them open to every client for their own project
-// (the workspace switcher changes the project, so each client — and a platform
-// admin switched into a client's project — sees their own Analyst, Keywords,
-// Competitors and so on):
+// Ordered by what a client needs first: what is waiting on them, then their workspace, then how the site is doing,
+// then the rest. One page per job, every one of them open to every client for their own project (the workspace
+// switcher changes the project, so each client sees their own Analyst, Keywords, Competitors and so on):
 //
-//   Performance — how the site is doing
-//     Insights      search traffic from Google Search Console
-//     AI visibility how often AI engines mention and cite the brand
-//     Keywords      keyword opportunities, gaps, and the topics the site covers
-//     Competitors   who ranks and gets recommended instead, backlinks, rankings
-//     Compare       two periods side by side
-//     Reports       the baseline report from day one, then weekly and monthly
-//   Optimize — what to do about it
+//   Home          Overview
+//   Needs you     what is waiting on the client's decision
 //     Action Center every issue and fix, with a draft to review and approve
 //     Content       the blog posts, landing pages and translations the agent drafts
-//     Analyst       the AI briefing, the growth outlook, and what AI found
-//     Agents        the agent run console and the systems map (was "Orchestration")
+//   Workspace     projects, goals, people, API tokens, monitoring and settings
+//   Performance   how the site is doing: Insights, AI visibility, Keywords, Competitors, Compare, Reports
+//   More          Analyst (the AI briefing and growth outlook), Demand (product sites only)
 //
-// Milestones is gone as its own page: its baseline lives in Reports, and /milestones
-// redirects there (see App.jsx).
+// Agents (/ai-orchestration, the run console) is no longer a Browse link: the sidebar's Agent toggle shows the agents
+// live instead. It stays registered here with `sidebar: false` so the page and its breadcrumb keep working.
 //
-// Demand is Universal Product Growth mode's one nav entry — shown only when the
-// current site's own property_type is 'product', never for a 'website' site.
+// Milestones is gone as its own page: its baseline lives in Reports, and /milestones redirects there (see App.jsx).
+// Demand is Universal Product Growth mode's one nav entry, shown only when the current site's property_type is 'product'.
 export const NAV_GROUPS = [
   {
     id: 'home', label: 'Home',
@@ -36,7 +30,14 @@ export const NAV_GROUPS = [
     visible: () => true,
   },
   {
-    // On its own, right under Home: projects, goals, people, API tokens, monitoring and settings.
+    id: 'needs-you', label: 'Needs you',
+    items: [
+      { to: '/action-center', label: 'Action Center', icon: Zap },
+      { to: '/content', label: 'Content', icon: PenLine },
+    ],
+    visible: () => true,
+  },
+  {
     id: 'workspace', label: 'Workspace',
     items: [
       { to: '/workspace', label: 'Workspace', icon: Building2 },
@@ -56,18 +57,22 @@ export const NAV_GROUPS = [
     visible: () => true,
   },
   {
-    id: 'optimize', label: 'Optimize',
+    id: 'more', label: 'More',
     items: [
-      { to: '/action-center', label: 'Action Center', icon: Zap },
-      { to: '/content', label: 'Content', icon: PenLine },
       { to: '/analyst', label: 'Analyst', icon: LineChart },
-      { to: '/ai-orchestration', label: 'Agents', icon: Network },
       { to: '/demand', label: 'Demand', icon: Target, visible: (ctx) => !!ctx.isProduct },
+      { to: '/ai-orchestration', label: 'Agents', icon: Network, sidebar: false },
     ],
     visible: () => true,
   },
 ];
 
+// The groups as the Browse list shows them: items marked `sidebar: false` are left out, and a group left empty is dropped.
+export function sidebarGroups(ctx) {
+  return visibleGroups(ctx)
+    .map((g) => ({ ...g, items: g.items.filter((i) => i.sidebar !== false) }))
+    .filter((g) => g.items.length > 0);
+}
 
 // Groups (and items) the current session may see.
 export function visibleGroups(ctx) {

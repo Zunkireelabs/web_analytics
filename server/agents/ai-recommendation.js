@@ -58,7 +58,7 @@ const HIGH_INTENT_SOURCES = new Set(['service', 'top-query']);
 // below) since this step is generation/phrasing, not the actual "does
 // OpenAI recommend us" test — that distinction matters: only the real
 // probe below is locked to OpenAI per the agent's design.
-async function generatePromptCandidates({ companyName, homepageTitle, homepageDescription, topPages, topQueries, targetMarkets = [], localPlaces = [], british = false }) {
+async function generatePromptCandidates({ companyName, homepageTitle, homepageDescription, topPages, topQueries, targetMarkets = [], localPlaces = [], british = false, businessDescription = '' }) {
   const system = 'You write realistic buyer-style questions a real prospective customer might ask an AI ' +
     'assistant, based ONLY on the real company context given below — never invent a service, industry, or fact ' +
     'not evidenced in the context. For each of: (1) the company\'s real services/offerings as described on its ' +
@@ -90,7 +90,10 @@ async function generatePromptCandidates({ companyName, homepageTitle, homepageDe
       '"older people" not "seniors"). ' : '') +
     'Respond with ONLY a JSON array, each item {"promptText": "...", "source": "service"|"landing-page"|"top-query"}, ' +
     `capped at ${MAX_TRACKED_PROMPTS} items total.`;
-  const user = `Company: ${companyName}\nHomepage title: ${homepageTitle || 'unknown'}\n` +
+  const user = `Company: ${companyName}\n` +
+    // The verified business profile, when one exists: what the company sells and to whom, instead of a guess from the homepage title.
+    (businessDescription ? `Verified business profile: ${businessDescription}\n` : '') +
+    `Homepage title: ${homepageTitle || 'unknown'}\n` +
     `Homepage description: ${homepageDescription || 'unknown'}\n` +
     `Top pages: ${topPages.join(', ') || 'none'}\nTop queries: ${topQueries.join(', ') || 'none'}`;
   const raw = await callLLM(system, user, { maxTokens: 900 }).catch(() => null);
@@ -258,7 +261,9 @@ export async function run({ siteId, start, end }) {
   // (upsertTrackedPrompt), so re-running doesn't duplicate prompts already
   // tracked; only genuinely new ones (site content/queries changed) get added.
   const homepage = topPageUrls[0] ? await analyzePageUrl(topPageUrls[0]).catch(() => ({ ok: false })) : { ok: false };
+  const businessCtx = await (await import('../lib/tenant-context.js')).loadBusinessContext(siteId, { agent: 'aeo' }).catch(() => null);
   const candidates = await generatePromptCandidates({
+    businessDescription: businessCtx?.canonical ? businessCtx.description : '',
     companyName: site.name,
     homepageTitle: homepage.ok ? homepage.analysis.title : null,
     homepageDescription: homepage.ok ? homepage.analysis.metaDescription : null,

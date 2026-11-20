@@ -4,6 +4,9 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { api, daysAgo, timeAgo } from '../api.js';
 import DraftModal from '../components/DraftModal.jsx';
 import PageIntro from '../components/layout/PageIntro.jsx';
+import DraftPanel from '../components/content/DraftPanel.jsx';
+import { shape as shapeDraft } from '../lib/content-history.js';
+import { initialDraftsTab } from '../lib/content-tabs.js';
 import KpiStrip from '../components/layout/KpiStrip.jsx';
 import Section from '../components/layout/Section.jsx';
 import SegmentedTabs from '../components/SegmentedTabs.jsx';
@@ -272,6 +275,19 @@ function DraftStepper({ status }) {
 // scope: 'fixes' is the Action Center (every issue and fix); 'content' is the Content page (the
 // blog posts, landing pages and translations the agent drafts). They are two views of the same
 // board, so nothing is hidden twice or lost: see lib/draft-scope.js. Undefined = everything.
+// A list never gets its own scroll box (a scroll area inside the page steals the wheel and cuts rows in half): it shows its first
+// LIST_ROWS rows, and this button opens the rest in place so the page has one scroll.
+const LIST_ROWS = 8;
+function ShowAllRow({ total, expanded, onToggle }) {
+  if (total <= LIST_ROWS) return null;
+  return (
+    <button type="button" onClick={onToggle} aria-expanded={expanded}
+      className="w-full py-2.5 border-t border-border text-[13px] font-medium text-primary-strong hover:bg-muted">
+      {expanded ? 'Show fewer' : `Show all ${total}`}
+    </button>
+  );
+}
+
 export default function ActionCenter({ scope }) {
   const isContent = scope === 'content';
   const [searchParams, setSearchParams] = useSearchParams();
@@ -282,7 +298,11 @@ export default function ActionCenter({ scope }) {
   // which case every api.actionCenter.* call below falls back to the
   // session's own site, same as before this existed.
   const siteId = searchParams.get('siteId') || undefined;
-  const [tab, setTab] = useState('recommendations'); // 'recommendations' | 'drafts' | 'implemented'
+  // 'recommendations' | 'drafts' | 'implemented'. The content screen opens on the drafts to review, or the tab named in ?tab=.
+  const [tab, setTab] = useState(() => initialDraftsTab(searchParams.get('tab'), isContent));
+  // Following a Content tab (To review / Live history) while this screen is already open changes ?tab=, so follow it.
+  const tabParam = searchParams.get('tab');
+  useEffect(() => { if (tabParam) setTab(initialDraftsTab(tabParam, isContent)); }, [tabParam]);
   const [recs, setRecs] = useState(null); // null = loading
   const [drafts, setDrafts] = useState(null);
   // Exact tab-badge counts, loaded independently of `drafts` itself — the
@@ -326,12 +346,14 @@ export default function ActionCenter({ scope }) {
   // Selected item inside lists for split-screen preview
   const [selectedRecommendation, setSelectedRecommendation] = useState(null);
   const [selectedDraftItem, setSelectedDraftItem] = useState(null);
+  const [panelItem, setPanelItem] = useState(null); // the fix whose side panel is open
+  const [listExpanded, setListExpanded] = useState({ drafts: false, implemented: false });
+  const toggleList = (k) => setListExpanded((e) => ({ ...e, [k]: !e[k] }));
   // Action Center layout only (the Content page keeps the permanent details column): the details of the
   // clicked issue or draft open in a side drawer; each group card can show all of its issues; the date
   // range is tucked behind a button.
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [expandedKinds, setExpandedKinds] = useState({});
-  const [showRange, setShowRange] = useState(false);
   useEffect(() => {
     if (!drawerOpen) return undefined;
     const onKey = (e) => { if (e.key === 'Escape') setDrawerOpen(false); };
@@ -407,7 +429,7 @@ export default function ActionCenter({ scope }) {
         const target = (all || []).find((d) => String(d.id) === openId);
         if (target && !inDraftScope(target.action_type, scope)) {
           // A writing draft opened from the Action Center (or the reverse): send it to the page that shows it.
-          navigate(`${scope === 'content' ? '/action-center' : '/content'}?openDraft=${openId}`, { replace: true });
+          navigate(scope === 'content' ? `/action-center?openDraft=${openId}` : `/content?view=${target.status === 'implemented' ? 'history' : 'review'}&openDraft=${openId}`, { replace: true });
           return;
         }
         if (target) {
@@ -721,11 +743,15 @@ export default function ActionCenter({ scope }) {
     }
   }, [sortedItems]);
 
+  // Details always shows an item from the list on screen: switching between To review and Done must not leave the panel on a
+  // draft from the other list. Keep the selection if it is in the current list, else take its first row (or none).
   useEffect(() => {
-    if (visibleDrafts && visibleDrafts.length > 0 && !selectedDraftItem) {
-      setSelectedDraftItem(visibleDrafts[0]);
-    }
-  }, [visibleDrafts]);
+    if (tab === 'recommendations') return;
+    const list = tab === 'implemented' ? implementedDrafts : visibleDrafts;
+    if (!list) return;
+    if (selectedDraftItem && list.some((d) => d.id === selectedDraftItem.id)) return;
+    setSelectedDraftItem(list[0] || null);
+  }, [tab, visibleDrafts, drafts]);
 
   // Below lg the details panel sits under the list, so selecting a row scrolls
   // it into view (above lg it is a sticky right column and already visible).
@@ -780,8 +806,6 @@ export default function ActionCenter({ scope }) {
     { label: 'Other', value: kindCount('other'), sub: 'AI answers, growth, legal' },
     { label: 'Auto-fixable', value: safeEligibleCount, sub: 'safe to ship automatically' },
   ];
-
-  const dateInput = 'h-8 px-2.5 rounded-control bg-white text-[13px] font-medium text-fg min-w-0 flex-1 md:flex-none';
 
   // One badge per recommendation describing its state. Lifecycle first: a card
   // with work actually in flight, or one that has come back after a failed
@@ -1103,7 +1127,18 @@ export default function ActionCenter({ scope }) {
                         </span>
                       </Fact>
                       {selectedDraftItem.implemented_at && (
-                        <Fact label="Merge timeline">{new Date(selectedDraftItem.implemented_at).toLocaleString()}</Fact>
+                        <Fact label="Went live">{new Date(selectedDraftItem.implemented_at).toLocaleString()}</Fact>
+                      )}
+                      {selectedDraftItem.pr_number && (
+                        <Fact label="Pull request">
+                          {selectedDraftItem.pr_url
+                            ? <a href={selectedDraftItem.pr_url} target="_blank" rel="noreferrer" className="underline underline-offset-2">#{selectedDraftItem.pr_number}</a>
+                            : <>#{selectedDraftItem.pr_number}</>}
+                          {selectedDraftItem.pr_state ? <span className="text-faint"> · {selectedDraftItem.pr_state}</span> : null}
+                        </Fact>
+                      )}
+                      {selectedDraftItem.branch_name && (
+                        <Fact label="Branch"><span className="font-mono text-[13px] break-all">{selectedDraftItem.branch_name}</span></Fact>
                       )}
                     </dl>
 
@@ -1145,7 +1180,8 @@ export default function ActionCenter({ scope }) {
   // Content page keeps the toolbar, summary strip and permanent details column below.
   if (!isContent) {
     const openIssue = (item) => { pickRecommendation(item); setDrawerOpen(true); };
-    const openDraftRow = (d) => { pickDraft(d); setDrawerOpen(true); };
+    // A fix opens the same side panel as a piece of content: what it changes (or how the page will look), then Approve or Skip.
+    const openDraftRow = (d) => setPanelItem(shapeDraft(d));
     const SEV = { high: STATUS.critical.color, medium: STATUS.warning.color, low: '#c9c9c9' };
     const SEV_LABEL = { high: 'Critical', medium: 'Important', low: 'Minor' };
     // Open issues exclude anything already being worked on: that issue is shown under "Being fixed" (as its
@@ -1201,7 +1237,7 @@ export default function ActionCenter({ scope }) {
                 <p className="mt-2 text-[13px] text-text">{k === 'security' ? 'No security issues found' : 'Nothing here right now'}</p>
               </div>
             ) : (
-              <div className={expanded ? 'max-h-[460px] overflow-y-auto' : ''}>
+              <div>
                 {shown.map((item) => {
                   const on = drawerOpen && selectedRecommendation?.id === item.id;
                   const itemUrl = item.url || item.params?.page;
@@ -1258,6 +1294,7 @@ export default function ActionCenter({ scope }) {
                 <span className="block font-mono text-xs text-faint truncate">{draftTarget(d)}</span>
               </span>
               <Badge tone={done ? 'green' : (DRAFT_TONE[d.status] || 'grey')} className="shrink-0">{done ? 'Fixed' : draftStatusText(d.status)}</Badge>
+              {d.pr_number && <span className="hidden sm:inline text-xs text-faint shrink-0 tnum" title={d.branch_name || undefined}>PR #{d.pr_number}</span>}
               {done && d.implemented_at && <span className="hidden sm:inline text-xs text-faint shrink-0">{timeAgo(d.implemented_at)}</span>}
             </button>
           );
@@ -1320,18 +1357,8 @@ export default function ActionCenter({ scope }) {
               <button key={f.value} type="button" aria-pressed={sourceFilter === f.value} onClick={() => setSourceFilter(f.value)} className={chip(sourceFilter === f.value)}
                 style={sourceFilter === f.value ? undefined : { boxShadow: 'inset 0 0 0 1px var(--input)' }}>{f.label}</button>
             ))}
-            <button type="button" aria-expanded={showRange} onClick={() => setShowRange((v) => !v)} className={chip(showRange)}
-              style={showRange ? undefined : { boxShadow: 'inset 0 0 0 1px var(--input)' }}>Date range</button>
           </div>
         </div>
-        {showRange && (
-          <div className="mt-3 flex items-center gap-2">
-            <input type="date" value={range.start} onChange={(e) => setRange((r) => ({ ...r, start: e.target.value }))} className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="Start date" />
-            <span className="text-faint shrink-0">→</span>
-            <input type="date" value={range.end} onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))} className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="End date" />
-          </div>
-        )}
-
         <div className="mt-5">
           {tab === 'recommendations' && <DesignChoices siteId={siteId} />}
           {tab === 'recommendations' && (
@@ -1365,6 +1392,7 @@ export default function ActionCenter({ scope }) {
         )}
 
         {draftModalEl}
+        <DraftPanel item={panelItem} siteId={siteId} onClose={() => setPanelItem(null)} onChanged={loadDrafts} />
       </div>
     );
   }
@@ -1386,17 +1414,6 @@ export default function ActionCenter({ scope }) {
           // recommendations feed; Generate Draft/Drafts/Approval/PR logic
           // below is untouched.
           <SegmentedTabs options={SOURCE_FILTERS} value={sourceFilter} onChange={setSourceFilter} />
-        )}
-        {/* The date range is tucked behind a button, as on the Action Center, so the toolbar is not a wall of controls. */}
-        <Button variant="light" aria-expanded={showRange} onClick={() => setShowRange((v) => !v)}>Date range</Button>
-        {showRange && (
-          <div className="flex items-center gap-2 w-full md:w-auto">
-            <input type="date" value={range.start} onChange={(e) => setRange((r) => ({ ...r, start: e.target.value }))}
-              className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="Start date" />
-            <span className="text-faint shrink-0">→</span>
-            <input type="date" value={range.end} onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))}
-              className={dateInput} style={{ boxShadow: 'var(--ring)' }} aria-label="End date" />
-          </div>
         )}
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {/* Live "today" counters — distinct from the Run button's live
@@ -1434,7 +1451,7 @@ export default function ActionCenter({ scope }) {
         {tab === 'recommendations' && (
           <Section tray className="min-w-0 h-full [&>.tray]:h-full [&>.tray>.tray-card]:h-full" title={isContent ? 'Recommendations' : 'Issues and fixes'}
             subtitle={isContent ? 'Grouped by kind · open a group to see its ideas' : 'Security issues first · open a group to see what is in it'}>
-            <div className="border-t border-border lg:max-h-[600px] lg:overflow-y-auto">
+            <div className="border-t border-border">
               {recs === null ? (
                 Array.from({ length: 6 }).map((_, i) => (
                   <div key={i} className="px-4 py-3 border-b border-border last:border-0"><div className="h-4 bg-muted rounded-control animate-pulse" /></div>
@@ -1471,13 +1488,8 @@ export default function ActionCenter({ scope }) {
                       </button>
                       {open && (
                         <>
-                          {/* Unlike the Drafts/Done lists below (which already cap at
-                              max-h-[360px] overflow-y-auto), this one had no scroll
-                              bound — "Show all" expanding to a dozen-plus entries just
-                              grew the whole card (and page) instead of scrolling
-                              internally, burying the details panel far below the fold
-                              on mobile. */}
-                          <div className="overflow-y-auto max-h-[360px]">
+                          {/* Four rows, then "Show all" opens the rest in place: the page scrolls, never the list. */}
+                          <div>
                             {(showAllRecommendations ? sortedItems : sortedItems.slice(0, 4)).map((item) => {
                               const selected = selectedRecommendation?.id === item.id;
                               const level = item.priority === 'high' ? 3 : item.priority === 'medium' ? 2 : 1;
@@ -1540,8 +1552,9 @@ export default function ActionCenter({ scope }) {
               ) : visibleDrafts.length === 0 ? (
                 <div className="py-10 text-center text-sm text-faint">No drafts matching status.</div>
               ) : (
-                <div className="overflow-y-auto max-h-[360px]">
-                  {visibleDrafts.map((d) => {
+                <>
+                <div>
+                  {(listExpanded.drafts ? visibleDrafts : visibleDrafts.slice(0, LIST_ROWS)).map((d) => {
                     const meta = GENERATOR_META[d.action_type] || { label: d.action_type };
                     const selected = selectedDraftItem?.id === d.id;
                     return (
@@ -1556,6 +1569,8 @@ export default function ActionCenter({ scope }) {
                     );
                   })}
                 </div>
+                <ShowAllRow total={visibleDrafts.length} expanded={listExpanded.drafts} onToggle={() => toggleList('drafts')} />
+                </>
               )}
             </div>
           </Section>
@@ -1569,8 +1584,9 @@ export default function ActionCenter({ scope }) {
               ) : implementedDrafts.length === 0 ? (
                 <div className="py-10 text-center text-sm text-faint">Nothing shipped in this range yet.</div>
               ) : (
-                <div className="overflow-y-auto max-h-[360px]">
-                  {implementedDrafts.map((d) => {
+                <>
+                <div>
+                  {(listExpanded.implemented ? implementedDrafts : implementedDrafts.slice(0, LIST_ROWS)).map((d) => {
                     const meta = GENERATOR_META[d.action_type] || { label: d.action_type };
                     const selected = selectedDraftItem?.id === d.id;
                     return (
@@ -1586,6 +1602,8 @@ export default function ActionCenter({ scope }) {
                     );
                   })}
                 </div>
+                <ShowAllRow total={implementedDrafts.length} expanded={listExpanded.implemented} onToggle={() => toggleList('implemented')} />
+                </>
               )}
             </div>
           </Section>
@@ -1595,6 +1613,7 @@ export default function ActionCenter({ scope }) {
       </div>
 
       {draftModalEl}
+      <DraftPanel item={panelItem} siteId={siteId} onClose={() => setPanelItem(null)} onChanged={loadDrafts} />
     </div>
   );
 }

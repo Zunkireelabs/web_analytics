@@ -10,6 +10,8 @@ import { callDataAnalystAgent } from '../lib/data-analyst-client.js';
 import { answerQuestion } from '../agents/lib/copilot.js';
 import { createConversation, getConversation, getRecentMessages, saveMessage } from '../store/copilot.js';
 import { query } from '../db.js';
+import { collectNeedsYou } from './needs-you.js';
+import { suggestedQuestions } from './questions.js';
 
 // The Assistant's entire surface for touching the system (Phase 3, §9/§21).
 //
@@ -180,6 +182,39 @@ export const CAPABILITIES = {
         sample: items.slice(0, 5).map((i) => ({ id: i.id, tag: i.tag, page: i.params?.page ?? null, blocked: !!i.blockedReason })),
       };
     },
+  },
+
+  // Everything on this site waiting on a person, from the real records (see needs-you.js). The assistant's opening
+  // message and its "what did you find?" answer both use this. Read-only: acting on an item goes through the existing
+  // action for it, never through here.
+  get_needs_you: {
+    description: 'Everything waiting on a person for this site: approvals to give, issues the agents found, and decisions they cannot make alone.',
+    requiredRole: 'tenant_member',
+    run: async (ctx, _args, deps = {}) => {
+      const items = await (deps.collectNeedsYou || collectNeedsYou)(ctx.siteId);
+      return { total: items.length, items };
+    },
+  },
+
+  // What actually went live on this site in the last 7 days, from the drafts that reached "implemented". Counts by type only.
+  get_week_summary: {
+    description: 'What went live on this site in the last 7 days, by type of change.',
+    requiredRole: 'tenant_member',
+    run: async (ctx, _args, deps = {}) => {
+      const db = deps.db || query;
+      const { rows } = await db(
+        `SELECT action_type, count(*)::int AS n FROM drafts
+          WHERE site_id = $1 AND status = 'implemented' AND implemented_at >= now() - interval '7 days'
+          GROUP BY action_type ORDER BY n DESC, action_type`, [ctx.siteId]);
+      return { total: rows.reduce((t, r) => t + r.n, 0), byType: rows.map((r) => ({ type: r.action_type, count: r.n })) };
+    },
+  },
+
+  // The one-tap questions for the chat (top 15 in four groups). No site data inside, so any role may read it.
+  get_suggested_questions: {
+    description: 'The questions a client can tap in the Agent chat.',
+    requiredRole: 'tenant_member',
+    run: async () => suggestedQuestions(),
   },
 
   // Every role. The Assistant's deterministic intents above only cover

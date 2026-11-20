@@ -11,7 +11,8 @@ import { pageStructureGuidance } from './lib/design-aware-composer.js';
 import { getSeoPolicy } from '../store/site-seo-policy.js';
 import { getSiteProfile } from '../store/data-analyst.js';
 import { tenantIndustries } from '../agents/lib/seo-tenant-context.js';
-import { tenantContextTextFor } from '../lib/tenant-context.js';
+import { tenantContextTextFor, loadBusinessContext, businessContextPrompt } from '../lib/tenant-context.js';
+import { contentFocusLine } from '../lib/business-profile.js';
 import { attributionNote, globalGrowthNote, agencyCreditLine } from '../agents/lib/zunkireelabs-growth-policy.js';
 import { llmFailure } from './lib/llm-error.js';
 
@@ -179,11 +180,17 @@ export async function generate({ siteId, params }) {
   // source existing means genuinely nothing is known yet — no fallback
   // guess, no industry line at all (2026-09-10 multi-tenant SEO rule).
   const industries = tenantIndustries(seoPolicy, siteProfile);
-  const industryFocus = industries?.length
-    ? `Write for readers in this business's own industry/industries where the topic allows it — their real ` +
-      `problems, services, products, software, automation, website, CRM, booking, or management needs: ` +
-      `${industries.join(', ')}. `
-    : '';
+  // A verified business profile replaces the generic industry steer with the company's own buyers, offering and their problems. Without
+  // one, the steer is exactly what it was.
+  const businessContext = await loadBusinessContext(siteId, { agent: 'content' }).catch(() => null);
+  const canonicalFocus = businessContext?.canonical ? contentFocusLine(businessContext.profile) : '';
+  const industryFocus = canonicalFocus
+    ? `${businessContextPrompt(businessContext)} ${canonicalFocus} `
+    : (industries?.length
+      ? `Write for readers in this business's own industry/industries where the topic allows it — their real ` +
+        `problems, services, products, software, automation, website, CRM, booking, or management needs: ` +
+        `${industries.join(', ')}. `
+      : '');
   // Baseline for every tenant (a policy row can only ever add stricter
   // constraints, per no_invented_data's schema default — never opt back
   // into inventing numbers): no fabricated search-volume/demand figures.

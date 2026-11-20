@@ -151,7 +151,8 @@ export function registerAiActionsTools(server, siteId, permissionLevel) {
     },
   }, withErrorHandling('save_site_profile', async ({ industry, mainTopics, siteType }) => {
     const denied = requireLevel(permissionLevel, 'ai_actions'); if (denied) return denied;
-    await saveSiteProfile(siteId, { industry, mainTopics, siteType: siteType ?? null });
+    // An inference from search queries: say so, so it never replaces an industry that was detected from evidence or set by a person.
+    await saveSiteProfile(siteId, { industry, mainTopics, siteType: siteType ?? null, industrySource: 'inferred', industryConfidence: 'low' });
     return jsonResult({ ok: true });
   }));
 

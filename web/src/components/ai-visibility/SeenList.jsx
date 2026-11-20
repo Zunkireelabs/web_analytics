@@ -6,7 +6,7 @@ import { engineLabel } from './engines.js';
 export default function SeenList({ rows, total, loading }) {
   return (
     <ListCard
-      title={`Where you are seen${loading ? '' : ` · ${rows.length}`}`}
+      title={`Where AI recommends you${loading ? '' : ` · ${rows.length}`}`}
       subtitle="Rank in the answer, and how often across checks"
       empty={loading ? 'Loading…' : !rows.length ? 'No prompt names you yet. Once the agent has checked your prompts, the ones that do will show here.' : null}
       footer={!loading && <><span>{rows.length} of {total} checked prompts</span><span /></>}

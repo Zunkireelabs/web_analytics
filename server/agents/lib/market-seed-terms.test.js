@@ -79,3 +79,34 @@ describe('resolveMarketServiceTerms', () => {
     assert.equal(out.terms.length, 12);
   });
 });
+
+import { normalizeProfile as _np, applyReview as _ar } from '../../lib/business-profile.js';
+
+describe('resolveMarketServiceTerms with a canonical business profile', () => {
+  const ev = [{ source: 'page', ref: 'u', summary: 's', quote: 'q' }];
+  const F = (value) => ({ value, status: 'detected', confidence: 'high', evidence: ev });
+  const profile = () => _np({ fields: { ownIndustry: F({ label: 'Software (SaaS)' }), productsServices: F([{ name: 'Online booking' }, { name: 'Staff scheduling' }]), targetCustomerIndustries: F(['Spas', 'Salons']) } });
+  const noCaps = async () => [];
+  const noDb = async () => ({ rows: [{ main_topics_json: JSON.stringify(['gym', 'fitness']) }] });
+
+  test('the products the company sells beat the stale topic list, and customer industries never become service terms', async () => {
+    const out = await resolveMarketServiceTerms(1, { deps: { getProductCapabilities: noCaps, query: noDb, getBusinessProfile: async () => ({ profile: profile() }) } });
+    assert.deepEqual(out.terms, ['online booking', 'staff scheduling']);
+    assert.equal(out.source, 'business-profile');
+    assert.equal(out.confidence, 'medium');
+    assert.ok(!out.terms.includes('spas') && !out.terms.includes('gym'));
+  });
+
+  test('a person-confirmed product list is high confidence', async () => {
+    const confirmed = _ar(profile(), [{ field: 'productsServices', accept: true }], { userId: 1 }).profile;
+    const out = await resolveMarketServiceTerms(1, { deps: { getProductCapabilities: noCaps, query: noDb, getBusinessProfile: async () => ({ profile: confirmed }) } });
+    assert.equal(out.confidence, 'high');
+  });
+
+  test('verified capabilities still come first, and with no profile the old ladder is unchanged', async () => {
+    const caps = await resolveMarketServiceTerms(1, { deps: { getProductCapabilities: async () => [{ name: 'Verified thing' }], query: noDb, getBusinessProfile: async () => ({ profile: profile() }) } });
+    assert.equal(caps.source, 'verified-capabilities');
+    const legacy = await resolveMarketServiceTerms(1, { deps: { getProductCapabilities: noCaps, query: noDb, getBusinessProfile: async () => null } });
+    assert.equal(legacy.source, 'site-profile-topics');
+  });
+});
