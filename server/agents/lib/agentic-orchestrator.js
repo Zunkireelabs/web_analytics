@@ -1,9 +1,9 @@
-import OpenAI from 'openai';
 import { listAgentMeta } from '../registry.js';
 import { runAgent } from '../runner.js';
 import { createPageCache } from './fetch-cache.js';
 import { summarizeAgentRuns } from '../orchestrator.js';
-import { withRetry, isRetryable, LLM_TIMEOUT_MS } from '../../llm.js';
+import { withRetry, isRetryable } from '../../llm.js';
+import { makeAgenticClient } from './agentic-client.js';
 import { normalizeCompetitorDomain } from './competitor-analysis.js';
 import { saveAgenticOrchestrationRun } from '../../store/agentic-orchestration-runs.js';
 import { getSiteById } from '../../store/read.js';
@@ -19,10 +19,8 @@ import { safeMessage } from '../../lib/errors.js';
 // OpenAI-tool-specific, not just another configuration of the existing
 // single-shot fan-out.
 //
-// Deliberately OpenAI-only (unlike llm.js's callLLM, which auto-switches
-// provider) — this is new infrastructure with no existing dual-provider
-// tool-calling support to preserve, and OpenAI's tools API is what this was
-// built and verified against.
+// Built against OpenAI's tools API. The client it talks to (agentic-client.js) looks like the OpenAI SDK but answers with Claude's
+// tool-use API when OpenAI's quota is exhausted, and goes back to OpenAI by itself once it works again.
 
 // Same double-gate pattern as ai-recommendation's model-providers/openai.js
 // configured(): never let OPENAI_API_KEY's mere presence (already set in
@@ -32,7 +30,8 @@ import { safeMessage } from '../../lib/errors.js';
 export function agenticOrchestrationEnabled() {
   const key = process.env.OPENAI_API_KEY;
   const hasRealKey = !!key && !key.startsWith('sk-xxxx');
-  return hasRealKey && process.env.AGENTIC_ORCHESTRATION_ENABLED === 'true';
+  // An Anthropic key alone is enough too: the loop answers with Claude when OpenAI is unavailable (see agentic-client.js).
+  return (hasRealKey || !!process.env.ANTHROPIC_API_KEY) && process.env.AGENTIC_ORCHESTRATION_ENABLED === 'true';
 }
 
 const MODEL = process.env.AGENTIC_ORCHESTRATION_MODEL || 'gpt-4o-mini';
@@ -380,7 +379,7 @@ export async function runAgenticLoop({
   const startedAt = Date.now();
   const mode = staleness != null ? 'selection' : 'question';
   const tools = await buildAgentTools(mode);
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
+  const client = makeAgenticClient();
   const pageCache = createPageCache();
   // Resolved once per session from the SESSION's siteId (never from anything
   // the model or the user supplied) — the allowlist the inspect_* tools are

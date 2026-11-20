@@ -124,12 +124,27 @@ async function loadBusiness(siteId, site, d) {
     siteType: profile?.site_type ?? profile?.siteType ?? null,
     hasSeoPolicy: Boolean(ctx.seoPolicy),
   };
-  const empty = !goals.length && !data.industries.length && !data.markets.length && !profile && !ctx.seoPolicy;
+  // The canonical business profile (migration 258), when the project has one: what it IS in a few fields, with the version and how far a
+  // person has confirmed it. Added only when it exists, so a project without one has exactly the section it always had.
+  const bp = ctx.businessProfile;
+  if (bp?.profile) {
+    const f = bp.profile.fields || {};
+    data.businessProfile = {
+      version: bp.version ?? null,
+      state: bp.status ?? null,
+      ownIndustry: f.ownIndustry?.value?.label ?? null,
+      businessModel: f.businessModel?.value?.model ?? null,
+      sells: (f.productsServices?.value || []).map((x) => x.name).slice(0, 8),
+      customers: (f.targetCustomers?.value || []).map((x) => x.segment).slice(0, 6),
+      pendingChanges: Array.isArray(bp.pending) ? bp.pending.length : 0,
+    };
+  }
+  const empty = !goals.length && !data.industries.length && !data.markets.length && !profile && !ctx.seoPolicy && !data.businessProfile;
   if (empty) return null;
   return {
     data,
-    asOf: latestOf(profile?.profiled_at, ...(ctx.goals || []).map((g) => g.updatedAt ?? g.updated_at)),
-    sources: ['site_goals', 'site_profiles', 'site_seo_policy', 'product_growth_config'],
+    asOf: latestOf(profile?.profiled_at, bp?.createdAt, ...(ctx.goals || []).map((g) => g.updatedAt ?? g.updated_at)),
+    sources: ['site_goals', 'site_profiles', 'site_seo_policy', 'product_growth_config', ...(bp?.profile ? ['business_profile_versions'] : [])],
   };
 }
 

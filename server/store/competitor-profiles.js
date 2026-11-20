@@ -80,12 +80,15 @@ export async function listCompetitorsByKind(siteId, kind, { limit = 20 } = {}) {
 // row from one run shares the identical runAt timestamp (see
 // upsertCompetitorProfile), so this can never blend two real runs even if
 // they happen to land within minutes of each other.
+// Rows marked excluded (excluded_reason set: a platform, a government site, a directory...) are not competitors and never appear here.
+// command-center, content-gap and project-memory read this list without checking the column themselves.
 export async function listCompetitorProfiles(siteId) {
   const { rows } = await query(
     `SELECT * FROM competitor_profiles
      WHERE site_id = $1
+       AND excluded_reason IS NULL
        AND last_analyzed_at = (
-         SELECT MAX(last_analyzed_at) FROM competitor_profiles WHERE site_id = $1
+         SELECT MAX(last_analyzed_at) FROM competitor_profiles WHERE site_id = $1 AND excluded_reason IS NULL
        )
      ORDER BY domain`,
     [siteId]

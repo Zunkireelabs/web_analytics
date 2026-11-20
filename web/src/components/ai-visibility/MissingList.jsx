@@ -1,10 +1,10 @@
-import { Check, Zap } from 'lucide-react';
+import { Check } from 'lucide-react';
 import Badge from '../Badge.jsx';
 import Button from '../Button.jsx';
 import ListCard, { ROW } from './ListCard.jsx';
 
 const STATE = {
-  queued: <Badge tone="amber">Agent working · 07:00</Badge>,
+  queued: <Badge tone="amber">Being drafted</Badge>,
   drafted: <Badge tone="primary">Draft ready</Badge>,
 };
 
@@ -14,7 +14,7 @@ export default function MissingList({ rows, picked, onToggle, onSelectAll, onShi
   return (
     <ListCard
       title={`Where you are missing${loading ? '' : ` · ${rows.length}`}`}
-      subtitle="Tick the ones to fix. Ship now, or leave them for the 07:00 run"
+      subtitle="Tick the ones to fix, then draft them"
       action={open.length > 0 && (
         <button type="button" className="text-xs text-primary hover:underline" onClick={onSelectAll}>
           {n === open.length ? 'Clear' : 'Select all'}
@@ -23,10 +23,9 @@ export default function MissingList({ rows, picked, onToggle, onSelectAll, onShi
       empty={loading ? 'Loading…' : !rows.length ? 'No missed prompts. Every checked prompt names you.' : null}
       footer={!loading && (
         <>
-          <span className="min-w-0 truncate">{message || `${n} selected`}</span>
+          <span className="min-w-0 truncate">{message || (n ? <><b className="text-fg font-semibold">{n} selected</b> · becomes drafts you approve in Action Center</> : 'Tick the questions to fix')}</span>
           <span className="flex items-center gap-1.5 shrink-0">
-            <Button size="sm" variant="light" disabled={!n || busy} onClick={() => onShip(false)}>Leave for 07:00</Button>
-            <Button size="sm" variant="primary" disabled={!n || busy} onClick={() => onShip(true)}><Zap size={13} />Ship {n || ''} now</Button>
+            <Button size="sm" variant="primary" disabled={!n || busy} onClick={() => onShip(true)}>{busy ? 'Drafting…' : `Draft ${n ? `these ${n}` : 'these'}`}</Button>
           </span>
         </>
       )}
@@ -46,8 +45,7 @@ export default function MissingList({ rows, picked, onToggle, onSelectAll, onShi
             <div className="min-w-0 flex-1">
               <div className="text-fg">“{p.promptText}”</div>
               <div className="text-xs text-faint mt-0.5">
-                Not seen in {p.checks} check{p.checks === 1 ? '' : 's'}
-                {p.competitors.length > 0 && ` · shown instead: ${p.competitors.slice(0, 3).join(', ')}`}
+                {p.competitors.length > 0 ? `Named instead: ${p.competitors.slice(0, 3).join(', ')}` : `Not seen in ${p.checks} check${p.checks === 1 ? '' : 's'}`}
               </div>
               {p.shipError && <div className="text-xs mt-0.5" style={{ color: 'var(--critical, #b42318)' }}>Last try failed: {p.shipError}</div>}
             </div>

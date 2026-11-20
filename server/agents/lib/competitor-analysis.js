@@ -5,6 +5,7 @@ import { getCompetitorProvider, competitorProviderConfigured } from '../../inges
 import { callLLM } from '../../llm.js';
 import { resolveOwnDomain, knownDomain, filterOwnDomainPages } from './site-domain.js';
 import { resolveSiteLocations } from './site-locations.js';
+import { splitByDomainKind, validateCompetitorCandidate } from './competitor-category.js';
 
 // LLM-driven competitor discovery + crawl + compare — the MVP pipeline that
 // makes competitor-intelligence work with zero external SEO API, so it's
@@ -91,7 +92,7 @@ async function detectCompetitorsFromSerp(ownDomain, topQueries, { locationCode, 
 // with how the domain was actually found and refuses to rank an
 // unverified, zero-overlap candidate alongside a SERP-confirmed one.
 export async function detectCompetitors(ownDomain, topPages, topQueries, businessContext = {}) {
-  const { title, metaDescription } = businessContext;
+  const { title, metaDescription, companyDescription, competitorInclude, competitorExclude } = businessContext;
   const system = 'You are a market-research analyst identifying REAL business competitors for a company — not an ' +
     'SEO keyword-overlap tool. Using what the company\'s own homepage says about itself (its actual industry, ' +
     'services, and target market/geography), name 3-5 REAL, well-known companies a prospective customer would ' +
@@ -103,9 +104,14 @@ export async function detectCompetitors(ownDomain, topPages, topQueries, busines
     'operating company — never invent a plausible-sounding domain or guess a company into existence because its ' +
     'name would fit the pattern. If you are not confident about a 4th or 5th real competitor, return fewer than 5 ' +
     'rather than padding the list with a guess. Respond with ONLY a JSON array of bare domains (no protocol, no ' +
-    'www), e.g. ["example.com","other.com"]. Never include the site\'s own domain.';
+    'www), e.g. ["example.com","other.com"]. Never include the site\'s own domain. A competitor is a company that sells the ' +
+    'same kind of thing to the same kind of buyer. Never name a directory, review site, marketplace, news publisher, ' +
+    'social platform, government body, embassy or university as a competitor.';
   const context = [
     `Own domain: ${ownDomain}`,
+    companyDescription ? `What this company is (verified business profile): ${companyDescription}` : null,
+    competitorInclude?.length ? `Kinds of company that compete with it: ${competitorInclude.join('; ')}` : null,
+    competitorExclude?.length ? `Kinds of site that are NOT competitors: ${competitorExclude.join('; ')}` : null,
     title ? `Homepage title: ${title}` : null,
     metaDescription ? `Homepage description: ${metaDescription}` : null,
     `Top pages: ${topPages.join(', ') || 'none'}`,
@@ -269,7 +275,7 @@ export async function analyzeCompetitor(domain, ownAnalysis, ownDomain, ownScore
     // customer as computed evidence. It belongs in facts/narrative, never in
     // evidence; the real numbers a Finding may cite are ownScore,
     // competitorScore, structuralSignals and queryOverlap.
-    return { domain, ok: true, comparison: { ...comparison, structuralSignals }, queryOverlap, ownScore, competitorScore };
+    return { domain, ok: true, comparison: { ...comparison, structuralSignals }, queryOverlap, ownScore, competitorScore, homepage: { title: fetched.analysis.title, metaDescription: fetched.analysis.metaDescription, text: String(fetched.analysis.bodyText || '').slice(0, 1500) } };
   } catch {
     return { domain, ok: false, error: 'comparison response was not valid JSON' };
   }
@@ -299,6 +305,19 @@ export async function runCompetitorDiscovery(siteId, start, end, { forceDomain }
   // global default for every tenant.
   const { locationCode, languageCode } = resolveSiteLocations(site)[0];
   const businessContext = { title: ownPageFetch.analysis.title, metaDescription: ownPageFetch.analysis.metaDescription };
+  // The canonical business profile (when one exists) replaces the model's guess from a homepage title: what the company sells, to whom,
+  // and which kinds of site compete or do not. Soft: no profile means exactly the old behaviour.
+  let profile = null;
+  try {
+    const { loadBusinessContext } = await import('../../lib/tenant-context.js');
+    const bc = await loadBusinessContext(siteId, { agent: 'competitor' });
+    if (bc?.canonical) {
+      profile = bc.profile;
+      businessContext.companyDescription = bc.description;
+      businessContext.competitorInclude = bc.profile?.fields?.competitorCategories?.value?.include || [];
+      businessContext.competitorExclude = bc.profile?.fields?.competitorCategories?.value?.exclude || [];
+    }
+  } catch { /* no profile available */ }
 
   // Two independent discovery lenses, run together rather than as a
   // fallback chain: the LLM reasons about the real marketplace/industry
@@ -336,10 +355,22 @@ export async function runCompetitorDiscovery(siteId, start, end, { forceDomain }
     ? [forceDomain, ...discoveredDomains.filter((d) => d !== forceDomain)].slice(0, MAX_COMPETITORS)
     : discoveredDomains;
 
-  const analyzed = await Promise.all(candidateDomains.map((d) =>
+  // Category check, part 1: what the DOMAIN alone proves (a government site, a known directory, a platform). Such a candidate is never
+  // fetched and never costs a model call. It is still reported, so it can be stored as excluded and not rediscovered as a rival.
+  const { keep, excluded: preExcluded } = splitByDomainKind(candidateDomains, profile);
+  const analyzed = await Promise.all(keep.map((d) =>
     analyzeCompetitor(d, ownPageFetch.analysis, ownDomain, ownScore, queryTexts)
       .then((c) => ({ ...c, discoverySource: sourceByDomain.get(d) || 'forced' }))
   ));
+  // Part 2: what the fetched homepage says about itself (a ministry page, a listing site on an ordinary domain).
+  for (const c of analyzed) {
+    if (!c.ok) continue;
+    const v = validateCompetitorCandidate(c.domain, c.homepage, profile);
+    if (v.excluded) { c.excludedKind = v.kind; c.excludedReasons = v.reasons; }
+  }
+  for (const x of preExcluded) {
+    analyzed.push({ domain: x.domain, ok: false, error: `not a competitor: ${x.kind}`, excludedKind: x.kind, excludedReasons: x.reasons, discoverySource: sourceByDomain.get(x.domain) || 'forced' });
+  }
 
   // A SERP-only candidate that comes back with zero real topical overlap
   // (queryRelevanceOverlap above) is a domain that merely shares a SERP with

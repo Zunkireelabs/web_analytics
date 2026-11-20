@@ -6,6 +6,8 @@ import { listCompetitorProfiles } from '../store/competitor-profiles.js';
 import { getSeoPolicy } from '../store/site-seo-policy.js';
 import { getSiteProfile } from '../store/data-analyst.js';
 import { tenantIndustries } from './lib/seo-tenant-context.js';
+import { loadBusinessContext } from '../lib/tenant-context.js';
+import { contentFocusLine } from '../lib/business-profile.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -89,7 +91,7 @@ const AI_SUGGESTION_MAX_ITEMS = 4;
 // to name likely-relevant subtopics the text doesn't seem to cover. This is
 // explicitly an inference, never a verified fact — kept in its own field,
 // never merged into the deterministic `gaps`, and always confidence-labeled.
-async function suggestMissingEntities(bodyText, queryText, seoPolicy, siteProfile) {
+async function suggestMissingEntities(bodyText, queryText, seoPolicy, siteProfile, businessContext = null) {
   if (!bodyText || !queryText) return { suggestions: [], error: 'no-context' };
   // This tenant's own real business/industry (explicit site_seo_policy
   // override when set, else the industry already inferred generically for
@@ -99,11 +101,16 @@ async function suggestMissingEntities(bodyText, queryText, seoPolicy, siteProfil
   // (2026-09-10 multi-tenant SEO rule — dynamic per site_id, never
   // hardcoded to one tenant).
   const industries = tenantIndustries(seoPolicy, siteProfile);
-  const industryFocus = industries?.length
-    ? ` Prioritize subtopics real prospects in this business's own industry/industries would search for — their ` +
-      `problems, services, products, software/CRM/booking/automation/website needs — over generic ones: ` +
-      `${industries.join(', ')}.`
-    : '';
+  // With a verified business profile the steer comes from it (the company's buyers, what it sells, their problems). Without one it is
+  // exactly what it was.
+  const canonicalFocus = businessContext?.canonical ? contentFocusLine(businessContext.profile) : '';
+  const industryFocus = canonicalFocus
+    ? ` ${canonicalFocus}`
+    : (industries?.length
+      ? ` Prioritize subtopics real prospects in this business's own industry/industries would search for — their ` +
+        `problems, services, products, software/CRM/booking/automation/website needs — over generic ones: ` +
+        `${industries.join(', ')}.`
+      : '');
   const system = 'You are an SEO/AEO content analyst. Given a real search query and a page\'s actual fetched ' +
     `text, suggest up to ${AI_SUGGESTION_MAX_ITEMS} specific subtopics or entities commonly expected for that ` +
     'query which the text does NOT appear to cover. This is your inference from reading the page, not a verified ' +
@@ -205,9 +212,10 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const aiCandidates = analyzed.filter((r) => r.aiEligible)
     .sort((a, b) => b.impressions - a.impressions)
     .slice(0, MAX_AI_SUGGESTION_PAGES);
+  const businessContext = aiCandidates.length ? await loadBusinessContext(siteId, { agent: 'content' }).catch(() => null) : null;
   const aiResults = await Promise.all(aiCandidates.map(async (r) => ({
     page: r.page,
-    ...(await suggestMissingEntities(r._analysis.bodyText, r._topQuery, seoPolicy, siteProfile)),
+    ...(await suggestMissingEntities(r._analysis.bodyText, r._topQuery, seoPolicy, siteProfile, businessContext)),
   })));
   const aiByPage = new Map(aiResults.map((a) => [a.page, a]));
 

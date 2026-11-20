@@ -1,11 +1,11 @@
 import { Fragment } from 'react';
 import { useLocation } from 'react-router-dom';
-import { ChevronRight, Menu, MessageSquare } from 'lucide-react';
+import { ChevronRight, Menu } from 'lucide-react';
 import Button from './Button.jsx';
 import NotificationBell from './NotificationBell.jsx';
 import { breadcrumbFor } from '../lib/nav.js';
 
-export default function TopBar({ isInternal, isPlatformAdmin, isProduct, agentOpen, onAgent, agentAvailable, onOpenMenu }) {
+export default function TopBar({ isInternal, isPlatformAdmin, isProduct, onOpenMenu }) {
   const { pathname, search } = useLocation();
   const crumbs = breadcrumbFor(pathname, { isPlatformAdmin, isProduct }, search);
 
@@ -39,12 +39,6 @@ export default function TopBar({ isInternal, isPlatformAdmin, isProduct, agentOp
 
       <div className="ml-auto flex items-center gap-1.5">
         {isInternal && <NotificationBell isPlatformAdmin={isPlatformAdmin} />}
-        {agentAvailable && (
-          <Button variant={agentOpen ? 'light' : 'ghost'} onClick={() => onAgent(!agentOpen)} aria-pressed={agentOpen}>
-            <MessageSquare size={14} />
-            Agent
-          </Button>
-        )}
       </div>
     </header>
   );

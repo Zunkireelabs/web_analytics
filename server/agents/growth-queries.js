@@ -135,7 +135,7 @@ export async function findCoveringPage(queryText, directPage, inventoryUrls, ana
 // proposals and the real GSC candidates handed in) as 'broad-category' or
 // 'niche' RELATIVE TO THIS SITE'S OWN real niche — never a fixed word-count
 // rule, so the same call generalizes across any industry.
-async function expandAndClassify({ companyName, homepageTitle, homepageDescription, topPages, topQueries, candidateTexts }) {
+async function expandAndClassify({ companyName, homepageTitle, homepageDescription, topPages, topQueries, candidateTexts, businessDescription = '' }) {
   const system = 'You are a search-visibility strategist. Using ONLY the real company context given below — never invent ' +
     'a service, industry, or fact not evidenced in it — do two things. First, propose additional realistic queries real ' +
     'people might search on Google or ask an AI assistant about this company\'s real category: broad category terms, ' +
@@ -147,7 +147,9 @@ async function expandAndClassify({ companyName, homepageTitle, homepageDescripti
     '"llm-comparison"|"llm-question", "specificity": "broad-category"|"niche"}], "candidateSpecificity": ' +
     `[{"queryText": "...", "specificity": "broad-category"|"niche"}]}, "proposed" capped at ${LLM_PROPOSAL_CAP} items, ` +
     '"candidateSpecificity" covering every real candidate query given.';
-  const user = `Company: ${companyName}\nHomepage title: ${homepageTitle || 'unknown'}\n` +
+  const user = `Company: ${companyName}\n` +
+    (businessDescription ? `Verified business profile: ${businessDescription}\n` : '') +
+    `Homepage title: ${homepageTitle || 'unknown'}\n` +
     `Homepage description: ${homepageDescription || 'unknown'}\nTop pages: ${topPages.join(', ') || 'none'}\n` +
     `Top queries: ${topQueries.join(', ') || 'none'}\nReal candidate queries to classify: ${candidateTexts.join(', ') || 'none'}`;
   const raw = await callLLM(system, user, { maxTokens: 1400 }).catch(() => null);
@@ -207,7 +209,9 @@ export async function run({ siteId, start, end }) {
     }));
 
   const homepage = topPages[0] ? await analyzePageUrl(topPages[0]).catch(() => ({ ok: false })) : { ok: false };
+  const businessCtx = await (await import('../lib/tenant-context.js')).loadBusinessContext(siteId, { agent: 'keyword' }).catch(() => null);
   const { proposed, specificityByText } = await expandAndClassify({
+    businessDescription: businessCtx?.canonical ? businessCtx.description : '',
     companyName: site?.name || 'This company',
     homepageTitle: homepage.ok ? homepage.analysis.title : null,
     homepageDescription: homepage.ok ? homepage.analysis.metaDescription : null,

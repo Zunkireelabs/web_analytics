@@ -368,8 +368,11 @@ export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted 
     setTransitioning(true);
     setError(null);
     try {
-      const apiFn = call === 'approve' ? api.actionCenter.approveDraft : api.actionCenter.pushBranch;
-      const updated = await apiFn(draft.id, renderMode, siteId);
+      // Approving only approves. It does NOT commit or open a PR: when everything for the day is approved, the agent asks in its
+      // popup whether to commit, then pushes, then asks about the PR (lib/ship-flow.js).
+      const updated = call === 'approve'
+        ? await api.actionCenter.approveDraftOnly(draft.id, siteId, renderMode)
+        : await api.actionCenter.pushBranch(draft.id, renderMode, siteId);
       setRenderModeConfirm(null);
       onSaved(updated);
     } catch (e) {
@@ -793,7 +796,7 @@ export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted 
 
                   {draft.status === 'submitted_for_approval' && (
                     <Button variant="primary" onClick={() => runPublishAction('approve')} disabled={transitioning}>
-                      <Check size={14} strokeWidth={2.5} /> {transitioning ? 'Publishing…' : 'Approve & publish'}
+                      <Check size={14} strokeWidth={2.5} /> {transitioning ? 'Approving…' : 'Approve'}
                     </Button>
                   )}
 
@@ -804,10 +807,15 @@ export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted 
                           Mark implemented manually
                         </Button>
                       )}
-                      {!ADVISORY_ONLY_TYPES.includes(draft.action_type) && (
+                      {/* An approved draft is NOT committed from here. When everything for the day is approved, the agent asks in its popup
+                          whether to commit (and then pushes, then asks about the PR). Only a draft whose last push failed gets a retry button. */}
+                      {!ADVISORY_ONLY_TYPES.includes(draft.action_type) && draft.apply_error && (
                         <Button variant="primary" onClick={() => runPublishAction('push-branch')} disabled={transitioning}>
-                          <GitBranch size={14} /> {transitioning ? 'Pushing…' : 'Push branch'}
+                          <GitBranch size={14} /> {transitioning ? 'Pushing…' : 'Try the push again'}
                         </Button>
+                      )}
+                      {!ADVISORY_ONLY_TYPES.includes(draft.action_type) && !draft.apply_error && (
+                        <span className="text-xs text-faint">Approved. The agent will ask before it commits.</span>
                       )}
                     </>
                   )}

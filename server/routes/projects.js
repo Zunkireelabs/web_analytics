@@ -413,6 +413,59 @@ router.put('/projects/:siteId/places', requireAuth, requireProjectRole('admin'),
   }
 });
 
+// ── Business Intelligence: the canonical business profile ─────────────────────────────────────────────────────────────────
+// What the system understands this project's business to be, with the evidence behind each statement, and the review that lets a person
+// confirm or correct it. Reading needs member access; confirming, correcting and refreshing need a project admin, the same gate as the
+// capability review below. Every query is scoped to req.projectId (the project this person can open), never to a body or query value.
+router.get('/projects/:siteId/business-profile', requireAuth, requireProjectRole('member'), async (req, res, next) => {
+  try {
+    const { getCurrentBusinessProfile } = await import('../store/business-profile.js');
+    const { buildView } = await import('../lib/business-profile-service.js');
+    res.json({ ...buildView(await getCurrentBusinessProfile(req.projectId)), canReview: req.projectRole !== 'member' });
+  } catch (err) { next(err); }
+});
+
+router.get('/projects/:siteId/business-profile/versions', requireAuth, requireProjectRole('member'), async (req, res, next) => {
+  try {
+    const { listBusinessProfileVersions } = await import('../store/business-profile.js');
+    res.json({ versions: await listBusinessProfileVersions(req.projectId, { limit: 50 }) });
+  } catch (err) { next(err); }
+});
+
+router.post('/projects/:siteId/business-profile/review', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const [{ getCurrentBusinessProfile, insertBusinessProfileVersion }, { reviewProfile, buildView }] = await Promise.all([
+      import('../store/business-profile.js'), import('../lib/business-profile-service.js'),
+    ]);
+    const out = await reviewProfile(req.projectId, { edits: req.body?.edits, decisions: req.body?.decisions }, { id: req.userId }, {
+      getCurrent: getCurrentBusinessProfile,
+      save: (id, body) => insertBusinessProfileVersion(id, body),
+      audit: (e) => recordAuditEvent(req, { ...e, tenantSiteId: req.projectId, success: true }),
+    });
+    if (!out.ok) return res.status(out.status).json({ error: out.error });
+    res.json({ ...buildView(await getCurrentBusinessProfile(req.projectId)), canReview: true, applied: out.applied, resolved: out.resolved });
+  } catch (err) { next(err); }
+});
+
+// Read the website again. A cooldown per project: it is a few page fetches and one model call, but a button that can be held down is a
+// button that can be scripted. A confirmed field is never changed by this; a differing finding becomes a pending change to review.
+const businessProfileCooldown = new Map();
+router.post('/projects/:siteId/business-profile/refresh', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const last = businessProfileCooldown.get(req.projectId) || 0;
+    if (Date.now() - last < 60_000) return res.status(429).json({ error: 'Just refreshed. Give it a minute.' });
+    businessProfileCooldown.set(req.projectId, Date.now());
+    const [{ refreshBusinessProfile }, { refreshProfile, buildView }, { getCurrentBusinessProfile }] = await Promise.all([
+      import('../lib/business-intelligence.js'), import('../lib/business-profile-service.js'), import('../store/business-profile.js'),
+    ]);
+    const out = await refreshProfile(req.projectId, { id: req.userId }, {
+      refresh: (id, o) => refreshBusinessProfile(id, o),
+      audit: (e) => recordAuditEvent(req, { ...e, tenantSiteId: req.projectId, success: true }),
+    });
+    res.json({ ...buildView(await getCurrentBusinessProfile(req.projectId)), canReview: true, refresh: { insufficient: Boolean(out?.insufficient), reason: out?.reason ?? null, changed: out?.changed ?? [], pending: (out?.pending || []).length, saved: out?.saved ?? null } });
+  } catch (err) { next(err); }
+});
+
 // ── What this project offers (capability review) ───────────────────────────
 // The list that paid research, gap relevance and competitor work are all grounded in. Discovery PROPOSES from the
 // client's own site; nothing proposed steers a single call until a person approves it here. Same admin gate as every

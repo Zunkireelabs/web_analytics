@@ -8,7 +8,7 @@ import { callLLMForJson } from '../llm.js';
 // condenses them to plain text, and makes ONE cheap model call. Every fetch goes through the
 // free audit's SSRF guard (fetchMainPage -> assertPublicUrl, on every redirect).
 
-const KEY_PAGE = /(about|product|service|solution|platform|offering|what-we|industr|customer|who-we|company|pricing)/i;
+export const KEY_PAGE = /(about|product|service|solution|platform|offering|what-we|industr|customer|who-we|company|pricing|feature)/i;
 const MAX_EXTRA_PAGES = 3;
 const PAGE_TEXT_CHARS = 2500;
 const TOTAL_TEXT_CHARS = 9000;
@@ -16,7 +16,7 @@ const TOTAL_TEXT_CHARS = 9000;
 const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 
 // What a page says about itself, without scripts, styles or repeated chrome.
-function readPage(html, url) {
+export function readPage(html, url) {
   const $ = cheerio.load(html);
   const jsonld = [];
   $('script[type="application/ld+json"]').each((_, el) => {
@@ -45,7 +45,7 @@ function readPage(html, url) {
 }
 
 // Same-origin pages worth reading next, in the order the site links them.
-function pickKeyLinks(home, origin) {
+export function pickKeyLinks(home, origin, max = MAX_EXTRA_PAGES) {
   const seen = new Set([home.url]);
   const out = [];
   for (const { href, text } of home.links) {
@@ -57,7 +57,7 @@ function pickKeyLinks(home, origin) {
     if (!KEY_PAGE.test(u.pathname) && !KEY_PAGE.test(text)) continue;
     seen.add(u.toString());
     out.push(u);
-    if (out.length === MAX_EXTRA_PAGES) break;
+    if (out.length === max) break;
   }
   return out;
 }

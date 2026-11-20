@@ -69,31 +69,27 @@ export async function getSiteProfile(siteId) {
 // existing caller — including the Python collector's save_site_profile MCP
 // tool — passes neither, which keeps their behaviour byte-identical.
 //
-// The CASE is the one real change: a HUMAN-asserted industry is never
-// overwritten by an inference. Without it, writing a staff-set industry
-// here would work exactly once, until the next clustering run for a tenant
-// that does have Search Console upserted over it. A human write (source
-// 'human') always wins, including over an earlier human write.
-export async function saveSiteProfile(siteId, { industry, mainTopics, siteType, industrySource = null, industryConfidence = null }) {
-  await query(
+// Which existing industries a write may replace (2026-11-20). A person's industry is never replaced by anything that is not also a
+// person's (and, new, neither are that row's topics and site type: a weekly inference used to clobber them). An industry the system
+// DETECTED from evidence, or took from the growth config, is only replaced by an equally strong source: the Python collector's weekly
+// write carries no source at all and used to downgrade both to NULL, undoing the detection every week. A write from the collector can
+// still contribute topics and site type to such rows.
+export async function saveSiteProfile(siteId, { industry, mainTopics, siteType, industrySource = null, industryConfidence = null }, { run = query } = {}) {
+  const keepIndustry = `
+         (site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human')
+      OR (site_profiles.industry_source IN ('growth-config', 'detected')
+          AND (EXCLUDED.industry_source IS NULL OR EXCLUDED.industry_source IN ('inferred', 'llm-classified', 'unmapped')))`;
+  const keepHuman = `(site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human')`;
+  await run(
     `INSERT INTO site_profiles (site_id, industry, main_topics_json, site_type, profiled_at,
                                 industry_source, industry_confidence)
      VALUES ($1, $2, $3, $4, now(), $5, $6)
      ON CONFLICT (site_id) DO UPDATE SET
-       industry = CASE
-         WHEN site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human'
-           THEN site_profiles.industry
-         ELSE EXCLUDED.industry END,
-       industry_source = CASE
-         WHEN site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human'
-           THEN site_profiles.industry_source
-         ELSE EXCLUDED.industry_source END,
-       industry_confidence = CASE
-         WHEN site_profiles.industry_source = 'human' AND EXCLUDED.industry_source IS DISTINCT FROM 'human'
-           THEN site_profiles.industry_confidence
-         ELSE EXCLUDED.industry_confidence END,
-       main_topics_json = EXCLUDED.main_topics_json,
-       site_type = EXCLUDED.site_type,
+       industry = CASE WHEN ${keepIndustry} THEN site_profiles.industry ELSE EXCLUDED.industry END,
+       industry_source = CASE WHEN ${keepIndustry} THEN site_profiles.industry_source ELSE EXCLUDED.industry_source END,
+       industry_confidence = CASE WHEN ${keepIndustry} THEN site_profiles.industry_confidence ELSE EXCLUDED.industry_confidence END,
+       main_topics_json = CASE WHEN ${keepHuman} THEN site_profiles.main_topics_json ELSE EXCLUDED.main_topics_json END,
+       site_type = CASE WHEN ${keepHuman} THEN site_profiles.site_type ELSE EXCLUDED.site_type END,
        profiled_at = EXCLUDED.profiled_at`,
     [siteId, industry, JSON.stringify(mainTopics || []), siteType || null, industrySource, industryConfidence]
   );

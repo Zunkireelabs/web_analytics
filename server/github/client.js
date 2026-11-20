@@ -637,7 +637,17 @@ export async function getPullRequest(site, prNumber) {
   const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/pulls/${prNumber}`);
   if (!res.ok) throw new Error(`getPullRequest failed (${res.status}): ${await res.text()}`);
   const data = await res.json();
-  return { state: data.state, merged: data.merged, mergeable: data.mergeable, mergeableState: data.mergeable_state };
+  return { state: data.state, merged: data.merged, mergeable: data.mergeable, mergeableState: data.mergeable_state, base: data.base?.ref ?? null, headSha: data.head?.sha ?? null };
+}
+
+// Merges a pull request. This is the ONE place this app merges a PR, and it is never called directly: only lib/ship-flow.js's
+// mergeStagePr calls it, after it has checked that a signed-in person asked for it, that the PR targets the site's STAGE branch
+// (never main), and that its checks passed. Merging into main is always a person, on GitHub.
+export async function mergePullRequest(site, prNumber, { method = 'squash', sha = null } = {}) {
+  const res = await githubRequest(site, 'PUT', `/repos/${repoPath(site)}/pulls/${prNumber}/merge`, { merge_method: method, ...(sha ? { sha } : {}) });
+  if (!res.ok) throw new Error(`mergePullRequest failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  return { merged: Boolean(data.merged), sha: data.sha || null };
 }
 
 // Full recursive file listing of a branch's tree — the one real inventory of

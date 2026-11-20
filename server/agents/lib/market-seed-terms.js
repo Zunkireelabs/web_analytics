@@ -7,8 +7,9 @@ import { query } from '../../db.js';
 // Preference order, strongest evidence first (the same ladder describeTenantForRelevance already uses for judging a
 // topic's relevance, kept deliberately consistent):
 //   1. verified product capabilities  — a human approved these (store/data-analyst.js, kind 'capability')
-//   2. site_profiles.main_topics_json — the profiler's own topics for this site
-//   3. confirmed site_understanding   — facts about the site a human confirmed
+//   2. the canonical business profile — the products and services it sells, with quoted evidence (lib/business-profile.js)
+//   3. site_profiles.main_topics_json — the profiler's own topics for this site
+//   4. confirmed site_understanding   — facts about the site a human confirmed
 // A site with none of these returns no terms, and the caller skips the paid call with the reason 'no_services_known'
 // rather than researching a market nobody has described.
 
@@ -21,6 +22,19 @@ export async function resolveMarketServiceTerms(siteId, { deps = {} } = {}) {
   const verified = await capabilities(siteId, 'verified').catch(() => []);
   const fromCapabilities = clean((verified || []).map((c) => c.name));
   if (fromCapabilities.length) return { terms: fromCapabilities.slice(0, MAX_TERMS), source: 'verified-capabilities', confidence: 'high' };
+
+  // The canonical business profile: the products and services the company itself sells (not its customers' industries).
+  const current = await (deps.getBusinessProfile || (async (id) => (await import('../../store/business-profile.js')).getCurrentBusinessProfile(id)))(siteId).catch(() => null);
+  if (current?.profile) {
+    const bp = await import('../../lib/business-profile.js');
+    if (bp.isUsable(current.profile)) {
+      const names = clean((bp.valueOf(current.profile, 'productsServices') || []).map((x) => x.name));
+      if (names.length) {
+        const confirmed = bp.normalizeProfile(current.profile).fields.productsServices.status === 'confirmed';
+        return { terms: names.slice(0, MAX_TERMS), source: 'business-profile', confidence: confirmed ? 'high' : 'medium' };
+      }
+    }
+  }
 
   const profile = await q('SELECT main_topics_json FROM site_profiles WHERE site_id = $1', [siteId]).catch(() => ({ rows: [] }));
   const topics = parseTopics(profile.rows?.[0]?.main_topics_json);

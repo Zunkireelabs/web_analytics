@@ -21,6 +21,7 @@ import { callLLMForJson } from '../../llm.js';
 import { PACED_GENERATORS } from './ship-pacing.js';
 import { claimForItem } from './work-claims.js';
 import { loadTenantContext } from '../../lib/tenant-context.js';
+import { resolveBusinessContext, describeCompany, groundingTerms } from '../../lib/business-profile.js';
 import { isTopicScorerEnabled, topicKeyFor } from './topic-scorer.js';
 // gap-action-resolver.js is intentionally NOT a static import here — it
 // pulls in decision-engine.js's/decision-evidence.js's full dependency
@@ -125,6 +126,16 @@ export async function describeTenantForRelevance(siteId, { loadContext = loadTen
 
   const ctx = await loadContext(siteId).catch(() => null);
   if (!ctx) return null;
+
+  // The canonical business profile (migration 258): what the company sells, who buys it and the problem it solves, with the company's own
+  // industry kept apart from its customers'. Stronger than the legacy tenant-profile lines below and, once a person has confirmed it,
+  // as strong as verified capabilities. The legacy fallbacks below are never used in its place.
+  const resolved = resolveBusinessContext({ current: ctx.businessProfile, siteProfile: ctx.siteProfile, seoPolicy: ctx.seoPolicy, growthConfig: ctx.growthConfig });
+  if (resolved.status === 'canonical') {
+    const terms = groundingTerms(resolved.profile).slice(0, 12);
+    const text = `${describeCompany(resolved.profile)}${terms.length ? `\nSubjects it is relevant to: ${terms.join('; ')}.` : ''}`;
+    return { text, source: 'business-profile', confidence: resolved.state === 'confirmed' ? 'high' : 'medium' };
+  }
 
   // Other verified knowledge kinds (migration 176: flow, pricing, audience,
   // proof). A tenant that has described how its product works but never

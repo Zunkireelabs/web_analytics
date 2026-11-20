@@ -1,0 +1,90 @@
+import { useEffect, useState } from 'react';
+import { PenLine } from 'lucide-react';
+import { api } from '../../api.js';
+import Drawer from '../Drawer.jsx';
+import Badge from '../Badge.jsx';
+import Button from '../Button.jsx';
+import DesignFrame from './DesignFrame.jsx';
+import DraftPreview from '../DraftPreview.jsx';
+
+const WAITING = new Set(['draft', 'edited', 'submitted_for_approval', 'revision_requested']);
+const STATUS = { draft: 'New draft', edited: 'Edited', submitted_for_approval: 'Waiting for you', revision_requested: 'Changes requested', approved: 'Approved', branch_pushed: 'Branch pushed', merged_to_stage: 'On stage', pr_opened: 'PR open', awaiting_publish: 'Ready to publish', implemented: 'Live' };
+
+// The side panel for one content draft: the page in the client's own design (Preview), its facts (What changes), and Approve / Skip while
+// it is waiting. Approve records the approval only: no PR is opened here. `item` is a draft shaped by content-history.js.
+export default function DraftPanel({ item, siteId, onClose, onChanged }) {
+  const [tab, setTab] = useState('Preview');
+  const [page, setPage] = useState(null); // null loading, { html } or { none: true }
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!item) return undefined;
+    let alive = true;
+    setTab('Preview'); setPage(null); setError(null);
+    api.actionCenter.designPreview(item.id, siteId).then((r) => { if (alive) setPage({ html: r.html }); }).catch((e) => { if (alive) { setPage({ none: true, reason: e.status === 422 ? null : (e.message || 'The preview could not be drawn.') }); if (e.status === 422) setTab('What changes'); } });
+    return () => { alive = false; };
+  }, [item?.id, siteId]);
+
+  if (!item) return null;
+  const waiting = WAITING.has(item.status);
+  const act = async (kind) => {
+    setBusy(kind); setError(null);
+    try {
+      if (kind === 'approve') await api.actionCenter.approveDraftOnly(item.id, siteId);
+      else await api.actionCenter.rejectDraft(item.id, 'skipped_by_client', siteId);
+      await onChanged?.();
+      onClose();
+    } catch (e) { setError(e.message || 'That did not work. Nothing was changed.'); } finally { setBusy(null); }
+  };
+
+  return (
+    <Drawer isOpen onClose={onClose} title={item.title} subtitle={item.page || item.typeLabel} icon={PenLine} maxWidth="max-w-[760px]">
+      <div className="px-5 pt-3">
+        <div className="flex items-center gap-2 mb-3">
+          <Badge tone="primary">{item.typeLabel}</Badge>
+          <Badge tone={item.status === 'implemented' ? 'green' : waiting ? 'amber' : 'blue'}>{STATUS[item.status] || item.status}</Badge>
+        </div>
+        <div className="flex gap-1 border-b border-border -mx-5 px-5" role="tablist">
+          {['Preview', 'What changes'].map((t) => (
+            <button key={t} type="button" role="tab" aria-selected={tab === t} onClick={() => setTab(t)}
+              className={`px-3.5 pt-2 pb-2.5 text-sm font-medium -mb-px border-b-2 ${tab === t ? 'text-fg border-primary' : 'text-text border-transparent'}`}>{t}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="px-5 py-4 flex-1">
+        {tab === 'Preview' ? (
+          page === null ? <div className="h-[560px] rounded-card bg-muted animate-pulse" />
+            : page.html ? <DesignFrame html={page.html} url={item.page} title={item.title} />
+            : <div className="rounded-card bg-muted px-5 py-10 text-center text-sm text-text">{page.reason || 'This change is not a page, so there is no page preview. See “What changes”.'}</div>
+        ) : (
+          <>
+          <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4 text-[13px] mb-5">
+            <Fact label="Kind">{item.typeLabel}</Fact>
+            <Fact label="Page">{item.page ? <span className="font-mono text-xs break-all">{item.page}</span> : '—'}</Fact>
+            <Fact label="Status">{STATUS[item.status] || item.status}</Fact>
+            <Fact label="Waiting">{item.waitedDays >= 1 ? `${item.waitedDays} days` : 'Since today'}</Fact>
+            {item.pr && <Fact label="Pull request">#{item.pr.number}{item.pr.state ? ` · ${item.pr.state}` : ''}</Fact>}
+            {item.branch && <Fact label="Branch"><span className="font-mono text-xs break-all">{item.branch}</span></Fact>}
+          </dl>
+          {item.content && <div className="border-t border-border pt-4"><DraftPreview actionType={item.typeId || item.type} content={item.content} /></div>}
+          </>
+        )}
+        {error && <div className="mt-4 rounded-control bg-[#fdecec] text-[#b42318] text-[13px] px-3 py-2.5">{error}</div>}
+      </div>
+
+      <div className="sticky bottom-0 bg-white border-t border-border px-5 py-3 flex items-center gap-2" style={{ background: '#fcfcfb' }}>
+        {waiting ? (
+          <>
+            <Button variant="light" onClick={() => act('skip')} disabled={Boolean(busy)}>{busy === 'skip' ? 'Skipping…' : 'Skip'}</Button>
+            <span className="flex-1 text-[13px] text-faint pl-1">Nothing goes live until you approve.</span>
+            <Button variant="primary" onClick={() => act('approve')} disabled={Boolean(busy)}>{busy === 'approve' ? 'Approving…' : 'Approve'}</Button>
+          </>
+        ) : <span className="flex-1 text-[13px] text-faint">{item.status === 'implemented' ? 'This is live on your site.' : 'Approved. It is on its way to your site.'}</span>}
+      </div>
+    </Drawer>
+  );
+}
+
+const Fact = ({ label, children }) => (<div><dt className="text-xs text-faint">{label}</dt><dd className="mt-0.5 text-fg">{children}</dd></div>);

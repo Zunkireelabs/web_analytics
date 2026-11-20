@@ -1,3 +1,4 @@
+import { staticAnswer } from './questions.js';
 import { invokeCapability, capabilitiesFor } from './capabilities.js';
 import { deriveOnboardingState, recommendForFinding, explainFailure, ASSISTANT_STATE } from './onboarding-state.js';
 
@@ -15,6 +16,8 @@ import { deriveOnboardingState, recommendForFinding, explainFailure, ASSISTANT_S
 // a deterministic router cannot hallucinate a capability that does not exist.
 
 const INTENTS = [
+  { id: 'week', patterns: [/\b(what|anything)\b.*\b(changed|went live|shipped|published)\b/i, /\b(this|last) week\b/i, /\bwhat('s| has| have)? been (done|changed|published)\b/i] },
+  { id: 'findings', patterns: [/\b(what|show|list|give)\b.*\b(found|find|findings|waiting|pending|to fix|needs? (me|my|you)|everything|broken|issues?)\b/i, /\bwhat('s| is) (broken|waiting)\b/i, /\b(full|complete) list\b/i] },
   { id: 'status', patterns: [/\bhow('s| is)?\b.*\b(onboarding|going|progress|setup)\b/i, /\bstatus\b/i, /\bhow far\b/i] },
   { id: 'needs_from_me', patterns: [/what do you need/i, /\bneed from me\b/i, /what.*\b(should|do)\b.*\bi\b.*\bdo\b/i, /\bblock(ing|ers?)\b/i] },
   { id: 'explain', patterns: [/\bwhy\b/i, /\bexplain\b/i, /what does .* mean/i] },
@@ -22,7 +25,7 @@ const INTENTS = [
   { id: 'run_discovery', patterns: [/\b(run|start|begin|redo|refresh)\b.*\b(discovery|onboarding|scan|inspect)\b/i, /\bconfigure the\b/i, /\bset ?up\b/i] },
   { id: 'run_remediation', patterns: [/\b(ship|fix|remediat\w*)\b.*\b(safe|what.?s safe|today|now)\b/i, /\brun (safe )?remediation\b/i, /\bfix everything safe\b/i] },
   { id: 'do_it', patterns: [/^\s*(do it|go ahead|proceed|continue|carry on)\s*[.!]?\s*$/i] },
-  { id: 'failures', patterns: [/\b(fail(ed|ure)s?|error|broke|not working|why did .* fail)\b/i] },
+  { id: 'failures', patterns: [/\b(fail(ed|ure)s?|error|broke(n)?|not working|why did .* fail)\b/i] },
   { id: 'agent_work', patterns: [/\b(what|anything)\b.*\b(agents?|autonomous|today|happened|done)\b/i, /\bactivity\b/i] },
   { id: 'unsure', patterns: [/\b(i('m| am)? not sure|dunno|don't know|unsure|no idea)\b/i] },
 ];
@@ -124,6 +127,11 @@ function resolveReference(message, unresolved) {
 // result the message was composed from, so a UI can render richly and a
 // reviewer can check that the words match the system's actual state.
 export async function handleMessage({ ctx, message, deps = {}, conversationId = null } = {}) {
+  // A plain-English question ("what is AEO?", "what happens when I approve?") has one fixed answer for every client and
+  // needs no site data, so it is answered before anything is read.
+  const fixed = staticAnswer(message);
+  if (fixed) return { state: ASSISTANT_STATE.READY, message: fixed, data: { fixed: true }, actions: [] };
+
   const intent = classifyIntent(message);
 
   const status = await invokeCapability('get_onboarding_status', ctx, {}, deps);
@@ -138,6 +146,17 @@ export async function handleMessage({ ctx, message, deps = {}, conversationId = 
   const unresolved = unresolvedResult.ok ? unresolvedResult.data : [];
 
   switch (intent) {
+    case 'week': {
+      const result = await invokeCapability('get_week_summary', ctx, {}, deps);
+      return { state: onboarding.state, message: composeWeek(result.ok ? result.data : { total: 0, byType: [] }), data: result.data || {}, actions: [] };
+    }
+
+    case 'findings': {
+      const result = await invokeCapability('get_needs_you', ctx, {}, deps);
+      const items = result.ok ? result.data.items : [];
+      return { state: onboarding.state, message: composeNeedsYou(items), data: { items }, actions: items.flatMap((i) => i.actions || []).slice(0, 6) };
+    }
+
     case 'status': {
       return {
         state: onboarding.state,
@@ -362,4 +381,25 @@ function composeAgentWork(agents, approvals, autonomy) {
   }
   lines.push('', 'Production merge still requires your approval — I prepare changes, I do not ship them.');
   return lines.join('\n');
+}
+
+// The full list of what is waiting on a person, grouped, in plain words. Built from data, no model call.
+const NEEDS_YOU_GROUPS = [['approval', 'Waiting for your approval'], ['issue', 'Issues I found'], ['decision', 'Decisions I need from you']];
+export function composeNeedsYou(items) {
+  if (!items?.length) return 'Nothing is waiting on you right now. No approvals, no issues and no open decisions.';
+  const lines = [`${items.length} ${items.length === 1 ? 'thing is' : 'things are'} waiting on you:`];
+  for (const [kind, heading] of NEEDS_YOU_GROUPS) {
+    const group = items.filter((i) => i.kind === kind);
+    if (!group.length) continue;
+    lines.push('', `${heading}:`);
+    for (const i of group) lines.push(`- ${i.title}${i.ageDays >= 1 ? ` (${i.ageDays}d)` : ''}${i.detail ? `: ${i.detail}` : ''}`);
+  }
+  return lines.join('\n');
+}
+
+// What went live in the last 7 days, in plain words. Only real counts from the drafts that reached "implemented".
+export function composeWeek({ total, byType }) {
+  if (!total) return 'Nothing has gone live on your site in the last 7 days. Anything waiting on you is in the Action Center.';
+  const parts = byType.map((t) => `${t.count} ${t.type.replace(/-/g, ' ')}`).join(', ');
+  return `${total} ${total === 1 ? 'change' : 'changes'} went live in the last 7 days: ${parts}.`;
 }

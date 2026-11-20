@@ -5,7 +5,7 @@ import { runAgent } from '../agents/runner.js';
 import { getAgentRunHistory } from '../store/agent-runs.js';
 import { getAgentActivityFeed } from '../agents/lib/command-center.js';
 import { getAgentStatusList } from '../agents/lib/agent-status.js';
-import { subscribeActivity } from '../agents/lib/activity-bus.js';
+import { subscribeActivity, runningAgentsFor } from '../agents/lib/activity-bus.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -52,6 +52,8 @@ router.get('/agents/live', (req, res) => {
     'X-Accel-Buffering': 'no',
   });
   res.write(': connected\n\n');
+  // What is already running when the tab connects, so it does not wait for the next start event to show it.
+  res.write(`data: ${JSON.stringify({ type: 'snapshot', running: runningAgentsFor(req.siteId), at: new Date().toISOString() })}\n\n`);
 
   const unsubscribe = subscribeActivity(req.siteId, (event) => {
     res.write(`data: ${JSON.stringify(event)}\n\n`);

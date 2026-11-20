@@ -108,10 +108,16 @@ export async function loadTenantContext(siteId, { site: siteArg = null, refresh 
   const industries = tenantIndustries(seoPolicy, siteProfile)
     || (growthConfig?.industries?.length ? growthConfig.industries : null);
 
+  // The canonical business profile (migration 258). Soft: while the table does not exist, or a project has no profile, this is null and
+  // the context is exactly what it was before the profile existed.
+  const businessProfile = await soft(
+    import('../store/business-profile.js').then((m) => m.getCurrentBusinessProfile(siteId)), null);
+
   const value = {
     site,
     siteId,
     propertyType: site.property_type || 'website',
+    businessProfile,
     isProduct,
     capabilities: computeSiteCapabilities(site),
     goals,
@@ -213,4 +219,52 @@ export async function tenantContextTextForSiteId(siteId, options = {}) {
   if (!isTenantContextEnabled()) return '';
   const ctx = await loadTenantContext(siteId).catch(() => null);
   return formatTenantContextForPrompt(ctx, options);
+}
+
+
+// ── The Business Context Provider ────────────────────────────────────────────────────────────────────────────────────────────
+// The ONE way an agent learns what a project's business is. Every agent asks for its slice here instead of inferring an industry from
+// a homepage title or a search query. Isolation: the project is identified only by siteId; nothing from another project can appear.
+//
+//   status 'canonical'         a usable canonical profile exists; it is authoritative and nothing legacy overrides it.
+//   status 'partial'           a profile exists but is not usable yet; legacy values only fill its gaps, labelled as assumed.
+//   status 'legacy-unverified' no profile, only the old coarse labels; every value is an unverified assumption.
+//   status 'insufficient'      nothing is known; the caller must say so, never guess.
+//   status 'no-site'           the project does not exist.
+//
+// Not behind TENANT_CONTEXT_ENABLED: using the profile to make a decision is not a prompt experiment (see isTenantContextEnabled).
+export async function loadBusinessContext(siteId, { agent = 'all', refresh = false } = {}) {
+  if (siteId == null) return { status: 'no-site', siteId: null, agent, usable: false, canonical: false, slice: {}, description: '', groundingTerms: [] };
+  const [ctx, bp] = await Promise.all([
+    loadTenantContext(siteId, { refresh }),
+    import('./business-profile.js'),
+  ]);
+  if (!ctx) return { status: 'no-site', siteId, agent, usable: false, canonical: false, slice: {}, description: '', groundingTerms: [] };
+  const resolved = bp.resolveBusinessContext({
+    current: ctx.businessProfile, siteProfile: ctx.siteProfile, seoPolicy: ctx.seoPolicy, growthConfig: ctx.growthConfig,
+  });
+  return {
+    status: resolved.status,
+    siteId,
+    agent,
+    usable: resolved.usable,
+    canonical: resolved.status === 'canonical',
+    legacy: resolved.legacy,
+    version: resolved.version,
+    state: resolved.state,
+    pending: resolved.pending,
+    profile: resolved.profile,
+    slice: bp.projectForAgent(resolved.profile, agent),
+    description: bp.describeCompany(resolved.profile),
+    ownIndustry: bp.ownIndustryLabel(resolved.profile),
+    groundingTerms: bp.groundingTerms(resolved.profile),
+  };
+}
+
+// Prompt text for a resolved business context. '' unless a profile is canonical: until one exists every agent keeps the prompt it had,
+// and once one exists it replaces the bare industry label with the five separated concepts.
+export function businessContextPrompt(bc) {
+  if (!bc || bc.status !== 'canonical' || !bc.description) return '';
+  const note = bc.state === 'confirmed' ? '' : ' (detected from the company\'s own website; not yet confirmed by a person)';
+  return `About this company${note}: ${bc.description}`;
 }

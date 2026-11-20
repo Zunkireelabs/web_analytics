@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Activity, Target, ChevronDown, ChevronsUpDown, Lock, LogOut, Settings as SettingsIcon } from 'lucide-react';
 import { usePosthogState, connectPosthogPath } from '../lib/posthog-state.jsx';
 import { useIndustry } from '../lib/industry-state.jsx';
@@ -9,8 +9,13 @@ import WorkspaceSwitcher from './WorkspaceSwitcher.jsx';
 import Avatar from './Avatar.jsx';
 import Button from './Button.jsx';
 import SegmentedTabs from './SegmentedTabs.jsx';
+import SidebarAgents from './SidebarAgents.jsx';
 import { ROLE_LABELS } from './RoleBadge.jsx';
-import { visibleGroups, currentSiteOf } from '../lib/nav.js';
+import { sidebarGroups, currentSiteOf } from '../lib/nav.js';
+import { AGENT_PATH, isAgentPath, browseTarget } from '../lib/agent-groups.js';
+
+const LAST_BROWSE_KEY = 'sidebar-last-browse-path';
+const readLastBrowse = () => { try { return sessionStorage.getItem(LAST_BROWSE_KEY); } catch { return null; } };
 
 const COLLAPSE_STORAGE_KEY = 'sidebar-collapsed-sections';
 
@@ -45,10 +50,23 @@ export default function Sidebar({
   const isActive = (to) => loc.pathname === to;
   const [collapsed, setCollapsed] = useState(loadCollapsedSections);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Browse (page links) or Agent (the six agent groups). The toggle is the route: Agent opens the agents system in the main area,
+  // Browse goes back to the page the client was on (Overview if they came straight to Agent). A direct visit to an agent page lands
+  // in Agent view by itself. The chat popup (`agentOpen`) is separate.
+  const navigate = useNavigate();
+  const inAgent = isAgentPath(loc.pathname);
+  const showAgents = agentAvailable && inAgent;
+  useEffect(() => {
+    if (inAgent) return;
+    try { sessionStorage.setItem(LAST_BROWSE_KEY, loc.pathname + loc.search); } catch { /* the toggle then returns to Overview */ }
+  }, [loc.pathname, loc.search, inAgent]);
+  const switchView = (v) => {
+    if (v === 'agent') { if (!inAgent) navigate(AGENT_PATH); } else if (inAgent) navigate(browseTarget(readLastBrowse()));
+  };
   const menuRef = useRef(null);
 
   const currentSite = currentSiteOf(sites, siteId);
-  const baseGroups = visibleGroups({ isPlatformAdmin, isProduct: currentSite?.property_type === 'product' });
+  const baseGroups = sidebarGroups({ isPlatformAdmin, isProduct: currentSite?.property_type === 'product' });
   // Only a project that already has PostHog, and only when it stopped working: "Reconnect PostHog" right above Overview
   // (and only for someone allowed to). Nobody is asked to connect PostHog any more.
   const ph = usePosthogState().state;
@@ -161,18 +179,22 @@ export default function Sidebar({
               <SegmentedTabs
                 className="w-full [&>button]:flex-1"
                 options={[{ value: 'browse', label: 'Browse' }, { value: 'agent', label: 'Agent' }]}
-                value={agentOpen ? 'agent' : 'browse'}
-                onChange={(v) => onAgent(v === 'agent')}
+                value={showAgents ? 'agent' : 'browse'}
+                onChange={switchView}
               />
             </div>
           )}
 
-          <nav className="flex-1 overflow-y-auto px-3 py-1.5 custom-scrollbar">
-            {groups.map((g, i) => (
-              <SidebarGroup key={g.id} group={g} first={i === 0} isActive={isActive}
-                open={!collapsed[g.id]} onToggle={toggleSection} locked={Boolean(access?.locked)} />
-            ))}
-          </nav>
+          {showAgents ? (
+            <SidebarAgents />
+          ) : (
+            <nav className="flex-1 overflow-y-auto px-3 py-1.5 custom-scrollbar">
+              {groups.map((g, i) => (
+                <SidebarGroup key={g.id} group={g} first={i === 0} isActive={isActive}
+                  open={!collapsed[g.id]} onToggle={toggleSection} locked={Boolean(access?.locked)} />
+              ))}
+            </nav>
+          )}
 
           <div className="border-t border-border-canvas px-3 pt-2 pb-3">
             <div className="relative" ref={menuRef}>

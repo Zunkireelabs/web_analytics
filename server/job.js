@@ -986,35 +986,63 @@ export async function runMonthlyIfDueForAllSites() {
 // created today in the site's own timezone, not just present at all, so a
 // stale row from a PRIOR day's run (a still-connected site whose 07:00 pass
 // hung every day this week, say) can't false-positive as "done" either.
+// What the hourly guard should do for one site. Before this, a missing narrative alone made it re-run the WHOLE
+// daily job (ingest + all 27 agents + LLM calls) every hour. The narrative is the one LLM step, so whenever the LLM
+// was unavailable it was missing all day and every site ran its full battery 10-15 times a day (2026-11-15..20),
+// which also burned the LLM spend that caused it. Now:
+//   - day fully done                          -> 'skip'
+//   - agents ran today, only narrative missing -> 'narrative-only' (one LLM call; no ingest, no agents)
+//   - agents have not run today               -> 'full', at most MAX_FULL_CATCHUPS_PER_DAY times per site per day
+//   - full catch-up already tried that often  -> 'gave-up' (logged; the next day's 07:00 run starts fresh)
+export const MAX_FULL_CATCHUPS_PER_DAY = 2;
+export function catchupAction({ hasNarrative, analysisDoneToday, fullAttemptsToday = 0, maxFull = MAX_FULL_CATCHUPS_PER_DAY }) {
+  if (hasNarrative && analysisDoneToday) return 'skip';
+  if (analysisDoneToday) return 'narrative-only';
+  return fullAttemptsToday < maxFull ? 'full' : 'gave-up';
+}
+const fullCatchupAttempts = new Map(); // `${siteId}:${day}` -> count, per process (a restart allows a fresh attempt, which is fine)
+
 export async function runHourlyCatchupForAllSites(tz) {
   const sites = await listConnectedSites();
   for (const site of sites) {
     try {
-      const reportDate = daysAgoInTz(site.timezone || tz, GSC_LAG_DAYS);
+      const siteTz = site.timezone || tz;
+      const reportDate = daysAgoInTz(siteTz, GSC_LAG_DAYS);
       const [existing, [latestExecReport]] = await Promise.all([
         getNarrative(site.id, reportDate),
         getLatestAgentRuns(site.id, ['executive-report']),
       ]);
+      const today = todayInTz(siteTz);
       const analysisDoneToday = latestExecReport != null
-        && todayInTz(site.timezone || tz, new Date(latestExecReport.created_at)) === todayInTz(site.timezone || tz);
-      if (existing?.narrative && analysisDoneToday) continue; // whole day's work genuinely done
+        && todayInTz(siteTz, new Date(latestExecReport.created_at)) === today;
+      const attemptKey = `${site.id}:${today}`;
+      const action = catchupAction({ hasNarrative: Boolean(existing?.narrative), analysisDoneToday, fullAttemptsToday: fullCatchupAttempts.get(attemptKey) || 0 });
+      if (action === 'skip') continue; // whole day's work genuinely done
 
+      if (action === 'narrative-only') {
+        console.log(`[job] hourly guard: site ${site.id} "${site.name}" (${reportDate}) analysis done, narrative missing — retrying the narrative only`);
+        try {
+          const narrative = await generateNarrative(site, reportDate);
+          if (narrative) await saveNarrative(site.id, reportDate, narrative);
+        } catch (err) {
+          safeMessage(`job.hourlyGuard.narrative[site ${site.id}]`, err, 'narrative retry failed');
+        }
+        continue;
+      }
+      if (action === 'gave-up') {
+        console.warn(`[job] hourly guard: site ${site.id} "${site.name}" daily analysis still incomplete after ${MAX_FULL_CATCHUPS_PER_DAY} catch-up runs today — not running it again until tomorrow's scheduled run.`);
+        continue;
+      }
+
+      fullCatchupAttempts.set(attemptKey, (fullCatchupAttempts.get(attemptKey) || 0) + 1);
       const reason = !existing?.narrative ? 'report missing' : 'detection incomplete';
-      console.log(`[job] hourly guard: daily report for site ${site.id} "${site.name}" (${reportDate}) ${reason} — running catch-up`);
+      console.log(`[job] hourly guard: daily report for site ${site.id} "${site.name}" (${reportDate}) ${reason} — running catch-up ${fullCatchupAttempts.get(attemptKey)}/${MAX_FULL_CATCHUPS_PER_DAY}`);
       const { reportDate: done } = await runDailyJobForSite(site);
       console.log(`[job] hourly guard: catch-up done for site ${site.id} — report date ${done}`);
       await runWeeklyIfDue(site);
       await runExecutiveIfDue(site);
-      // GEO Audit shares the same Thursday-8am cron trigger as the two
-      // calls above (cron.js) but had no catch-up here — if the process
-      // wasn't up at that exact moment (a real risk: this app redeploys
-      // often, e.g. multiple times in one day during active development),
-      // every other weekly job on that trigger self-heals within the hour
-      // via this guard, but GEO Audit silently skipped the whole week with
-      // no backstop. Real incident: site #1's geo_audit_last_done shows a
-      // real run on 2026-07-26, then nothing for 2 weeks despite the
-      // weekly cadence, with the Thursday cron plausibly missed during one
-      // of several same-day staging redeploys.
+      // GEO Audit shares the same Thursday-8am cron trigger as the two calls above (cron.js) but had no catch-up
+      // here; if the process was down at that moment the whole week was skipped. See git history for the incident.
       await runGeoAuditIfDue(site);
       await noteGoogleAuthOutcome(true, undefined, site);
     } catch (err) {

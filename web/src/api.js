@@ -585,6 +585,17 @@ export const api = {
     deleteDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId), { method: 'DELETE' }),
     submitDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}/submit`, siteId), { method: 'POST' }),
     reject: (id, reason, siteId) => req(withSite(`/action-center/drafts/${id}/reject`, siteId), { method: 'POST', body: JSON.stringify({ reason }) }),
+    // The shipping flow behind the card: where it is, open the PR for what was approved, merge it into stage, open the PR to main.
+    shipState: (scope, siteId) => req(withSite(`/action-center/ship/state?scope=${scope}`, siteId)),
+    shipPushBranch: (scope, siteId) => req(withSite('/action-center/ship/push-branch', siteId), { method: 'POST', body: JSON.stringify({ scope }) }),
+    shipOpenPr: (scope, siteId) => req(withSite('/action-center/ship/open-pr', siteId), { method: 'POST', body: JSON.stringify({ scope }) }),
+    shipMergeStage: (prNumber, siteId) => req(withSite('/action-center/ship/merge-stage', siteId), { method: 'POST', body: JSON.stringify({ prNumber }) }),
+    shipOpenMain: (siteId) => req(withSite('/action-center/ship/open-main', siteId), { method: 'POST', body: JSON.stringify({}) }),
+    // The client's Approve: records the approval only, opens no PR (the day's approved drafts go as one PR when they say so).
+    approveDraftOnly: (id, siteId, renderMode) => req(withSite(`/action-center/drafts/${id}/approve-only`, siteId), { method: 'POST', body: JSON.stringify(renderMode ? { renderMode } : {}) }),
+    rejectDraft: (id, reason, siteId) => req(withSite(`/action-center/drafts/${id}/reject`, siteId), { method: 'POST', body: JSON.stringify({ reason }) }),
+    // A copy draft drawn in the site's own design: { html }.
+    designPreview: (id, siteId) => req(withSite(`/action-center/drafts/${id}/design-preview`, siteId)),
     approveDraft: (id, renderMode, siteId) => req(withSite(`/action-center/drafts/${id}/approve`, siteId), { method: 'POST', body: JSON.stringify({ renderMode }) }),
     implementDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}/implemented`, siteId), { method: 'POST' }),
     pushBranch: (id, renderMode, siteId) => req(withSite(`/action-center/drafts/${id}/push-branch`, siteId), { method: 'POST', body: JSON.stringify({ renderMode }) }),

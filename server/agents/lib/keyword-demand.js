@@ -122,7 +122,16 @@ function difficultyBucket(score) {
 // Real offering terms from the site's own homepage copy — never a guess
 // about the business, and never a hardcoded seed list, so this generalizes
 // to any client's site without per-site configuration.
-export async function deriveSeedTermsForSite(site, { start, end }) {
+export async function deriveSeedTermsForSite(site, { start, end }, { deps = {} } = {}) {
+  // The verified business profile already says what the company sells, with quoted evidence: use it, and skip fetching the homepage and
+  // paying for a model call to re-derive the same thing. Customer industries are never seeds.
+  try {
+    const bc = await (deps.loadBusinessContext || (async (id) => (await import('../../lib/tenant-context.js')).loadBusinessContext(id, { agent: 'keyword' })))(site.id);
+    if (bc?.canonical) {
+      const offered = (bc.profile.fields.productsServices.value || []).map((x) => String(x.name || '').trim()).filter(Boolean);
+      if (offered.length) return [...new Set(offered)].slice(0, MAX_SEED_TERMS);
+    }
+  } catch { /* no profile available: derive from the homepage as before */ }
   const domain = await resolveOwnDomain(site, site.id, start, end);
   if (!domain) return [];
 

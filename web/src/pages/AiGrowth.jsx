@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import useLiveAgents from '../hooks/useLiveAgents.js';
 import { useSearchParams } from 'react-router-dom';
 import { api, daysAgo, timeAgo } from '../api.js';
 import OrchestrationDiagram from '../components/orchestration/OrchestrationDiagram.jsx';
@@ -19,7 +20,6 @@ import Button from '../components/Button.jsx';
 import Badge from '../components/Badge.jsx';
 import { CHART, STATUS } from '../lib/palette.js';
 
-const FALLBACK_POLL_MS = 45000;
 const REFRESH_START = daysAgo(7);
 const REFRESH_END = daysAgo(0);
 
@@ -48,10 +48,7 @@ const OPS_RUN_STATUS = {
 const fmtDuration = (ms) => (ms != null ? `${(ms / 1000).toFixed(1)}s` : '—');
 
 export default function AiGrowth({ isInternal }) {
-  const [agents, setAgents] = useState(null);
-  const [activity, setActivity] = useState(null);
   const [selected, setSelected] = useState(null);
-  const [runningAgents, setRunningAgents] = useState(new Map());
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState(null);
 
@@ -89,23 +86,24 @@ export default function AiGrowth({ isInternal }) {
     setConsoleLogs((prev) => [...prev, { text, type, time: new Date().toLocaleTimeString() }]);
   };
 
-  const refresh = useCallback(() => {
-    api.agentsStatus().then(setAgents).catch(() => setAgents((a) => a ?? []));
-    api.agentsActivity(12).then(setActivity).catch(() => setActivity((a) => a ?? []));
+  // Agents, recent activity and what is running now, from the shared live feed (also used by the sidebar's Agent
+  // view). Each start/done event also writes the console log and reveals the finished agent's finding card.
+  const onLiveEvent = useCallback((event, agentLabel) => {
+    if (event.type === 'start') {
+      setIsThinking(true);
+      addLog(`[Agent Process] Initializing ${agentLabel}...`, 'start');
+    } else if (event.type === 'done') {
+      addLog(`[Agent Process] ${agentLabel} completed auditing successfully. Insights recorded.`, 'success');
+      // Find if this agent has a recent report/finding to display
+      api.reportInsights(1).then((res) => {
+        const finding = res?.agentFindings?.find((f) => f.agentId === event.agentId);
+        if (finding) {
+          setRevealedFindings((prev) => (prev.some((p) => p.agentId === finding.agentId) ? prev : [...prev, finding]));
+        }
+      }).catch(() => {});
+    }
   }, []);
-
-  // The SSE handler below is set up once (mount-only effect) and must always
-  // read the LATEST agent list, not whatever `agents` was when the effect
-  // first ran — a ref sidesteps the stale-closure trap without forcing an
-  // SSE reconnect every time `agents` refreshes.
-  const agentsRef = useRef([]);
-  useEffect(() => { agentsRef.current = agents; }, [agents]);
-
-  useEffect(() => {
-    refresh();
-    const poll = setInterval(refresh, FALLBACK_POLL_MS);
-    return () => clearInterval(poll);
-  }, [refresh]);
+  const { agents, activity, running: runningAgents } = useLiveAgents({ onEvent: onLiveEvent });
 
   // Real, already-persisted telemetry for the agentic tool-calling loop
   // (only populated once AGENTIC_ORCHESTRATION_ENABLED is on and a refresh
@@ -172,48 +170,6 @@ export default function AiGrowth({ isInternal }) {
       if (res?.agentFindings?.length) setRevealedFindings(res.agentFindings);
     }).catch(() => {});
   }, []);
-
-  // Connect to SSE stream
-  useEffect(() => {
-    const es = new EventSource(`${import.meta.env.BASE_URL}api/agents/live`);
-    es.onmessage = (raw) => {
-      let event;
-      try { event = JSON.parse(raw.data); } catch { return; }
-      
-      const agentLabel = agentsRef.current.find((a) => a.id === event.agentId)?.name || event.agentId;
-
-      if (event.type === 'start') {
-        setRunningAgents((m) => new Map(m).set(event.agentId, new Date(event.at).getTime()));
-        setIsThinking(true);
-        addLog(`[Agent Process] Initializing ${agentLabel}...`, 'start');
-      } else if (event.type === 'done') {
-        setRunningAgents((m) => {
-          if (!m.has(event.agentId)) return m;
-          const next = new Map(m);
-          next.delete(event.agentId);
-          return next;
-        });
-
-        // Add a log entry and reveal finding card
-        addLog(`[Agent Process] ${agentLabel} completed auditing successfully. Insights recorded.`, 'success');
-        
-        // Find if this agent has a recent report/finding to display
-        api.reportInsights(1).then((res) => {
-          const finding = res?.agentFindings?.find(f => f.agentId === event.agentId);
-          if (finding) {
-            setRevealedFindings((prev) => {
-              // Avoid duplicates
-              if (prev.some(p => p.agentId === finding.agentId)) return prev;
-              return [...prev, finding];
-            });
-          }
-        }).catch(() => {});
-
-        refresh();
-      }
-    };
-    return () => es.close();
-  }, [refresh]);
 
   // Auto-scroll terminal log to bottom
   useEffect(() => {

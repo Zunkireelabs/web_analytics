@@ -88,6 +88,9 @@ describe('buildBoard', () => {
     });
     assert.equal(b.words.length, 2);
     assert.ok(b.words.every((w) => w.covers >= 1));
+    // each phrase names the missing questions it covers, so "Draft these" can draft exactly those
+    assert.ok(b.words.every((w) => w.promptIds.length === w.covers));
+    assert.deepEqual([...new Set(b.words.flatMap((w) => w.promptIds))].sort(), [1, 2, 3]);
     assert.ok(!b.suggestions.includes('best seo analytics tool'), 'already-tracked prompt is not suggested again');
     assert.ok(b.suggestions.every((s) => s.startsWith('best ')));
   });

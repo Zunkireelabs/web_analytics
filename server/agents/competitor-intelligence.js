@@ -57,13 +57,21 @@ export async function run({ siteId, start, end, params }) {
   // tool.
   const forceDomain = normalizeCompetitorDomain(params?.competitor);
   const discovery = await runCompetitorDiscovery(siteId, start, end, { forceDomain });
-  const reached = discovery.competitors.filter((c) => c.ok);
-  const unreachable = discovery.competitors.filter((c) => !c.ok);
+  // Candidates the category check found are not business competitors (a government site, a directory, a marketplace...). They are
+  // stored as excluded so nothing treats them as a rival again, and they never become findings.
+  const notCompetitors = discovery.competitors.filter((c) => c.excludedKind);
+  const realCandidates = discovery.competitors.filter((c) => !c.excludedKind);
+  const reached = realCandidates.filter((c) => c.ok);
+  const unreachable = realCandidates.filter((c) => !c.ok);
 
   // One timestamp shared by every domain this run identifies — lets
   // store/competitor-profiles.js select "this run's" competitors by exact
   // equality instead of a time-window heuristic (see its comment).
   const runAt = new Date();
+  await Promise.all(notCompetitors.map((c) =>
+    upsertCompetitorProfile(siteId, c.domain, { excluded: true, kind: c.excludedKind, reasons: c.excludedReasons || [], discoverySource: c.discoverySource }, runAt, c.excludedKind)
+      .catch((err) => console.error(`[agents] competitor-intelligence: failed to record excluded domain ${c.domain}:`, err.message))
+  ));
   await Promise.all(reached.map((c) =>
     upsertCompetitorProfile(
       siteId, c.domain,
