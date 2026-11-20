@@ -1,4 +1,5 @@
 import { resolveFile, resolveActionFile, resolveLineKeys, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, isPageMapped, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
+import { isTemplatedSitemap } from './lib/sitemap-guard.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, resolveBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, getRepoTree } from '../github/client.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
@@ -95,6 +96,11 @@ async function pushSitemapBranch(site, draft, batchInfo) {
   const path = resolveSiteRootFile(site, 'sitemap');
   if (!path) {
     return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.sitemap is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  // Never replace a template that generates the sitemap with a frozen XML list (see lib/sitemap-guard.js).
+  const current = await getFileContent(site, path, baseBranch(site));
+  if (current && isTemplatedSitemap(current.content)) {
+    return { ok: false, reason: 'generated-sitemap', error: `${path} is a template that generates the sitemap, not a static sitemap.xml — writing XML into it would stop new pages from being listed. Fix the page's own sitemap setting instead, or map a static sitemap file.` };
   }
   return pushDraftBranch(site, draft, [{ path, content: draft.content.sitemapXml }], batchInfo);
 }
