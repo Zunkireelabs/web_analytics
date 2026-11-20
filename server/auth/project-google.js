@@ -37,6 +37,8 @@ export class ProjectGoogleAuthError extends Error {
 // and a connection changes only when someone clicks Connect or Disconnect (both of
 // which call forgetProjectGoogleAuth, so the change is seen at once by this process).
 const TTL_MS = 60_000;
+// The decrypt failures that are about THIS process's configuration (secret-box.js), not about the stored token.
+const isKeyProblem = (m) => /SECRETS_ENCRYPTION_KEY/.test(String(m || ''));
 const cache = new Map(); // siteId -> { at, value }
 
 export function forgetProjectGoogleAuth(siteId) {
@@ -80,11 +82,19 @@ export async function getProjectGoogleAuth(site) {
   let value = null;
   const { rows } = await query('SELECT refresh_token_enc, status, status_error, updated_at FROM project_google_connections WHERE site_id = $1', [siteId]);
   if (rows[0]) {
+    // A connection flagged 'unreadable' only because the process that read it had no SECRETS_ENCRYPTION_KEY was never actually bad:
+    // that is the READER's configuration, not the project's connection. It is tried again (below) instead of being treated as dead,
+    // so a project wrongly flagged by a key-less process (a local run, a misconfigured container) recovers by itself.
+    const wronglyFlagged = rows[0].status === 'unreadable' && isKeyProblem(rows[0].status_error);
     // Already known to be dead: do not even try, and do not fall back to anyone else's access.
-    if (rows[0].status !== 'ok') throw new ProjectGoogleAuthError(siteId, rows[0].status_error || rows[0].status);
+    if (rows[0].status !== 'ok' && !wronglyFlagged) throw new ProjectGoogleAuthError(siteId, rows[0].status_error || rows[0].status);
     try {
       value = oauthClientFor(decryptSecret(rows[0].refresh_token_enc), siteId, rows[0].updated_at);
+      if (wronglyFlagged) await markGoogleConnectionStatus(siteId, 'ok', null).catch(() => {});
     } catch (err) {
+      // This process cannot read ANY project's connection (no/invalid key). Say so, but never write it onto the project: the
+      // 2026-11 incident marked three healthy connections 'unreadable' this way and every later run refused them.
+      if (isKeyProblem(err?.message)) throw Object.assign(new Error(`This server cannot read stored Google connections: ${err.message}`), { code: 'SECRETS_KEY_UNAVAILABLE' });
       console.error(`[project-google] site ${siteId}: stored Google connection could not be used: ${err.message}`);
       await markGoogleConnectionStatus(siteId, 'unreadable', err.message).catch(() => {});
       throw new ProjectGoogleAuthError(siteId, 'unreadable');
