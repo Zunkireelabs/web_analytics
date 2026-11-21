@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { apply, resolveTargetAndBody, FRONTEND_ACTION_TYPES, COMPLIANCE_ACTION_TYPES, computeGeneratedPostsManifestUpdate } from './frontend.js';
+import { apply, preview, resolveTargetAndBody, FRONTEND_ACTION_TYPES, COMPLIANCE_ACTION_TYPES, computeGeneratedPostsManifestUpdate } from './frontend.js';
 
 describe('resolveTargetAndBody — generation-time-prepared fast path', () => {
   test('a draft with rendered_body/target_file_path already set is returned verbatim, no recomputation', async () => {
@@ -297,5 +297,29 @@ describe('apply — design completeness gate (DESIGN_GATE_FAIL_CLOSED)', () => {
     const r = await withFlag(() => apply(site, draft));
     assert.equal(r.reason, 'design-incomplete');
     assert.match(r.error, /typography\.heading\.item/);
+  });
+});
+
+describe('preview — design gates run early, only when the approval flow asks for them', () => {
+  const draft = {
+    action_type: 'blog-outline', finding_id: 'f',
+    rendered_body: '---\ntitle: "x"\n---\nbody text', target_file_path: 'src/blog/x.md', content: { title: 'x' },
+  };
+  const withFlag = async (fn) => {
+    process.env.DESIGN_GATE_FAIL_CLOSED = 'true';
+    try { return await fn(); } finally { delete process.env.DESIGN_GATE_FAIL_CLOSED; }
+  };
+
+  test('validateDesign: a gate failure comes back structured, with the reason code and the rendered markup, BEFORE anything is applied', async () => {
+    const r = await withFlag(() => preview({ url_file_map: {} }, draft, { validateDesign: true }));
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'design-incomplete');
+    assert.ok(Array.isArray(r.deviations));
+    assert.match(r.draftHtml, /body text/);
+  });
+
+  test('without the option, preview never runs the gates (the Draft Preview panel stays fast)', async () => {
+    const r = await withFlag(() => preview({ url_file_map: {} }, draft));
+    assert.notEqual(r.reason, 'design-incomplete');
   });
 });

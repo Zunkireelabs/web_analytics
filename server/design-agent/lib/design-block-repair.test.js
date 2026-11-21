@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { requeueProfileForRepeatedBlocks, REQUEUE_AFTER_BLOCKS } from './design-block-repair.js';
+import { requeueProfileForRepeatedBlocks, requestProfileRefresh, REQUEUE_AFTER_BLOCKS } from './design-block-repair.js';
 
 const site = { id: 7, repo_owner: 'o', repo_name: 'r' };
 const base = (over = {}) => {
@@ -37,5 +37,27 @@ describe('requeueProfileForRepeatedBlocks', () => {
     assert.equal((await requeueProfileForRepeatedBlocks({ id: 7 }, base().deps)).reason, 'no-repo');
     assert.equal((await requeueProfileForRepeatedBlocks(site, base({ resolvePageUrl: () => null }).deps)).reason, 'no-page-url');
     assert.equal((await requeueProfileForRepeatedBlocks(site, base({ countBlocks: async () => { throw new Error('x'); } }).deps)).reason, 'error');
+  });
+});
+
+describe('requestProfileRefresh (a repair diagnosed the captured design as the cause)', () => {
+  test('queues a re-capture on the FIRST diagnosed occurrence — no repeat needed', async () => {
+    const b = base({ countBlocks: async () => 0 });
+    assert.deepEqual(await requestProfileRefresh(site, b.deps), { queued: true, reason: 'diagnosed-design-capture-gap' });
+    assert.equal(b.enqueued.length, 1);
+  });
+  test('keeps the safeguards: one already queued is enough, and the cooldown still applies', async () => {
+    assert.equal((await requestProfileRefresh(site, base({ findQueued: async () => ({ id: 1 }) }).deps)).reason, 'already-queued');
+    const now = new Date('2026-10-08T00:00:00Z');
+    const recent = base({ findLatestJob: async () => ({ created_at: '2026-10-07T00:00:00Z' }) });
+    assert.equal((await requestProfileRefresh(site, recent.deps, now)).reason, 'cooldown');
+    assert.equal(recent.enqueued.length, 0);
+  });
+  test('needs a connected repo; any failure is swallowed, never thrown', async () => {
+    assert.equal((await requestProfileRefresh({ id: 7 }, base().deps)).reason, 'no-repo');
+    assert.equal((await requestProfileRefresh(site, base({ findQueued: async () => { throw new Error('x'); } }).deps)).reason, 'error');
+  });
+  test('the existing repeated-blocks path is unchanged: one block is still not enough', async () => {
+    assert.equal((await requeueProfileForRepeatedBlocks(site, base({ countBlocks: async () => 1 }).deps)).reason, 'not-repeated');
   });
 });

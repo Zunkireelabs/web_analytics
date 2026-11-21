@@ -212,3 +212,68 @@ describe('runAgentLoop — OpenAI provider (structurally different tool-call wir
     assert.equal(result.summary, 'fixed it');
   });
 });
+
+import { isProviderLimitError } from './agent-loop.js';
+
+describe('OpenAI limit -> carry on with Claude', () => {
+  test('quota and rate-limit errors are recognised; ordinary errors are not', () => {
+    for (const e of [{ status: 429 }, { code: 'insufficient_quota' }, { message: 'You exceeded your current quota' }, { message: 'Rate limit reached' }]) assert.equal(isProviderLimitError(e), true, JSON.stringify(e));
+    for (const e of [{ status: 500, message: 'server error' }, { message: 'bad tool call' }, null]) assert.equal(isProviderLimitError(e), false);
+  });
+});
+
+describe('runAgentLoop — OpenAI limit exceeded falls back to Claude for the SAME repair', () => {
+  const env = { ...process.env };
+  const restore = () => { for (const k of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'NATIVE_REPAIR_PROVIDER']) { if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; } };
+  const run = async (extra) => {
+    const sandbox = await createSandbox();
+    try {
+      return await runAgentLoop({
+        systemPrompt: 's', taskPrompt: 't', sandbox, allowlist: ['node'], validate: async () => ({ ok: true, output: 'ok', filesChanged: [] }), ...extra,
+      });
+    } finally { await destroySandbox(sandbox); }
+  };
+  const limited = { chat: { completions: { create: async () => { const e = new Error('You exceeded your current quota'); e.status = 429; throw e; } } } };
+  const claude = (log) => ({ messages: { create: async () => { log.push('claude'); return { content: [{ type: 'text', text: '{"summary":"done by claude"}' }] }; } } });
+
+  test('a 429 from OpenAI continues with Claude and reports it', async () => {
+    process.env.OPENAI_API_KEY = 'sk-real-key'; process.env.ANTHROPIC_API_KEY = 'ant-key'; delete process.env.NATIVE_REPAIR_PROVIDER;
+    try {
+      const log = [];
+      const r = await run({ openaiClient: limited, anthropicClient: claude(log) });
+      assert.equal(r.status, 'ok');
+      assert.equal(r.fellBackFrom, 'openai');
+      assert.deepEqual(log, ['claude']);
+    } finally { restore(); }
+  });
+
+  test('a PINNED provider is respected: no silent switch', async () => {
+    process.env.OPENAI_API_KEY = 'sk-real-key'; process.env.ANTHROPIC_API_KEY = 'ant-key'; process.env.NATIVE_REPAIR_PROVIDER = 'openai';
+    try {
+      const log = [];
+      const r = await run({ openaiClient: limited, anthropicClient: claude(log) });
+      assert.equal(r.status, 'error');
+      assert.deepEqual(log, []);
+    } finally { restore(); }
+  });
+
+  test('a non-limit OpenAI error is NOT retried on Claude', async () => {
+    process.env.OPENAI_API_KEY = 'sk-real-key'; process.env.ANTHROPIC_API_KEY = 'ant-key'; delete process.env.NATIVE_REPAIR_PROVIDER;
+    try {
+      const log = [];
+      const broken = { chat: { completions: { create: async () => { throw new Error('malformed request'); } } } };
+      const r = await run({ openaiClient: broken, anthropicClient: claude(log) });
+      assert.equal(r.status, 'error');
+      assert.deepEqual(log, []);
+    } finally { restore(); }
+  });
+
+  test('with no Claude key available, the OpenAI limit is reported honestly, not hidden', async () => {
+    process.env.OPENAI_API_KEY = 'sk-real-key'; delete process.env.ANTHROPIC_API_KEY; delete process.env.NATIVE_REPAIR_PROVIDER;
+    try {
+      const r = await run({ openaiClient: limited });
+      assert.equal(r.status, 'error');
+      assert.equal(r.limit, true);
+    } finally { restore(); }
+  });
+});

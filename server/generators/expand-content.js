@@ -1,6 +1,7 @@
 import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
 import { getSiteById } from '../store/read.js';
 import { callLLMForJson } from '../llm.js';
+import { withDesignCorrections } from './lib/design-corrections.js';
 import { groundingProviderConfigured, searchGroundedSources, queryTokens } from '../ingest/search-grounding-providers/index.js';
 import { safeMessage } from '../lib/errors.js';
 import { filterCompetitorCandidates } from '../agents/lib/competitor-policy.js';
@@ -377,7 +378,10 @@ export async function generate({ siteId, params }) {
     const draftSections = async (prompt) => {
       let raw;
       try {
-        raw = await callLLMForJson(system, prompt, {
+        // The citations-grounded prompt is deliberately closed to any other
+        // instruction (see SYSTEM_CITATIONS_GROUNDED above); every other focus
+        // reads the repair channel like every other generator.
+        raw = await callLLMForJson(system, focus === 'external-citations' ? prompt : withDesignCorrections(prompt, params), {
           task: 'content', maxTokens: 1200, generatorId: meta.id, siteId, pageUrl: page, validate: Array.isArray,
         });
       } catch (err) {

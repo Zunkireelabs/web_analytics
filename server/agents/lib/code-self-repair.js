@@ -11,6 +11,7 @@ import { createNativeCodeSelfRepairHandler } from '../../design-agent/native-rep
 import {
   getBranchSha, createBranch, commitFilesAtomic, openPullRequest, listOpenPullRequestsForBranch,
 } from '../../github/client.js';
+import { checkRepairBase } from './platform-branch-policy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -124,18 +125,24 @@ export async function openPlatformRepairPr({
   listOpenPullRequestsForBranchFn = listOpenPullRequestsForBranch,
 } = {}) {
   const branchName = `fix/self-repair-${slug}`;
+  // Fail CLOSED: with no usable stage branch there is no target. Never fall back to the production branch.
+  const target = checkRepairBase();
+  if (!target.ok) return { ok: false, reason: target.reason, error: target.error };
   try {
     const existing = await listOpenPullRequestsForBranchFn(PLATFORM_REPO, branchName).catch(() => []);
     if (existing.length) {
       const pr = existing[0];
       return { ok: true, branchName, prNumber: pr.number, prUrl: pr.html_url, reused: true };
     }
-    const baseSha = await getBranchShaFn(PLATFORM_REPO, PLATFORM_REPO.repo_default_branch);
+    // Work is CUT from main (the day's merged state) and the PR goes INTO stage — the same shape as every client batch.
+    const baseSha = await getBranchShaFn(PLATFORM_REPO, target.production);
     await createBranchFn(PLATFORM_REPO, branchName, baseSha);
     await commitFilesAtomicFn(PLATFORM_REPO, branchName, files, `Platform self-repair: ${title}`);
-    const { number, url } = await openPullRequestFn(PLATFORM_REPO, { branch: branchName, title: `Platform self-repair: ${title}`, body });
+    const { number, url } = await openPullRequestFn(PLATFORM_REPO, { branch: branchName, base: target.stage, title: `Platform self-repair: ${title}`, body });
     return { ok: true, branchName, prNumber: number, prUrl: url, reused: false };
   } catch (err) {
+    // A missing stage branch is a setup fact a person must fix, not a transient error to retry.
+    if (/404|not found|base.*(invalid|does not exist)|Validation Failed.*base/i.test(String(err.message))) return { ok: false, reason: 'stage-branch-missing', error: `The stage branch "${target.stage}" does not exist on the platform repo.` };
     return { ok: false, error: err.message };
   }
 }
@@ -154,7 +161,8 @@ function prBodyFor({ generatorId, reasonKey, occurrenceDays, errorMessage, rootC
     testOutput ? `\n<details><summary>Test output</summary>\n\n\`\`\`\n${String(testOutput).slice(0, 4000)}\n\`\`\`\n</details>` : null,
     patch ? `\n<details><summary>Patch</summary>\n\n\`\`\`diff\n${String(patch).slice(0, 8000)}\n\`\`\`\n</details>` : null,
     '',
-    'Never auto-merged — review the diff and merge into `' + PLATFORM_REPO.repo_default_branch + '` to ship the fix. '
+    'Targets the stage branch `' + PLATFORM_REPO.repo_default_branch + '`. The authorised staging agent merges it only once every check is green; '
+      + 'it can never merge into the production branch — that, and the release, stay with a person. '
       + 'A `agent_fix_memory` code lesson is recorded once this PR is opened, so the next occurrence of this exact '
       + 'failure (for ANY client) reuses this fix instead of triggering a fresh investigation.',
   ].filter(Boolean).join('\n');
@@ -328,8 +336,15 @@ export async function maybeEscalateToCodeRepair({ generatorId, reason: reasonKey
   if (!codeSelfRepairEnabled(env)) return { escalated: false, reason: 'disabled' };
   if (!generatorId || !reasonKey) return { escalated: false, reason: 'no-reason' };
 
-  const days = await countDistinctFailureDays(generatorId, reasonKey, { queryFn });
-  if (days < DISTINCT_DAY_THRESHOLD) return { escalated: false, reason: 'insufficient-evidence', days };
+  // `verifiedEvidence`: the caller already ran a deterministic diagnosis (a
+  // real-browser comparison, design-repair.js) that names a shared-code cause.
+  // That is evidence in hand, not noise to wait out across two calendar days.
+  // Everything else is unchanged: this still needs ENABLE_CODE_SELF_REPAIR, it
+  // still stops at flagged_for_review, runs in the sandbox, must pass the
+  // independent validation, and only ever ends in a PR a human merges.
+  const counted = await countDistinctFailureDays(generatorId, reasonKey, { queryFn });
+  const days = deps.verifiedEvidence ? Math.max(1, counted) : counted;
+  if (days < DISTINCT_DAY_THRESHOLD && !deps.verifiedEvidence) return { escalated: false, reason: 'insufficient-evidence', days };
 
   const lessonRow = await lookupCodeLesson(generatorId, reasonKey, { queryFn });
 
@@ -355,7 +370,7 @@ export async function maybeEscalateToCodeRepair({ generatorId, reason: reasonKey
 
   let lastDetail = errorMessage;
   for (let attempt = 1; attempt <= maxFreshAttempts; attempt++) {
-    const result = await investigateAndRepairFn({ generatorId, reasonKey, errorMessage, occurrenceDays: days, testFileHint: null }, deps);
+    const result = await investigateAndRepairFn({ generatorId, reasonKey, errorMessage, occurrenceDays: days, testFileHint: deps.testFileHint ?? null }, deps);
     if (result.ok) {
       await recordFixOutcomeFn({
         memoryRefId: null, category: 'code', scope: 'repo', siteId: null, generatorId,
@@ -378,4 +393,54 @@ export async function maybeEscalateToCodeRepair({ generatorId, reason: reasonKey
   // Unreachable (the loop above always returns), kept only so a future edit
   // to the loop can't silently fall through without a return value.
   return { escalated: true, path: 'unknown-issue', ok: false, reason: 'exhausted' };
+}
+
+// DESIGN-DIAGNOSED ENGINEERING TASKS (generators/lib/design-repair.js).
+//
+// When a design failure is diagnosed as the shared renderer's or the validation gate's, the caller needs to know ONE
+// thing before it defers the draft: did anyone take responsibility? A "retry later" with nobody working on it is worse
+// than a plain failure, so this answers honestly and quickly, and does the slow work off the request path:
+//
+//   accepted:false  'disabled'                       ENABLE_CODE_SELF_REPAIR is off -> the draft goes to a person
+//   accepted:false  'already-flagged-for-human-review'  automation already tried and gave up -> a person
+//   accepted:false  'lookup-failed'                  could not check -> a person (never assume)
+//   accepted:false  'stage-branch-missing' / 'unsafe-base-branch' / 'no-stage-configured'
+//                                                    nowhere safe to send a repair (never main) -> a person
+//   accepted:true   'repair-already-proposed'        a repair/PR for this root cause exists; its reviewer has it
+//   accepted:true   'already-in-progress'            an investigation for it is running right now
+//   accepted:true   'started'                        investigation started in the background
+//
+// The background run is maybeEscalateToCodeRepair with the diagnosis as verified evidence (no two-day wait). It keeps
+// EVERY existing safeguard: the feature flag, the sandbox, the independent validation (syntax + tests), the retry limit
+// (MAX_FRESH_INVESTIGATION_ATTEMPTS), flagged_for_review as its terminal state, and a PR that only a human merges. If
+// it fails it records flagged_for_review, and the NEXT retry of the held item is refused above and handed to a person.
+const inFlightDesignRepairs = new Set();
+
+export async function acceptDesignRepairTask({ generatorId, owner, errorMessage, testFileHint = null }, deps = {}) {
+  const {
+    env = process.env, queryFn = query, escalateFn = maybeEscalateToCodeRepair,
+    detach = (fn) => { fn(); }, getBranchShaFn = getBranchSha,
+  } = deps;
+  if (!codeSelfRepairEnabled(env)) return { accepted: false, reason: 'disabled' };
+  if (!generatorId || !owner) return { accepted: false, reason: 'no-reason' };
+
+  // Preflight, before any LLM spend: is there somewhere safe to send a repair? If not, nobody can take this on.
+  const base = checkRepairBase(env);
+  if (!base.ok) return { accepted: false, reason: base.reason };
+  try { await getBranchShaFn(PLATFORM_REPO, base.stage); } catch { return { accepted: false, reason: 'stage-branch-missing' }; }
+
+  const reasonKey = `design-${owner}`;
+  let lesson = null;
+  try { lesson = await lookupCodeLesson(generatorId, reasonKey, { queryFn }); } catch { return { accepted: false, reason: 'lookup-failed' }; }
+  if (lesson?.status === 'flagged_for_review' || lesson?.status === 'deprecated') return { accepted: false, reason: 'already-flagged-for-human-review' };
+  if (lesson?.fix_pattern) return { accepted: true, reason: 'repair-already-proposed' };
+
+  const signature = codeProblemSignature(generatorId, reasonKey);
+  if (inFlightDesignRepairs.has(signature)) return { accepted: true, reason: 'already-in-progress' };
+  inFlightDesignRepairs.add(signature);
+  detach(() => Promise.resolve()
+    .then(() => escalateFn({ generatorId, reason: reasonKey, errorMessage, siteId: null }, { ...deps, verifiedEvidence: true, testFileHint }))
+    .catch((err) => console.error(`[code-self-repair] design repair task for ${signature} failed:`, err.message))
+    .finally(() => inFlightDesignRepairs.delete(signature)));
+  return { accepted: true, reason: 'started' };
 }

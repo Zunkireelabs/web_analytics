@@ -123,6 +123,66 @@ const TRANSIENT_REASON_CODES = new Set([
   'design-unreviewed',
 ]);
 
+// The live page this item's design is compared against could not be read right
+// now. The item was never judged; a stale design is deliberately not used
+// (live-design-validation.js), so the only honest outcome is retry — without it
+// counting toward the cap, or it is retired for a network blip.
+const DESIGN_SAMPLE_UNREACHABLE_CODES = new Set(['group-sample-unreachable', 'sample-unreachable']);
+
+// The layout and render gates measured a real browser render and the draft
+// disagrees with the site (responsive-preview-gate.js, design-gates.js). The
+// automatic repair loop has already rewritten the content and re-measured
+// before this is recorded, and a retry re-checks an unchanged page, so it
+// reaches the identical verdict. A person has to pick a layout or fix the
+// captured template. Not the item's own defect, so not counted toward retiring it.
+const LAYOUT_GATE_REASON_CODES = new Set([
+  'responsive-regression',
+  'render-deviation',
+]);
+
+// Autonomous design repair (generators/lib/design-repair.js) hands a failure it
+// diagnosed to whoever owns it and returns one of these instead of a bare gate
+// verdict. The item itself is fine; it is waiting on a platform change (a
+// design re-capture, a shared-code repair PR, a gate fix) that a person still
+// has to merge. Retry later, never count it against the item.
+// The one wording for a deferral. The approval stage THROWS these, the classifier RECOGNISES them, and the
+// deferral counter QUERIES for them — all three from this single definition so they can never drift apart.
+export const DESIGN_DEFERRAL_MESSAGES = Object.freeze({
+  capture: 'This page\'s design is being re-captured from the live site; it will be retried once that finishes.',
+  shared: 'The cause is in shared platform code and a repair has been requested; this will be retried once it lands.',
+});
+export const DESIGN_DEFERRAL_FRAGMENTS = Object.freeze({
+  capture: 'design is being re-captured from the live site',
+  shared: 'cause is in shared platform code and a repair has been requested',
+});
+
+export const DESIGN_REPAIR_PENDING_REASON_CODES = new Set([
+  'design-capture-refresh-pending',
+  'shared-code-repair-pending',
+]);
+
+// Every apply()/preview() reason code that is a per-ITEM design verdict: a
+// refusal about this one draft, never evidence of a systemic fault, so it must
+// not trip the circuit breaker. Single source of truth for auto-remediation's
+// refusal marking (it used to rediscover these by matching message prose).
+export const ITEM_LEVEL_DESIGN_REASON_CODES = new Set([
+  ...LAYOUT_GATE_REASON_CODES,
+  ...DESIGN_REPAIR_PENDING_REASON_CODES,
+  'design-incomplete',
+  'design-integrity-failed',
+  'page-design-integrity-failed',
+  'needs-design-choice',
+]);
+
+// The structured failure of an approve/apply attempt -> what the caller should
+// record. A reason code only reaches here if the implementer set one; anything
+// else returns null and the caller falls back to message-shape matching.
+export function structuredApplyFailure(approved) {
+  const reason = approved?.apply_reason;
+  if (typeof reason !== 'string' || !reason) return null;
+  return { reason, refusal: ITEM_LEVEL_DESIGN_REASON_CODES.has(reason) };
+}
+
 // Ordered most-specific first. Each entry cites the observed abandon reason
 // it was written for; every one of these is a real string counted in the live
 // drafts table, not a hypothetical.
@@ -142,6 +202,43 @@ const RULES = [
     failureClass: FAILURE_CLASS.EXTERNAL_SERVICE,
     policy: RETRY_POLICY.RETRY,
     summary: 'The attempt failed on infrastructure, not on the item itself.',
+  },
+  {
+    addedBy: 'design-repair',
+    match: (r) => DESIGN_REPAIR_PENDING_REASON_CODES.has(r),
+    failureClass: FAILURE_CLASS.EXTERNAL_SERVICE,
+    policy: RETRY_POLICY.RETRY,
+    summary: 'The cause was found and handed to the platform to repair; this item is retried once that lands.',
+  },
+  {
+    addedBy: 'design-repair',
+    match: (r) => LAYOUT_GATE_REASON_CODES.has(r)
+      || /breaks the page.s layout at a real device width/i.test(r)
+      || /measures differently/i.test(r) && /held rather than shipped/i.test(r),
+    failureClass: FAILURE_CLASS.INVALID_INPUT,
+    policy: RETRY_POLICY.NEEDS_HUMAN,
+    summary: 'Automatic repair tried and could not make this block match the site, so it needs a person to look at the evidence.',
+  },
+  {
+    // schema-repair was asked to fix a page and found nothing wrong. That is
+    // an answer, not a failure: the page is already fine (or another draft got
+    // there first), so the recommendation closes instead of retrying.
+    addedBy: 'design-repair',
+    match: (r) => /no malformed or duplicate structured data was found/i.test(r),
+    failureClass: null,
+    policy: RETRY_POLICY.ALREADY_RESOLVED,
+    summary: 'The page has no structured-data problem to repair.',
+  },
+  {
+    addedBy: 'design-repair',
+    match: (r) => DESIGN_SAMPLE_UNREACHABLE_CODES.has(r)
+      || /design could not be confirmed against the live site/i.test(r) || /group-sample-unreachable/i.test(r)
+      // design-repair.js deferrals (action-center.js runDesignRepairStage): the cause was handed to its owner, not the item's.
+      || r.toLowerCase().includes(DESIGN_DEFERRAL_FRAGMENTS.capture)
+      || r.toLowerCase().includes(DESIGN_DEFERRAL_FRAGMENTS.shared),
+    failureClass: FAILURE_CLASS.EXTERNAL_SERVICE,
+    policy: RETRY_POLICY.RETRY,
+    summary: 'The live page used as the design reference could not be reached; it will be retried.',
   },
   // ---- Human decisions -----------------------------------------------
   // Exact-match sentinels written by the system itself, not prose.
@@ -426,12 +523,15 @@ const RULES = [
 // deliberate choice not to default to a benign class: an unknown failure is
 // treated as real until someone proves otherwise, so a new failure mode
 // surfaces as a capped item rather than retrying forever in silence.
-export function classifyAbandonReason(reason) {
+// `legacy: true` classifies as the system did BEFORE autonomous design repair: the rules that change added are skipped.
+// Only the read-only audit uses it, to show exactly which stored failures change meaning after deploy.
+export function classifyAbandonReason(reason, { legacy = false } = {}) {
   const text = typeof reason === 'string' ? reason.trim() : '';
   if (!text) {
     return { failureClass: null, retryPolicy: RETRY_POLICY.RETRY, summary: 'The attempt ended without recording a reason.' };
   }
   for (const rule of RULES) {
+    if (legacy && rule.addedBy) continue;
     if (rule.match(text)) {
       return { failureClass: rule.failureClass, retryPolicy: rule.policy, summary: rule.summary };
     }

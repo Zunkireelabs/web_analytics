@@ -119,16 +119,32 @@ export async function runSandboxCommand(sandbox, cmd, args = [], { cwd, timeoutM
   // short-circuits to a no-op). Stripped unconditionally — this variable
   // has no meaning for anything this function ever runs (validation
   // commands, builds, installs), only for an actual nested test runner.
-  const { NODE_TEST_CONTEXT, ...cleanEnv } = process.env;
   try {
     const { stdout, stderr } = await execFileAsync(cmd, args, {
-      cwd: workDir, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, env: cleanEnv,
+      cwd: workDir, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, env: buildSandboxEnv(process.env, sandbox.root),
     });
     return { ok: true, output: `${stdout}${stderr}`.slice(-4000) };
   } catch (err) {
     const output = `${err.stdout || ''}${err.stderr || ''}` || err.message;
     return { ok: false, output: String(output).slice(-4000) };
   }
+}
+
+// WHAT A SANDBOX COMMAND CAN SEE. There is no container here, and `node --test` runs agent-written code on the host, so
+// the process gets a SHORT ALLOWLIST of the environment and nothing else — never the server's own secrets (database
+// URLs, API keys, GitHub tokens). HOME and the temp/npm cache are pointed inside the sandbox directory, so even a
+// misbehaving command writes nowhere else. DATABASE_URL is a fixed local test URL because the repo's tests refuse to
+// run against anything non-local (and nothing is listening there, so a DB test fails rather than reaching a real one).
+// NODE_TEST_CONTEXT is dropped (see below): it makes a nested `node --test` silently skip and report success.
+export const SANDBOX_ENV_ALLOWLIST = Object.freeze(['PATH', 'LANG', 'LC_ALL', 'TZ', 'CI']);
+export function buildSandboxEnv(source = process.env, root = '/tmp') {
+  const env = {};
+  for (const key of SANDBOX_ENV_ALLOWLIST) if (source[key] != null) env[key] = source[key];
+  return {
+    ...env,
+    HOME: root, TMPDIR: root, npm_config_cache: `${root}/.npm-cache`,
+    NODE_ENV: 'test', DATABASE_URL: 'postgres://test:test@localhost:5432/test',
+  };
 }
 
 // ── Snapshot / diff — the independent "what actually changed" check ────────

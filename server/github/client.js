@@ -543,7 +543,8 @@ export async function createCommitObject(site, parentSha, files, message, { tree
 
   const treeRes = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/git/trees`, {
     base_tree: baseTree,
-    tree: files.map((f) => ({ path: f.path, mode: '100644', type: 'blob', content: f.content })),
+    // `delete: true` removes the path (a null sha in the tree); everything else writes the content as before.
+    tree: files.map((f) => (f.delete ? { path: f.path, mode: '100644', type: 'blob', sha: null } : { path: f.path, mode: '100644', type: 'blob', content: f.content })),
   });
   if (!treeRes.ok) throw new Error(`createCommitObject (create tree) failed (${treeRes.status}): ${await treeRes.text()}`);
   const newTree = (await treeRes.json()).sha;
@@ -637,7 +638,91 @@ export async function getPullRequest(site, prNumber) {
   const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/pulls/${prNumber}`);
   if (!res.ok) throw new Error(`getPullRequest failed (${res.status}): ${await res.text()}`);
   const data = await res.json();
-  return { state: data.state, merged: data.merged, mergeable: data.mergeable, mergeableState: data.mergeable_state, base: data.base?.ref ?? null, headSha: data.head?.sha ?? null };
+  return { state: data.state, merged: data.merged, mergeable: data.mergeable, mergeableState: data.mergeable_state, base: data.base?.ref ?? null, headSha: data.head?.sha ?? null, headRef: data.head?.ref ?? null, mergeSha: data.merge_commit_sha ?? null, mergedAt: data.merged_at ?? null, title: data.title ?? null, url: data.html_url ?? null };
+}
+
+// Open pull requests INTO one base branch, with their head branch names. Read-only. The platform staging agent
+// (agents/lib/platform-staging-merge.js) uses it to find the self-repair PRs waiting on stage.
+export async function listOpenPullRequestsForBase(site, base) {
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/pulls?state=open&base=${encodeURIComponent(base)}&per_page=100`);
+  if (!res.ok) throw new Error(`listOpenPullRequestsForBase failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  return (Array.isArray(data) ? data : []).map((pr) => ({ number: pr.number, headRef: pr.head?.ref ?? null, base: pr.base?.ref ?? null, headSha: pr.head?.sha ?? null, url: pr.html_url }));
+}
+
+// ---- Release workflow (agents/lib/platform-release.js, lib/promotion-branch.js) -------------------------------------------------
+// Pull requests merged INTO one base branch, newest first, with the merge commit, labels and head branch. Read-only.
+export async function listMergedPullRequestsForBase(site, base, { pages = 2 } = {}) {
+  const out = [];
+  for (let page = 1; page <= pages; page += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/pulls?state=closed&base=${encodeURIComponent(base)}&sort=updated&direction=desc&per_page=100&page=${page}`);
+    if (!res.ok) throw new Error(`listMergedPullRequestsForBase failed (${res.status}): ${await res.text()}`);
+    // eslint-disable-next-line no-await-in-loop
+    const data = await res.json();
+    for (const pr of Array.isArray(data) ? data : []) {
+      if (!pr.merged_at) continue;
+      out.push({ number: pr.number, title: pr.title, url: pr.html_url, headRef: pr.head?.ref ?? null, base: pr.base?.ref ?? null, mergeSha: pr.merge_commit_sha ?? null, mergedAt: pr.merged_at, labels: (pr.labels || []).map((l) => l.name) });
+    }
+    if (!Array.isArray(data) || data.length < 100) break;
+  }
+  return out;
+}
+
+// The files a pull request changed (added / modified / removed / renamed), every page.
+export async function listPullRequestFiles(site, prNumber) {
+  const out = [];
+  for (let page = 1; page <= 10; page += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/pulls/${prNumber}/files?per_page=100&page=${page}`);
+    if (!res.ok) throw new Error(`listPullRequestFiles failed (${res.status}): ${await res.text()}`);
+    // eslint-disable-next-line no-await-in-loop
+    const data = await res.json();
+    for (const f of Array.isArray(data) ? data : []) out.push({ path: f.filename, status: f.status, previousPath: f.previous_filename ?? null });
+    if (!Array.isArray(data) || data.length < 100) break;
+  }
+  return out;
+}
+
+// The first parent of a commit — for a squash/merge commit on stage, the stage tip just BEFORE that change.
+export async function getCommitParentSha(site, sha) {
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/commits/${encodeURIComponent(sha)}`);
+  if (!res.ok) throw new Error(`getCommitParentSha failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  return data.parents?.[0]?.sha ?? null;
+}
+
+// GitHub Actions runs of one workflow file for one commit. How the release agent knows whether the repo's OWN deploy
+// workflow (deploy-staging.yml / deploy.yml) ran for a merge, and how it ended.
+export async function getWorkflowRunsForSha(site, workflowFile, sha) {
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/actions/workflows/${encodeURIComponent(workflowFile)}/runs?head_sha=${encodeURIComponent(sha)}&per_page=10`);
+  if (!res.ok) throw new Error(`getWorkflowRunsForSha failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  return (data.workflow_runs || []).map((r) => ({ id: r.id, status: r.status, conclusion: r.conclusion, url: r.html_url, headSha: r.head_sha, createdAt: r.created_at }));
+}
+
+// The most recent runs of one workflow on one branch. Needed because GitHub drops an older PENDING run when a newer push to
+// the same concurrency group arrives: a deploy for an earlier merge can be "cancelled" while the later run (which deploys
+// the branch head, so includes it) succeeds.
+export async function getWorkflowRunsForBranch(site, workflowFile, branch) {
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/actions/workflows/${encodeURIComponent(workflowFile)}/runs?branch=${encodeURIComponent(branch)}&per_page=20`);
+  if (!res.ok) throw new Error(`getWorkflowRunsForBranch failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  return (data.workflow_runs || []).map((r) => ({ id: r.id, status: r.status, conclusion: r.conclusion, url: r.html_url, headSha: r.head_sha, createdAt: r.created_at }));
+}
+
+// Labels are the release agent's state: stateless, visible on the PR, and auditable by a person. GitHub creates a label the
+// first time it is used.
+export async function addPullRequestLabels(site, prNumber, labels) {
+  const res = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/issues/${prNumber}/labels`, { labels });
+  if (!res.ok) throw new Error(`addPullRequestLabels failed (${res.status}): ${await res.text()}`);
+  return true;
+}
+
+export async function commentOnPullRequest(site, prNumber, body) {
+  const res = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/issues/${prNumber}/comments`, { body });
+  if (!res.ok) throw new Error(`commentOnPullRequest failed (${res.status}): ${await res.text()}`);
+  return true;
 }
 
 // Merges a pull request. This is the ONE place this app merges a PR, and it is never called directly: only lib/ship-flow.js's

@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   codeSelfRepairEnabled, codeProblemSignature, countDistinctFailureDays,
-  maybeEscalateToCodeRepair, applyKnownFix, investigateAndRepair, openPlatformRepairPr,
+  maybeEscalateToCodeRepair, acceptDesignRepairTask, applyKnownFix, investigateAndRepair, openPlatformRepairPr,
   PLATFORM_REPO,
 } from './code-self-repair.js';
 
@@ -341,5 +341,192 @@ describe('multi-client behavior — platform lessons apply regardless of which s
       );
       assert.equal(result.ok, true, `siteId=${siteId} must reuse the same platform lesson`);
     }
+  });
+});
+
+describe('maybeEscalateToCodeRepair — caller-verified evidence (design-repair.js diagnosis)', () => {
+  const rows = (lesson = null) => {
+    let n = 0;
+    return async () => { n++; return n === 1 ? { rows: [{ days: '0' }] } : { rows: lesson ? [lesson] : [] }; };
+  };
+
+  test('a deterministic diagnosis starts the investigation without waiting for a second calendar day', async () => {
+    let investigated = false;
+    const result = await maybeEscalateToCodeRepair(
+      { generatorId: 'direct-answer', reason: 'design-shared-renderer', errorMessage: 'generic evidence' },
+      { env: { ENABLE_CODE_SELF_REPAIR: 'true' }, queryFn: rows(), verifiedEvidence: true, recordFixOutcomeFn: async () => {},
+        investigateAndRepairFn: async () => { investigated = true; return { ok: true, prUrl: 'https://github.com/x/y/pull/9', filesChanged: ['server/a.js'] }; } },
+    );
+    assert.equal(investigated, true);
+    assert.equal(result.escalated, true);
+  });
+
+  test('without verified evidence the same 0-day history still does NOT escalate', async () => {
+    const result = await maybeEscalateToCodeRepair(
+      { generatorId: 'direct-answer', reason: 'design-shared-renderer', errorMessage: 'x' },
+      { env: { ENABLE_CODE_SELF_REPAIR: 'true' }, queryFn: rows(), investigateAndRepairFn: async () => ({ ok: true }) },
+    );
+    assert.equal(result.reason, 'insufficient-evidence');
+  });
+
+  test('verified evidence does not bypass the feature flag', async () => {
+    const result = await maybeEscalateToCodeRepair(
+      { generatorId: 'direct-answer', reason: 'design-shared-renderer', errorMessage: 'x' },
+      { env: {}, queryFn: rows(), verifiedEvidence: true, investigateAndRepairFn: async () => ({ ok: true }) },
+    );
+    assert.equal(result.reason, 'disabled');
+  });
+
+  test('verified evidence does not re-open a problem already flagged for a human', async () => {
+    const result = await maybeEscalateToCodeRepair(
+      { generatorId: 'direct-answer', reason: 'design-shared-renderer', errorMessage: 'x' },
+      { env: { ENABLE_CODE_SELF_REPAIR: 'true' }, queryFn: rows({ status: 'flagged_for_review' }), verifiedEvidence: true, investigateAndRepairFn: async () => ({ ok: true }) },
+    );
+    assert.equal(result.reason, 'already-flagged-for-human-review');
+  });
+});
+
+describe('acceptDesignRepairTask — did anyone take responsibility? (design-repair.js hand-off)', () => {
+  const task = { generatorId: 'direct-answer', owner: 'shared-renderer', errorMessage: 'generic evidence', testFileHint: 'server/x.test.js' };
+  const lessonQuery = (lesson) => async () => ({ rows: lesson ? [lesson] : [] });
+  const sync = (fn) => fn();
+
+  test('DISABLED (production today): not accepted, so the caller hands the item to a person — nothing is started', async () => {
+    let started = false;
+    const r = await acceptDesignRepairTask(task, { env: {}, queryFn: lessonQuery(null), escalateFn: async () => { started = true; } });
+    assert.deepEqual(r, { accepted: false, reason: 'disabled' });
+    assert.equal(started, false);
+  });
+
+  test('ENABLED, nothing known: accepted, and the investigation starts with the diagnosis as verified evidence', async () => {
+    const calls = [];
+    let finished;
+    const done = new Promise((res) => { finished = res; });
+    const r = await acceptDesignRepairTask(task, {
+      env: { ENABLE_CODE_SELF_REPAIR: 'true' }, getBranchShaFn: async () => 'sha', queryFn: lessonQuery(null),
+      escalateFn: async (args, deps) => { calls.push([args, deps]); finished(); return { escalated: true, ok: true }; },
+      detach: sync,
+    });
+    await done;
+    assert.deepEqual(r, { accepted: true, reason: 'started' });
+    const [args, deps] = calls[0];
+    assert.equal(args.reason, 'design-shared-renderer');
+    assert.equal(args.siteId, null, 'a shared engineering task never carries a tenant id');
+    assert.equal(deps.verifiedEvidence, true);
+    assert.equal(deps.testFileHint, 'server/x.test.js');
+  });
+
+  test('FAILED earlier (flagged for review): not accepted — automation already gave up, so a person gets it', async () => {
+    const r = await acceptDesignRepairTask(task, { env: { ENABLE_CODE_SELF_REPAIR: 'true' }, getBranchShaFn: async () => 'sha', queryFn: lessonQuery({ status: 'flagged_for_review' }), escalateFn: async () => { throw new Error('must not run'); } });
+    assert.deepEqual(r, { accepted: false, reason: 'already-flagged-for-human-review' });
+  });
+
+  test('a deprecated lesson is not accepted either', async () => {
+    const r = await acceptDesignRepairTask(task, { env: { ENABLE_CODE_SELF_REPAIR: 'true' }, getBranchShaFn: async () => 'sha', queryFn: lessonQuery({ status: 'deprecated' }), escalateFn: async () => {} });
+    assert.equal(r.accepted, false);
+  });
+
+  test('a repair for this root cause already exists: accepted (its PR reviewer has it) and nothing new is started', async () => {
+    let started = false;
+    const r = await acceptDesignRepairTask(task, { env: { ENABLE_CODE_SELF_REPAIR: 'true' }, getBranchShaFn: async () => 'sha', queryFn: lessonQuery({ status: 'candidate', fix_pattern: 'diff --git ...' }), escalateFn: async () => { started = true; } });
+    assert.deepEqual(r, { accepted: true, reason: 'repair-already-proposed' });
+    assert.equal(started, false);
+  });
+
+  test('IN PROGRESS: a second request for the same root cause joins it instead of starting a duplicate', async () => {
+    let release; const gate = new Promise((res) => { release = res; });
+    let runs = 0;
+    const deps = { env: { ENABLE_CODE_SELF_REPAIR: 'true' }, getBranchShaFn: async () => 'sha', queryFn: lessonQuery(null), escalateFn: async () => { runs++; await gate; return { escalated: true, ok: true }; }, detach: sync };
+    const first = await acceptDesignRepairTask({ ...task, generatorId: 'landing-page' }, deps);
+    const second = await acceptDesignRepairTask({ ...task, generatorId: 'landing-page' }, deps);
+    assert.equal(first.reason, 'started');
+    assert.equal(second.reason, 'already-in-progress');
+    assert.equal(runs, 1);
+    release();
+    await gate;
+    await new Promise((r) => setImmediate(r));
+    const third = await acceptDesignRepairTask({ ...task, generatorId: 'landing-page' }, deps);
+    assert.equal(third.reason, 'started', 'once finished it can be requested again');
+    release();
+  });
+
+  test('the investigation THROWING later never reaches the caller — and frees the slot', async () => {
+    let finished; const done = new Promise((res) => { finished = res; });
+    const deps = { env: { ENABLE_CODE_SELF_REPAIR: 'true' }, getBranchShaFn: async () => 'sha', queryFn: lessonQuery(null), detach: sync,
+      escalateFn: async () => { setImmediate(finished); throw new Error('sandbox crashed'); } };
+    const r = await acceptDesignRepairTask({ ...task, generatorId: 'translation' }, deps);
+    await done; await new Promise((res) => setImmediate(res));
+    assert.equal(r.accepted, true);
+    const again = await acceptDesignRepairTask({ ...task, generatorId: 'translation' }, { ...deps, escalateFn: async () => ({}) });
+    assert.equal(again.reason, 'started');
+  });
+
+  test('a lesson lookup that fails is NOT assumed fine: not accepted, so a person gets it', async () => {
+    const r = await acceptDesignRepairTask(task, { env: { ENABLE_CODE_SELF_REPAIR: 'true' }, getBranchShaFn: async () => 'sha', queryFn: async () => { throw new Error('db down'); }, escalateFn: async () => {} });
+    assert.deepEqual(r, { accepted: false, reason: 'lookup-failed' });
+  });
+
+  test('missing generator or owner is refused, never started', async () => {
+    assert.equal((await acceptDesignRepairTask({ owner: 'shared-renderer' }, { env: { ENABLE_CODE_SELF_REPAIR: 'true' }, getBranchShaFn: async () => 'sha', queryFn: lessonQuery(null) })).accepted, false);
+    assert.equal((await acceptDesignRepairTask({ generatorId: 'faq' }, { env: { ENABLE_CODE_SELF_REPAIR: 'true' }, getBranchShaFn: async () => 'sha', queryFn: lessonQuery(null) })).accepted, false);
+  });
+});
+
+describe('platform repairs fail CLOSED on the target branch (never main)', () => {
+  const task = { generatorId: 'direct-answer', owner: 'shared-renderer', errorMessage: 'e' };
+  const enabled = { ENABLE_CODE_SELF_REPAIR: 'true' };
+  const noLesson = async () => ({ rows: [] });
+
+  test('no stage branch on the repo: NOT accepted, before any LLM spend — a person gets the evidence', async () => {
+    let started = false;
+    const r = await acceptDesignRepairTask(task, { env: enabled, queryFn: noLesson, getBranchShaFn: async () => { throw new Error('Not Found'); }, escalateFn: async () => { started = true; } });
+    assert.deepEqual(r, { accepted: false, reason: 'stage-branch-missing' });
+    assert.equal(started, false);
+  });
+
+  test('stage configured as the production branch: NOT accepted (never retargeted at main)', async () => {
+    const r = await acceptDesignRepairTask(task, { env: { ...enabled, PLATFORM_REPO_BASE_BRANCH: 'main' }, queryFn: noLesson, getBranchShaFn: async () => 'sha', escalateFn: async () => {} });
+    assert.deepEqual(r, { accepted: false, reason: 'unsafe-base-branch' });
+  });
+
+  test('stage exists: accepted as before', async () => {
+    const r = await acceptDesignRepairTask(task, { env: enabled, queryFn: noLesson, getBranchShaFn: async () => 'sha', escalateFn: async () => ({}), detach: (fn) => fn() });
+    assert.equal(r.accepted, true);
+  });
+
+  test('openPlatformRepairPr refuses to open anything when the target is production', async () => {
+    const prev = process.env.PLATFORM_REPO_BASE_BRANCH;
+    process.env.PLATFORM_REPO_BASE_BRANCH = 'main';
+    try {
+      let touched = false;
+      const r = await openPlatformRepairPr({ slug: 's', title: 't', body: 'b', files: [], createBranchFn: async () => { touched = true; }, getBranchShaFn: async () => { touched = true; } });
+      assert.equal(r.ok, false);
+      assert.equal(r.reason, 'unsafe-base-branch');
+      assert.equal(touched, false, 'not even a branch is created');
+    } finally { if (prev === undefined) delete process.env.PLATFORM_REPO_BASE_BRANCH; else process.env.PLATFORM_REPO_BASE_BRANCH = prev; }
+  });
+
+  test('a missing stage branch is reported as exactly that, not as a retryable error', async () => {
+    const r = await openPlatformRepairPr({ slug: 's', title: 't', body: 'b', files: [], listOpenPullRequestsForBranchFn: async () => [], getBranchShaFn: async () => { throw new Error('getBranchSha failed (404): Not Found'); } });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'stage-branch-missing');
+  });
+});
+
+describe('agent work is CUT from main and the PR goes INTO stage', () => {
+  test('the branch is created from the production branch tip, and the PR targets the stage branch', async () => {
+    const seen = {};
+    const r = await openPlatformRepairPr({
+      slug: 'x', title: 't', body: 'b', files: [{ path: 'server/a.js', content: 'c' }],
+      listOpenPullRequestsForBranchFn: async () => [],
+      getBranchShaFn: async (_repo, branch) => { seen.cutFrom = branch; return 'MAINSHA'; },
+      createBranchFn: async (_repo, name, sha) => { seen.created = [name, sha]; },
+      commitFilesAtomicFn: async () => {},
+      openPullRequestFn: async (_repo, args) => { seen.pr = args; return { number: 4, url: 'https://gh/pull/4' }; },
+    });
+    assert.equal(r.ok, true);
+    assert.equal(seen.cutFrom, 'main', 'cut from main, not stage');
+    assert.deepEqual(seen.created, ['fix/self-repair-x', 'MAINSHA']);
+    assert.equal(seen.pr.base, 'stage', 'the PR goes into stage');
   });
 });

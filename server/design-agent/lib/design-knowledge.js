@@ -27,6 +27,7 @@ export const DESIGN_PATTERNS = Object.freeze({
   'raw-color-value': { component: 'color', rootCause: 'A literal colour was written instead of this site\'s own colour classes.' },
   'inline-style': { component: 'spacing', rootCause: 'Inline styles were used instead of this site\'s own utility classes.' },
   'design-incomplete': { component: 'design-profile', rootCause: 'The captured design does not cover what this page renders.' },
+  'responsive-regression': { component: 'responsive-layout', rootCause: 'Rendered into this site\'s real page, the draft broke the layout at a real device width (overflow, clipping or unusable controls).' },
   'render-deviation': { component: 'typography', rootCause: 'Rendered into a real page of this site, the draft measures differently (scale, spacing, line length or overflow).' },
   'design-integrity-failed': { component: 'design-profile', rootCause: 'The draft failed the design-integrity check against this site\'s captured roles.' },
   'template-missing-placeholder': { component: 'component-template', rootCause: 'A derived component template dropped a placeholder the generator needs.' },

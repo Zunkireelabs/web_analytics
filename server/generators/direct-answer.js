@@ -3,6 +3,7 @@ import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/sit
 import { callLLM, callLLMForJson } from '../llm.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 import { pageStructureGuidance } from './lib/design-aware-composer.js';
+import { withDesignCorrections } from './lib/design-corrections.js';
 import { tenantContextTextFor } from '../lib/tenant-context.js';
 import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
 import { usedPhotoIds } from './lib/blog-image-usage.js';
@@ -107,11 +108,12 @@ export async function generate({ siteId, params }) {
   // structurally closest to this site's own real FAQ-shaped content
   // (answer-first, supporting sections), so 'faq' is the primary match.
   const structureGuidance = pageStructureGuidance(site, 'faq', { fallbackPageTypes: ['other'] });
-  const user = `Query: ${query}${context ? `\nContext: ${context}` : ''}` +
+  const userBase = `Query: ${query}${context ? `\nContext: ${context}` : ''}` +
     (groundingExcerpt ? `\n\nReal site content (from ${homepage}):\n${groundingExcerpt}` : '') +
     (tenantContext ? `\n\n${tenantContext}` : '') +
     `\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}` +
     (structureGuidance ? `\n\n${structureGuidance}` : '');
+  const user = withDesignCorrections(userBase, params);
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 900, generatorId: meta.id, siteId });

@@ -1,5 +1,6 @@
 import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
 import { callLLMForJson } from '../llm.js';
+import { withDesignCorrections } from './lib/design-corrections.js';
 import { sanitizeTable } from './expand-content.js';
 import { llmFailure } from './lib/llm-error.js';
 
@@ -50,7 +51,7 @@ export async function generate({ siteId, params }) {
         : '.')
     : 'Real decline evidence: this page\'s clicks dropped meaningfully versus the prior period (exact figures unavailable).';
 
-  const user = `Query: ${query || ''}\n${trendLine}\nPage title: ${fetched.analysis.title}\nPage text: ${fetched.analysis.bodyText.slice(0, 3000)}`;
+  const user = withDesignCorrections(`Query: ${query || ''}\n${trendLine}\nPage title: ${fetched.analysis.title}\nPage text: ${fetched.analysis.bodyText.slice(0, 3000)}`, params);
 
   let sections;
   try {

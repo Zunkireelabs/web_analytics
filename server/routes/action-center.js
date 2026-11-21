@@ -20,7 +20,7 @@ import { getProtectedPageSet } from '../store/protected-pages.js';
 import { isProtectedChange } from '../agents/lib/protected-pages.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState, reopenRecommendation, blockRecommendation, closeRecommendation, getRecommendationByFindingId } from '../store/recommendations.js';
 import { recordAttempt } from '../store/recommendation-attempts.js';
-import { classifyAbandonReason, RETRY_POLICY } from '../lib/attempt-classification.js';
+import { classifyAbandonReason, RETRY_POLICY, DESIGN_DEFERRAL_MESSAGES } from '../lib/attempt-classification.js';
 import { query as pgQuery } from '../db.js';
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
 import { scheduleImpactMeasurement } from '../store/fix-impact.js';
@@ -42,7 +42,7 @@ import { reviewPrChecks, generatedFilePaths, AGENT_REVIEW_STATE } from '../imple
 import {
   createDraft, getDraftByFindingId, listDrafts, listDraftsForBoard, countDraftsByLifecycle, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, markCmsDraftPublished, recordAgentReviewState, recordPrState, recordApplyFailure, recordMergeFailure,
-  recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds,
+  recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds, countDesignDeferralsForFinding,
 } from '../store/drafts.js';
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
 import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor, sitePageUrl as siteBasePageUrl } from '../implementers/lib/design-drift.js';
@@ -53,7 +53,8 @@ import { resolveOrCreateCanonicalPageTemplate, PAGE_TEMPLATE_TYPES_FOR_GENERATOR
 import { buildCorrectionFeedback, canonicalTemplateForFeedback } from '../generators/lib/design-repair-feedback.js';
 import { pageFamilyOf, formatDesignKnowledge } from '../design-agent/lib/design-knowledge.js';
 import { findDesignKnowledge, recordDesignIssues, recordKnowledgeReuse } from '../store/design-knowledge.js';
-import { describeResponsiveRegressions } from '../generators/lib/responsive-preview-gate.js';
+import { investigateAndRepairDesign, MAX_REPAIR_ATTEMPTS } from '../generators/lib/design-repair.js';
+import { buildHandoffs, tenantLessonRecorder } from '../generators/lib/design-repair-wiring.js';
 import { hasProfileLevelMismatch, repairProfileLevelMismatch } from '../generators/lib/design-mismatch-repair.js';
 import { repairDesignProfileRolesForSites } from '../scripts/repair-design-profile-roles.js';
 import { FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
@@ -959,6 +960,86 @@ router.post('/action-center/drafts/:id/request-revision', async (req, res, next)
 // this call itself failed with. Only a pre-approval rejection (bad
 // implementer resolution, a failed preview, or an uncertain render mode)
 // throws.
+// One budget for every "check, repair, re-check" gate in the approval flow: the design repair below and the
+// SEO/tech re-check further down share it, as they always did.
+const MAX_DESIGN_VALIDATE_ATTEMPTS = MAX_REPAIR_ATTEMPTS;
+
+// DESIGN-VALIDATE + AUTONOMOUS REPAIR, stage. The approval preview renders the exact content about to publish in a real
+// browser against the real page (layout gate for edits to existing pages; completeness + render comparison for new pages)
+// and generators/lib/design-repair.js does the rest: diagnose the root cause from the real DOM and CSS, find who owns it,
+// repair what a rewrite can repair, hand the rest to its owner, re-render, re-validate. Bounded by MAX_REPAIR_ATTEMPTS.
+//
+// Returns the final preview result and the content that produced it. THROWS (422) when the draft must not go on:
+//   - deferred: the cause is in the captured design or shared platform code. It is handed to its owner, the item is
+//     retried once that lands, and it is NOT counted against the item.
+//   - exhausted: repair was tried and did not hold. A person gets the diagnosis and what was tried, never a bare "failed".
+// A draft that failed validation is never returned as passing.
+async function runDesignRepairStage({ site, siteId, draft, resolved, renderMode }) {
+  const outcome = await investigateAndRepairDesign({
+    content: draft.content,
+    check: (content) => resolved.implementer.preview(site, { ...draft, content }, { renderModeOverride: renderMode, validateDesign: true }),
+    draftHtmlOf: (_content, result) => result?.draftHtml ?? '',
+    producedBy: 'renderer',
+    regenerate: async (correction) => {
+      const generator = await getGenerator(draft.action_type);
+      if (!generator) return null; // nothing that can regenerate this action type — fall through to the honest failure
+      const repaired = await withValidatedDesign(siteId, draft, () => generator.generate({
+        siteId, params: { ...(draft.input || {}), designCorrections: correction },
+      })).catch((err) => { console.error(`[action-center] design repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
+      if (!repaired?.content) return null;
+      // A repair the model writes is new content, not a human edit: it must clear the same Quality Gate generation does.
+      const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site });
+      if (!repairGate.clean) { console.warn(`[action-center] draft ${draft.id}'s design repair failed the Quality Gate, abandoning repair`); return null; }
+      return repaired.content;
+    },
+    handoff: buildHandoffs({ site, draft }),
+    learn: tenantLessonRecorder({ siteId, draft }),
+    // Earlier runs that already deferred this same finding to its owner: bounds the wait (generators/lib/design-repair.js).
+    priorDeferrals: draft.finding_id ? await countDesignDeferralsForFinding(siteId, draft.finding_id).catch(() => 0) : 0,
+  });
+
+  if (outcome.ok || outcome.status === 'not-repairable') {
+    return { previewResult: outcome.result, activeContent: outcome.content };
+  }
+
+  const failed = outcome.result || {};
+  const { diagnosis } = outcome;
+  const evidence = diagnosis ? [diagnosis.summary, ...(diagnosis.evidence || []).slice(0, 4)].filter(Boolean).join(' ') : '';
+
+  if (outcome.status === 'deferred') {
+    const waiting = outcome.pendingReason === 'design-capture-refresh-pending' ? DESIGN_DEFERRAL_MESSAGES.capture : DESIGN_DEFERRAL_MESSAGES.shared;
+    console.warn(`[action-center] draft ${draft.id} handed to ${diagnosis?.owner}: ${diagnosis?.cause}`);
+    throw httpError(422, `${waiting} ${evidence}`.trim(), { reason: outcome.pendingReason });
+  }
+
+  // exhausted — repair was attempted and did not hold.
+  const designAttempts = outcome.attempts.map((a, i) => ({
+    what: i === 0 ? 'Built the block in your site\'s usual style and checked it in a browser' : `Rewrote the block with the measured problem as feedback (repair ${i})`,
+    result: a.cause,
+  }));
+  console.warn(`[action-center] draft ${draft.id} could not be repaired after ${outcome.attempts.length} attempt(s): ${diagnosis?.cause}`);
+  // Told ONCE per episode, with the diagnosis (the per-attempt gates were quiet on purpose).
+  if (failed.reason === 'render-deviation' || failed.reason === 'design-incomplete') {
+    import('../notifications/design-blocked.js').then((m) => m.notifyDesignBlocked(site, { reason: failed.reason, actionType: draft.action_type })).catch(() => {});
+  }
+  // If the site has more than one of its OWN layouts that can show this block, a person picks which one; the next run
+  // builds it. Nothing is published meanwhile, and the draft is withdrawn as before.
+  const choice = designChoiceInputFor({ draft, componentTemplates: site.url_file_map?.siteRoot?.componentTemplates, attempts: designAttempts });
+  if (choice) {
+    await createDesignChoice(siteId, choice).catch((err) => console.error(`[action-center] could not record the design choice for draft ${draft.id}:`, err.message));
+    throw httpError(422, 'This block could not be fitted into your page without changing how it looks. It was sent to you to choose which of your own layouts it should use.', { reason: 'needs-design-choice' });
+  }
+  // No second layout to offer. The automatic recovery rounds re-check a page that has not changed, so they cannot fix a
+  // layout: hand it to a person now (the card stays visible, with this reason and the diagnosis) instead of cycling.
+  const rec = draft.finding_id ? await getRecommendationByFindingId(siteId, draft.finding_id).catch(() => null) : null;
+  if (rec) await blockRecommendation(rec.id, layoutNeedsPersonReason({ draft, attempts: designAttempts, diagnosis })).catch((err) => console.error(`[action-center] could not hand rec ${rec.id} to a person:`, err.message));
+  const noOneToFix = outcome.handedToPerson ? ' No automatic repair could take this on, so it needs a person.' : '';
+  throw httpError(422, `${failed.error || 'The draft does not match the site\'s design.'} ${evidence}${noOneToFix}`.trim(), {
+    reason: failed.reason, regressions: failed.regressions, deviations: failed.deviations,
+    diagnosis: diagnosis ? { owner: diagnosis.owner, cause: diagnosis.cause } : null,
+  });
+}
+
 // Every check approveAndPublishDraft runs BEFORE approval, and nothing else: it never approves, pushes or opens a pull request.
 // Order (unchanged): Quality Gate -> resolve implementer -> preview with the bounded responsive repair loop -> persist repaired
 // content -> rendering gate -> technical check with its bounded repair loop -> persist. Throws exactly the errors the approval
@@ -1029,56 +1110,9 @@ export async function validateDraft(siteId, draftId, { renderMode, afterQualityG
       // Any other preview failure (render-mode-uncertain, missing classes,
       // ...) isn't something a content regeneration can fix, so it still
       // fails immediately, unchanged from before.
-      const MAX_DESIGN_VALIDATE_ATTEMPTS = 3; // 1 real check + 2 repair retries
-      let previewResult = null;
-      let activeContent = draft.content;
-      const designAttempts = []; // what the repair loop tried, kept so a person sees it if the loop gives up
-      for (let attempt = 1; attempt <= MAX_DESIGN_VALIDATE_ATTEMPTS; attempt++) {
-        previewResult = await resolved.implementer.preview(site, { ...draft, content: activeContent }, { renderModeOverride: renderMode });
-        if (previewResult.ok || previewResult.reason !== 'responsive-regression' || attempt === MAX_DESIGN_VALIDATE_ATTEMPTS) break;
-
-        const regressionSummary = describeResponsiveRegressions(previewResult.regressions);
-        console.warn(`[action-center] draft ${draft.id} broke the page's real layout on approval preview (attempt ${attempt}), attempting repair: ${regressionSummary}`);
-        designAttempts.push({ what: attempt === 1 ? 'Built the block in your site\'s usual style and checked it in a browser' : `Rewrote the block with the measured layout problem as feedback (repair ${attempt - 1})`, result: regressionSummary });
-        // eslint-disable-next-line no-await-in-loop
-        const generator = await getGenerator(draft.action_type);
-        if (!generator) break; // nothing that can regenerate this action type — fall through to the honest failure below
-        const repaired = await withValidatedDesign(siteId, draft, () => generator.generate({
-          siteId,
-          params: {
-            ...(draft.input || {}),
-            designCorrections: `CORRECTION REQUIRED — the previous version of this content was checked in a real browser at real `
-              + `device widths against the actual live page it publishes to, and it broke the layout: ${regressionSummary}. Fix `
-              + 'exactly this problem (the content itself, not the page around it) and keep everything else you already wrote.',
-          },
-        })).catch((err) => { console.error(`[action-center] design-validate repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
-        if (!repaired?.content) break;
-
-        // The repaired content is a fresh, machine-written attempt — it must
-        // clear the same Quality Gate any other generation does before it's
-        // trusted enough to even re-check visually. A repair that fixes the
-        // layout by breaking the content (truncating it into invalid JSON-LD,
-        // say) must not quietly become this draft's new content.
-        // eslint-disable-next-line no-await-in-loop
-        const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site });
-        if (!repairGate.clean) { console.warn(`[action-center] draft ${draft.id}'s design-validate repair failed the Quality Gate, abandoning repair`); break; }
-
-        activeContent = repaired.content;
-      }
-      if (!previewResult.ok && previewResult.reason === 'responsive-regression') {
-        designAttempts.push({ what: `Rewrote the block with the measured layout problem as feedback (repair ${designAttempts.length})`, result: describeResponsiveRegressions(previewResult.regressions) });
-        // The loop gave up. If the site has more than one of its OWN layouts that can show this block, a person picks
-        // which one; the next run builds it. Nothing is published meanwhile, and the draft is withdrawn as before.
-        const choice = designChoiceInputFor({ draft, componentTemplates: site.url_file_map?.siteRoot?.componentTemplates, attempts: designAttempts });
-        if (choice) {
-          await createDesignChoice(siteId, choice).catch((err) => console.error(`[action-center] could not record the design choice for draft ${draft.id}:`, err.message));
-          throw httpError(422, 'This block could not be fitted into your page without changing how it looks. It was sent to you to choose which of your own layouts it should use.', { reason: 'needs-design-choice' });
-        }
-        // No second layout to offer. The automatic recovery rounds re-check a page that has not changed, so they cannot
-        // fix a layout: hand it to a person now (the card stays visible, with this reason) instead of cycling through them.
-        const rec = draft.finding_id ? await getRecommendationByFindingId(siteId, draft.finding_id).catch(() => null) : null;
-        if (rec) await blockRecommendation(rec.id, layoutNeedsPersonReason({ draft, attempts: designAttempts })).catch((err) => console.error(`[action-center] could not hand rec ${rec.id} to a person:`, err.message));
-      }
+      const designStage = await runDesignRepairStage({ site, siteId, draft, resolved, renderMode });
+      let previewResult = designStage.previewResult;
+      let activeContent = designStage.activeContent;
       if (!previewResult.ok) {
         throw httpError(422, previewResult.error, {
           reason: previewResult.reason, confidence: previewResult.confidence, suggestedMode: previewResult.suggestedMode,
@@ -1293,7 +1327,11 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
         draftStatus: approvedDraft.status,
       });
     }
-    return getDraft(siteId, approvedDraft.id);
+    // The row only keeps the message text; the implementer's structured reason
+    // is what a caller can act on without re-reading English, so it rides along
+    // on the returned draft (not persisted — there is no column for it).
+    const failedRow = await getDraft(siteId, approvedDraft.id);
+    return failedRow ? { ...failedRow, apply_reason: applyResult.reason ?? null } : failedRow;
   }
   const branchPushedDraft = await markDraftBranchPushed(siteId, approvedDraft.id, {
     branchName: applyResult.branchName, implementerId, renderMode: applyResult.renderMode, appliedFiles: applyResult.appliedFiles,

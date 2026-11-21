@@ -19,7 +19,7 @@ import { loadGrowthStage } from '../../lib/growth-stage.js';
 import { classifyShipFailure, failureFamilyKey, FAILURE_KIND, SYSTEMIC_FAILURE_LIMIT, FAMILY_FAILURE_LIMIT } from './failure-policy.js';
 import { getQueryPageMetrics } from '../../store/read.js';
 import { draftShipState, SHIP_STATE } from '../../lib/draft-ship-state.js';
-import { classifyAbandonReason, RETRY_POLICY } from '../../lib/attempt-classification.js';
+import { classifyAbandonReason, RETRY_POLICY, structuredApplyFailure } from '../../lib/attempt-classification.js';
 import { NO_FILE_MAPPING_FRAGMENT, NO_MARKERS_CONFIGURED_FRAGMENT, UNVERIFIED_PLACEHOLDER_FRAGMENT } from '../../lib/draft-failure-phrases.js';
 import { recordAutoRemediationRun } from '../../store/auto-remediation-runs.js';
 import { laneBudgets, ANALYST_MAX, AUTONOMOUS_DRAFT_SOURCES } from '../../lib/autonomous-quota.js';
@@ -1451,7 +1451,14 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
     // since Aug 25-26, each time contributing to (and some days tripping)
     // the old all-purpose circuit breaker and halting the rest of that day's
     // budgeted work.
-    if (/anchor\(s\) no longer found verbatim|anchor\(s\) appear more than once/.test(message)) {
+    const structured = structuredApplyFailure(approved);
+    if (structured) {
+      // The implementer told us exactly what happened: use that, not a guess
+      // from its English. Per-item design verdicts are refusals, never
+      // systemic faults.
+      err.reason = structured.reason;
+      if (structured.refusal) err.refusal = true;
+    } else if (/anchor\(s\) no longer found verbatim|anchor\(s\) appear more than once/.test(message)) {
       // exact-match-patch.js's describePatchFailure: the page's live source
       // no longer contains the exact text detection captured. That is the
       // same "found live evidence the recommendation's premise is no longer

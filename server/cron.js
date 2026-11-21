@@ -14,6 +14,8 @@ import { runLearningUpdateAfterOutcomes, runDailyLearningUpdate } from './lib/le
 import { expireStaleClaims } from './agents/lib/work-claims.js';
 import { schedulePipelineCron, pipelineOwnsMorning } from './lib/daily-pipeline/cron.js';
 import { runSetupPrsDue } from './lib/setup-pr-job.js';
+import { sweepPlatformRepairPrs, stagingAutomergeEnabled } from './agents/lib/platform-staging-merge.js';
+import { runPlatformReleaseCycle, releaseAgentEnabled } from './agents/lib/platform-release.js';
 
 // Every scheduled lane runs under a database-backed lease keyed by its name, so two app instances (staging
 // and production sharing a database, a second worker, a laptop left running) can never run the same lane at
@@ -443,6 +445,32 @@ export function startCron() {
     }
   }, { timezone: tz });
   console.log('[cron] hourly catch-up guard scheduled (fires at :05 each hour)');
+
+  // PLATFORM RELEASE (agents/lib/platform-staging-merge.js, agents/lib/platform-release.js), every 10 minutes:
+  //   1. the staging agent merges validated self-repair PRs into STAGE once every check is green (never into main);
+  //   2. the repo's own deploy-staging.yml deploys stage; this verifies the deploy and the live staging app;
+  //   3. a fresh promotion branch from main with only the verified changes becomes a PR into main — never merged by an agent;
+  //   4. after a person merges it, production's deploy and live app are verified.
+  // Each step is behind its own switch and a deployment that sets neither (production today) never starts any of it.
+  if (stagingAutomergeEnabled() || releaseAgentEnabled()) {
+    cron.schedule('*/10 * * * *', async () => {
+      try {
+        const merged = await sweepPlatformRepairPrs();
+        const mergedCount = (merged.results || []).filter((x) => x.merged).length;
+        if (mergedCount) console.log(`[cron] platform staging agent merged ${mergedCount} validated self-repair PR(s) into stage`);
+        const release = await runPlatformReleaseCycle();
+        if (release.ran) {
+          const count = (part, state) => (release[part]?.results || []).filter((x) => x.state === state).length;
+          if (count('staging', 'verified') || count('staging', 'failed') || release.promotion?.opened || count('production', 'verified') || count('production', 'failed')) {
+            console.log(`[cron] platform release: staging verified ${count('staging', 'verified')}, failed ${count('staging', 'failed')}; promotion opened ${release.promotion?.opened ? release.promotion.opened.url : 'no'}; production verified ${count('production', 'verified')}, failed ${count('production', 'failed')}`);
+          }
+        }
+      } catch (err) {
+        console.error('[cron] platform release error:', err.message);
+      }
+    });
+    console.log('[cron] platform release cycle scheduled (every 10 minutes)');
+  }
 
   // SETUP PR (lib/setup-pr-job.js): every five minutes, the oldest project whose setup PR is due, one at a time. Nothing here is due until a
   // project's onboarding audit finished and an hour passed, or staff scheduled it (scripts/schedule-setup-pr.js), so on an ordinary day

@@ -5,6 +5,9 @@
 // {generatorId, reason, errorMessage, occurrenceDays, testFileHint} and
 // needs no changes to keep calling this.
 import { listSandboxFiles, snapshotFiles, diffSnapshots, runSandboxCommand } from './sandbox.js';
+import { scanRepairForRisks, describeFindings } from './security-checks.js';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 const CODE_ROOT = 'server';
 // package.json/package-lock.json are outside CODE_ROOT (repo root), so the
@@ -76,6 +79,12 @@ function isForbiddenPath(path) {
 // _validate_code_self_repair: node --check every changed file, then
 // node --test on testFileHint or any changed *.test.js file; a fix with no
 // test target at all is not validated, same as today.
+// The TAP summary node:test prints: "# tests N", "# pass N", "# skipped N".
+export function testCounts(output) {
+  const n = (label) => { const m = String(output || '').match(new RegExp(`^# ${label} (\\d+)`, 'm')); return m ? Number(m[1]) : 0; };
+  return { tests: n('tests'), pass: n('pass'), skipped: n('skipped') };
+}
+
 export async function validateCodeSelfRepair(sandbox, { testFileHint }, beforeSnapshot) {
   const currentFiles = await listSandboxFiles(sandbox, CODE_ROOT);
   const after = await snapshotFiles(sandbox, [...new Set([...Object.keys(beforeSnapshot), ...currentFiles])]);
@@ -98,12 +107,29 @@ export async function validateCodeSelfRepair(sandbox, { testFileHint }, beforeSn
     return { ok: false, output: 'No test file available to validate against (no testFileHint, and the agent added no *.test.js file).' };
   }
 
+  // The checkout is a bare tarball: without dependencies every test that imports one fails with "module not found", so
+  // nothing could ever be validated. Install what package-lock.json pins, with install scripts disabled.
+  // A real platform checkout always has a lockfile; a workspace without one has nothing to install.
+  const hasLockfile = await fs.access(path.join(sandbox.root, 'package-lock.json')).then(() => true, () => false);
+  if (hasLockfile) {
+    const install = await runSandboxCommand(sandbox, 'npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { allowlist: ['npm'], timeoutMs: 300_000 });
+    if (!install.ok) return { ok: false, output: `dependency install failed, so the tests cannot be run:\n${install.output}` };
+  }
+
   const outputs = [];
   for (const testPath of testTargets) {
     // eslint-disable-next-line no-await-in-loop
-    const result = await runSandboxCommand(sandbox, 'node', ['--test', testPath], { allowlist: ['node'], timeoutMs: 120_000 });
+    const result = await runSandboxCommand(sandbox, 'node', ['--experimental-test-module-mocks', '--test', testPath], { allowlist: ['node'], timeoutMs: 180_000 });
     outputs.push(`$ node --test ${testPath}\n${result.output}`);
     if (!result.ok) return { ok: false, output: outputs.join('\n\n') };
+    // A run where nothing actually ran is not a pass: every test skipped (no browser, no database) proves nothing.
+    const counts = testCounts(result.output);
+    if (counts.tests === 0 || counts.pass === 0 || counts.pass <= counts.skipped) {
+      return { ok: false, output: `${outputs.join('\n\n')}\n\nNot validated: ${counts.pass} test(s) passed and ${counts.skipped} were skipped. A skipped test proves nothing.` };
+    }
   }
+
+  const security = scanRepairForRisks(changed);
+  if (!security.ok) return { ok: false, output: `Security check failed:\n${describeFindings(security.findings)}` };
   return { ok: true, output: outputs.join('\n\n'), filesChanged: changed, patch: changed.map((c) => c.patch).join('\n\n') };
 }
