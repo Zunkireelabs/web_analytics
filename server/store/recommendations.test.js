@@ -299,6 +299,10 @@ describe('classifyBlockedKind — the text-pattern -> UI-branch mapping', () => 
     assert.equal(classifyBlockedKind(reason), 'site-fact');
   });
 
+  test('a numbered page of a list reads as a site fact ("Can\'t be drafted here"), not as setup to do', () => {
+    assert.equal(classifyBlockedKind('This is a numbered page of a list (page 2, 3 and so on of the blog listing): the same listing template showing the next slice of posts, with no file or text of its own. Nothing needs to be set up.'), 'site-fact');
+  });
+
   test('a design-context-not-yet-derived message reads as awaiting-derivation — nothing to do', () => {
     assert.equal(classifyBlockedKind("This site's Design Context hasn't been derived yet — analysis of the live site has been queued. No action needed; this generator's default fallback template renders in the meantime."), 'awaiting-derivation');
   });

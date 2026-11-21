@@ -14,6 +14,7 @@ import { repairStaleFileMapping, staleMappingBlockedReason } from '../../impleme
 import { autoHealNewContentTarget } from '../../implementers/lib/discover-content-target.js';
 import { discoverPaginationRoutes, matchPaginationRoute, paginationBlockedReason, paginationHeadTagAutoHandled } from '../../implementers/lib/pagination-routes.js';
 import { healPaginationAdapter } from '../../implementers/lib/pagination-adapter-discovery.js';
+import { isUnshippablePaginationFix, PAGINATED_BLOCKED_REASON } from './paginated-pages.js';
 import { nestedIdsFromPageUrl } from '../../implementers/adapters/data-array-content.js';
 import { evaluateLocationServiceGap, GAP_CLASS } from './location-service-gap.js';
 import { getCachedGapEvaluation, saveGapEvaluation } from '../../store/location-service-gaps.js';
@@ -472,6 +473,10 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
         if (!isPageMapped(site, page, generatorId)) {
           mappingBlockedReason = paginationBlockedReason(generated, generatorId);
         }
+      } else if (isUnshippablePaginationFix(generatorId, page)) {
+        // A numbered page of a list (/blog/page/3) has no file of its own by design, so "no mapping" is the wrong thing to report: nothing is
+        // missing, and there is nothing to heal or map. Say what is true.
+        mappingBlockedReason = PAGINATED_BLOCKED_REASON;
       } else {
         await healUnmappedPage(page, generatorId);
         if (!isPageMapped(site, page, generatorId)) {
