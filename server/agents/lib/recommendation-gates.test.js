@@ -702,3 +702,37 @@ describe('stale mapping repair — homepage end to end', () => {
     assert.equal(state.writes.length, 0);
   });
 });
+
+// A numbered page of a list (/blog/page/3) has no file of its own by design. Its card used to say "No url_file_map entry resolves ..." (a setup
+// problem to repair), which was false: nothing is missing. It now states the real reason.
+describe('createRecommendationGates — numbered list pages are not reported as a mapping gap', () => {
+  const site = { id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', auto_remediation_enabled: true, url_file_map: {} };
+  const run = async (generatorId, page) => {
+    let healed = 0;
+    const gates = createRecommendationGates(1, site, { ...neutralDeps(), healFn: async () => { healed++; return null; } });
+    const out = await gates.evaluate(generatorId, { page });
+    return { out, healed };
+  };
+  test('a content fix on /blog/page/3 says what is true, and never tries to heal a mapping', async () => {
+    for (const g of ['schema', 'faq', 'qa-content']) {
+      const { out, healed } = await run(g, 'https://acme.com/blog/page/3/');
+      assert.match(out.blockedReason, /numbered page of a list/, g);
+      assert.match(out.blockedReason, /Nothing needs to be set up/, g);
+      assert.doesNotMatch(out.blockedReason, /url_file_map|connect-repo/, g);
+      assert.equal(healed, 0, `${g}: no mapping repair attempted`);
+    }
+  });
+  test('a language-prefixed numbered page is the same', async () => {
+    const { out } = await run('schema', 'https://acme.com/de/blog/page/12');
+    assert.match(out.blockedReason, /numbered page of a list/);
+  });
+  test('an ordinary unmapped page keeps the mapping reason (and does try to heal)', async () => {
+    const { out, healed } = await run('schema', 'https://acme.com/blog/some-post/');
+    assert.match(out.blockedReason, /No url_file_map entry resolves/);
+    assert.equal(healed, 1);
+  });
+  test('a page that merely contains "page" in its name is not mistaken for a numbered page', async () => {
+    const { out } = await run('schema', 'https://acme.com/landing-page/3-things/');
+    assert.match(out.blockedReason, /No url_file_map entry resolves/);
+  });
+});

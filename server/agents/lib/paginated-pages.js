@@ -24,3 +24,8 @@ export function isPaginatedListUrl(pageUrl) {
 export function isUnshippablePaginationFix(generatorId, pageUrl) {
   return CONTENT_FIX.has(generatorId) && isPaginatedListUrl(pageUrl);
 }
+
+// What a card for such a fix says. It is NOT a mapping problem (nothing is missing from url_file_map: these pages have no file by design),
+// so it must not read as one. The wording is matched by store/recommendations.js's classifyBlockedKind ("numbered page of a list"), which files it
+// under "Can't be drafted here: how this page is built" instead of "setup needed".
+export const PAGINATED_BLOCKED_REASON = 'This is a numbered page of a list (page 2, 3 and so on of the blog listing): the same listing template showing the next slice of posts, with no file or text of its own. Content fixes are not written onto it; the posts themselves are fixed on their own pages. Nothing needs to be set up.';
