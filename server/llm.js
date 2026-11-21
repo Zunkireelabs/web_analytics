@@ -89,8 +89,16 @@ const quotaCooldownMs = () => Number(process.env.LLM_QUOTA_COOLDOWN_MS) || 15 * 
 export function fallbackAvailable(env = process.env) {
   return String(env.LLM_FALLBACK_ON_QUOTA || '').toLowerCase() !== 'off' && Boolean(env.ANTHROPIC_API_KEY);
 }
+// OPENAI PAUSED. While the OpenAI project is blocked (spend limit, no credit) set LLM_OPENAI_PAUSED=true and every OpenAI call is answered
+// by Claude straight away, with the same larger token budget and cut-off continuation as the automatic fallback. Unlike the automatic
+// fallback it never calls OpenAI at all, so no call is wasted on a 429 and nothing probes OpenAI every 15 minutes. Remove the variable
+// once the limit is lifted. Needs ANTHROPIC_API_KEY; without one it does nothing (calls still go to OpenAI, as before).
+export function openAiPaused(env = process.env) {
+  return /^(1|true|on|yes)$/i.test(String(env.LLM_OPENAI_PAUSED || '').trim()) && Boolean(env.ANTHROPIC_API_KEY);
+}
 // 'openai' = call OpenAI normally; 'probe' = the cooldown just ended, this call tests OpenAI; 'fallback' = go to Anthropic.
 export function openAiRoute(now = Date.now(), env = process.env) {
+  if (openAiPaused(env)) return 'fallback';
   if (!fallbackAvailable(env) || quotaBreaker.blockedUntil === 0) return 'openai';
   if (now < quotaBreaker.blockedUntil) return 'fallback';
   quotaBreaker.blockedUntil = now + PROBE_LEASE_MS;
@@ -104,7 +112,7 @@ export function noteOpenAiQuotaExhausted(err, now = Date.now()) {
 export function noteOpenAiHealthy() {
   if (quotaBreaker.blockedUntil !== 0) { quotaBreaker.blockedUntil = 0; console.log('[llm] OpenAI is working again — back on OpenAI.'); }
 }
-export function llmFallbackState() { return { blockedUntil: quotaBreaker.blockedUntil, active: quotaBreaker.blockedUntil !== 0 }; }
+export function llmFallbackState() { return { blockedUntil: quotaBreaker.blockedUntil, active: quotaBreaker.blockedUntil !== 0 || openAiPaused(), paused: openAiPaused() }; }
 export function _resetQuotaBreakerForTest() { quotaBreaker.blockedUntil = 0; }
 
 export function isRetryable(err) {

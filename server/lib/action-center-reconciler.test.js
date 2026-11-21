@@ -59,6 +59,8 @@ function normalize(text) {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+let stallSelectSql = null;
+
 function fakeQuery(text, params = []) {
   const sql = normalize(text);
 
@@ -72,6 +74,7 @@ function fakeQuery(text, params = []) {
     // Pass 2's stall-reclaim SELECT. Its position relative to pass 0 is the
     // whole point of that fix, so note when it runs.
     passOrder.push('stall-reclaim');
+    stallSelectSql = sql;
     return { rows: [] };
   }
   // Pass 3 (classifyUnrecordedFailures) — abandoned drafts with no attempt row yet.
@@ -774,5 +777,19 @@ describe('pass 0 (batch-PR recovery) — ordering', () => {
       passOrder.indexOf('pr-recovery') < passOrder.indexOf('stall-reclaim'),
       'a reclaim that runs first destroys the very work pass 0 exists to finish',
     );
+  });
+});
+
+describe('pass 2 (reclaimStalledDrafts) — person-driven sites', () => {
+  test('the stall sweep only reaches sites whose drafts the system itself moves (auto on, or merely paused)', async () => {
+    stallSelectSql = null;
+    await reconcileSite(SITE_ID, { apply: false });
+    assert.ok(stallSelectSql, 'pass 2 select ran');
+    // A site with auto-remediation off and no resume date is reviewed by a person (mobilise.agency): its drafts are waiting for
+    // the client, not stalled, so the sweep must exclude it. A paused site (resume_at set) must still be swept.
+    assert.match(stallSelectSql, /ship_mode = 'review-first'/);
+    assert.match(stallSelectSql, /auto_remediation_enabled = false/);
+    assert.match(stallSelectSql, /auto_remediation_resume_at IS NULL/);
+    assert.match(stallSelectSql, /NOT EXISTS/);
   });
 });

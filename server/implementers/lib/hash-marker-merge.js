@@ -84,3 +84,84 @@ export function validateNginxBraces(content) {
   }
   return { ok: true };
 }
+
+// ── placing a missing marker pair (nginx) ──────────────────────────────────────────────────────────────────────────────────────────────
+// Earlier a missing pair was always a refusal, which left every nginx site that was not hand-prepared unable to receive these fixes. The
+// pair can be placed deterministically and safely: right after the opening line of the server block that actually serves the site (the
+// first `server {` whose body has `root` or `try_files`; a block that only redirects is skipped). Anything else is still a refusal. The
+// change reaches the client only as a reviewed pull request, and the brace check still runs on the result.
+
+// The same text with every real comment blanked to spaces (same length, so offsets still line up). nginx starts a comment only at the
+// start of a token: `# note` is one, `/services/#top` is not.
+function blankComments(src) {
+  let out = '';
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '#' && (i === 0 || /[\s;{}]/.test(src[i - 1]))) {
+      while (i < src.length && src[i] !== '\n') { out += ' '; i++; }
+      if (i < src.length) out += '\n';
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+// Index just past the `}` that closes the block opened at `openIdx` (a `{`), on comment-blanked text. Quoted strings are skipped.
+function matchingClose(src, openIdx) {
+  let depth = 0;
+  for (let i = openIdx; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '"' || ch === "'") { const q = ch; i++; while (i < src.length && src[i] !== q && src[i] !== '\n') { if (src[i] === '\\') i++; i++; } continue; }
+    if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) return i + 1; }
+  }
+  return -1;
+}
+
+export function findServingServerBlock(content) {
+  const text = blankComments(content);
+  const re = /(^|\n)([ \t]*)server\s*\{/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const open = text.indexOf('{', m.index + m[1].length);
+    const end = matchingClose(text, open);
+    if (end === -1) return null;
+    const body = text.slice(open + 1, end - 1);
+    if (/(^|\s)(root\s|try_files\s)/.test(body)) {
+      const nl = content.indexOf('\n', open);
+      return { open, end, indent: m[2], lineEnd: nl === -1 ? open + 1 : nl + 1 };
+    }
+    re.lastIndex = end;
+  }
+  return null;
+}
+
+// Locations inside the serving block that set their own add_header (nginx then drops every server-level add_header for them).
+export function locationsDroppingServerHeaders(content) {
+  const block = findServingServerBlock(content);
+  if (!block) return [];
+  const body = blankComments(content).slice(block.open + 1, block.end - 1);
+  const out = [];
+  const re = /(^|\n)[ \t]*location\s+([^{\n]+)\{/g;
+  let m;
+  while ((m = re.exec(body))) {
+    const open = m.index + m[0].length - 1;
+    const end = matchingClose(body, open);
+    if (end === -1) break;
+    if (/^\s*add_header\s/m.test(body.slice(open + 1, end - 1))) out.push(m[2].trim());
+    re.lastIndex = end;
+  }
+  return out;
+}
+
+export function ensureHashMarker(fileContent, markerName) {
+  if (hashBlockRegex(markerName).test(fileContent)) return { ok: true, content: fileContent, inserted: false };
+  const block = findServingServerBlock(fileContent);
+  if (!block) {
+    return { ok: false, reason: 'no-insertion-marker', error: `Marker "SEOAI:${markerName}" is missing and no server { } block with a root or try_files was found to place it in.` };
+  }
+  const pad = `${block.indent}    `;
+  const insert = `${pad}# SEOAI:${markerName}:START\n${pad}# SEOAI:${markerName}:END\n`;
+  return { ok: true, content: fileContent.slice(0, block.lineEnd) + insert + fileContent.slice(block.lineEnd), inserted: true };
+}

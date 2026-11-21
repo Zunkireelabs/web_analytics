@@ -210,13 +210,25 @@ async function reconcileStuckApprovedDrafts(siteId, { apply, log }) {
   return result;
 }
 
+// A site where a PERSON, not the autonomous loop, moves drafts forward: it is review-first (sites.ship_mode, migration 259: the
+// client approves every change before anything is committed), or auto-remediation is off and not merely paused (a paused site has
+// auto_remediation_resume_at set and comes back on its own). On such a site (mobilise.agency: the client
+// reviews every fix before anything is committed) a draft that sits in draft / edited / approved / branch_pushed is WAITING FOR
+// THAT PERSON, not dropped by the system. Reclaiming it would throw away work the client has not had the chance to review (or
+// has already approved) and regenerate it. Kept in SQL so the sweep stays one query per site.
+export const SITE_IS_PERSON_DRIVEN_SQL = `NOT EXISTS (
+          SELECT 1 FROM sites s
+           WHERE s.id = $1 AND (s.ship_mode = 'review-first'
+                                OR (s.auto_remediation_enabled = false AND s.auto_remediation_resume_at IS NULL)))`;
+
 // Pass 2 — drafts that stopped moving. Reclaim them and hand the
-// recommendation back.
+// recommendation back. Skipped on person-driven sites (see above).
 async function reclaimStalledDrafts(siteId, { idleHours, apply, log }) {
   const { rows: stalled } = await query(
     `SELECT id, finding_id, status, action_type, branch_name, updated_at
        FROM drafts
       WHERE site_id = $1
+        AND ${SITE_IS_PERSON_DRIVEN_SQL}
         AND status = ANY($2)
         AND pr_number IS NULL
         AND updated_at < now() - ($3 || ' hours')::interval

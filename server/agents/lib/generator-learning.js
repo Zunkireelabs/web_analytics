@@ -38,6 +38,24 @@ const NEGATIVE = new Set(['failed', 'rejected']);
 // convergence cap already uses, so the two can no longer drift apart.
 export const NON_SCORING = new Set(['refused', 'infra']);
 
+// OUTAGE ERRORS THAT WERE RECORDED AS "the model returned bad JSON". Until the labeling fix of 2026-11-19 (generators/lib/llm-error.js),
+// every generator turned ANY failed model call, including the OpenAI "no credits remaining" / "enforced spend limit" outage of
+// 2026-11-06..19, into "<X> generation failed: model did not return valid JSON". attributeOutcome could not tell them apart (that text
+// reads as an item defect), so about 130 outage failures were scored against the generators and demoted nearly all of them: on
+// 2026-11-21 chayce held 20 of its 26 open fixes, admizz held 12 generator types, and zunkireelabs held 9, none of it a real defect.
+// Rows written before the fix and carrying that exact label are therefore not scored. Genuine invalid-JSON failures after the cutoff
+// are still scored; the cutoff is the deploy time of the labeling fix (git: bfc0ad8, 2026-11-19 11:52 UTC, rounded up to noon).
+export const MISLABELED_OUTAGE_CUTOFF = '2026-11-19T12:00:00Z';
+
+// TECHNICAL EVIDENCE AGES OUT. The scoring window is a generator's last WINDOW_SIZE attempts with no age limit, and a demoted
+// generator is barely attempted (one probation probe a day), so its old failures never left the window: on 2026-11-21 canonical,
+// expand-content, broken-link-fix, qa-content and others were held on September failures whose causes were long fixed ("module
+// ... does not provide an export", "Incorrect API key", "Unknown generator"). A generator with no recent evidence is simply
+// untested again (below MIN_SAMPLES it is not demoted), and one that keeps failing is demoted again by its fresh failures.
+// Impact outcomes arrive 31+ days after a merge, so they keep their own, unaged window.
+export const TECHNICAL_EVIDENCE_DAYS = 14;
+export const MISLABELED_OUTAGE_DETAIL = '%did not return valid JSON%';
+
 // A recorded outcome is this generator's own fault only when the reason
 // classifies as a real, item-specific defect. Everything else — transient
 // infrastructure, a config gap a human must close, a human's own decision,
@@ -186,8 +204,10 @@ export async function getLearnedConfidenceMap(siteId) {
          SELECT generator_id, outcome, created_at,
                 row_number() OVER (PARTITION BY generator_id, (outcome LIKE 'impact-%') ORDER BY created_at DESC) AS rn
          FROM generator_outcomes WHERE site_id = $1
+           AND NOT (outcome = 'failed' AND detail ILIKE $3 AND created_at < $4::timestamptz)
+           AND (outcome LIKE 'impact-%' OR created_at > now() - ($5 || ' days')::interval)
        ) windowed WHERE rn <= $2`,
-      [siteId, WINDOW_SIZE]
+      [siteId, WINDOW_SIZE, MISLABELED_OUTAGE_DETAIL, MISLABELED_OUTAGE_CUTOFF, String(TECHNICAL_EVIDENCE_DAYS)]
     ),
     // 2026-09 lifecycle-gap audit finding #3: fix-impact.js's impactByGenerator
     // computed real before/after-merge GSC deltas per generator but had zero

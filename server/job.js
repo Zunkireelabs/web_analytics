@@ -54,11 +54,12 @@ import { rateLimitKey } from './github/client.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
 
 import { syncWatchlist } from './agents/lib/watchlist.js';
-import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js';
+import { discoverFromSitemaps, crawlSite, MAX_CRAWL_PAGES } from './agents/lib/site-discovery.js';
 import { getSearchPerformanceRange } from './store/read.js';
 import { ownDomains, filterOwnDomainPages } from './agents/lib/site-domain.js';
 import { isForeignPlatformSpamUrl } from './agents/lib/index-bloat.js';
 import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages, pruneStaleInventory } from './store/page-inventory.js';
+import { syncSitemapIntoInventory } from './discovery/sitemap-sync.js';
 import { runDueVerifications } from './agents/lib/fix-verification.js';
 import { siteHasUsableDesignProfile, sitePageUrl, getDesignProfile } from './implementers/lib/design-drift.js';
 import { createDesignProfileJob, getQueuedComponentTemplateJob, getLatestDesignAgentJob, DESIGN_PROFILE_JOB_KEY, createConsistencyScanJob, CONSISTENCY_SCAN_JOB_KEY } from './store/execution-jobs.js';
@@ -840,7 +841,12 @@ export async function runSiteDiscoveryIfDue(site, {
   // real formatting difference sites commonly have between the two sources.
   const normalize = (u) => u.replace(/\/+$/, '');
   const crawledSet = new Set(crawledUrls.map(normalize));
-  const orphanedUrls = sitemapUrls.filter((u) => !crawledSet.has(normalize(u)));
+  // "Orphaned" means the crawl looked at the whole site and no page linked here. A crawl that stopped at its page cap (MAX_CRAWL_PAGES)
+  // did not look at the whole site: zunkireelabs has 661 pages against a cap of 300, so 285 of its blog posts, every one listed on the
+  // live blog pagination, were flagged orphaned, and two duplicate-detection agents skipped them. When the crawl was cut short we cannot
+  // know, so nothing is flagged (and any earlier flag is cleared) instead of guessing.
+  const crawlTruncated = crawledUrls.length >= MAX_CRAWL_PAGES;
+  const orphanedUrls = crawlTruncated ? [] : sitemapUrls.filter((u) => !crawledSet.has(normalize(u)));
   await markOrphanedPagesFn(site.id, orphanedUrls);
 
   // Self-clean the ledger: drop rows that are provably not this site's real
@@ -855,8 +861,8 @@ export async function runSiteDiscoveryIfDue(site, {
     console.error(`[site-discovery] site ${site.id} inventory prune failed:`, err.message);
   }
 
-  console.log(`[site-discovery] site ${site.id}: ${sitemapUrls.length} sitemap URL(s), ${crawledUrls.length} crawled URL(s), ${gscPages.length} GSC page(s), ${orphanedUrls.length} orphaned.`);
-  return { sitemapCount: sitemapUrls.length, crawlCount: crawledUrls.length, gscCount: gscPages.length, orphanedCount: orphanedUrls.length, prunedCount, sitemapRegistration };
+  console.log(`[site-discovery] site ${site.id}: ${sitemapUrls.length} sitemap URL(s), ${crawledUrls.length} crawled URL(s), ${gscPages.length} GSC page(s), ${orphanedUrls.length} orphaned${crawlTruncated ? ' (crawl hit its page cap, so no page was flagged orphaned)' : ''}.`);
+  return { sitemapCount: sitemapUrls.length, crawlCount: crawledUrls.length, gscCount: gscPages.length, orphanedCount: orphanedUrls.length, crawlTruncated, prunedCount, sitemapRegistration };
 }
 
 // `force` bypasses only the weekly staleness gate (every other precondition
@@ -871,6 +877,24 @@ export async function runSiteDiscoveryIfDue(site, {
 // waits, since the weekly gate only asks "did we run recently," never
 // "did the site change since." force-site-discovery.js is the one-time
 // catch-up; routine weekly discovery resumes normally afterward.
+// DAILY SITEMAP SYNC (discovery/sitemap-sync.js): adds any sitemap URL the inventory does not have yet, so a page published between two
+// weekly discovery runs is not invisible for up to two weeks. Cheap (one sitemap read per site), never crawls, prunes or flags orphans.
+export async function runSitemapSyncForAllSites({ listAllSites = listConnectedSites, syncForSite = syncSitemapIntoInventory } = {}) {
+  const sites = await listAllSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      // eslint-disable-next-line no-await-in-loop -- sequential, same as every other fleet loop in this file
+      const out = await syncForSite(site);
+      if (out.added) console.log(`[sitemap-sync] site ${site.id}: ${out.added} new page(s) found in the sitemap and added to the inventory${out.sitemapResubmit?.ok ? '; Search Console asked to re-read the sitemap' : ''}.`);
+      results.push({ siteId: site.id, ...out });
+    } catch (err) {
+      console.error(`[sitemap-sync] site ${site.id} failed:`, err.message);
+    }
+  }
+  return results;
+}
+
 export async function runSiteDiscoveryIfDueForAllSites({
   force = false,
   listAllSites = listConnectedSites,

@@ -957,3 +957,46 @@ describe('data-array-content computeChange — content-integrity-repair (data-ar
     assert.equal(reread.ok, true);
   });
 });
+
+// chayce-properties builds /elderly-removals-<slug>/ from src/_data/localAreas.json: the URL's last segment is
+// "elderly-removals-wellingborough" but the data entry's own id is "wellingborough". `idPrefix` strips the fixed text.
+describe('data-array-content computeChange — idPrefix (permalink wraps the data id in fixed text)', () => {
+  const localAreas = JSON.stringify([
+    { slug: 'kettering', name: 'Kettering', seoTitle: 'Removals Kettering | Chayce' },
+    { slug: 'wellingborough', name: 'Wellingborough', seoTitle: 'Removals Wellingborough: Residential & Elderly Moves | Chayce' },
+  ], null, 2);
+  const fetchAreas = async () => ({ content: localAreas });
+  const chayce = {
+    id: 3,
+    url_file_map: {
+      patterns: [{
+        match: '^/elderly-removals-(kettering|wellingborough)/?$',
+        adapters: { 'meta-title': { id: 'data-array-content', format: 'json-array', dataFile: 'src/_data/localAreas.json', idField: 'slug', idPrefix: 'elderly-removals-', fields: { title: 'seoTitle' } } },
+      }],
+    },
+  };
+  const draftFor = (page) => ({ action_type: 'meta-title', content: { page, selectedTitle: 'New Wellingborough Title | Chayce', metaDescription: 'unused: no data field' } });
+
+  test('matches the entry whose slug is the URL minus the prefix, and rewrites only that entry\'s title', async () => {
+    const r = await computeChange(chayce, draftFor('https://chayceproperties.com/elderly-removals-wellingborough/'), fetchAreas);
+    assert.equal(r.ok, true);
+    assert.equal(r.filePath, 'src/_data/localAreas.json');
+    assert.equal(r.changedRegions.length, 1);
+    const after = JSON.parse(r.newContent);
+    assert.equal(after[1].seoTitle, 'New Wellingborough Title | Chayce');
+    assert.equal(after[0].seoTitle, 'Removals Kettering | Chayce', 'the other area is untouched');
+    assert.equal(r.newContent.split('\n').length, r.oldContent.split('\n').length, 'one line changed, nothing added');
+  });
+
+  test('a URL that does not start with the prefix gets no id, so nothing is guessed', async () => {
+    const noPrefix = { ...chayce, url_file_map: { patterns: [{ ...chayce.url_file_map.patterns[0], match: '^/(wellingborough)/?$' }] } };
+    const r = await computeChange(noPrefix, draftFor('https://chayceproperties.com/wellingborough/'), fetchAreas);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-file-mapping');
+  });
+
+  test('a slug that is not in the data file is refused, not matched loosely', async () => {
+    const r = await computeChange(chayce, draftFor('https://chayceproperties.com/elderly-removals-kettering-north/'), async () => ({ content: localAreas }));
+    assert.equal(r.ok, false);
+  });
+});

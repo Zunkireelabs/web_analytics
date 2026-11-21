@@ -30,20 +30,12 @@ function hostOf(domain) {
 
 export async function run({ siteId }) {
   const site = await getSiteById(siteId);
-  const sitemapPath = site?.url_file_map?.siteRoot?.sitemap;
-  if (!sitemapPath) {
-    return {
-      meta, status: 'insufficient-data', facts: null, narrative: null,
-      message: 'No sitemap mapped yet for this site — set url_file_map.siteRoot.sitemap (via `npm run connect-repo`) to enable sitemap monitoring.',
-      generatedAt: new Date().toISOString(),
-    };
-  }
+  // The mapped sitemap FILE is only needed to FIX a gap (the 'sitemap' generator edits it). Detecting a gap needs only the live sitemap and the
+  // inventory, so a site without a mapped file (a framework-generated sitemap, or one nobody mapped yet: zunkireelabs, superrank, zennly and
+  // mobilise were all in this state) is still monitored. Its finding is information with no automatic fix, and says why. Before this the
+  // agent returned "insufficient-data" for those four sites, so a sitemap missing real pages was never reported on them.
+  const sitemapPath = site?.url_file_map?.siteRoot?.sitemap || null;
 
-  // Real, already-collected data — no new crawl/fetch beyond one live
-  // sitemap read: page_inventory is the existing weekly sitemap+crawl+GSC
-  // superset (job.js's runSiteDiscoveryIfDue), and listOrphanedPages is the
-  // same real orphan signal technical-seo.js already surfaces, reused here
-  // rather than re-detected.
   const [inventory, sitemapRead, orphanedPages] = await Promise.all([
     listPageInventory(siteId),
     discoverSitemapEntriesChecked(site),
@@ -103,7 +95,12 @@ export async function run({ siteId }) {
   // real sitemap update is one file change regardless of how many URLs are
   // missing, same "one finding per shared root cause" convention as
   // security-headers.js's site-wide missing-headers finding.
-  const finding = buildMissingUrlsFinding({ sitemapPath, missingUrls, orphanedUrls });
+  const built = buildMissingUrlsFinding({ sitemapPath, missingUrls, orphanedUrls });
+  const finding = sitemapPath ? built : {
+    ...built,
+    recommendedAction: null,
+    whyItMatters: `${built.whyItMatters} This site's sitemap is not mapped to a file in its repository (url_file_map.siteRoot.sitemap), so it cannot be updated automatically: if a framework generates it, these pages need to be included by that configuration, otherwise map the file with connect-repo.`,
+  };
   const facts = {
     sitemapPath, missingUrls, missingCount: missingUrls.length,
     candidatesDropped: verified.dropped.length, unverifiableCount: verified.unverifiable.length, probeSkippedCount: verified.skipped.length,
