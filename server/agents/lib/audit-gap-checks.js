@@ -112,6 +112,19 @@ export function detectNoOutgoingLinks(pageUrl, internalLinks, { ignorePaths = []
   return { outgoingCount: unique.length, deadEnd: unique.length === 0 };
 }
 
+/**
+ * The pages of one audit batch that are genuine dead ends.
+ *
+ * A page whose analysis is missing was either redirected (runPageChecks nulls `analysis` for a 3xx, because the
+ * fetched HTML belongs to the destination) or could not be fetched. Neither is evidence of a page with no links, and
+ * treating "no analysis" as "no links" made every redirected URL a dead-end finding that can never be fixed
+ * (confirmed on mobilise.agency: /inside-mobilise/ 301s to /inside/). Only pages we actually read can be dead ends.
+ */
+export function deadEndPages(pageResults, opts) {
+  return (pageResults || []).filter((r) => r?.analysis && !r.redirected
+    && detectNoOutgoingLinks(r.page, r.analysis.internalLinks, opts).deadEnd);
+}
+
 // ---------------------------------------------------------------------------
 // 4. Duplicate meta descriptions
 // ---------------------------------------------------------------------------

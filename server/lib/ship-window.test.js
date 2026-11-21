@@ -129,6 +129,16 @@ describe('checkShipStall', () => {
     assert.match(event.body, /2026-09-12/);
   });
 
+  test('never flags a site a person drives (review-first, or auto-remediation off and not paused)', () => {
+    assert.equal(checkShipStall({ site: { ...chayce, ship_mode: 'review-first' }, shipped: 0 }), null);
+    assert.equal(checkShipStall({ site: { ...chayce, auto_remediation_enabled: false, auto_remediation_resume_at: null }, shipped: 0 }), null);
+  });
+
+  test('still flags a site whose auto-remediation is only PAUSED (it comes back on its own)', () => {
+    const paused = { ...chayce, auto_remediation_enabled: false, auto_remediation_resume_at: '2026-09-13T00:00:00Z' };
+    assert.ok(checkShipStall({ site: paused, shipped: 0 }));
+  });
+
   test('treats exactly 25% of target as healthy, one below it as stalled', () => {
     // 0.25 * 60 = 15 exactly — "far below" means strictly under the ratio,
     // so hitting the ratio precisely is not itself a stall.

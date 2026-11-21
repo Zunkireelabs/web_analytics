@@ -100,11 +100,17 @@ export const meta = {
 // `/glossary/rag/` -> `rag`) and the standard shape for this kind of
 // "one generated page per data-array id" URL pattern generally, so no
 // per-tenant capture-group config is needed for it.
-function idFromPageUrl(pageUrl) {
+// `config.idPrefix` is for a template whose permalink wraps the data id in fixed text: chayce-properties builds
+// /elderly-removals-<slug>/ from localAreas.json, so the URL's last segment is "elderly-removals-wellingborough" while the entry's own
+// id is "wellingborough". With the prefix set it is stripped; a URL that does not start with it yields no id at all (never a guess).
+function idFromPageUrl(pageUrl, config = null) {
   let path;
   try { path = new URL(pageUrl).pathname; } catch { return null; }
   const segments = path.replace(/\/+$/, '').split('/').filter(Boolean);
-  return segments.length ? segments[segments.length - 1] : null;
+  const last = segments.length ? segments[segments.length - 1] : null;
+  const prefix = config?.idPrefix;
+  if (!prefix || !last) return last;
+  return last.startsWith(prefix) && last.length > prefix.length ? last.slice(prefix.length) : null;
 }
 
 // Two-level counterpart to idFromPageUrl, used ONLY when config.nestedField
@@ -150,7 +156,7 @@ function resolveNestedObjectRange(content, objRange, config, nestedId) {
 // apply() itself uses — one evidence path, not a second guess at it.
 export async function isDataReady(site, page, config, fetchFile = getFileContent, beforeRef = baseBranch(site)) {
   const idField = config.idField || 'id';
-  const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page), nestedId: null };
+  const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page, config), nestedId: null };
   if (!id || (config.nestedField && !nestedId)) return false;
 
   const file = await fetchFile(site, config.dataFile, beforeRef);
@@ -221,7 +227,7 @@ async function computeScalarFieldChange(site, draft, fetchFile, beforeRef, confi
   const values = valuesResult.values;
 
   const idField = config.idField || 'id';
-  const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page), nestedId: null };
+  const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page, config), nestedId: null };
   if (!id || (config.nestedField && !nestedId)) return { ok: false, reason: 'no-file-mapping', error: `Could not derive ${config.nestedField ? 'a location + service id pair' : 'an id'} from "${page || '(no page)'}".` };
 
   const file = await fetchFile(site, config.dataFile, beforeRef);
@@ -297,7 +303,7 @@ async function computeSchemaFieldChange(site, draft, fetchFile, beforeRef, confi
   }
 
   const idField = config.idField || 'id';
-  const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page), nestedId: null };
+  const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page, config), nestedId: null };
   if (!id || (config.nestedField && !nestedId)) return { ok: false, reason: 'no-file-mapping', error: `Could not derive ${config.nestedField ? 'a location + service id pair' : 'an id'} from "${page || '(no page)'}".` };
 
   const file = await fetchFile(site, config.dataFile, beforeRef);
@@ -441,7 +447,7 @@ async function computeContentIntegrityChange(site, draft, fetchFile, beforeRef, 
   if (!edits) return { ok: false, reason: 'draft-not-ready', error: `Unknown fix type "${draft.content?.fixType}" on this draft.` };
 
   const idField = config.idField || 'id';
-  const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page), nestedId: null };
+  const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page, config), nestedId: null };
   if (!id || (config.nestedField && !nestedId)) return { ok: false, reason: 'no-file-mapping', error: `Could not derive ${config.nestedField ? 'a location + service id pair' : 'an id'} from "${page || '(no page)'}".` };
 
   const file = await fetchFile(site, config.dataFile, beforeRef);
@@ -516,7 +522,7 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
     }
   } else {
     const idField = config.idField || 'id';
-    const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page), nestedId: null };
+    const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page, config), nestedId: null };
     if (!id || (config.nestedField && !nestedId)) return { ok: false, reason: 'no-file-mapping', error: `Could not derive ${config.nestedField ? 'a location + service id pair' : 'an id'} from "${page || '(no page)'}".` };
 
     objRange = findObjectRange(file.content, idField, id, format);

@@ -191,7 +191,10 @@ export default function App() {
   // its popup. Each open question counts on the bubble. A PR waiting for a person to merge is information, not a question.
   const shipping = useShipping(siteId, { enabled: Boolean(authed && siteId && !noProject && role !== 'platform_admin' && !access?.locked) });
   const shipAsks = ['fixes', 'content'].filter((k) => shipping[k]?.step && shipping[k].step !== 'waiting').length;
-  const waitingCount = needsYou.items.reduce((n, i) => n + (i.count || 1), 0) + shipAsks;
+  // A pull request that is open and waiting for a person to merge it on GitHub (step 'waiting') is not a button here, but it is still
+  // something left undone: it counts, so the bubble and its reminder ("a pull request is waiting for someone to merge it") show.
+  const shipWaiting = ['fixes', 'content'].filter((k) => shipping[k]?.step === 'waiting').length;
+  const waitingCount = needsYou.items.reduce((n, i) => n + (i.count || 1), 0) + shipAsks + shipWaiting;
 
   if (authed === null) return <div className="p-8 text-gray-400">Loading…</div>;
   // The approval email's Sign in button (/login?token=…) wins over a session that is already open: someone

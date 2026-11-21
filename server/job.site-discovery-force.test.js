@@ -154,3 +154,33 @@ describe('runSiteDiscoveryIfDueForAllSites — runs inside the morning window', 
     assert.equal(results.length, 1);
   });
 });
+
+describe('runSiteDiscoveryIfDue — orphan flag when the crawl was cut short', () => {
+  const stale = { getLastDiscoveryAtFn: async () => '2020-01-01T00:00:00.000Z' };
+  const many = (n) => Array.from({ length: n }, (_, i) => `https://example.com/p${i}/`);
+
+  test('a crawl that stopped at its page cap flags nothing, because it cannot know what is orphaned', async () => {
+    let flagged = null;
+    const result = await runSiteDiscoveryIfDue(SITE, fakeDeps({
+      ...stale,
+      discoverFromSitemapsFn: async () => many(661),
+      crawlSiteFn: async () => many(300), // MAX_CRAWL_PAGES
+      markOrphanedPagesFn: async (_id, urls) => { flagged = urls; },
+    }));
+    assert.deepEqual(flagged, [], 'the flag is cleared, never set from a partial crawl');
+    assert.equal(result.orphanedCount, 0);
+    assert.equal(result.crawlTruncated, true);
+  });
+
+  test('a crawl that finished still flags the sitemap pages it never reached', async () => {
+    let flagged = null;
+    const result = await runSiteDiscoveryIfDue(SITE, fakeDeps({
+      ...stale,
+      discoverFromSitemapsFn: async () => ['https://example.com/', 'https://example.com/lonely/'],
+      crawlSiteFn: async () => ['https://example.com/'],
+      markOrphanedPagesFn: async (_id, urls) => { flagged = urls; },
+    }));
+    assert.deepEqual(flagged, ['https://example.com/lonely/']);
+    assert.equal(result.crawlTruncated, false);
+  });
+});

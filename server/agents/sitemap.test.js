@@ -59,10 +59,28 @@ beforeEach(() => {
 });
 
 describe('sitemap agent', () => {
-  test('insufficient-data when no sitemap is mapped', async () => {
+  test('no mapped sitemap file: nothing missing is still a clean "ok" run, not "insufficient-data"', async () => {
     site = { id: 1, url_file_map: {} };
     const result = await run({ siteId: 1 });
-    assert.equal(result.status, 'insufficient-data');
+    assert.equal(result.status, 'ok');
+    assert.deepEqual(result.facts.missingUrls, []);
+  });
+
+  test('no mapped sitemap file: a real gap is still reported, as information with no automatic fix and the reason why', async () => {
+    site = { id: 1, url_file_map: {} };
+    inventory = [{ page: 'https://example.com/new-page/' }];
+    const result = await run({ siteId: 1 });
+    assert.equal(result.status, 'ok');
+    assert.deepEqual(result.facts.missingUrls, ['https://example.com/new-page/']);
+    const [finding] = result.facts.findings;
+    assert.equal(finding.recommendedAction, null, 'there is no file to edit, so no automatic fix is offered');
+    assert.match(finding.whyItMatters, /not mapped to a file/);
+  });
+
+  test('a mapped sitemap file still gets the automatic "Update sitemap" fix', async () => {
+    inventory = [{ page: 'https://example.com/new-page/' }];
+    const result = await run({ siteId: 1 });
+    assert.equal(result.facts.findings[0].recommendedAction?.generatorId, 'sitemap');
   });
 
   test('flags a real page missing from the sitemap', async () => {

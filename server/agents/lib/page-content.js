@@ -166,7 +166,10 @@ export function requireGroundedContent(analysis, { generatorId } = {}) {
     new Error(`Not enough real page content could be extracted to ground ${generatorId || 'this generator'} ` +
       `(found ${words} word(s) after stripping nav/header/footer/script/style — need ${MIN_GROUNDING_WORDS}+). ` +
       'The page may be thin, client-side-rendered, or nav/template-only — try again once it has real content.'),
-    { status: 502, userFacing: true },
+    // `refusal: true`: declining a page with no real text is the no-fabrication policy working, not the generator failing. Without the
+    // flag the shipping loop counted it as a failure (a 502 is not a 4xx), scored it against the generator, and demoted it: admizz
+    // internal-links sat at 9 of 9 "failed" on 2026-11-21 for exactly this. As a refusal it is logged but never scored.
+    { status: 502, userFacing: true, refusal: true },
   );
 }
 

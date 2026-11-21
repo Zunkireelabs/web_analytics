@@ -141,6 +141,7 @@ mock.module(resolve('../../store/drafts.js'), {
     // run. Tracked separately from `abandoned` precisely because the whole
     // point of the distinction is that these two are NOT interchangeable.
     recordMergeFailure: async (siteId, draftId, reason) => { calls.retryable.push({ draftId, reason }); },
+    requeueUnpushedBatchDraft: async () => null,
     // Feeds ship-pacing.js's convergence cap: finding_id -> how many times it
     // has already been drafted and abandoned for an item-specific reason.
     countFailedAttemptsByFinding: async () => failedAttempts,
@@ -455,6 +456,33 @@ describe('auto-remediation — chain shape', () => {
     recommendations = [r];
     await autoRemediateSafeRecommendations(1);
     assert.deepEqual(calls.findingOrigins, [null]);
+  });
+});
+
+describe('auto-remediation — review-first sites (sites.ship_mode, migration 259)', () => {
+  beforeEach(reset);
+
+  test('drafts every candidate and stops: nothing is approved, committed, pushed or opened, and nothing counts as shipped', async () => {
+    site.ship_mode = 'review-first';
+    recommendations = [rec(1), rec(2)];
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.deepEqual(calls.generated, ['f1', 'f2'], 'both fixes are drafted, up to the daily limit');
+    assert.deepEqual(calls.approved, [], 'nothing is approved for the client');
+    assert.deepEqual(calls.prsOpened, [], 'no PR is opened');
+    assert.equal(result.shipped, 0);
+    assert.equal(result.failed, 0);
+    assert.equal(result.attempted, 2, 'each draft still uses one slot of the day\'s budget');
+    assert.equal(result.selection.draftedForReview, 2);
+  });
+
+  test('a site on the default ship mode still ships to an open PR, unchanged', async () => {
+    site.ship_mode = 'auto';
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 1);
+    assert.deepEqual(calls.approved, ['d-f1']);
+    assert.equal(result.selection.draftedForReview, undefined);
   });
 });
 

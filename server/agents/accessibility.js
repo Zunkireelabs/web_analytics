@@ -3,6 +3,7 @@ import { makeFinding, aggregateSystemicFinding } from './lib/findings.js';
 import { analyzePageUrl, effortForGenerator } from './lib/page-content.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { callLLM } from '../llm.js';
+import { isAutoFixableDuplicateId } from '../implementers/lib/duplicate-id-inject.js';
 
 export const meta = {
   id: 'accessibility',
@@ -76,7 +77,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // stem from one shared header/footer/nav component reused across the
   // whole site, so they're reported as "N of M checked pages" aggregates
   // rather than assumed sitewide the way missing-html-lang is above.
-  function aggregatedFinding(field, idPrefix, describe, recommendedAction = null) {
+  function aggregatedFinding(field, idPrefix, describe, recommendedAction = null, pickRepresentative, reportOnly) {
     const affected = reachable.filter((r) => r.analysis[field] > 0);
     return aggregateSystemicFinding({
       id: `accessibility:${idPrefix}`,
@@ -86,6 +87,8 @@ export async function run({ siteId, start, end, pageCache, params }) {
       getImpressions: (r) => r.impressions,
       whyItMatters: (n, c) => describe(n, c),
       recommendedAction,
+      pickRepresentative,
+      reportOnly,
     });
   }
 
@@ -98,13 +101,30 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // carries the actual duplicate id values/occurrences (not just a count),
   // so the representative (highest-impression) affected page's own data is
   // enough to build a real, reviewable duplicate-id-fix.js draft.
+  // Only ids the implementer can rename provably safely (an SVG gradient/clipPath/mask def) are handed to the generator. An id on a
+  // <div> (id="start") could be a CSS selector, a getElementById target or an #anchor, so backend.js refuses it every time: offering it
+  // as a fix just produced the same "Can't safely auto-apply" failure each run. Those are reported for a person instead.
+  const fixableIds = (r) => (r.analysis.duplicateIds || []).filter(isAutoFixableDuplicateId);
   const duplicateIdFinding = aggregatedFinding('duplicateIdCount', 'duplicate-id',
     (n, c) => `${n} of ${c} checked pages have an id attribute used more than once — breaks aria-labelledby/for references pointing at them.`,
-    (representative) => ({
-      label: 'Fix duplicate element IDs',
-      generatorId: 'duplicate-id-fix',
-      params: { page: representative.page, duplicateIds: representative.analysis.duplicateIds },
-      effort: effortForGenerator('duplicate-id-fix'),
+    (representative) => {
+      const duplicateIds = fixableIds(representative);
+      if (!duplicateIds.length) return null;
+      return {
+        label: 'Fix duplicate element IDs',
+        generatorId: 'duplicate-id-fix',
+        params: { page: representative.page, duplicateIds },
+        effort: effortForGenerator('duplicate-id-fix'),
+      };
+    },
+    // Prefer a page that actually has something fixable, so one page with only div ids doesn't hide a fixable one elsewhere.
+    (affected) => [...affected].filter((r) => fixableIds(r).length)
+      .sort((a, b) => (b.impressions || 0) - (a.impressions || 0))[0] || affected[0],
+    (rep) => ({
+      kind: 'duplicate-id-manual',
+      label: 'Duplicate element IDs need a person',
+      page: rep.page,
+      whyBlocked: `The repeated ids on this page (${(rep.analysis.duplicateIds || []).slice(0, 3).map((d) => `"${d.id}"`).join(', ')}) sit on ordinary elements, not SVG gradient/clip/mask definitions. Renaming one could break a CSS selector, a script lookup or an anchor link somewhere else, so it can't be changed automatically. Someone needs to pick which element keeps the id.`,
     }));
   const headingSkipFinding = aggregatedFinding('headingLevelSkips', 'heading-skip',
     (n, c) => `${n} of ${c} checked pages have a heading structure that skips a level (e.g. H1 straight to H3, no H2) — screen-reader users navigating by heading level lose the section structure.`);

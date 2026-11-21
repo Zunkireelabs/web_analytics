@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  detectRedirectLoop, detectHeadingOrderSkips, detectNoOutgoingLinks, detectDuplicateMetaDescriptions,
+  detectRedirectLoop, detectHeadingOrderSkips, detectNoOutgoingLinks, deadEndPages, detectDuplicateMetaDescriptions,
 } from './audit-gap-checks.js';
 
 describe('redirect loop', () => {
@@ -174,4 +174,14 @@ describe('duplicate meta descriptions', () => {
     assert.deepEqual(detectDuplicateMetaDescriptions(null).duplicates, []);
     assert.deepEqual(detectDuplicateMetaDescriptions([null, {}]).duplicates, []);
   });
+});
+
+test('deadEndPages: a redirected or unfetchable page is not a dead end, a fetched page with no links is', () => {
+  const pages = [
+    { page: 'https://a.com/old/', redirected: true, analysis: null },
+    { page: 'https://a.com/failed/', redirected: false, analysis: null },
+    { page: 'https://a.com/real-dead/', redirected: false, analysis: { internalLinks: [] } },
+    { page: 'https://a.com/fine/', redirected: false, analysis: { internalLinks: ['https://a.com/x'] } },
+  ];
+  assert.deepEqual(deadEndPages(pages).map((r) => r.page), ['https://a.com/real-dead/']);
 });

@@ -16,7 +16,7 @@ import { configured as pagespeedConfigured } from '../ingest/pagespeed.js';
 import { callLLM } from '../llm.js';
 import { getGscBreakdownRange } from '../store/read.js';
 import { detectSpamUrlPatterns, detectForeignScriptQueries } from './lib/index-bloat.js';
-import { detectRedirectLoop, detectHeadingOrderSkips, detectNoOutgoingLinks, detectDuplicateMetaDescriptions } from './lib/audit-gap-checks.js';
+import { detectRedirectLoop, detectHeadingOrderSkips, deadEndPages, detectDuplicateMetaDescriptions } from './lib/audit-gap-checks.js';
 
 export const meta = {
   id: 'technical-seo',
@@ -593,11 +593,9 @@ export async function run({ siteId, start, end, pageCache, params, dryRun = fals
     }));
 
   // A page with no internal links out is a dead end: a crawler reaching it finds nowhere to go next.
-  const deadEndFindings = pageResults
-    .map((r) => ({ r, out: detectNoOutgoingLinks(r.page, r.analysis?.internalLinks) }))
-    .filter(({ out }) => out.deadEnd)
+  const deadEndFindings = deadEndPages(pageResults)
     .slice(0, 10)
-    .map(({ r }) => makeFinding({
+    .map((r) => makeFinding({
       id: `technical-seo:no-outgoing-links:${r.page}`,
       evidence: { page: r.page },
       whyItMatters: `${r.page} has no links to any other page on this site, so whatever authority it earns flows nowhere and a crawler reaching it stops there.`,

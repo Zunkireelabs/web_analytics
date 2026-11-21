@@ -3,7 +3,7 @@ import { masterTick } from './lib/master-agent.js';
 import { getMasterMode, recordPlanError } from './lib/master-agent-control.js';
 import { RUN_WINDOW_MS } from './lib/site-run.js';
 import { runCompetitorGrowthCycleForAllSites, runCompetitorOutcomeLearningForAllSites, runRankTrackingForAllSites, runPosthogIngestForAllSites, runGscScreenRefreshForAllSites } from './job.js';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runNightlyIssueRecheckForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runKeywordScheduleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, runAiVisibilityShipForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, checkDesignChangesForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites, runTrendRadarIfDueForAllSites, runNewsPostsIfDueForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runSitemapSyncForAllSites, runFixVerificationsForAllSites, runNightlyIssueRecheckForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runKeywordScheduleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, runAiVisibilityShipForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, checkDesignChangesForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites, runTrendRadarIfDueForAllSites, runNewsPostsIfDueForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -1184,6 +1184,28 @@ export function startCron() {
       { timezone: tz }
     );
     console.log(`[cron] sign-up reminders scheduled "${signupReminder}" (${tz})`);
+  }
+
+  // Daily sitemap sync (discovery/sitemap-sync.js): new pages in a site's sitemap enter the page inventory the next day instead of waiting
+  // for the weekly discovery run. Early, before the morning pipeline, so the day's agents already see them.
+  const sitemapSync = process.env.SITEMAP_SYNC_CRON_SCHEDULE || '15 5 * * *';
+  if (!cron.validate(sitemapSync)) {
+    console.error(`[cron] invalid SITEMAP_SYNC_CRON_SCHEDULE "${sitemapSync}" — daily sitemap sync NOT scheduled.`);
+  } else {
+    cron.schedule(
+      sitemapSync,
+      () => locked('sitemap-sync', async () => {
+        try {
+          const results = await runSitemapSyncForAllSites();
+          const added = results.reduce((n, r) => n + (r.added || 0), 0);
+          console.log(`[cron] sitemap sync finished — ${added} new page(s) across ${results.length} site(s)`);
+        } catch (err) {
+          console.error('[cron] sitemap sync error:', err.message);
+        }
+      }),
+      { timezone: tz }
+    );
+    console.log(`[cron] daily sitemap sync scheduled "${sitemapSync}" (${tz})`);
   }
 
   const draftPurge = process.env.SIGNUP_DRAFT_PURGE_CRON_SCHEDULE || '30 3 * * *';

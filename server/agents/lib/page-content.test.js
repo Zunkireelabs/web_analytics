@@ -444,6 +444,13 @@ describe('hasSufficientGroundingContent / requireGroundedContent', () => {
     assert.throws(() => requireGroundedContent({ wordCount: 5 }, { generatorId: 'schema' }), /not enough real page content/i);
   });
 
+  test('declining a page with no real text is a refusal, not a generator failure', () => {
+    let thrown;
+    try { requireGroundedContent({ wordCount: 5 }, { generatorId: 'internal-links' }); } catch (e) { thrown = e; }
+    assert.equal(thrown?.refusal, true);
+    assert.equal(thrown?.userFacing, true);
+  });
+
   test('true/does not throw at or above MIN_GROUNDING_WORDS', () => {
     assert.equal(hasSufficientGroundingContent({ wordCount: MIN_GROUNDING_WORDS }), true);
     assert.doesNotThrow(() => requireGroundedContent({ wordCount: MIN_GROUNDING_WORDS + 10 }, { generatorId: 'schema' }));

@@ -1,5 +1,5 @@
 import { listOpenRecommendations, closeRecommendation, blockRecommendation } from '../../store/recommendations.js';
-import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, markDraftAbandoned, recordMergeFailure } from '../../store/drafts.js';
+import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, markDraftAbandoned, recordMergeFailure, requeueUnpushedBatchDraft } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr, pushDraftBranch, openDraftPr } from '../../routes/action-center.js';
@@ -28,6 +28,7 @@ import { takeSlot, giveBackSlot, isCeilingError } from '../../store/autonomous-s
 import { countDraftsBySourcesToday } from '../../store/drafts.js';
 import { listByState as listQueueItemsByState, markShipped as markQueueItemShipped, releaseItem as releaseQueueItem, countShippedFileEditsToday, QUEUE_STATES } from '../../store/shipping-queue.js';
 import { recordFixOutcome } from '../../agent-memory.js';
+import { isReviewFirst } from '../../lib/ship-mode.js';
 import { getProtectedPageSet } from '../../store/protected-pages.js';
 import { getSuppressionSet, isSuppressed, isSuppressionEnforcing } from '../../store/fix-suppressions.js';
 import { makeAllowance, countTrialsThisWeek, isRestore, recordTrial } from './protected-title-trials.js';
@@ -386,7 +387,10 @@ export async function selectRemediationCandidates(site, siteId, { globalRemainin
   // file-edits work computed remaining=0 from analyticsCandidates=0 alone
   // and returned before the drain code below ever ran, silently leaving
   // genuinely prepared, already-validated work unshipped.
-  const learnedRepairAll = (await listQueueItemsByState(siteId, QUEUE_STATES.QUEUED)).filter((r) => r.source === 'learned-repair');
+  // A review-first site's client approves every change before anything is committed. The learned-repair and file-edits queue lanes
+  // ship work with no draft for the client to look at, so on such a site they are not drained here (they stay queued).
+  const reviewFirst = isReviewFirst(site);
+  const learnedRepairAll = reviewFirst ? [] : (await listQueueItemsByState(siteId, QUEUE_STATES.QUEUED)).filter((r) => r.source === 'learned-repair');
   // The shared queue's lanes never pass through classifyRecommendation, so the
   // protected-page rule is applied where they are drained (protected-pages.js).
   const { kept: learnedRepairQueueItems, held: learnedRepairHeld } = splitProtectedQueueItems(learnedRepairAll, protectedPages);
@@ -399,7 +403,7 @@ export async function selectRemediationCandidates(site, siteId, { globalRemainin
   // share the identical shape (params.edits, params.commitMessage) and the
   // identical drain treatment below, so they are not distinguished by
   // source here — only by `kind`.
-  const fileEditsAll = (await listQueueItemsByState(siteId, QUEUE_STATES.PREPARED)).filter((r) => r.kind === 'file-edits');
+  const fileEditsAll = reviewFirst ? [] : (await listQueueItemsByState(siteId, QUEUE_STATES.PREPARED)).filter((r) => r.kind === 'file-edits');
   const { items: fileEditsQueueItems, held: fileEditsHeld } = splitProtectedFileEdits(
     fileEditsAll, protectedFilePaths(site, protectedPages, resolveFile), { unknown: protectedPages.unknown },
   );
@@ -536,6 +540,9 @@ export async function autoRemediateSafeRecommendations(siteId, {
   const queue = drainOnly ? [] : selectedQueue;
   const selectionDeferred = drainOnly ? [] : selectedDeferred;
 
+  // Review-first site: drafts are made and left for the client (see shipDraftForRecommendation); none are shipped.
+  const reviewFirst = isReviewFirst(site);
+  let draftedForReview = 0;
   let shipped = 0;
   let failed = 0;
   // Refusals are a SUBSET of `failed` — reported separately so a run that
@@ -793,7 +800,17 @@ export async function autoRemediateSafeRecommendations(siteId, {
         // Lets draftShipState tell a live commit on THIS run's branch from a
         // ghost on a prior day's (see lib/draft-ship-state.js).
         batchBranch: branchName,
+        reviewFirst,
       });
+
+      // A review-first site's draft is waiting for its client: it used one slot of today's budget (so the daily limit still means
+      // the number of fixes prepared), but it is not shipped, must not join the batch, and has no outcome to learn from yet.
+      if (approved.awaitingReview) {
+        draftedForReview++;
+        consecutiveSystemicFailures = 0;
+        consecutiveRefusals = 0;
+        continue;
+      }
 
       // deferPr means approved.pr_number is never set here (see
       // approveAndPublishDraft's own comment on deferPr) — this item's PR
@@ -1225,7 +1242,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
   }
   console.log(
     `[auto-remediation] ${clientLabel}: run complete — attempted ${attempted}, shipped ${shipped}, failed ${failed}, `
-    + `refused ${refused}, quarantined ${quarantined}, resolved ${resolved}, conflicted ${conflicted}${designPending ? `, design-pending ${designPending}` : ''}${stoppedReason ? `, stopped: ${stoppedReason}` : ''}.`
+    + `refused ${refused}, quarantined ${quarantined}, resolved ${resolved}, conflicted ${conflicted}${designPending ? `, design-pending ${designPending}` : ''}${reviewFirst ? `, drafted for the client's review ${draftedForReview}` : ''}${stoppedReason ? `, stopped: ${stoppedReason}` : ''}.`
   );
 
   return finish({
@@ -1247,6 +1264,8 @@ export async function autoRemediateSafeRecommendations(siteId, {
       },
       quarantinedGenerators: Object.fromEntries(quarantinedGenerators),
       quarantineNotes,
+      // Review-first site: how many drafts were prepared and left for the client (none of them are in `shipped`).
+      ...(reviewFirst ? { draftedForReview } : {}),
     },
   });
 }
@@ -1272,7 +1291,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
 // Throws on any failure — callers decide what a failure means (auto-
 // remediation leaves the recommendation open; the learned-repair path also
 // records a failed reuse against the memory it borrowed).
-export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, findingOrigin = null, memoryRefId = null, waitForDesignAgent = false, deferPr = false, batchBranch = null }) {
+export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, findingOrigin = null, memoryRefId = null, waitForDesignAgent = false, deferPr = false, batchBranch = null, reviewFirst = false }) {
   const draft = await generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId, waitForDesignAgent });
 
   const autoSelected = autoSelectMetaTitle(generatorId, draft.content);
@@ -1280,6 +1299,11 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
     const updated = await updateDraft(siteId, draft.id, { content: autoSelected });
     if (updated) draft.content = updated.content;
   }
+
+  // REVIEW-FIRST (sites.ship_mode, migration 259): the draft is made and left exactly as it is, in 'draft', which is a state the
+  // dashboard already lists as "waiting for your approval". Nothing is submitted, approved, committed or pushed; the client does
+  // that in the dashboard (lib/ship-flow.js). `awaitingReview` tells the caller this is drafted, not shipped.
+  if (reviewFirst) return { ...draft, awaitingReview: true };
 
   const submitted = await submitDraftForApproval(siteId, draft.id);
   if (!submitted) {
@@ -1352,6 +1376,13 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
       err.refusal = true;
       err.reason = 'awaiting-human-review';
       throw err;
+    }
+    // A 'branch_pushed' draft carrying an apply_error was left there by recordMergeFailure: a batch-level push/PR failure (usually a
+    // GitHub rate limit), not a defect in this draft. Its content is intact, so re-apply it instead of abandoning it for a full
+    // regeneration that would hit the same wall (see store/drafts.js requeueUnpushedBatchDraft).
+    if (current?.status === 'branch_pushed' && current.apply_error && !current.pr_number) {
+      const requeued = await requeueUnpushedBatchDraft(siteId, draft.id).catch(() => null);
+      if (requeued) return await pushDraftBranch(siteId, draft.id);
     }
     // STRANDED: a genuinely stuck row, and the repo's own recorded lesson for
     // this code applies — never leave a partially-failed draft sitting in a

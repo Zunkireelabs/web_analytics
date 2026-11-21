@@ -1,4 +1,5 @@
 import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, refreshRecommendationBlockState, listOpenRecommendations, listOpenBlockedRecommendations, closeStaleRecommendations, markRecommendationsUnfixable, getRecommendationById, closeRecommendation } from '../../store/recommendations.js';
+import { isUnshippablePaginationFix } from './paginated-pages.js';
 import { getLiveDraftsByFindingId } from '../../store/drafts.js';
 import { attemptSummaryByFinding } from '../../store/recommendation-attempts.js';
 import { categoryByAgentId } from './command-center.js';
@@ -168,6 +169,14 @@ function normalizePageForKey(page) {
   }
 }
 
+// The single real page a recommendation is about, or null. A key that is already a plain page URL is that page; a composite key
+// (`<page>::<something>`) uses the recommendation's own params.page; keys like `topic::x` or `redirect::x` have no page.
+export function realPageOf(rec) {
+  const isUrl = (v) => typeof v === 'string' && /^https?:\/\/[^\s:]+(?::\d+)?[^\s]*$/.test(v) && !v.includes('::');
+  if (isUrl(rec?.page)) return rec.page;
+  return isUrl(rec?.params?.page) ? rec.params.page : null;
+}
+
 export function recommendationPageKey(item) {
   if (item.generatorId === 'analytics-install') return `analytics:${item.params?.provider || 'unknown'}`;
   if (item.generatorId === 'expand-content') return `${item.params?.page || ''}::${item.params?.focus || ''}`;
@@ -216,6 +225,9 @@ export function recommendationPageKey(item) {
   // unambiguous ground truth, so keying on it directly avoids re-deriving a
   // URL from a title/slug guess that could drift from the real one.
   if (item.generatorId === 'blog-image') return `blog-image::${item.params?.filePath || ''}`;
+  // blog-pagination (agents/blog-pagination.js) is about a LISTING, which it names in params.listing (it has no `page`). One card per listing,
+  // keyed on the listing URL itself, which is a real page, so a re-check can still fetch it.
+  if (item.generatorId === 'blog-pagination') return normalizePageForKey(item.params?.listing) || '';
   if (SITE_LEVEL_GENERATOR_IDS.has(item.generatorId)) return '';
   return item.params?.page || '';
 }
@@ -255,6 +267,8 @@ export const DEDUP_IDENTITY = {
   'comparison-page': 'topic',
   'content-integrity-repair': 'fixType|sectionOrder|textRole',
   'blog-image': 'filePath',
+  // One card per blog listing, not per page: it has no `page` param.
+  'blog-pagination': 'listing',
 };
 
 // Generators with no page dimension at all — one row per site, whatever the
@@ -348,6 +362,10 @@ export async function syncFromGrounded(siteId, grounded) {
     if (!item.generatorId) continue; // buildRecommendations already filters these, but stay defensive
     const page = recommendationPageKey(item);
     const existing = await findOpenRecommendation(siteId, page, item.generatorId);
+    // A content fix on page N of a paginated list has no file or prose of its own, so nothing can ship it (paginated-pages.js). No NEW one
+    // is created. An existing open one is deliberately left exactly as it is: closing or merging it is a decision for a person, and only the
+    // listing URL is affected, never a post (a post is /blog/<slug>/, which never matches).
+    if (isUnshippablePaginationFix(item.generatorId, page)) continue;
     if (existing) {
       // ALWAYS merge, even when the *finding* itself is unchanged (same
       // deterministic id as yesterday). This used to early-return here on
@@ -633,6 +651,14 @@ export async function recheckRecommendation(siteId, recommendationId, { refreshE
 
   if (!rec.page) return { status: 'open', changed: false, reason: 'site-level recommendation — re-checked automatically on the next full sync' };
 
+  // `rec.page` is the recommendation's KEY, not always a URL: recommendationPageKey stores `<page>::<link>` for missing-page-create,
+  // `<page>::<focus>` for expand-content, `topic::<topic>` for a blog outline, and so on. Handing that key to the page checker made
+  // technical SEO inspect (and record in technical_seo_checks) pages that do not exist, like `/blog/x/::https://clutch.co/...`: 45 of
+  // them across zunkireelabs, admizz and chayce, each spending Google URL-inspection quota and counted as "unknown to Google".
+  // Only a real page URL is re-checked, taken from the recommendation's own `params.page` when the key is composite.
+  const checkPage = realPageOf(rec);
+  if (!checkPage) return { status: 'open', changed: false, reason: 'not tied to a single page — re-evaluated by the next full run' };
+
   const agentId = rec.detecting_agents?.[0];
   if (!agentId) return { status: 'open', changed: false, reason: 'no detecting agent on record' };
 
@@ -642,7 +668,7 @@ export async function recheckRecommendation(siteId, recommendationId, { refreshE
 
   let output;
   try {
-    output = await runAgent(agentId, { siteId, start, end, params: { pages: [rec.page] } }, { persist: false });
+    output = await runAgent(agentId, { siteId, start, end, params: { pages: [checkPage] } }, { persist: false });
   } catch (err) {
     // `detecting_agents[0]` is a LABEL for who raised the finding, not always a
     // registered, runnable agent: 'design-consistency' is the weekly whole-site

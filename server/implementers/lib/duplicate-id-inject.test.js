@@ -107,3 +107,17 @@ describe('findIdScopesInOrder + applyScopeRenames', () => {
     assert.equal(scopes, null);
   });
 });
+
+import { isAutoFixableDuplicateId } from './duplicate-id-inject.js';
+describe('isAutoFixableDuplicateId', () => {
+  test('accepts ids only on SVG paint defs', () => {
+    assert.equal(isAutoFixableDuplicateId({ id: 'g', occurrences: [{ tag: 'linearGradient' }, { tag: 'linearGradient' }] }), true);
+  });
+  test('refuses an id on a div (the id="start" case)', () => {
+    assert.equal(isAutoFixableDuplicateId({ id: 'start', occurrences: [{ tag: 'div' }, { tag: 'div' }] }), false);
+  });
+  test('refuses a mixed or empty entry', () => {
+    assert.equal(isAutoFixableDuplicateId({ occurrences: [{ tag: 'mask' }, { tag: 'div' }] }), false);
+    assert.equal(isAutoFixableDuplicateId({ occurrences: [] }), false);
+  });
+});

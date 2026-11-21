@@ -658,6 +658,21 @@ export async function recordMergeFailure(siteId, id, errorMessage) {
   return rows[0] || null;
 }
 
+// branch_pushed + apply_error -> approved. The only writer of apply_error on a 'branch_pushed' draft is recordMergeFailure, i.e. a
+// BATCH-level failure (GitHub rate limit, the one shared push, the one shared PR). endBatchPush drops the staged commit without moving
+// the ref, so the commit is gone, but the draft's content is intact and already Quality-Gated. Putting it back to 'approved' lets
+// the existing RESUME_APPLY path re-stage it (no model call). Abandoning it instead regenerated every draft and re-hit the same rate
+// limit, which is how a 10-minute GitHub limit turned into days of "no fixes shipped".
+export async function requeueUnpushedBatchDraft(siteId, id) {
+  const { rows } = await query(
+    `UPDATE drafts SET status = 'approved', apply_error = NULL, updated_at = now()
+     WHERE site_id = $1 AND id = $2 AND status = 'branch_pushed' AND pr_number IS NULL AND apply_error IS NOT NULL
+     RETURNING *`,
+    [siteId, id]
+  );
+  return rows[0] || null;
+}
+
 // Every generator type now has a real, working merge-to-stage strategy (see
 // server/implementers/backend.js's MARKER_MERGE_TYPES + llms-txt +
 // security-headers/html-lang, and server/implementers/frontend.js for

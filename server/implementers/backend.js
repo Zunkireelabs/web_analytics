@@ -1,14 +1,18 @@
 import { resolveFile, resolveActionFile, resolveLineKeys, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, isPageMapped, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
 import { isTemplatedSitemap } from './lib/sitemap-guard.js';
+import { guardSiteRootWrite, isTemplatedFile } from './lib/site-root-write-guard.js';
+import { computeBlogPaginationMerge, pushBlogPaginationBranch, previewLiveBlogPagination } from './lib/blog-pagination-inject.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, resolveBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, getRepoTree } from '../github/client.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
 import { planRedirect } from './lib/redirect-writer.js';
+import { planSecurityHeaders } from './lib/host-headers-writer.js';
+import { HEADER_BY_KEY } from '../generators/security-headers.js';
 import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
 import { resolveInsertion, buildUnresolvedInsertionFailure } from './lib/insertion-engine.js';
 import { loadExpandStructurePrior } from '../design-agent/lib/expand-structure-loader.js';
 import { classifyPageType } from '../design-agent/live-analysis/schema.js';
-import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
+import { spliceHashBlock, validateNginxBraces, getHashMarkerContent, ensureHashMarker, locationsDroppingServerHeaders } from './lib/hash-marker-merge.js';
 import { patchSoftNotFoundFallback } from './lib/soft-404-inject.js';
 import { patchRedirectChain } from './lib/redirect-chain-nginx-inject.js';
 import { removeUrlsFromSitemap } from './lib/sitemap-removal-inject.js';
@@ -24,7 +28,7 @@ import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination
 import { checkSharedTemplateWrite } from './lib/action-scope.js';
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
 import { safeMessage } from '../lib/errors.js';
-import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, classifyScopeCountMismatch, applyScopeRenames } from './lib/duplicate-id-inject.js';
+import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, classifyScopeCountMismatch, applyScopeRenames, SVG_PAINT_DEF_TAGS } from './lib/duplicate-id-inject.js';
 import { computeSchemaRepairMerge, pushSchemaRepairBranch, previewLiveSchemaRepair } from './lib/schema-repair-inject.js';
 import { computeContentIntegrityMerge, pushContentIntegrityBranch, previewLiveContentIntegrity } from './lib/content-integrity-inject.js';
 import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './lib/alt-text-inject.js';
@@ -38,7 +42,7 @@ export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'redirect-add', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'sitemap-frontmatter-exclude', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx', 'compression-nginx'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'redirect-add', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'sitemap-frontmatter-exclude', 'blog-pagination', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx', 'compression-nginx'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -79,11 +83,21 @@ async function pushLlmsTxtBranch(site, draft, batchInfo) {
   if (!llmsPath) {
     return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.llmsTxt is not configured — set it via `npm run connect-repo` before this can be applied.' };
   }
-  const files = [{ path: llmsPath, content: draft.content.llmsTxt }];
+  const readFile = (p) => getFileContent(site, p, baseBranch(site));
+  // A whole-file overwrite must not drop a template's front matter (its permalink), nor create a second source for a URL that another file
+  // already produces: see lib/site-root-write-guard.js.
+  const guard = await guardSiteRootWrite({ path: llmsPath, kind: 'llms', readFile });
+  if (!guard.ok) return guard;
+  const files = [{ path: llmsPath, content: guard.mode === 'keep-front-matter' ? `${guard.frontMatter}${draft.content.llmsTxt}` : draft.content.llmsTxt }];
 
   const robotsPath = resolveSiteRootFile(site, 'robotsTxt');
   if (robotsPath && draft.content.robotsDirectives) {
-    files.push({ path: robotsPath, content: draft.content.robotsDirectives });
+    // The robots rewrite is a full overwrite. A robots TEMPLATE (zennly's robots.njk) carries a production-only guard and a permalink that an
+    // overwrite would destroy, so a templated or unreadable robots file is left alone and only llms.txt is written.
+    const currentRobots = await readFile(robotsPath).catch(() => null);
+    if (currentRobots && !isTemplatedFile(currentRobots.content)) {
+      files.push({ path: robotsPath, content: draft.content.robotsDirectives });
+    }
   }
   return pushDraftBranch(site, draft, files, batchInfo);
 }
@@ -155,18 +169,47 @@ async function previewLiveSitemapRemoval(site, draft) {
 // run a real `nginx -t` here (pure REST writes, no clone, no nginx binary).
 // Shared by preview() and apply(), same "can never diverge" discipline as
 // computeMarkerMerge.
+// Sites not served by a mapped nginx config (Vercel, Netlify, Cloudflare Pages, Apache, Next.js) go through
+// lib/host-headers-writer.js, which edits whichever of those files the repo already has.
+async function computeHostSecurityHeadersMerge(site, draft, beforeRef) {
+  const c = draft.content || {};
+  const headers = Array.isArray(c.headers) && c.headers.length
+    ? c.headers
+    : (c.headersIncluded || []).map((k) => HEADER_BY_KEY[k]).filter(Boolean);
+  let tree;
+  try { tree = await getRepoTree(site, beforeRef); } catch (err) {
+    const { message } = safeMessage('backend.computeHostSecurityHeadersMerge', err, 'the repository file list is temporarily unavailable');
+    return { ok: false, reason: 'repo-tree-unavailable', error: message };
+  }
+  const plan = await planSecurityHeaders({ files: tree.files, read: async (path) => (await getFileContent(site, path, beforeRef))?.content ?? null, headers });
+  if (!plan.ok) return plan;
+  const conflict = detectConflictMarkers(plan.oldContent);
+  if (conflict) return conflict;
+  return {
+    ok: true, filePath: plan.filePath, oldContent: plan.oldContent, newContent: plan.newContent,
+    changedRegions: [{ field: 'headers', before: '', after: `${plan.added.join(', ')} (${plan.format})` }],
+  };
+}
+
 async function computeSecurityHeadersMerge(site, draft, beforeRef) {
   const path = resolveSiteRootFile(site, 'nginxConfig');
-  if (!path) {
-    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.nginxConfig is not configured — set it via `npm run connect-repo` before this can be applied.' };
-  }
+  if (!path) return computeHostSecurityHeadersMerge(site, draft, beforeRef);
   const file = await getFileContent(site, path, beforeRef);
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
   }
   const conflict = detectConflictMarkers(file.content);
   if (conflict) return conflict;
-  const spliced = spliceHashBlock(file.content, 'SECURITY-HEADERS', draft.content.nginxBlock);
+  const placed = ensureHashMarker(file.content, 'SECURITY-HEADERS');
+  if (!placed.ok) return placed;
+  if (placed.inserted) {
+    // nginx drops server-level add_header inside any location that sets its own; a block placed at server level would deploy and never reach those pages.
+    const dropped = locationsDroppingServerHeaders(file.content);
+    if (dropped.length) {
+      return { ok: false, reason: 'headers-not-inherited', error: `nginx does not inherit server-level headers inside a location that sets its own add_header (${dropped.slice(0, 4).join(', ')}), so a headers block added here would not reach those pages. The headers have to be repeated in those locations by hand.` };
+    }
+  }
+  const spliced = spliceHashBlock(placed.content, 'SECURITY-HEADERS', draft.content.nginxBlock);
   if (!spliced.ok) return spliced;
   const validated = validateNginxBraces(spliced.newContent);
   if (!validated.ok) return validated;
@@ -184,7 +227,10 @@ async function pushSecurityHeadersBranch(site, draft, batchInfo, beforeRef) {
 
 async function previewLiveSecurityHeaders(site, draft) {
   const path = resolveSiteRootFile(site, 'nginxConfig');
-  if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.nginxConfig is not configured.' };
+  if (!path) {
+    const merged = await computeHostSecurityHeadersMerge(site, draft, baseBranch(site));
+    return merged.ok ? { ok: true, filePath: merged.filePath, live: false, changedRegions: merged.changedRegions } : merged;
+  }
   const file = await getFileContent(site, path, baseBranch(site));
   if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${baseBranch(site)}".` };
   const content = getHashMarkerContent(file.content, 'SECURITY-HEADERS');
@@ -214,7 +260,9 @@ async function computeCompressionMerge(site, draft, beforeRef) {
   }
   const conflict = detectConflictMarkers(file.content);
   if (conflict) return conflict;
-  const spliced = spliceHashBlock(file.content, 'COMPRESSION', draft.content.nginxBlock);
+  const placed = ensureHashMarker(file.content, 'COMPRESSION');
+  if (!placed.ok) return placed;
+  const spliced = spliceHashBlock(placed.content, 'COMPRESSION', draft.content.nginxBlock);
   if (!spliced.ok) return spliced;
   const validated = validateNginxBraces(spliced.newContent);
   if (!validated.ok) return validated;
@@ -341,6 +389,10 @@ async function pushRobotsBootstrapBranch(site, draft, batchInfo) {
   if (!path) {
     return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.robotsTxt is not configured — set it via `npm run connect-repo` before this can be applied.' };
   }
+  // Bootstrap only ever CREATES a robots.txt. If the mapped file already exists (zennly's robots.njk) the live site is missing robots.txt for a
+  // build or deploy reason, and overwriting the file would only lose its settings: lib/site-root-write-guard.js.
+  const guard = await guardSiteRootWrite({ path, kind: 'robots-bootstrap', readFile: (p) => getFileContent(site, p, baseBranch(site)) });
+  if (!guard.ok) return guard;
   return pushDraftBranch(site, draft, [{ path, content: draft.content.robotsTxt }], batchInfo);
 }
 
@@ -576,7 +628,6 @@ async function previewLiveRedirectFix(site, draft) {
 // anywhere in the repo) refuses rather than guesses, all-or-nothing per
 // draft: if any one occurrence in the plan isn't safe, none of them are
 // applied, so a reviewer never has to reason about a half-renamed page.
-const SVG_PAINT_DEF_TAGS = new Set(['lineargradient', 'radialgradient', 'clippath', 'mask']);
 
 export async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
   const page = draft.content?.page;
@@ -1555,6 +1606,7 @@ export async function apply(site, draft, opts = {}) {
   if (draft.action_type === 'blog-image') return pushBlogImageBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'html-lang') return pushHtmlLangBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'viewport') return pushViewportBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'blog-pagination') return pushBlogPaginationBranch(site, draft, batchInfo, beforeRef);
   if (MARKER_MERGE_TYPES.has(draft.action_type)) {
     const merged = await computeMarkerMerge(site, draft, opts.renderModeOverride, beforeRef);
     if (!merged.ok) return merged;
@@ -1618,6 +1670,7 @@ export async function preview(site, draft, opts = {}) {
     if (draft.action_type === 'blog-image') return previewLiveBlogImage(site, draft);
     if (draft.action_type === 'html-lang') return previewLiveHtmlLang(site, draft);
     if (draft.action_type === 'viewport') return previewLiveViewport(site, draft);
+    if (draft.action_type === 'blog-pagination') return previewLiveBlogPagination(site, draft);
     if (MARKER_MERGE_TYPES.has(draft.action_type)) return previewLiveMarkerContent(site, draft);
     return { ok: false, reason: 'merge-strategy-not-implemented', error: `No live view available for "${draft.action_type}" yet.` };
   }
@@ -1662,6 +1715,7 @@ export async function preview(site, draft, opts = {}) {
   if (draft.action_type === 'blog-image') return computeBlogImageMerge(site, draft, beforeRef);
   if (draft.action_type === 'html-lang') return computeHtmlLangMerge(site, draft, beforeRef);
   if (draft.action_type === 'viewport') return computeViewportMerge(site, draft, beforeRef);
+  if (draft.action_type === 'blog-pagination') return computeBlogPaginationMerge(site, draft, beforeRef);
   if (MARKER_MERGE_TYPES.has(draft.action_type)) return computeMarkerMerge(site, draft, opts.renderModeOverride, beforeRef);
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No preview available for "${draft.action_type}" yet.` };
 }

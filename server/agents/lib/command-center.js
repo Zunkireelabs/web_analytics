@@ -37,6 +37,7 @@ const ACTIVITY_LABEL = {
   'duplicate-content': 'Hashed real page content to find byte-identical duplicates',
   accessibility: 'Checked real form labels, heading structure, and page-language attributes',
   'mobile-usability': 'Checked real viewport configuration for mobile rendering issues',
+  'blog-pagination': 'Checked that every blog post is reachable from the blog listing without JavaScript',
   'executive-report': 'Generated executive briefing across all specialist agents',
 };
 

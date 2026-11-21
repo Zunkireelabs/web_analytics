@@ -40,6 +40,17 @@ const DIRECTIVE_BY_KEY = {
 
 const ALL_KEYS = Object.keys(DIRECTIVE_BY_KEY);
 
+// The same headers as plain name/value pairs, so the implementer can write them in whatever format the site's host
+// reads (nginx, Vercel vercel.json, Netlify/Cloudflare _headers or netlify.toml, Apache .htaccess, next.config).
+// Kept next to DIRECTIVE_BY_KEY so the two can never drift: the nginx line is derived from the same value.
+export const HEADER_BY_KEY = {
+  'x-frame-options': { name: 'X-Frame-Options', value: 'SAMEORIGIN' },
+  'x-content-type-options': { name: 'X-Content-Type-Options', value: 'nosniff' },
+  'referrer-policy': { name: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+  'strict-transport-security': { name: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains' },
+  'content-security-policy': { name: 'Content-Security-Policy-Report-Only', value: "default-src 'self'; report-uri /csp-report" },
+};
+
 // params: { missingHeaders?: string[] } — the check keys the security-headers
 // agent found absent. Falls back to the full set if absent/empty, since
 // re-adding an already-present header via this bounded marker region is
@@ -54,7 +65,7 @@ export async function generate({ params }) {
   const nginxBlock = headersIncluded.map((key) => DIRECTIVE_BY_KEY[key]).join('\n');
 
   return {
-    content: { headersIncluded, nginxBlock, missingHeaders: params?.missingHeaders || [] },
+    content: { headersIncluded, headers: headersIncluded.map((key) => HEADER_BY_KEY[key]), nginxBlock, missingHeaders: params?.missingHeaders || [] },
     summary: `Security-headers nginx block for ${headersIncluded.length} missing header(s): ${headersIncluded.join(', ')}.`,
   };
 }

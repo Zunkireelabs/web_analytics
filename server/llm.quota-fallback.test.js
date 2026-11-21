@@ -1,6 +1,6 @@
 import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { isQuotaExhaustedError, isRetryable, openAiRoute, noteOpenAiQuotaExhausted, noteOpenAiHealthy, fallbackAvailable, llmFallbackState, _resetQuotaBreakerForTest } from './llm.js';
+import { isQuotaExhaustedError, isRetryable, openAiRoute, openAiPaused, noteOpenAiQuotaExhausted, noteOpenAiHealthy, fallbackAvailable, llmFallbackState, _resetQuotaBreakerForTest } from './llm.js';
 
 // The real error OpenAI returned on 2026-11-20 for an exhausted project.
 const spendLimit429 = Object.assign(new Error('429 Your project has reached its configured enforced spend limit. Update your limit at https://platform.openai.com/settings/proj_x/limits.'), { status: 429, code: 'project_spend_limit_exceeded', type: 'insufficient_quota' });
@@ -154,5 +154,31 @@ describe('usage and cost recording', () => {
   });
   test('prices can be overridden by env', () => {
     assert.equal(llmCostUsd('claude-haiku-4-5', 1e6, 0, { LLM_PRICE_CLAUDE_HAIKU_4_5_IN: '2' }), 2);
+  });
+});
+
+describe('LLM_OPENAI_PAUSED — Claude straight away while OpenAI is blocked', () => {
+  beforeEach(() => _resetQuotaBreakerForTest());
+  const paused = { ANTHROPIC_API_KEY: 'sk-ant-test', LLM_OPENAI_PAUSED: 'true' };
+
+  test('every call goes to Claude, and OpenAI is never probed, however long it has been', () => {
+    const t0 = 1_000_000;
+    assert.equal(openAiRoute(t0, paused), 'fallback');
+    assert.equal(openAiRoute(t0 + 16 * 60_000, paused), 'fallback');
+    assert.equal(openAiRoute(t0 + 24 * 60 * 60_000, paused), 'fallback');
+  });
+  test('it needs an Anthropic key: without one it does nothing, so calls are never sent to a provider with no key', () => {
+    assert.equal(openAiPaused({ LLM_OPENAI_PAUSED: 'true' }), false);
+    assert.equal(openAiRoute(1, { LLM_OPENAI_PAUSED: 'true' }), 'openai');
+  });
+  test('only an explicit yes turns it on; unset, empty or "false" leave OpenAI in use', () => {
+    for (const v of [undefined, '', 'false', '0', 'off']) assert.equal(openAiPaused({ ANTHROPIC_API_KEY: 'k', LLM_OPENAI_PAUSED: v }), false, String(v));
+    for (const v of ['true', '1', 'on', 'yes', 'TRUE']) assert.equal(openAiPaused({ ANTHROPIC_API_KEY: 'k', LLM_OPENAI_PAUSED: v }), true, v);
+  });
+  test('llmFallbackState reports it as active', () => {
+    const prev = { ...process.env };
+    process.env.ANTHROPIC_API_KEY = 'k'; process.env.LLM_OPENAI_PAUSED = 'true';
+    try { assert.deepEqual({ active: llmFallbackState().active, paused: llmFallbackState().paused }, { active: true, paused: true }); }
+    finally { process.env.ANTHROPIC_API_KEY = prev.ANTHROPIC_API_KEY; process.env.LLM_OPENAI_PAUSED = prev.LLM_OPENAI_PAUSED; if (prev.ANTHROPIC_API_KEY === undefined) delete process.env.ANTHROPIC_API_KEY; if (prev.LLM_OPENAI_PAUSED === undefined) delete process.env.LLM_OPENAI_PAUSED; }
   });
 });

@@ -85,6 +85,14 @@ test('two different dead URLs proposed for redirect stay two recommendations, no
   assert.equal(a, recommendationPageKey({ generatorId: 'redirect-add', params: { from: 'https://x.test/old-a', to: 'https://x.test/other' } }), 'the same dead URL is the same recommendation');
 });
 
+test('blog-pagination: one card per listing, keyed on the listing URL', () => {
+  const a = recommendationPageKey({ generatorId: 'blog-pagination', params: { listing: 'https://x.test/blog/' } });
+  const b = recommendationPageKey({ generatorId: 'blog-pagination', params: { listing: 'https://x.test/news/' } });
+  assert.notEqual(a, b, 'two long listings on one site are two recommendations');
+  assert.equal(a, recommendationPageKey({ generatorId: 'blog-pagination', params: { listing: 'https://x.test/blog/' } }));
+  assert.ok(a.startsWith('https://x.test/blog'), 'the key is the real listing URL');
+});
+
 test('every registered generator has a considered dedup identity', async () => {
   // The structural guard. Every discriminator in DEDUP_IDENTITY was added
   // reactively, after a user reported one card where there should have been

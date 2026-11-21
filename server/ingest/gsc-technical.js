@@ -13,6 +13,24 @@ import { safeMessage } from '../lib/errors.js';
 // page's result, not abort the whole batch. Same {ok, error} convention as
 // analyzePageUrl (agents/lib/page-content.js).
 
+// What KIND of failure a URL-inspection call hit, without any message text (that can carry property names or tokens). The stored result
+// used to say only "could not be inspected right now", so 81 pages across five sites were unreadable for an unknown reason and a permission
+// problem looked exactly like a temporary Google hiccup. The kind says what to do: reconnect, grant access, fix the URL/property pair, or wait.
+export function classifyInspectError(err) {
+  const raw = err?.code ?? err?.response?.status ?? err?.status;
+  const httpStatus = Number.isInteger(Number(raw)) && Number(raw) >= 100 ? Number(raw) : null;
+  const text = typeof err?.message === 'string' ? err.message : '';   // only matched against patterns below, never stored or shown
+  let errorKind = 'other';
+  if (httpStatus === 429 || /RESOURCE_EXHAUSTED/.test(text)) errorKind = 'quota';
+  else if (httpStatus === 401 || /invalid_grant|invalid_client|unauthorized/i.test(text)) errorKind = 'auth';
+  else if (httpStatus === 403) errorKind = 'permission';
+  else if (httpStatus === 404) errorKind = 'property-not-found';
+  else if (httpStatus === 400) errorKind = 'bad-request';
+  else if (httpStatus !== null && httpStatus >= 500) errorKind = 'google-unavailable';
+  else if (['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN', 'ENOTFOUND'].includes(err?.code)) errorKind = 'network';
+  return { httpStatus: httpStatus === null ? null : httpStatus, errorKind };
+}
+
 export async function inspectUrl(site, pageUrl) {
   try {
     const sc = await getSearchConsole(site);
@@ -43,6 +61,7 @@ export async function inspectUrl(site, pageUrl) {
       ok: false,
       quotaExceeded: status === 429 || String(err?.message || '').includes('RESOURCE_EXHAUSTED'),
       error: message,
+      ...classifyInspectError(err),
     };
   }
 }

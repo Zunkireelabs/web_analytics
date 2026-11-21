@@ -39,7 +39,7 @@ mock.module(new URL('./technical-seo-analysis.js', import.meta.url).href, {
   namedExports: { recheckLink: async (href) => recheckLinkImpl(href) },
 });
 
-const { recheckRecommendation } = await import('./recommendation-coordinator.js');
+const { recheckRecommendation, realPageOf } = await import('./recommendation-coordinator.js');
 
 const PAGE = 'https://zunkireelabs.com/services/ai-ecommerce/';
 
@@ -192,5 +192,43 @@ describe('recheckRecommendation — refreshEvidence: true (the autonomous-recove
       assert.match(result.reason, /could not be re-checked right now/);
       assert.ok(logged.some((l) => l.includes('internal-error')), 'a genuine failure must still be logged');
     });
+  });
+});
+
+describe('recheckRecommendation — a recommendation KEY is never handed to the page checker as if it were a URL', () => {
+  const clean = { ok: true, facts: { findings: [] } };
+
+  test('realPageOf: a plain URL is itself, a composite key uses params.page, and keys that are not pages give null', () => {
+    assert.equal(realPageOf({ page: 'https://a.com/x/' }), 'https://a.com/x/');
+    assert.equal(realPageOf({ page: 'https://a.com/x/::https://ext.com/y', params: { page: 'https://a.com/x/' } }), 'https://a.com/x/');
+    assert.equal(realPageOf({ page: 'https://a.com/x/::focus words', params: { page: 'https://a.com/x/' } }), 'https://a.com/x/');
+    assert.equal(realPageOf({ page: 'topic::ai agents', params: { topic: 'ai agents' } }), null);
+    assert.equal(realPageOf({ page: 'redirect::/old', params: {} }), null);
+    assert.equal(realPageOf({ page: 'https://a.com/x/::https://ext.com/y', params: {} }), null, 'a composite key with no params.page is never used raw');
+    assert.equal(realPageOf(null), null);
+  });
+
+  test('a composite key is re-checked on its real page, never on the key itself', async () => {
+    let seen;
+    recById = { id: 7, status: 'open', recommendation_type: 'missing-page-create', page: `${PAGE}::https://dead.example/x`, detecting_agents: ['technical-seo'], params: { page: PAGE, href: 'https://dead.example/x' } };
+    runAgentImpl = async (_agent, args) => { seen = args.params.pages; return clean; };
+    await recheckRecommendation(1, 7);
+    assert.deepEqual(seen, [PAGE]);
+  });
+
+  test('a key that is not a page at all is not re-checked, and the page checker is never called', async () => {
+    recById = { id: 8, status: 'open', recommendation_type: 'blog-outline', page: 'topic::ai agents', detecting_agents: ['content-gap'], params: { topic: 'ai agents' } };
+    runAgentImpl = () => { throw new Error('the page checker must not run for a key that is not a page'); };
+    const r = await recheckRecommendation(1, 8);
+    assert.equal(r.status, 'open');
+    assert.equal(r.changed, false);
+  });
+
+  test('an ordinary page recommendation is unchanged: still re-checked on its own URL', async () => {
+    let seen;
+    recById = { id: 9, status: 'open', recommendation_type: 'faq', page: PAGE, detecting_agents: ['content-gap'], params: { page: PAGE } };
+    runAgentImpl = async (_a, args) => { seen = args.params.pages; return clean; };
+    await recheckRecommendation(1, 9);
+    assert.deepEqual(seen, [PAGE]);
   });
 });
