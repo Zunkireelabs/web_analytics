@@ -2,12 +2,16 @@ import { query as dbQuery } from '../db.js';
 import { getSiteById } from '../store/read.js';
 import { getPullRequest, openPullRequest, listOpenPullRequestsForBranch, defaultBranchName } from '../github/client.js';
 import { checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
+import { buildPromotionBranch } from './promotion-branch.js';
 
 // After a person merges a client's batch pull request into its STAGE branch, the agent opens the stage -> main promotion PR
 // (owner decision 2026-11-06; lib/pr-routing.js decides which batches go to stage at all). Rules:
 //   - the agent NEVER merges: it opens the promotion PR and a person merges it;
 //   - it opens it only after stage's own build check is green (a repo with no such check yet is not blocked, and the PR says so);
-//   - one promotion PR covers every merged-but-unpromoted stage batch, and an already-open stage -> main PR is reused, never duplicated;
+//   - the promotion PR is NOT stage itself: it is a fresh branch cut from the LATEST main that replays ONLY the batches a person
+//     reviewed and merged on stage (lib/promotion-branch.js). Whatever else sits on stage — an unverified batch, a change main has
+//     since overtaken — is never carried into production by it. A batch whose files main has moved past is held back with the reason;
+//   - one promotion PR covers every merged-but-unpromoted stage batch, and an already-open one for the same batches is reused;
 //   - every step is idempotent, so the hourly run can repeat it safely.
 
 const loadBatches = async (query, siteId, stage) => (await query(
@@ -27,7 +31,7 @@ const remember = (query, siteId, prs, { status, number = null, url = null, note 
 export async function promoteMergedStageBatches(siteId, deps = {}) {
   const {
     query = dbQuery, loadSite = getSiteById, readPr = getPullRequest, openPr = openPullRequest, listOpen = listOpenPullRequestsForBranch,
-    buildStatus = checkClientBuildStatus, syncDrafts = null,
+    buildStatus = checkClientBuildStatus, syncDrafts = null, buildBranch = buildPromotionBranch, now = () => new Date(),
   } = deps;
   const out = { site: siteId, stage: null, checked: 0, merged: 0, opened: null, reused: false, waiting: false, blocked: false, reason: null };
   const site = await loadSite(siteId);
@@ -45,7 +49,7 @@ export async function promoteMergedStageBatches(siteId, deps = {}) {
     try { pr = await readPr(site, b.pr_number); } catch { continue; } // GitHub unreachable: try again next hour
     if (!pr?.merged) continue;                                        // still open, or closed without merging: nothing to promote
     if (b.undecided && syncDrafts) await syncDrafts(siteId, b.draft_ids).catch(() => {}); // lets Action Center show them as merged
-    mergedNow.push(b);
+    mergedNow.push({ ...b, pr });
   }
   out.merged = mergedNow.length;
   if (mergedNow.length === 0) return { ...out, reason: 'nothing-merged-on-stage' };
@@ -63,22 +67,41 @@ export async function promoteMergedStageBatches(siteId, deps = {}) {
   }
   const noCheck = build.reason === 'client-build-check-not-configured';
 
-  // An open stage -> main PR already exists (opened by hand, or by an earlier run): use it, never a second.
-  const open = (await listOpen(site, stage)).find((p) => p.base?.ref === main);
+  // The branch name is fixed by WHAT is being promoted, so a repeat run finds the same branch and PR instead of making a second.
+  const stamp = now().toISOString().slice(0, 10).replace(/-/g, '');
+  const branchName = `promote/${stage}-${stamp}-${Math.min(...prNumbers)}`;
+  const open = (await listOpen(site, branchName)).find((p) => p.base?.ref === main);
   if (open) {
     await remember(query, siteId, prNumbers, { status: 'opened', number: open.number, url: open.html_url, note: 'reused' });
     return { ...out, opened: { number: open.number, url: open.html_url }, reused: true };
   }
-  const lines = mergedNow.map((b) => `- ${b.pr_url ? b.pr_url : `#${b.pr_number}`}`).join('\n');
+
+  const built = await buildBranch(site, {
+    main, branchName,
+    prs: mergedNow.map((b) => ({ number: b.pr_number, mergeSha: b.pr.mergeSha, mergedAt: b.pr.mergedAt, title: b.pr.title, url: b.pr_url || b.pr.url })),
+    message: `Promote ${mergedNow.length} reviewed batch${mergedNow.length === 1 ? '' : 'es'} from ${stage}`,
+  });
+  const heldBack = built.skipped || [];
+  if (heldBack.length) await remember(query, siteId, heldBack.map((x) => x.number), { status: 'blocked', note: heldBack.map((x) => `${x.reason}: ${x.detail}`).join('; ').slice(0, 480) });
+  const appliedNumbers = (built.applied || []).map((x) => x.number);
+  if (!built.ok || built.noChange) {
+    // Nothing safe to promote. Already on main is a finished state; everything held back is a person's to look at, never forced.
+    if (!heldBack.length && built.ok) await remember(query, siteId, prNumbers, { status: 'opened', note: 'already on main' });
+    return { ...out, blocked: heldBack.length > 0, reason: heldBack.length ? 'promotion-held-back' : (built.ok ? 'already-on-main' : (built.reason || 'promotion-failed')), heldBack };
+  }
+
+  const line = (x) => `- ${x.url || `#${x.number}`}`;
+  const heldLines = heldBack.map((x) => `- #${x.number} (${x.reason}: \`${x.detail}\`)`).join('\n');
   const { number, url } = await openPr(site, {
-    branch: stage, base: main,
-    title: `Promote ${stage} to ${main}: ${mergedNow.length} reviewed batch${mergedNow.length === 1 ? '' : 'es'}`,
-    body: `This promotes \`${stage}\` into \`${main}\`.\n\nIt contains the batch${mergedNow.length === 1 ? '' : 'es'} a person already reviewed and merged on \`${stage}\`:\n${lines}\n\n`
+    branch: built.branch, base: main,
+    title: `Promote ${appliedNumbers.length} reviewed batch${appliedNumbers.length === 1 ? '' : 'es'} from ${stage} to ${main}`,
+    body: `This is a fresh branch cut from the latest \`${main}\`. It contains only the batch${appliedNumbers.length === 1 ? '' : 'es'} a person already reviewed and merged on \`${stage}\`, and nothing else that is on \`${stage}\`:\n${built.applied.map(line).join('\n')}\n\n`
+        + (heldBack.length ? `Held back, because \`${main}\` has changed those files since (a person needs to look):\n${heldLines}\n\n` : '')
         + (noCheck ? `No automated build check was found on \`${stage}\`, so please look at the stage site before merging.\n\n` : `\`${stage}\`'s build check passed.\n\n`)
         + `Review the diff and merge into \`${main}\` to publish. The agent never merges this for you.`,
   });
-  await remember(query, siteId, prNumbers, { status: 'opened', number, url });
-  return { ...out, opened: { number, url } };
+  await remember(query, siteId, appliedNumbers, { status: 'opened', number, url });
+  return { ...out, opened: { number, url }, heldBack };
 }
 
 // The scheduled run also lets Action Center see those drafts as merged, using the same check a person triggers with "Check PR status".

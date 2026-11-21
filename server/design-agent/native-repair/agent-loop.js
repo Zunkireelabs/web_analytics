@@ -200,7 +200,27 @@ async function runTurns({ provider, client, model, systemPrompt, tools, messages
 // should already tell the model what final-message JSON shape to respond
 // with (parsed here via server/llm.js's shared extractJson, same lenient
 // fence-stripping every other generator already gets).
-export async function runAgentLoop({
+// OpenAI's quota or rate limit being hit says nothing about the repair itself, so it must not end it.
+export function isProviderLimitError(err) {
+  const text = `${err?.code || ''} ${err?.type || ''} ${err?.message || ''}`;
+  return err?.status === 429 || /insufficient_quota|rate[_ ]?limit|exceeded your current quota|quota/i.test(text);
+}
+
+// The repair agent runs on OpenAI while it can. When OpenAI's limit is exceeded it carries on with Claude instead of
+// failing — unless the provider was pinned (NATIVE_REPAIR_PROVIDER or an explicit override), which is respected.
+export async function runAgentLoop(args) {
+  const pinned = Boolean(args.provider || process.env.NATIVE_REPAIR_PROVIDER);
+  const first = args.provider || pickProvider();
+  const result = await runAgentLoopOnce({ ...args, provider: first });
+  const canFallBack = first === 'openai' && !pinned && (args.anthropicClient || process.env.ANTHROPIC_API_KEY);
+  if (result.status === 'error' && result.limit && canFallBack) {
+    console.warn('[native-repair] OpenAI limit reached — continuing this repair with Claude');
+    return { ...(await runAgentLoopOnce({ ...args, provider: 'anthropic' })), fellBackFrom: 'openai' };
+  }
+  return result;
+}
+
+async function runAgentLoopOnce({
   systemPrompt, taskPrompt, sandbox, allowlist, fileAllowlist = null, maxTurns = 20, maxFixRounds = 2,
   validate, model, anthropicClient, openaiClient, provider: providerOverride,
 }) {
@@ -226,7 +246,7 @@ export async function runAgentLoop({
   const client = provider === 'openai'
     ? (openaiClient || new (await import('openai')).default({ apiKey: process.env.OPENAI_API_KEY }))
     : (anthropicClient || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }));
-  const resolvedModel = model || DEFAULT_MODEL[provider];
+  const resolvedModel = (providerOverride === 'anthropic' && model && /^gpt-|^o\d/.test(model)) ? DEFAULT_MODEL.anthropic : (model || DEFAULT_MODEL[provider]);
   const tools = buildTools(provider);
   const messages = [{ role: 'user', content: taskPrompt }];
 
@@ -236,7 +256,7 @@ export async function runAgentLoop({
       // eslint-disable-next-line no-await-in-loop
       finalText = await runTurns({ provider, client, model: resolvedModel, systemPrompt, tools, messages, sandbox, allowlist, fileAllowlist, maxTurns });
     } catch (err) {
-      return { status: 'error', detail: err.message, stage: err.stage || 'agent_run' };
+      return { status: 'error', detail: err.message, stage: err.stage || 'agent_run', limit: isProviderLimitError(err) };
     }
 
     // eslint-disable-next-line no-await-in-loop

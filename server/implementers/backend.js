@@ -1487,6 +1487,11 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
         ok: false, reason: 'responsive-regression',
         error: `This content breaks the page's layout at a real device width: ${describeResponsiveRegressions(responsivePreview.regressions)}.`,
         regressions: responsivePreview.regressions,
+        // The exact markup that was rendered, so the repair step can tell a hazard in the draft's own content
+        // (inline sizing, an unbreakable string) from something outside it (design-repair.js).
+        draftHtml: built.values[componentField],
+        pageUrl: page,
+        marker,
       };
     }
   }

@@ -25,10 +25,29 @@ export function measureBodyInPage(mark) {
     // The body region is the candidate holding the most real paragraph text:
     // `main` alone would include nav/footer chrome, `article` may be absent.
     const candidates = [...document.querySelectorAll('article, [class*="prose"], .post-content, .entry-content, .article-body, main')];
+    const scoreOf = (c) => [...c.querySelectorAll('p')].reduce((n, p) => n + (p.textContent || '').trim().length, 0);
     let best = null; let bestScore = 0;
     for (const c of candidates) {
-      const score = [...c.querySelectorAll('p')].reduce((n, p) => n + (p.textContent || '').trim().length, 0);
+      const score = scoreOf(c);
       if (score > bestScore) { best = c; bestScore = score; }
+    }
+    // INNERMOST container that still holds the body, not the outermost.
+    // `main` always contains `article`, so it always scored at least as high
+    // and won — but a site's typography is routinely scoped to an inner
+    // wrapper (`.blog-article p { max-width: 720px }`, `.blog-content p
+    // { margin-bottom: 26px }`). Measuring or injecting at `main` then drops
+    // those wrappers: a draft's paragraphs stop matching the site's own rules
+    // and render full width (line length 72 -> 160) with default spacing — a
+    // failure of the check, not of the draft. Walk down while exactly one child
+    // still holds nearly all of the body text; that is where the site's own
+    // template puts body copy, with every wrapper above it left intact.
+    if (best) {
+      const topScore = bestScore;
+      for (let guard = 0; guard < 12; guard++) {
+        const holders = [...best.children].filter((c) => scoreOf(c) >= topScore * 0.8);
+        if (holders.length !== 1) break;
+        best = holders[0];
+      }
     }
     region = best;
     if (region && mark) region.setAttribute('data-gate-region', '1');
@@ -47,14 +66,31 @@ export function measureBodyInPage(mark) {
     };
   };
   const paras = [...region.querySelectorAll('p')].filter((p) => (p.textContent || '').trim().length > 40);
+  // The BODY paragraphs are the ones sharing a container: the parent holding
+  // the most long paragraphs. A page often has a lone intro/standfirst <p> in
+  // its header (own width, own size) before the article proper; treating it as
+  // the first body paragraph, and the space between it and the body as a
+  // "paragraph gap", measured the template's header, not the prose. The draft
+  // body has no such header, so the two never matched and a correct draft was
+  // reported as a spacing deviation.
+  const byParent = new Map();
+  for (const p of paras) byParent.set(p.parentElement, [...(byParent.get(p.parentElement) || []), p]);
+  let bodyParas = paras;
+  let bodySize = 0;
+  for (const group of byParent.values()) {
+    if (group.length > bodySize) { bodySize = group.length; bodyParas = group; }
+  }
   const gaps = [];
-  for (let i = 1; i < paras.length; i++) {
-    const a = paras[i - 1].getBoundingClientRect(); const b = paras[i].getBoundingClientRect();
+  for (let i = 1; i < bodyParas.length; i++) {
+    // Only DIRECTLY adjacent paragraphs: with a heading, list or figure in
+    // between, the distance is that element's height, not paragraph spacing.
+    if (bodyParas[i - 1].nextElementSibling !== bodyParas[i]) continue;
+    const a = bodyParas[i - 1].getBoundingClientRect(); const b = bodyParas[i].getBoundingClientRect();
     const g = b.top - a.bottom;
     if (g >= 0 && g < 200) gaps.push(g);
   }
   gaps.sort((x, y) => x - y);
-  const firstP = paras[0] || null;
+  const firstP = bodyParas[0] || null;
   const pStat = stat(firstP);
   const regionRect = region.getBoundingClientRect();
   let plugin = false;

@@ -40,3 +40,9 @@ test('a layout problem with no second layout is handed to a person with a plain 
   const kind = (r) => (/queued|currently running|hasn't been derived|has never been verified/i.test(r) ? 'awaiting' : /will retry automatically|shared (template|layout|css class|stylesheet)/i.test(r) ? 'other' : 'needs-person');
   assert.equal(kind(reason), 'needs-person');
 });
+
+test('layoutNeedsPersonReason carries the diagnosis so a person sees WHY, not just that it failed', () => {
+  const text = layoutNeedsPersonReason({ draft: { input: { page: '/about/' } }, attempts: [{}, {}], diagnosis: { summary: 'Root cause (the draft\'s content): inline-sizing.' } });
+  assert.match(text, /Root cause/);
+  assert.match(text, /\/about\//);
+});

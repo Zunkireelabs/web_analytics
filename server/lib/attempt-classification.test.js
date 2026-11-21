@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyAbandonReason, isAutoRetryable, RETRY_POLICY } from './attempt-classification.js';
+import { classifyAbandonReason, isAutoRetryable, RETRY_POLICY, structuredApplyFailure, ITEM_LEVEL_DESIGN_REASON_CODES, DESIGN_DEFERRAL_MESSAGES, DESIGN_DEFERRAL_FRAGMENTS } from './attempt-classification.js';
 import { FAILURE_CLASS } from './failure-classification.js';
 
 // Every string below is a REAL abandoned_reason counted in the live drafts
@@ -308,4 +308,87 @@ test('a CLAUDE.md §2 section-removal refusal waits on a human, and stops retryi
   assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
   assert.equal(failureClass, FAILURE_CLASS.AGENT_LOGIC);
   assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
+{
+  const cases = [
+    ['This content breaks the page\'s layout at a real device width: 1 new undersized tap target(s) at 390px (mobile).', 'needs_human'],
+    ['responsive-regression', 'needs_human'],
+    ['Rendered into a real "inline-article" page on this site it measures differently: line-length 64 → 160 (desktop). Held rather than shipped.', 'needs_human'],
+    ['render-deviation', 'needs_human'],
+    ['faq is held: this page\'s current design could not be confirmed against the live site (group-sample-unreachable). A stale design is not used; it will be retried automatically.', 'retry'],
+    ['group-sample-unreachable', 'retry'],
+    ['No malformed or duplicate structured data was found on this page.', 'already_resolved'],
+  ];
+  for (const [reason, policy] of cases) {
+    test(`${policy}: ${reason.slice(0, 60)}`, () => {
+      assert.equal(classifyAbandonReason(reason).retryPolicy, policy);
+    });
+  }
+  test('none of them is scored as an item defect, so none counts toward retiring the item', () => {
+    for (const [reason] of cases) assert.notEqual(classifyAbandonReason(reason).retryPolicy, 'item_defect');
+  });
+}
+
+test('structuredApplyFailure: a design verdict reason becomes a refusal with its own code', () => {
+  assert.deepEqual(structuredApplyFailure({ apply_reason: 'render-deviation' }), { reason: 'render-deviation', refusal: true });
+  assert.deepEqual(structuredApplyFailure({ apply_reason: 'responsive-regression' }), { reason: 'responsive-regression', refusal: true });
+});
+
+test('structuredApplyFailure: a non-design reason keeps its code but is NOT auto-marked a refusal', () => {
+  assert.deepEqual(structuredApplyFailure({ apply_reason: 'github-error' }), { reason: 'github-error', refusal: false });
+});
+
+test('structuredApplyFailure: no reason -> null so the caller falls back to message matching', () => {
+  assert.equal(structuredApplyFailure({ apply_reason: null }), null);
+  assert.equal(structuredApplyFailure({}), null);
+  assert.equal(structuredApplyFailure(null), null);
+});
+
+test('repair-pending reasons are retried later and never counted against the item', () => {
+  for (const code of ['design-capture-refresh-pending', 'shared-code-repair-pending']) {
+    assert.equal(classifyAbandonReason(code).retryPolicy, RETRY_POLICY.RETRY);
+    assert.ok(ITEM_LEVEL_DESIGN_REASON_CODES.has(code));
+  }
+});
+
+test('the repair stage\'s own deferral messages are retried later, never counted against the item', () => {
+  for (const msg of [
+    'This page\'s design is being re-captured from the live site; it will be retried once that finishes. Root cause (the captured design of this site): x.',
+    'The cause is in shared platform code and a repair has been requested; this will be retried once it lands. Root cause (the platform\'s shared page renderer): y.',
+  ]) {
+    assert.equal(classifyAbandonReason(msg).retryPolicy, RETRY_POLICY.RETRY, msg);
+  }
+});
+
+test('an exhausted repair (diagnosis attached) is handed to a person, not counted as an item defect', () => {
+  const msg = 'Rendered into a real "inline-article" page on this site it measures differently: line-length 64 → 160 (desktop). Held rather than shipped. Root cause (the draft\'s content): x.';
+  assert.equal(classifyAbandonReason(msg).retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+});
+
+test('legacy mode reproduces what the system did BEFORE design repair: every failure it added a rule for was an item defect', () => {
+  for (const reason of [
+    'This content breaks the page\'s layout at a real device width: 1 new undersized tap target(s) at 1440px (desktop).',
+    'render-deviation', 'responsive-regression',
+    'No malformed or duplicate structured data was found on this page.',
+    'group-sample-unreachable',
+    'faq is held: this page\'s current design could not be confirmed against the live site (group-sample-unreachable).',
+    'design-capture-refresh-pending', 'shared-code-repair-pending',
+  ]) {
+    assert.equal(classifyAbandonReason(reason, { legacy: true }).retryPolicy, RETRY_POLICY.ITEM_DEFECT, reason);
+    assert.notEqual(classifyAbandonReason(reason).retryPolicy, RETRY_POLICY.ITEM_DEFECT, reason);
+  }
+});
+
+test('legacy mode leaves every rule that existed before untouched', () => {
+  for (const reason of ['pr_closed_without_merge', 'superseded', 'no-file-mapping', 'github-error', 'rate limit exceeded']) {
+    assert.deepEqual(classifyAbandonReason(reason, { legacy: true }), classifyAbandonReason(reason), reason);
+  }
+});
+
+test('the deferral wording the approval stage throws is recognised by the classifier, from one shared definition', () => {
+  for (const [key, message] of Object.entries(DESIGN_DEFERRAL_MESSAGES)) {
+    assert.ok(message.toLowerCase().includes(DESIGN_DEFERRAL_FRAGMENTS[key]), `${key}: the message must contain the fragment the counter searches for`);
+    assert.equal(classifyAbandonReason(`Auto-ship failed: ${message} Root cause: x.`).retryPolicy, RETRY_POLICY.RETRY, key);
+  }
 });

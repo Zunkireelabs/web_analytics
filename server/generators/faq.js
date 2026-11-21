@@ -3,6 +3,7 @@ import { callLLMForJson } from '../llm.js';
 import { getSiteById } from '../store/read.js';
 import { findRealFaqDataSource } from './lib/faq-data-source.js';
 import { pageStructureGuidance } from './lib/design-aware-composer.js';
+import { withDesignCorrections } from './lib/design-corrections.js';
 import { tenantContextTextFor } from '../lib/tenant-context.js';
 import { llmFailure } from './lib/llm-error.js';
 
@@ -55,7 +56,7 @@ export const PAGE_PURPOSE_GUIDANCE = {
 // lib/tenant-context.js). It is passed in rather than loaded here so the
 // repair caller and this generator share one prompt, and so this function
 // stays free of a database read.
-export async function generateFaqItemsFromEvidence({ siteId, subject, bodyExcerpt, pageGuidance, structureGuidance, tenantContext = '', expectedCount } = {}) {
+export async function generateFaqItemsFromEvidence({ siteId, subject, bodyExcerpt, pageGuidance, structureGuidance, tenantContext = '', expectedCount, designCorrections = '' } = {}) {
   const countInstruction = expectedCount
     ? `Write EXACTLY ${expectedCount} FAQ question/answer pairs — not more, not fewer. `
     : 'draft 4-6 FAQ question/answer pairs a reader would realistically ask. ';
@@ -71,9 +72,9 @@ export async function generateFaqItemsFromEvidence({ siteId, subject, bodyExcerp
     'answer instead. If no page content is given, write general informational answers about the topic only. ' +
     (pageGuidance ? `${pageGuidance} ` : '') +
     'Respond with ONLY a JSON array: [{"question": "...", "answer": "..."}, ...]';
-  const user = `Subject: ${subject}\n${bodyExcerpt ? `Page text: ${bodyExcerpt}` : 'No existing page — new content.'}` +
+  const user = withDesignCorrections(`Subject: ${subject}\n${bodyExcerpt ? `Page text: ${bodyExcerpt}` : 'No existing page — new content.'}` +
     (tenantContext ? `\n\n${tenantContext}` : '') +
-    (structureGuidance ? `\n\n${structureGuidance}` : '');
+    (structureGuidance ? `\n\n${structureGuidance}` : ''), { designCorrections });
   let items;
   try {
     items = await callLLMForJson(system, user, { task: 'content', maxTokens: 900, generatorId: meta.id, siteId });
@@ -148,7 +149,7 @@ export async function generate({ siteId, params }) {
   // would be prompt weight this generator cannot spend on anything.
   const tenantContext = await tenantContextTextFor(site, { sections: ['product'] });
 
-  const items = await generateFaqItemsFromEvidence({ siteId, subject, bodyExcerpt, pageGuidance, structureGuidance, tenantContext });
+  const items = await generateFaqItemsFromEvidence({ siteId, subject, bodyExcerpt, pageGuidance, structureGuidance, tenantContext, designCorrections: params?.designCorrections || '' });
 
   // FAQPage JSON-LD is a deterministic transform of the items, not a
   // separate LLM call — nothing here can drift from what's shown above.

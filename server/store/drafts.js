@@ -1,7 +1,7 @@
 import { query } from '../db.js';
 import { isVerifiableDraft, createPendingVerification, getWatchlistItemByFindingId } from './fix-verifications.js';
 import { sanitizeForCustomer } from '../lib/errors.js';
-import { classifyAbandonReason, RETRY_POLICY } from '../lib/attempt-classification.js';
+import { classifyAbandonReason, RETRY_POLICY, DESIGN_DEFERRAL_FRAGMENTS } from '../lib/attempt-classification.js';
 import { takeSlot, giveBackSlot, isAutonomousSource } from './autonomous-slots.js';
 
 // CRUD for the drafts table, plus its approval lifecycle:
@@ -1102,6 +1102,21 @@ export async function countFailedAttemptsByFinding(siteId) {
     counts.set(row.finding_id, (counts.get(row.finding_id) || 0) + 1);
   }
   return counts;
+}
+
+// How many earlier runs already DEFERRED this finding because its design problem was handed to the Design Agent or to
+// shared-code repair (generators/lib/design-repair.js). A deferral is "retry later, not your fault" — which is only
+// honest while someone is working on it. This is what bounds the wait: past the cap the item goes to a person.
+export async function countDesignDeferralsForFinding(siteId, findingId, { days = 14, queryFn = query } = {}) {
+  if (!siteId || !findingId) return 0;
+  const { rows } = await queryFn(
+    `SELECT count(*)::int AS n FROM drafts
+      WHERE site_id = $1 AND finding_id = $2 AND status = 'abandoned'
+        AND abandoned_at > now() - ($3::int * interval '1 day')
+        AND (abandoned_reason ILIKE $4 OR abandoned_reason ILIKE $5)`,
+    [siteId, findingId, days, `%${DESIGN_DEFERRAL_FRAGMENTS.capture}%`, `%${DESIGN_DEFERRAL_FRAGMENTS.shared}%`],
+  );
+  return rows[0]?.n || 0;
 }
 
 // The file-level sibling to getDraftedFindingIds above: that function stops

@@ -1,5 +1,6 @@
 import { getSiteById } from '../store/read.js';
 import { callLLMForJson } from '../llm.js';
+import { withDesignCorrections } from './lib/design-corrections.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 import { llmFailure } from './lib/llm-error.js';
 
@@ -112,11 +113,12 @@ export async function generate({ siteId, params }) {
     'headings with placeholder or note-style text. Respond with ONLY a JSON object: {"title": "...", ' +
     '"metaDescription": "...", "sections": [{"heading": "...", "body": "..."}]}';
 
-  const user = `Page to write: ${title}\nIts URL: ${href}\n` +
+  const userBase = `Page to write: ${title}\nIts URL: ${href}\n` +
     (linkedFrom.length ? `Linked to from: ${linkedFrom.join(', ')}\n` : '') +
     `\nExisting sibling page to match (${structureModel.url})\n` +
     `Its section headings: ${structureModel.headings.join(' | ') || '(none extracted)'}\n` +
     `Its content:\n${structureModel.excerpt}`;
+  const user = withDesignCorrections(userBase, params);
 
   let parsed;
   try {

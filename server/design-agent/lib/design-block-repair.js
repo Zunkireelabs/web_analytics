@@ -34,13 +34,14 @@ async function defaultDeps() {
   };
 }
 
-/** @returns {Promise<{queued:boolean, reason:string}>} never throws. */
-export async function requeueProfileForRepeatedBlocks(site, deps = {}, now = new Date()) {
+async function requeue(site, deps, now, { requireRepeat }) {
   try {
     if (!site?.id || !site.repo_owner || !site.repo_name) return { queued: false, reason: 'no-repo' };
     const d = { ...(await defaultDeps()), ...deps };
-    const blocks = await d.countBlocks(site.id, REQUEUE_WINDOW_DAYS);
-    if (blocks < REQUEUE_AFTER_BLOCKS) return { queued: false, reason: 'not-repeated' };
+    if (requireRepeat) {
+      const blocks = await d.countBlocks(site.id, REQUEUE_WINDOW_DAYS);
+      if (blocks < REQUEUE_AFTER_BLOCKS) return { queued: false, reason: 'not-repeated' };
+    }
     if (await d.findQueued(site.id)) return { queued: false, reason: 'already-queued' };
     const latest = await d.findLatestJob(site.id);
     const last = latest?.created_at ? new Date(latest.created_at).getTime() : 0;
@@ -48,9 +49,23 @@ export async function requeueProfileForRepeatedBlocks(site, deps = {}, now = new
     const pageUrl = d.resolvePageUrl(site);
     if (!pageUrl) return { queued: false, reason: 'no-page-url' };
     await d.enqueue(site.id, { requestedBy: null, pageUrl });
-    return { queued: true, reason: 'repeated-repairable-blocks' };
+    return { queued: true, reason: requireRepeat ? 'repeated-repairable-blocks' : 'diagnosed-design-capture-gap' };
   } catch (err) {
     console.warn(`[design-block-repair] could not re-queue design profile for site ${site?.id}: ${err.message}`);
     return { queued: false, reason: 'error' };
   }
+}
+
+/** @returns {Promise<{queued:boolean, reason:string}>} never throws. */
+export async function requeueProfileForRepeatedBlocks(site, deps = {}, now = new Date()) {
+  return requeue(site, deps, now, { requireRepeat: true });
+}
+
+// A repair diagnosed the cause as the captured design itself (design-repair.js):
+// that is evidence in hand, so it does not wait for the block to repeat. Every
+// other safeguard stays — one job already queued is enough, and the cooldown
+// still stops a job per draft.
+/** @returns {Promise<{queued:boolean, reason:string}>} never throws. */
+export async function requestProfileRefresh(site, deps = {}, now = new Date()) {
+  return requeue(site, deps, now, { requireRepeat: false });
 }

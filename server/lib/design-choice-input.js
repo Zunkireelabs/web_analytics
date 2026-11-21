@@ -27,10 +27,11 @@ export function designChoiceInputFor({ draft, componentTemplates, attempts = [] 
 // The reason shown on the card when the layout repair loop gave up and the site has no second layout to offer. A layout
 // cannot be fixed by the automatic recovery rounds (they re-check a page that has not changed), so this goes to a
 // person straight away instead of cycling. Worded to say what was tried and what would unblock it.
-export function layoutNeedsPersonReason({ draft, attempts = [] }) {
+export function layoutNeedsPersonReason({ draft, attempts = [], diagnosis = null }) {
   const n = attempts.length;
   const page = draft?.input?.page || draft?.content?.page || null;
   const path = (() => { try { return page ? new URL(page, 'https://x.invalid').pathname : null; } catch { return null; } })();
   return `Needs a person: the agent tried ${n ? `${n} time${n === 1 ? '' : 's'}` : 'several times'} to fit this${path ? ` into ${path}` : ''} without changing how your page looks, and could not. `
+    + (diagnosis?.summary ? `${diagnosis.summary} ` : '')
     + 'This site has no other layout the agent could try for this block. Add a second layout for it, or have someone look at the page.';
 }

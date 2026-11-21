@@ -6,6 +6,7 @@ import { renderLandingPageBody, renderBlogOutlineBody, renderBlogOutlineBodyTsx,
 import { buildGradientCover } from '../generators/lib/gradient-cover.js';
 import { siteHasUsableDesignProfile, checkDesignIntegrityGate, getDesignProfile } from './lib/design-drift.js';
 import { runDesignGates } from './lib/design-gates.js';
+import { renderableBody } from '../generators/lib/newpage-render-gate.js';
 import { findRootArrayBounds, spliceMarkedArray, assertValidContent } from './adapters/lib/js-data-splice.js';
 
 export const meta = {
@@ -330,6 +331,39 @@ export async function computeGeneratedPostsManifestUpdate(site, entry, fetchFile
 // real new-file content — not merged yet (see mergeToStage below). Staff
 // reviews the real diff (Draft Preview panel, unchanged — same
 // resolveTargetAndBody output) before deciding to merge the PR.
+// Tier B of the page-role resolver: what the target directory's own
+// human-written posts declare. Cached per directory by the contract module.
+// Shared by apply() and preview() so the two can never judge differently.
+function designGateDeps() {
+  return {
+    deriveContract: async (s, actionType) => {
+      const cfg = resolveNewContentTargetConfig(s, actionType);
+      return cfg.dir ? deriveNewContentContract(s, cfg) : null;
+    },
+  };
+}
+
+// The same pre-ship design gates apply() runs, run EARLIER and quietly so the
+// approval flow's repair loop (generators/lib/design-repair.js) can act on a
+// failure while the draft can still be changed. Quiet = no owner notification
+// and no per-attempt lesson: the loop sends one of each per episode, with the
+// diagnosis. Returns the structured evidence the loop diagnoses from.
+async function designGateForPreview(site, draft, resolved) {
+  const noop = async () => {};
+  const gate = await runDesignGates(site, draft, resolved, { ...designGateDeps(), notify: noop, learnFailure: noop, learnFix: noop });
+  if (gate.ok) return { ok: true };
+  const body = renderableBody(resolved.body, resolved.contentFormat);
+  return {
+    ok: false,
+    reason: gate.reason,
+    error: gate.error,
+    deviations: gate.renderGate?.detail?.deviations || [],
+    referenceUrl: gate.renderGate?.referenceUrl || null,
+    designAssessment: gate.designAssessment || null,
+    draftHtml: body.html ?? null,
+  };
+}
+
 export async function apply(site, draft) {
   const resolved = await resolveTargetAndBody(site, draft);
   if (!resolved.ok) return resolved;
@@ -351,14 +385,7 @@ export async function apply(site, draft) {
   // in 'enforce', record-and-ship in 'log', absent in 'off'. See
   // lib/design-gates.js for the policy and design_gate_decisions (186) for the
   // log-only evidence that decides when it is safe to enforce.
-  const designGate = await runDesignGates(site, draft, resolved, {
-    // Tier B of the page-role resolver: what the target directory's own
-    // human-written posts declare. Cached per directory by the contract module.
-    deriveContract: async (s, actionType) => {
-      const cfg = resolveNewContentTargetConfig(s, actionType);
-      return cfg.dir ? deriveNewContentContract(s, cfg) : null;
-    },
-  });
+  const designGate = await runDesignGates(site, draft, resolved, designGateDeps());
   if (!designGate.ok) return designGate;
 
   if (siteHasUsableDesignProfile(site)) {
@@ -431,9 +458,15 @@ export async function mergeToStage(site, draft) {
 // preview(): a brand-new file's "before" is simply whatever's on that path
 // today (empty/none for a genuinely new page, real existing content if a
 // prior attempt already opened this exact file, e.g. a retried translation).
-export async function preview(site, draft) {
+export async function preview(site, draft, opts = {}) {
   const resolved = await resolveTargetAndBody(site, draft);
   if (!resolved.ok) return resolved;
+  // Opt-in (the approval flow only): rendering in a real browser is far too slow
+  // for the Draft Preview panel's every open. Nothing changes for any other caller.
+  if (opts.validateDesign) {
+    const designResult = await designGateForPreview(site, draft, resolved);
+    if (!designResult.ok) return designResult;
+  }
   const { batchInfo, failure: batchFailure } = await resolveBatchBranch(site);
   if (batchFailure) return batchFailure;
   if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);

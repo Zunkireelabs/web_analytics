@@ -54,7 +54,7 @@ const NAV_TIMEOUT_MS = Number(process.env.RESPONSIVE_PREVIEW_NAV_TIMEOUT_MS) || 
 // page at all — a brand-new insertion has nothing "before" to preview
 // against, which the caller treats as skip, not a failure.
 /* eslint-disable no-undef */
-function injectMarkerContent([marker, html]) {
+export function injectMarkerContent([marker, html]) {
   const startLabel = `SEOAI:${marker}:START`;
   const endLabel = `SEOAI:${marker}:END`;
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT);
@@ -104,8 +104,14 @@ function diffMeasurement(before, after, viewport) {
   if (newClipped.length) {
     regressions.push({ viewport: viewport.name, width: viewport.width, kind: 'clipped-content', elements: newClipped });
   }
+  // Tap-target size is a TOUCH rule (WCAG 2.5.8 targets pointer-agnostic 24px,
+  // but the real-world failure is a thumb missing a control on a phone or
+  // tablet). At a 1440px desktop a small inline link is normal and a rewrite
+  // of the content cannot enlarge it, so measuring it there only produced
+  // failures no repair could clear — the draft was retried to its cap and
+  // retired for something that is not a layout break.
   const beforeSmall = new Set(before.smallTapTargets.map((e) => e.outerHtml));
-  const newSmall = after.smallTapTargets.filter((e) => !beforeSmall.has(e.outerHtml));
+  const newSmall = viewport.name === 'desktop' ? [] : after.smallTapTargets.filter((e) => !beforeSmall.has(e.outerHtml));
   if (newSmall.length) {
     regressions.push({ viewport: viewport.name, width: viewport.width, kind: 'undersized-tap-target', elements: newSmall });
   }
@@ -193,7 +199,17 @@ export function describeResponsiveRegressions(regressions) {
   return regressions.map((r) => {
     const at = `at ${r.width}px (${r.viewport})`;
     if (r.kind === 'horizontal-overflow') return `new horizontal overflow ${at} — ${r.overflowPx}px wider than the viewport`;
-    if (r.kind === 'clipped-content') return `content newly clipped ${at} (${r.elements.length} element(s))`;
-    return `${r.elements.length} new undersized tap target(s) ${at}`;
+    if (r.kind === 'clipped-content') return `content newly clipped ${at} (${r.elements.length} element(s))${describeElements(r.elements)}`;
+    return `${r.elements.length} new undersized tap target(s) ${at}${describeElements(r.elements)}`;
   }).join('; ');
+}
+
+// Names the first offending element (tag, text) so a person reading the
+// failure — and the repair prompt — can see WHAT broke, not just that
+// something did. Tag and visible text only: never raw markup in a message.
+function describeElements(elements) {
+  const e = elements?.[0];
+  if (!e?.tag) return '';
+  const text = String(e.text || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  return ` [<${e.tag}>${text ? ` "${text}"` : ''}]`;
 }

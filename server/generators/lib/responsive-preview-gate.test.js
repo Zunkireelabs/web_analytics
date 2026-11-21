@@ -122,6 +122,23 @@ describe('checkResponsivePreview', () => {
     assert.equal(result.regressions[0].kind, 'undersized-tap-target');
   });
 
+  test('an undersized tap target at desktop width is NOT a regression (touch rule, mobile/tablet only)', async () => {
+    const before = measurement();
+    const tiny = { tag: 'a', outerHtml: '<a href="#">x</a>', minSide: 18 };
+    const after = measurement({ smallTapTargets: [tiny] });
+    // viewports run desktop, tablet, mobile: only the FIRST after-measurement carries the tiny target
+    const { launchBrowserFn } = fakeBrowser({ measurements: [before, before, before, after, before, before] });
+    const result = await checkResponsivePreview({ ...BASE_OPTS, launchBrowserFn });
+    assert.equal(result.broken, false);
+  });
+
+  test('the failure message names the offending element', () => {
+    const summary = describeResponsiveRegressions([
+      { kind: 'undersized-tap-target', viewport: 'mobile', width: 390, elements: [{ tag: 'a', text: 'Read more' }] },
+    ]);
+    assert.match(summary, /\[<a> "Read more"\]/);
+  });
+
   test('no SEOAI marker found on the page -> skip, never a false failure', async () => {
     const clean = measurement();
     const { launchBrowserFn } = fakeBrowser({ measurements: [clean, clean, clean], injected: false });

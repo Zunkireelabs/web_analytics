@@ -268,6 +268,15 @@ jobs:
             # worked around no longer applies.
             TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}
             ENABLE_CONTENT_CITATION_SEARCH=true
+            # Platform self-repair and release (docs/platform-release-workflow.md). STAGING ONLY — deploy.yml (production) does not set
+            # these. The URLs come from the repo's own domain variables; nothing is guessed.
+            ENABLE_CODE_SELF_REPAIR=true
+            ENABLE_PLATFORM_STAGING_AUTOMERGE=true
+            ENABLE_PLATFORM_RELEASE_AGENT=true
+            PLATFORM_STAGING_URL=https://${{ vars.STAGING_DOMAIN }}
+            PLATFORM_PRODUCTION_URL=https://${{ vars.PROD_DOMAIN }}
+            PLATFORM_STAGING_MCP_URL=https://${{ vars.STAGING_MCP_DOMAIN }}
+            PLATFORM_PRODUCTION_MCP_URL=https://${{ vars.PROD_MCP_DOMAIN }}
 
             # ── Technical SEO (optional Core Web Vitals enrichment) ──────────
             # Without this, technical-seo.js still reports real GSC index

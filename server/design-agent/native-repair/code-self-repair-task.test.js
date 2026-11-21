@@ -112,3 +112,45 @@ describe('validateCodeSelfRepair — never trusts the agent, real evidence only'
     assert.match(result.output, /node --test/);
   });
 });
+
+describe('validateCodeSelfRepair — a repair must really run its tests, and pass the security checks', () => {
+  async function repairWith({ testBody, sourceBody, sourcePath = 'server/generators/x.js' }) {
+    const sandbox = await freshSandbox();
+    await writeSandboxFile(sandbox, 'server/generators/x.test.js', testBody);
+    const before = await snapshotServerTree(sandbox);
+    await writeSandboxFile(sandbox, sourcePath, sourceBody);
+    return validateCodeSelfRepair(sandbox, { testFileHint: 'server/generators/x.test.js' }, before);
+  }
+  const PASSING = "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { add } from './x.js';\ntest('adds', () => { assert.equal(add(1, 2), 3); });\n";
+  const ALL_SKIPPED = "import { test } from 'node:test';\ntest('needs a browser', (t) => { t.skip('no browser available'); });\n";
+
+  test('a test file where EVERYTHING is skipped is NOT validation — skipped proves nothing', async () => {
+    const r = await repairWith({ testBody: ALL_SKIPPED, sourceBody: 'export const add = (a, b) => a + b;\n' });
+    assert.equal(r.ok, false);
+    assert.match(r.output, /Not validated/);
+    assert.match(r.output, /skipped test proves nothing/i);
+  });
+
+  test('a repair that writes a credential into code is rejected even though its tests pass', async () => {
+    const r = await repairWith({ testBody: PASSING, sourceBody: "export const add = (a, b) => a + b;\nexport const key = 'sk-abcdefghijklmnopqrstuvwxyz0123456789';\n" });
+    assert.equal(r.ok, false);
+    assert.match(r.output, /Security check failed/);
+    assert.match(r.output, /secret/);
+  });
+
+  test('a repair that loosens a validation threshold is rejected even though its tests pass', async () => {
+    const sandbox = await freshSandbox();
+    await writeSandboxFile(sandbox, 'server/generators/x.test.js', PASSING);
+    await writeSandboxFile(sandbox, 'server/generators/x.js', 'export const add = (a, b) => a + b;\nexport const TOLERANCES = { lineChars: 0.25 };\n');
+    const before = await snapshotServerTree(sandbox);
+    await writeSandboxFile(sandbox, 'server/generators/x.js', 'export const add = (a, b) => a + b;\nexport const TOLERANCES = { lineChars: 0.9 };\n');
+    const r = await validateCodeSelfRepair(sandbox, { testFileHint: 'server/generators/x.test.js' }, before);
+    assert.equal(r.ok, false);
+    assert.match(r.output, /weakens-validation/);
+  });
+
+  test('a clean repair with really-passing tests still validates', async () => {
+    const r = await repairWith({ testBody: PASSING, sourceBody: 'export const add = (a, b) => a + b;\n' });
+    assert.equal(r.ok, true);
+  });
+});

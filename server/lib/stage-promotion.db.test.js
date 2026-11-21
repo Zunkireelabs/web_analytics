@@ -22,14 +22,20 @@ const draftOnPr = (siteId, pr, { status = 'pr_opened', base = 'stage', type = 'l
   [siteId, type, status, `action-center/batch-${siteId}-${pr}`, pr, `https://github.com/acme/repo/pull/${pr}`, base]);
 const rows = async (siteId) => (await query(`SELECT source_pr_number, status, promotion_pr_number FROM stage_promotions WHERE site_id = $1 ORDER BY source_pr_number`, [siteId])).rows;
 
-const make = ({ merged = {}, build = { ok: true }, open = [] } = {}) => {
-  const log = { opened: [] };
+const make = ({ merged = {}, build = { ok: true }, open = [], built = null } = {}) => {
+  const log = { opened: [], built: [] };
   return {
     log,
     deps: {
-      readPr: async (_s, n) => ({ state: merged[n] ? 'closed' : 'open', merged: Boolean(merged[n]), mergeable: null, mergeableState: null }),
+      readPr: async (_s, n) => ({ state: merged[n] ? 'closed' : 'open', merged: Boolean(merged[n]), mergeable: null, mergeableState: null, mergeSha: `M${n}`, mergedAt: `2026-01-${String(n % 28 + 1).padStart(2, '0')}T00:00:00Z`, title: `PR ${n}`, url: `https://github.com/acme/repo/pull/${n}` }),
       buildStatus: async () => build,
       listOpen: async () => open,
+      // The promotion branch is built by lib/promotion-branch.js (tested on its own); here it replays every batch it is given.
+      buildBranch: async (_s, args) => {
+        log.built.push(args);
+        return built ? built(args) : { ok: true, noChange: false, branch: args.branchName, applied: args.prs.map((p) => ({ number: p.number, url: p.url })), skipped: [] };
+      },
+      now: () => new Date('2026-11-21T10:00:00Z'),
       openPr: async (_s, args) => { log.opened.push(args); return { number: 500 + log.opened.length, url: `https://github.com/acme/repo/pull/${500 + log.opened.length}` }; },
     },
   };
@@ -65,7 +71,11 @@ describe('stage -> main promotion', () => {
     const { deps, log } = make({ merged: { 10: true } });
     const r = await promoteMergedStageBatches(id, deps);
     assert.equal(log.opened.length, 1);
-    assert.equal(log.opened[0].branch, 'stage'); assert.equal(log.opened[0].base, 'main');
+    assert.notEqual(log.opened[0].branch, 'stage', 'the promotion is never stage itself');
+    assert.match(log.opened[0].branch, /^promote\/stage-20261121-10$/); assert.equal(log.opened[0].base, 'main');
+    assert.deepEqual(log.built[0].prs.map((p) => p.number), [10], 'only the batch a person merged is replayed onto a fresh main branch');
+    assert.equal(log.built[0].main, 'main');
+    assert.match(log.opened[0].body, /fresh branch cut from the latest `main`/);
     assert.match(log.opened[0].body, /pull\/10/); assert.doesNotMatch(log.opened[0].body, /pull\/11/, 'only the merged batch is listed');
     assert.match(log.opened[0].body, /never merges/);
     assert.deepEqual(r.opened, { number: 501, url: 'https://github.com/acme/repo/pull/501' });
@@ -126,6 +136,36 @@ describe('stage -> main promotion', () => {
     const { deps, log } = make({ merged: { 80: true } });
     const r = await promoteMergedStageBatches(id, deps);
     assert.equal(r.reason, 'nothing-merged-on-stage'); assert.equal(log.opened.length, 0);
+  });
+
+  test('a batch whose files main has moved past is held back with the reason, never forced into production', async () => {
+    const id = await seedSite('heldback'); await draftOnPr(id, 100); await draftOnPr(id, 101);
+    const { deps, log } = make({
+      merged: { 100: true, 101: true },
+      built: (args) => ({ ok: true, noChange: false, branch: args.branchName, applied: [{ number: 100, url: 'https://github.com/acme/repo/pull/100' }], skipped: [{ number: 101, reason: 'main-changed', detail: 'src/a.md' }] }),
+    });
+    const r = await promoteMergedStageBatches(id, deps);
+    assert.equal(log.opened.length, 1);
+    assert.match(log.opened[0].body, /Held back/); assert.match(log.opened[0].body, /#101 \(main-changed: `src\/a\.md`\)/);
+    assert.deepEqual(r.heldBack.map((x) => x.number), [101]);
+    const st = Object.fromEntries((await rows(id)).map((x) => [x.source_pr_number, x.status]));
+    assert.deepEqual(st, { 100: 'opened', 101: 'blocked' });
+  });
+
+  test('when EVERYTHING is held back nothing is opened and a person is told why', async () => {
+    const id = await seedSite('allheld'); await draftOnPr(id, 110);
+    const { deps, log } = make({ merged: { 110: true }, built: () => ({ ok: true, noChange: true, branch: null, applied: [], skipped: [{ number: 110, reason: 'main-changed', detail: 'x.md' }] }) });
+    const r = await promoteMergedStageBatches(id, deps);
+    assert.equal(log.opened.length, 0); assert.equal(r.blocked, true); assert.equal(r.reason, 'promotion-held-back');
+    assert.equal((await rows(id))[0].status, 'blocked');
+  });
+
+  test('a batch already on main needs no PR and is not retried forever', async () => {
+    const id = await seedSite('onmain'); await draftOnPr(id, 120);
+    const { deps, log } = make({ merged: { 120: true }, built: () => ({ ok: true, noChange: true, branch: null, applied: [], skipped: [] }) });
+    const r = await promoteMergedStageBatches(id, deps);
+    assert.equal(log.opened.length, 0); assert.equal(r.reason, 'already-on-main');
+    assert.equal((await rows(id))[0].status, 'opened');
   });
 
   test('the all-sites run counts what it did, and one failing client does not stop the rest', async () => {
