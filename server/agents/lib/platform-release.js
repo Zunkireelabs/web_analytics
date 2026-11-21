@@ -73,13 +73,13 @@ export async function verifyLiveDeployment({ url, mcpUrl = null, fetchFn = fetch
     const health = await http(fetchFn, `${base}/api/health`);
     let healthOk = false;
     if (health.status === 200) { try { healthOk = JSON.parse(health.text)?.ok === true; } catch { healthOk = false; } }
-    checks.push({ name: 'api-health', ok: healthOk, detail: health.error || `HTTP ${health.status}${healthOk ? '' : ' without { ok: true }'}` });
+    checks.push({ name: 'api-health', ok: healthOk, detail: health.error || (healthOk ? 'answered ok' : `answered with status ${health.status} and not { ok: true }`) });
     const home = await http(fetchFn, `${base}/`);
     const isApp = home.status === 200 && /text\/html/i.test(home.contentType) && /id=["']root["']|<title/i.test(home.text);
-    checks.push({ name: 'dashboard', ok: isApp, detail: home.error || `HTTP ${home.status}${isApp ? '' : ' and not the dashboard page'}` });
+    checks.push({ name: 'dashboard', ok: isApp, detail: home.error || (isApp ? 'served the dashboard' : `answered with status ${home.status} and not the dashboard page`) });
     if (mcpUrl) {
       const mcp = await http(fetchFn, `${String(mcpUrl).replace(/\/+$/, '')}/api/health`);
-      checks.push({ name: 'mcp-health', ok: mcp.status === 200, detail: mcp.error || `HTTP ${mcp.status}` });
+      checks.push({ name: 'mcp-health', ok: mcp.status === 200, detail: mcp.error || (mcp.status === 200 ? 'answered ok' : `answered with status ${mcp.status}`) });
     }
     return checks;
   };
