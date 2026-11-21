@@ -81,6 +81,12 @@ export function isActiveSite(site) {
   return (site?.status ?? 'active') === 'active';
 }
 
+// Same rule as SITE_IS_PERSON_DRIVEN_SQL in action-center-reconciler.js, in JS for the stall check.
+export function isPersonDrivenSite(site) {
+  return site?.ship_mode === 'review-first'
+    || (site?.auto_remediation_enabled === false && site?.auto_remediation_resume_at == null);
+}
+
 export function isShippable(site) {
   return Boolean(site?.repo_owner && site?.repo_name) && isActiveSite(site);
 }
@@ -148,6 +154,11 @@ export const SHIP_STALL_RATIO = 0.25;
 export function checkShipStall({ site, shipped, now = new Date() }) {
   const target = siteDailyTarget(site);
   if (target <= 0) return null; // paused tenant — a stall check is meaningless
+  // A site a PERSON drives has no autonomous output to compare to a target: it is review-first (the client approves every fix before
+  // anything is committed), or auto-remediation is switched off and not merely paused (a pause sets auto_remediation_resume_at and comes
+  // back on its own). MOBILISE is one: its drafts wait for the client, so "0 shipped" was the design, and the stall email said
+  // "nothing was eligible, or the run did not start" about a site that was not meant to run.
+  if (isPersonDrivenSite(site)) return null;
   if (shipped >= SHIP_STALL_RATIO * target) return null;
   const today = now.toISOString().slice(0, 10);
   return {

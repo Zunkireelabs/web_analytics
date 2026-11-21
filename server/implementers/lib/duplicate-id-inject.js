@@ -16,6 +16,16 @@
 // in the repo) refuses rather than guesses, per the same "strict conditions,
 // no ambiguous matches" lesson backend.js's other injectors already follow.
 
+// The only element types whose id this module can rename provably safely (see the module comment). Shared with the detector
+// (agents/accessibility.js) so an id this can never rename is never offered to it as an auto-fix.
+export const SVG_PAINT_DEF_TAGS = new Set(['lineargradient', 'radialgradient', 'clippath', 'mask']);
+
+// True when every occurrence of a duplicate id is on one of those element types.
+export function isAutoFixableDuplicateId(entry) {
+  const occ = entry?.occurrences || [];
+  return occ.length > 0 && occ.every((o) => SVG_PAINT_DEF_TAGS.has(String(o.tag).toLowerCase()));
+}
+
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
