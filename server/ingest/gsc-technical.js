@@ -19,7 +19,7 @@ import { safeMessage } from '../lib/errors.js';
 export function classifyInspectError(err) {
   const raw = err?.code ?? err?.response?.status ?? err?.status;
   const httpStatus = Number.isInteger(Number(raw)) && Number(raw) >= 100 ? Number(raw) : null;
-  const text = String(err?.message || '');
+  const text = typeof err?.message === 'string' ? err.message : '';   // only matched against patterns below, never stored or shown
   let errorKind = 'other';
   if (httpStatus === 429 || /RESOURCE_EXHAUSTED/.test(text)) errorKind = 'quota';
   else if (httpStatus === 401 || /invalid_grant|invalid_client|unauthorized/i.test(text)) errorKind = 'auth';

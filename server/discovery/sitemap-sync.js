@@ -1,6 +1,7 @@
 import { discoverFromSitemaps } from '../agents/lib/site-discovery.js';
 import { listPageInventory, upsertPageInventoryBatch } from '../store/page-inventory.js';
 import { listSitemaps, submitSitemap } from '../ingest/gsc-technical.js';
+import { safeMessage } from '../lib/errors.js';
 
 // DAILY SITEMAP SYNC. Page discovery (job.js runSiteDiscoveryIfDue) crawls the whole site and only runs about once a week, and its
 // "is it due" check can skip a week outright, so a page that is published right after one run can wait up to ~2 weeks before anything
@@ -45,6 +46,7 @@ export async function syncSitemapIntoInventory(site, {
   if (!fresh.length) return { added: 0, newPages: [] };
 
   await upsert(site.id, fresh, 'sitemap');
-  const sitemapResubmit = await resubmit(site).catch((err) => ({ ok: false, reason: 'resubmit-failed', error: String(err?.message || err).slice(0, 160) }));
+  // The real error is logged internally; the result carries a plain sentence, never exception text.
+  const sitemapResubmit = await resubmit(site).catch((err) => ({ ok: false, reason: 'resubmit-failed', error: safeMessage('sitemap-sync.resubmit', err, 'The sitemap could not be resubmitted to Google right now.').message }));
   return { added: fresh.length, newPages: fresh.slice(0, 50), sitemapResubmit };
 }
