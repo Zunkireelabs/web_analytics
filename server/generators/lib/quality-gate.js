@@ -108,7 +108,7 @@ const CLAIM_GROUNDED_GENERATOR_IDS = new Set(['landing-page', 'blog-outline', 'd
 // simply skips the check, exactly as before it existed.
 export async function runQualityGate(content, generatorId, siteId, { site = null, enforceDesignIntegrity, page = null } = {}) {
   // Only looked up when this site has a visible-claim ban list AND a page is known: one cached page read, never for other sites.
-  const isArticlePage = (page && visibleClaimBansFor(site).length) ? await isArticlePageUrl(page) : false;
+  const isArticlePage = (page && visibleClaimBansFor(site).length) ? await isArticlePageUrl(page, { site }) : false;
   const isNonLlmContent = NON_LLM_GENERATOR_IDS.has(generatorId);
   const needsPositioningCheck = siteId != null && POSITIONING_CHECKED_GENERATOR_IDS.has(generatorId);
   const needsLegalFactCheck = LEGAL_FACT_CHECKED_GENERATOR_IDS.has(generatorId);

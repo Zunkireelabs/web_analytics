@@ -207,6 +207,23 @@ describe('meta-title generator — per-site titleClaimBans', () => {
     assert.doesNotMatch(jsonCalls[0], /Never use any of these words/);
   });
 
+  test('a blog post that is not published yet (page cannot be read) is exempt by the site\'s own blog URL pattern', async () => {
+    siteRow = { url_file_map: { siteRoot: { titleClaimBans: ['consultancy'] }, newContentTargets: { 'blog-outline': { urlPattern: '/blogs/{slug}' } } } };
+    pageAnalysis = { ok: false };
+    jsonResponse = { titles: ['consultancy ' + 'A'.repeat(44)], metaDescription: inRangeDescription };
+    const { content } = await generate({ siteId: 1, params: { query: 'q', page: 'https://x.test/blogs/draft-post' } });
+    assert.match(content.titles[0], /consultancy/);
+    assert.equal(jsonCalls.length, 1);
+    assert.doesNotMatch(jsonCalls[0], /Never use any of these words/);
+  });
+
+  test('an unpublished page that is NOT under the blog pattern is still banned', async () => {
+    siteRow = { url_file_map: { siteRoot: { titleClaimBans: ['consultancy'] }, newContentTargets: { 'blog-outline': { urlPattern: '/blogs/{slug}' } } } };
+    pageAnalysis = { ok: false };
+    await generate({ siteId: 1, params: { query: 'q', page: 'https://x.test/new-landing' } });
+    assert.match(jsonCalls[0], /Never use any of these words/);
+  });
+
   test('a site with no titleClaimBans is unaffected', async () => {
     siteRow = { url_file_map: { siteRoot: {} } };
     jsonResponse = { titles: ['consultancy ' + 'A'.repeat(44)], metaDescription: inRangeDescription };

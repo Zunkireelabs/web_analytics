@@ -3,6 +3,7 @@ import { callLLM, callLLMForJson } from '../llm.js';
 import { getSiteById } from '../store/read.js';
 import { searchClaimsFor, titleClaimBansFor, findBannedPhrases } from './lib/visible-claim-guard.js';
 import { llmFailure } from './lib/llm-error.js';
+import { matchesSiteArticleUrl } from './lib/article-page.js';
 
 export const meta = {
   id: 'meta-title',
@@ -76,7 +77,8 @@ export async function generate({ siteId, params }) {
   const site = await getSiteById(siteId).catch(() => null);
   const searchClaims = searchClaimsFor(site);
   // Words this site never wants in a title or description (titleClaimBans), on every page except a blog post / article.
-  const titleBans = isArticlePage ? [] : titleClaimBansFor(site);
+  // A blog post that is drafted but not published yet cannot be read, so the site's own blog URL pattern ("/blogs/{slug}") counts too.
+  const titleBans = (isArticlePage || matchesSiteArticleUrl(page, site)) ? [] : titleClaimBansFor(site);
   const titleBanNote = titleBans.length
     ? ` Never use any of these words or phrases anywhere in a title or the meta description: ${titleBans.map((b) => `"${b}"`).join(', ')}. ` +
       'Describe the business in other plain, accurate words instead (for example "partner" or "advisors").'

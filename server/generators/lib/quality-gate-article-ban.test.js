@@ -18,6 +18,11 @@ describe('runQualityGate — word ban follows the PAGE, not the generator', () =
     assert.equal(banned(onBlog), false);
     assert.equal(banned(onLanding), true);
   });
+  test('an unpublished blog post is exempt by the site blog URL pattern, for any generator', async () => {
+    const withPattern = { url_file_map: { ...site.url_file_map, newContentTargets: { 'blog-outline': { urlPattern: '/blogs/{slug}' } } } };
+    assert.equal(banned(await runQualityGate(content, 'faq', 1, { site: withPattern, page: 'https://x.test/blogs/not-live-yet' })), false);
+    assert.equal(banned(await runQualityGate(content, 'faq', 1, { site: withPattern, page: 'https://x.test/not-a-post' })), true);
+  });
   test('no page known: the ban applies', async () => {
     assert.equal(banned(await runQualityGate(content, 'expand-content', 1, { site })), true);
   });
