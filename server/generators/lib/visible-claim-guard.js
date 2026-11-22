@@ -40,6 +40,18 @@ export function visibleClaimBansExemptGeneratorsFor(site) {
   return Array.isArray(list) ? list.filter((g) => typeof g === 'string' && g.trim()).map((g) => g.trim()) : [];
 }
 
+// Words a site never wants in a TITLE TAG or META DESCRIPTION either (url_file_map.siteRoot.titleClaimBans). Separate from visibleClaimBans,
+// which deliberately leaves the search-only fields alone. meta-title.js applies it to every page except article-like ones (blog posts).
+export function titleClaimBansFor(site) {
+  const list = site?.url_file_map?.siteRoot?.titleClaimBans;
+  return Array.isArray(list) ? list.filter((p) => typeof p === 'string' && p.trim()).map((p) => p.trim()) : [];
+}
+
+export function findBannedPhrases(text, bans) {
+  const t = String(text ?? '');
+  return (bans || []).filter((p) => new RegExp(`(?<![\\w])${escapeRe(p).replace(/\s+/g, '\\s+')}(?![\\w])`, 'i').test(t));
+}
+
 export function searchClaimsFor(site) {
   const list = site?.url_file_map?.siteRoot?.searchClaims;
   return Array.isArray(list) ? list.filter((p) => typeof p === 'string' && p.trim()).map((p) => p.trim()) : [];

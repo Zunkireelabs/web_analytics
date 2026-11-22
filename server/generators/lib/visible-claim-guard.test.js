@@ -27,7 +27,7 @@ describe('findVisibleClaimIssues', () => {
   });
 });
 
-import { searchClaimsFor, visibleClaimBansExemptGeneratorsFor } from './visible-claim-guard.js';
+import { searchClaimsFor, visibleClaimBansExemptGeneratorsFor, titleClaimBansFor, findBannedPhrases } from './visible-claim-guard.js';
 describe('searchClaimsFor', () => {
   test('reads the per-site list and tolerates a missing one', () => {
     assert.deepEqual(searchClaimsFor({ url_file_map: { siteRoot: { searchClaims: ['best consultancy', ' '] } } }), ['best consultancy']);
@@ -49,5 +49,16 @@ describe('per-site generator exemption (blog may use the word, landing pages may
   test('reads the list and tolerates a missing one', () => {
     assert.deepEqual(visibleClaimBansExemptGeneratorsFor(s2), ['blog-outline']);
     assert.deepEqual(visibleClaimBansExemptGeneratorsFor(null), []);
+  });
+});
+
+describe('titleClaimBansFor / findBannedPhrases', () => {
+  test('reads the per-site list and matches whole words only, case-insensitively', () => {
+    const site = { url_file_map: { siteRoot: { titleClaimBans: ['consultancy', ' '] } } };
+    assert.deepEqual(titleClaimBansFor(site), ['consultancy']);
+    assert.deepEqual(titleClaimBansFor(null), []);
+    assert.deepEqual(findBannedPhrases('Study Abroad Consultancy in Nepal', ['consultancy']), ['consultancy']);
+    assert.deepEqual(findBannedPhrases('Study abroad partner', ['consultancy']), []);
+    assert.deepEqual(findBannedPhrases('consultancyfoo', ['consultancy']), []);
   });
 });
