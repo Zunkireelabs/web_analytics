@@ -36,7 +36,11 @@ mock.module(resolve('./lib/recommendation-coordinator.js'), {
   },
 });
 
-const { run, meta, defaultCapture } = await import('./visual-quality.js');
+// run() launches a REAL headless browser as a preflight (lib/browser-preflight.js) unless a checkBrowser is injected. These tests are about
+// what the agent does with the captures it is given, so the browser is stood in for: otherwise they pass only where Chromium is installed and idle
+// (a developer machine) and fail on a CI runner with no browser or under load ("insufficient-data" instead of the result under test).
+const { run: runAgent, meta, defaultCapture } = await import('./visual-quality.js');
+const run = (opts) => runAgent({ checkBrowser: async () => ({ ok: true }), ...opts });
 
 function page(url, screenshot = 'base64data') {
   return { url, pageType: 'homepage', title: 'T', blocks: [], screenshot };
