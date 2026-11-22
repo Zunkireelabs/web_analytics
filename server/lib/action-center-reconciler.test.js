@@ -197,7 +197,9 @@ function fakeQuery(text, params = []) {
 const resolve = (p) => new URL(p, import.meta.url).href;
 const { mock } = await import('node:test');
 mock.module(resolve('../db.js'), {
-  namedExports: { query: (text, params) => fakeQuery(text, params) },
+  namedExports: { query: (text, params) => fakeQuery(text, params),
+    // Named imports of modules in this test's import graph that are never exercised here; without them Node cannot link the graph.
+    updateSiteRepoConfig: async () => { throw new Error('not exercised'); } },
 });
 mock.module(resolve('../agents/lib/recommendation-coordinator.js'), {
   namedExports: {

@@ -76,7 +76,7 @@ export async function hasRecentNotification(siteId, type, sinceDays) {
 // Same day-scoping idiom as store/drafts.js's countDraftsBySourceToday.
 // Bell-only nudges that must never count as "an email notification already went out today" — otherwise a 10:00 approval reminder in the
 // bell would silence the day's real alert email.
-export const IN_APP_ONLY_TYPES = ['approval-reminder'];
+export const IN_APP_ONLY_TYPES = ['approval-reminder', 'config-audit'];
 
 export async function hasNotificationToday(siteId, timezone = 'UTC') {
   const { rows } = await query(

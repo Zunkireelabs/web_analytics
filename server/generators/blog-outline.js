@@ -16,6 +16,7 @@ import { contentFocusLine } from '../lib/business-profile.js';
 import { attributionNote, globalGrowthNote, agencyCreditLine } from '../agents/lib/zunkireelabs-growth-policy.js';
 import { llmFailure } from './lib/llm-error.js';
 import { getFileContent } from '../github/client.js';
+import { acceptQuickAnswer, acceptFaqItems } from './lib/blog-contract-fields.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
@@ -250,7 +251,13 @@ export async function generate({ siteId, params }) {
         'these genuinely fit this post\'s topic, list their exact titles in "categories" — choosing ONLY from that ' +
         'list, never inventing one; an empty array if none fit. '
       : '') +
+    // quickAnswer / faqItems: some clients' builds require an answer-first summary and visible FAQ items on every post. They are written from the
+    // article just produced and checked afterwards (lib/blog-contract-fields.js): any figure that is not in the sections is dropped. No sources or URLs.
+    'Also write "quickAnswer": one or two plain sentences (40 to 300 characters) that directly answer the post\'s main question, and ' +
+    '"faqItems": 3 to 5 question-and-answer pairs a reader would ask, each answer 40 to 500 characters. Use ONLY facts, names and figures ' +
+    'already stated in the sections you wrote — never add a new number, date, price or claim, and never include a URL or a source link. ' +
     'Respond with ONLY a JSON object: {"title": "...", "metaDescription": "...", ' +
+    '"quickAnswer": "...", "faqItems": [{"question": "...?", "answer": "..."}], ' +
     '"sections": [{"heading": "...", "body": "..."}], "suggestedFaqTopics": ["...", "..."], ' +
     '"suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]' +
     (realCategories.length ? ', "categories": ["..."]' : '') + '}';
@@ -281,7 +288,7 @@ export async function generate({ siteId, params }) {
     + (designCorrections ? `\n\n${designCorrections}` : '');
   let parsed;
   try {
-    parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 2500, generatorId: meta.id, siteId });
+    parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 3200, generatorId: meta.id, siteId });
   } catch (err) {
     throw llmFailure(err, 'Blog post generation failed: model did not return valid JSON', { status: 400 });
   }
@@ -374,6 +381,8 @@ export async function generate({ siteId, params }) {
     title: parsed.title || '',
     metaDescription: parsed.metaDescription || '',
     sections,
+    // Only what is demonstrably grounded in the final sections survives; sources are never generated (a person supplies them).
+    ...(() => { const qa = acceptQuickAnswer(parsed.quickAnswer, sections); const faq = acceptFaqItems(parsed.faqItems, sections); return { ...(qa ? { quickAnswer: qa } : {}), ...(faq.length ? { faqItems: faq } : {}) }; })(),
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
     categories,

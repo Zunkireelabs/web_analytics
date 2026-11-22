@@ -1,4 +1,4 @@
-import { test, describe, mock, beforeEach } from 'node:test';
+import { test, describe, mock, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 // The page-type classification (generators/lib/content-type.js) at the two route-level points that matter:
@@ -8,6 +8,9 @@ import assert from 'node:assert/strict';
 // Same approach as action-center.approve-publish.characterization.test.js: the real module, with only the collaborators that would reach
 // the database, the model, GitHub or a browser replaced.
 const R = (p) => new URL(p, import.meta.url).href;
+// The real `openai` package cannot be linked under node:test's module mocking (openai -> formdata-node -> web-streams-polyfill has no ESM named
+// export `ReadableStream` there), and the real generators/registry.js below reaches it through llm.js. No model is called here, so it is stubbed.
+mock.module('openai', { defaultExport: class FakeOpenAI {} });
 const real = async (p) => ({ ...(await import(R(p))) });
 const calls = [];
 let st;
@@ -42,7 +45,16 @@ mock.module(R('../generators/lib/quality-gate.js'), { namedExports: { ...(await 
 mock.module(R('../generators/registry.js'), { namedExports: { ...(await real('../generators/registry.js')),
   getGenerator: async (id) => ({ meta: { id }, generate: async ({ params }) => { st.generatorParams = params; return { content: { sections: [] }, summary: 'ok' }; } }) } });
 
+// runSafeFixesJob calls generateDraft with waitForDesignAgent: true, which asks resolveOrCreateComponentTemplate to start a Design Agent run for the
+// missing component template and WAIT for it (up to a long budget) — for these fixture sites that never finishes, so the whole file stalled. Page
+// classification does not depend on the template, so it reports "not available" at once, exactly what a site with no design context answers.
+mock.module(R('../implementers/lib/design-drift.js'), { namedExports: { ...(await real('../implementers/lib/design-drift.js')),
+  resolveOrCreateComponentTemplate: async () => ({ ok: false, reason: 'missing' }),
+} });
 const { validateDraft, generateDraft, runSafeFixesJob } = await import(R('./action-center.js'));
+
+// The real db.js is in the import graph and opens a connection pool; without closing it the process never exits and the file reports a timeout.
+after(async () => { const { pool } = await import(R('../db.js')); await pool.end().catch(() => {}); });
 
 beforeEach(() => { calls.length = 0; st = fresh(); });
 

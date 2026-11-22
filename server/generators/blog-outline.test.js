@@ -158,7 +158,7 @@ describe('blog-outline generator — real-category validation', () => {
     return [{ heading: 'Section', body: Array(850).fill('word').join(' ') }];
   }
 
-  async function runWithMocks({ categoriesResult, llmCategories }) {
+  async function runWithMocks({ categoriesResult, llmCategories, llmExtra = {} }) {
     const original = globalThis.fetch;
     globalThis.fetch = async (url) => {
       if (String(url).includes('apicdn.sanity.io')) {
@@ -166,7 +166,7 @@ describe('blog-outline generator — real-category validation', () => {
       }
       const text = JSON.stringify({
         title: 'T', metaDescription: 'D', sections: longEnoughSections(),
-        suggestedFaqTopics: [], suggestedInternalLinks: [], categories: llmCategories,
+        suggestedFaqTopics: [], suggestedInternalLinks: [], categories: llmCategories, ...llmExtra,
       });
       const body = { id: 'msg', type: 'message', role: 'assistant', content: [{ type: 'text', text }], model: 'claude-haiku-4-5', stop_reason: 'end_turn', usage: {} };
       return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -208,6 +208,29 @@ describe('blog-outline generator — real-category validation', () => {
       llmCategories: ['Study Abroad', 'Made Up Category That Does Not Exist'],
     });
     assert.deepEqual(content.categories, [{ slug: 'study-abroad', title: 'Study Abroad' }]);
+  });
+
+  const faq = (n) => Array.from({ length: n }, (_, i) => ({ question: `What does part ${i} of the guide cover?`, answer: 'It explains the step in plain words, using only what the guide already says about it.' }));
+
+  test('quickAnswer and faqItems the model writes from the post are kept when grounded (no invented figures, no links)', async () => {
+    const { content } = await runWithMocks({
+      categoriesResult: [], llmCategories: [],
+      llmExtra: { quickAnswer: 'The guide explains each step in plain words, using only what the post itself already says.', faqItems: faq(3) },
+    });
+    assert.match(content.quickAnswer, /^The guide explains each step/);
+    assert.equal(content.faqItems.length, 3);
+    assert.equal(content.sources, undefined, 'sources are never generated');
+  });
+
+  test('an invented figure or a link drops the field instead of shipping it; fewer than three FAQ items yields none', async () => {
+    const { content } = await runWithMocks({
+      categoriesResult: [], llmCategories: [],
+      llmExtra: { quickAnswer: 'The fee is £999 for everyone according to the guide, which the post never states.', faqItems: faq(2) },
+    });
+    assert.equal(content.quickAnswer, undefined);
+    assert.equal(content.faqItems, undefined);
+    const linky = await runWithMocks({ categoriesResult: [], llmCategories: [], llmExtra: { faqItems: [...faq(3).slice(0, 2), { question: 'Where do I read more?', answer: 'Read more at https://example.com/guide for everything the guide says about it.' }] } });
+    assert.equal(linky.content.faqItems, undefined);
   });
 
   test('more than 3 real categories picked is capped at 3', async () => {
