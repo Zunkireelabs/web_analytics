@@ -309,6 +309,24 @@ export async function approveDraft(siteId, id, approvedBy) {
 // lives" identifier is a draft document id. Recorded here rather than only at
 // awaiting_publish so mergeToStage has it — the same reason branch_name is
 // written at this step and not at pr_opened. NULL for every GitHub-path draft.
+// Saves the page-type classification (generators/lib/content-type.js) onto a draft that has none — a draft made before classification
+// existed — so later steps read it instead of re-deriving it. Only fills a gap: it never overwrites a stored classification, and it
+// changes nothing else about the draft (no status or timestamp), because this is bookkeeping, not an edit.
+export async function saveDraftPageClassification(siteId, id, classification) {
+  if (!classification || typeof classification !== 'object') return null;
+  const pageType = classification.status === 'resolved' && classification.pageType ? classification.pageType : null;
+  const { rows } = await query(
+    `UPDATE drafts
+        SET input = COALESCE(input, '{}'::jsonb)
+                    || jsonb_build_object('pageClassification', $3::jsonb)
+                    || CASE WHEN $4::text IS NOT NULL THEN jsonb_build_object('pageType', $4::text) ELSE '{}'::jsonb END
+      WHERE site_id = $1 AND id = $2 AND NOT (COALESCE(input, '{}'::jsonb) ? 'pageClassification')
+      RETURNING id`,
+    [siteId, id, JSON.stringify(classification), pageType],
+  );
+  return rows[0] || null;
+}
+
 export async function markDraftBranchPushed(siteId, id, { branchName, implementerId, renderMode = null, appliedFiles = null, targetProvenance = null, cmsDocumentId = null, cmsReviewUrl = null }) {
   const { rows } = await query(
     `UPDATE drafts SET status = 'branch_pushed', branch_name = $3, implementer_id = $4, render_mode = $5,

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { knownDomain, filterOwnDomainPages } from './site-domain.js';
+import { filterByScope } from './site-scope.js';
 import {
   COVERAGE_STATUSES, AMBIGUOUS_OVERLAP, LOCATION_CODE_TO_MARKET,
   topicTokens, detectLanguage, detectMarkets, languageNameToCode, scoreCandidate, decideCoverage, baseLang, pageSignals, buildTokenWeights,
@@ -66,7 +67,7 @@ function sqlWords(text) {
 
 async function gatherCandidates({ siteId, site, tokenLists, sqlTextList, deps }) {
   const domain = site ? knownDomain(site) : null;
-  const ownOnly = (rows, get) => (domain ? filterOwnDomainPages(rows, domain, get) : rows);
+  const ownOnly = (rows, get) => filterByScope(domain ? filterOwnDomainPages(rows, domain, get) : rows, site, get);
   const byUrl = new Map();
   const upsert = (url) => {
     const k = urlKey(url);

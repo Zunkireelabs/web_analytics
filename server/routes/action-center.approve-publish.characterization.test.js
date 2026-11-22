@@ -1,5 +1,8 @@
 import { test, describe, mock, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { stubOpenAI } from '../test-support/stub-openai.js';
+
+stubOpenAI(mock); // Node 20: see test-support/stub-openai.js
 
 // CHARACTERIZATION TESTS for approveAndPublishDraft(): they record what the function does TODAY, before validation is extracted
 // from publishing. They are deliberately about observable behaviour (what is called, in what order, what is thrown, what is

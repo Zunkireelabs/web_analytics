@@ -51,6 +51,9 @@ mock.module(resolve('../github/client.js'), {
 
 const prompts = []; const unexpectedLlm = [];
 // The real module's pure helpers and constants are kept; every call that would reach a model is replaced.
+// The real `openai` package cannot be linked under node:test's module mocking (openai -> formdata-node -> web-streams-polyfill has no ESM named
+// export `ReadableStream` there), and importing the real llm.js below reaches it. Every model call in this file is replaced, so the package is stubbed.
+mock.module('openai', { defaultExport: class FakeOpenAI {} });
 const realLlm = await import('../llm.js');
 mock.module(resolve('../llm.js'), {
   namedExports: {

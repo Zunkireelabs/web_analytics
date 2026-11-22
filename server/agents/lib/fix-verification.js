@@ -17,6 +17,7 @@ import { FAILURE_CLASS } from '../../lib/failure-classification.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { topLevelCategoryForGenerator } from '../../generators/lib/pattern-categories.js';
 import { getSiteById } from '../../store/read.js';
+import { matchLinksPresent, matchSchemaState, matchMetaTags, normalizeForMatch } from './verification-matchers.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { computeSiteFingerprint } from './site-fingerprint.js';
 import { getOrClassifyPageContentType } from './page-content-classifier.js';
@@ -296,16 +297,25 @@ async function checkRedirect(row) {
 function matchPageContent(html, expected, pageUrl = null) {
   const needle = expected?.needle;
   if (!needle) return { present: null, evidence: { error: 'no excerpt was recorded to look for' } };
-  const wanted = needle.replace(/\s+/g, ' ').trim().toLowerCase();
+  const wanted = normalizeForMatch(needle);
   // Checked against BOTH the visible text and the raw markup: plenty of real
   // shipped content never appears as visible text — JSON-LD inside a
   // <script type="application/ld+json">, an alt attribute, an OG meta tag —
   // and tag-stripping alone would report those as missing when they are
   // sitting right there.
-  const visibleText = stripHtmlToText(html).toLowerCase();
-  const rawMarkup = html.replace(/\s+/g, ' ').toLowerCase();
+  const visibleText = normalizeForMatch(stripHtmlToText(html));
+  const rawMarkup = normalizeForMatch(html);
   const present = visibleText.includes(wanted) || rawMarkup.includes(wanted);
   return { present, evidence: { needle, page: pageUrl, foundIn: present ? (visibleText.includes(wanted) ? 'text' : 'markup') : null } };
+}
+
+// The three structure-aware methods: re-read the live page and run the same matcher the pre-approval check ran on the file.
+async function checkLiveHtml(row) {
+  const fetched = await fetchHtml(row.page_url);
+  if (!fetched.ok) return { present: null, evidence: { error: fetched.error } };
+  if (row.method === VERIFICATION_METHOD.LINKS_PRESENT) return matchLinksPresent(fetched.html, row.expected);
+  if (row.method === VERIFICATION_METHOD.SCHEMA_STATE) return matchSchemaState(fetched.html, row.expected);
+  return matchMetaTags(fetched.html, row.expected);
 }
 
 async function checkPageContent(row) {
@@ -323,7 +333,7 @@ async function checkPageContent(row) {
 // against content that hasn't been committed yet at all.
 function matchRepoFileNeedle(content, needle, path) {
   if (!content) return { present: false, evidence: { path, reason: 'file is absent or empty' } };
-  if (needle && !content.replace(/\s+/g, ' ').toLowerCase().includes(needle.replace(/\s+/g, ' ').trim().toLowerCase())) {
+  if (needle && !normalizeForMatch(content).includes(normalizeForMatch(needle))) {
     return { present: false, evidence: { path, reason: 'file exists but no longer contains the shipped content' } };
   }
   return { present: true, evidence: { path } };
@@ -362,6 +372,9 @@ export function checkContentAgainstExpectation(method, expected, content, pageUr
     case VERIFICATION_METHOD.PAGE_PATTERN: return { checkable: true, ...matchPagePattern(content, expected) };
     case VERIFICATION_METHOD.PAGE_ABSENCE: return { checkable: true, ...matchPageAbsence(content, expected) };
     case VERIFICATION_METHOD.PAGE_CONTENT: return { checkable: true, ...matchPageContent(content, expected, pageUrl) };
+    case VERIFICATION_METHOD.LINKS_PRESENT: return { checkable: true, ...matchLinksPresent(content, expected) };
+    case VERIFICATION_METHOD.SCHEMA_STATE: return { checkable: true, ...matchSchemaState(content, expected) };
+    case VERIFICATION_METHOD.META_TAGS: return { checkable: true, ...matchMetaTags(content, expected) };
     case VERIFICATION_METHOD.REPO_FILE: {
       const files = expected?.files || [];
       if (!files.length) return { checkable: true, present: null, evidence: { error: 'no file path recorded for this change' } };
@@ -383,6 +396,9 @@ async function runMethodCheck(row, site) {
     case VERIFICATION_METHOD.PAGE_ABSENCE: return checkPageAbsence(row);
     case VERIFICATION_METHOD.REDIRECT: return checkRedirect(row);
     case VERIFICATION_METHOD.PAGE_CONTENT: return checkPageContent(row);
+    case VERIFICATION_METHOD.LINKS_PRESENT:
+    case VERIFICATION_METHOD.SCHEMA_STATE:
+    case VERIFICATION_METHOD.META_TAGS: return checkLiveHtml(row);
     case VERIFICATION_METHOD.REPO_FILE: return checkRepoFile(row, site);
     default: return { present: null, evidence: { error: `no verification method recorded (${row.method ?? 'null'})` } };
   }

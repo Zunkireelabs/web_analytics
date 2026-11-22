@@ -8,7 +8,11 @@ process.env.DATABASE_URL ||= 'postgres://test:test@localhost:5432/test';
 const resolve = (p) => new URL(p, import.meta.url).href;
 mock.module(resolve('../llm.js'), { namedExports: { callLLM: async () => 'stubbed narrative' } });
 
-const { run, meta } = await import('./font-consistency.js');
+// run() launches a REAL headless browser as a preflight (lib/browser-preflight.js) unless a checkBrowser is injected. These tests are about
+// what the agent does with the captures it is given, so the browser is stood in for: otherwise they pass only where Chromium is installed and idle
+// (a developer machine) and fail on a CI runner with no browser or under load ("insufficient-data" instead of the result under test).
+const { run: runAgent, meta } = await import('./font-consistency.js');
+const run = (opts) => runAgent({ checkBrowser: async () => ({ ok: true }), ...opts });
 
 function h(tag, fontSize, outerHtml, classes = '', ancestorClass = null, rawFontSizeDeclaration = null) {
   return { tag, fontSize, outerHtml, inlineStyle: null, classes, text: '', ancestorClass, rawFontSizeDeclaration };

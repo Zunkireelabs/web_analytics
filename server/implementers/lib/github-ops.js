@@ -9,6 +9,7 @@ import { routeBatch } from '../../lib/pr-routing.js';
 import { listBatchActionTypes, setBatchPrBase } from '../../store/drafts.js';
 import { todayInTz } from '../../util/dates.js';
 import { validateRenderingBatch } from './rendering-gate.js';
+import { validateWriteScope } from './write-scope-gate.js';
 import { validateSectionPreservation } from './section-preservation-gate.js';
 import { actionScopeFor } from './action-scope.js';
 import { findMarkerCorruption } from './marker-merge.js';
@@ -368,6 +369,10 @@ export async function pushDraftBranch(site, draft, files, target) {
   // the shared branch. Every implementer funnels through this one function,
   // so this is the single place a future generator/implementer inherits the
   // gate automatically, with no per-generator code.
+  // Repo write scope first: a file this site does not own (shared repo) must never even be rendered, let alone written.
+  const scopeGate = validateWriteScope(site, files);
+  if (!scopeGate.ok) return scopeGate;
+
   const renderGate = await validateRenderingBatch(site, files);
   if (!renderGate.ok) return renderGate;
 

@@ -440,7 +440,7 @@ export async function validatePageDesign(site, pageUrl, {
       if (!entry) return { fail: 'sample-not-captured' };
       const sampleUrl = absUrl(group.sample);
       let sampleLive;
-      try { sampleLive = pathKey(sampleUrl) === pathKey(pageUrl) ? page : await live(sampleUrl); } catch { return { fail: 'sample-unreachable' }; }
+      try { sampleLive = pathKey(sampleUrl) === pathKey(pageUrl) ? page : await live(sampleUrl); } catch (err) { return { fail: isGone(err) ? 'sample-gone' : 'sample-unreachable', httpStatus: err?.httpStatus ?? null }; }
       const cov = captureCoverage(entry.sections, sampleLive.html);
       if (cov.coverage === null || cov.coverage < MIN_CAPTURE_COVERAGE) return { fail: 'sample-stale', coverage: cov.coverage };
       return { entry, sampleLive, sampleUrl, coverage: cov.coverage };
@@ -464,17 +464,56 @@ export async function validatePageDesign(site, pageUrl, {
       return { ok: false, result: await provisionalCapture(`structure matches ${group.id} but the rendered design differs (${summary})`, { ...signals, visual: { verdict: 'regression', issues: v.issues.slice(0, 20) } }, 'new-group', null).then((r) => (r.status === 'provisional' ? { ...r, uncertain: true, visualMismatch: true } : r)) };
     };
 
+    const isGone = (err) => err?.httpStatus === 404 || err?.httpStatus === 410;
+
+    // Another page of the SAME group (its own member list), read live and confirmed to share this page's layout. This page itself is
+    // a valid replacement when it is the only reachable member. `ok:false` means other members exist but this page does not look like
+    // them, so it is not safely "the same group" and the caller falls back to the ordinary matching.
+    const findReplacementSample = async (group) => {
+      const members = (group.members || []).filter((m) => pathKey(m) !== pathKey(group.sample) && pathKey(m) !== pathKey(pageUrl)).slice(0, maxGroupScan);
+      const read = await mapLimit(members, scanConcurrency, async (m) => {
+        const url = absUrl(m);
+        if (!url) return null;
+        try { const sl = await live(url); return { url, cmp: compareLayouts(page.fp, sl.fp) }; } catch { return null; } // a dead or unreachable member is simply not a candidate
+      });
+      const reachable = read.filter(Boolean);
+      const match = reachable.filter((r) => r.cmp.verdict === 'match').sort((a, b) => b.cmp.similarity - a.cmp.similarity)[0];
+      if (match) return { ok: true, url: match.url, signals: match.cmp, self: false };
+      if (!reachable.length) return { ok: true, url: pageUrl, signals: null, self: true };
+      return { ok: false, nearest: reachable.sort((a, b) => b.cmp.similarity - a.cmp.similarity)[0].cmp };
+    };
+
     const assigned = layoutGroupFor(profile, pageUrl);
     let assignedSignals = null;
 
     if (assigned) {
       const sampleUrl = absUrl(assigned.sample);
-      let sampleLive;
-      try { sampleLive = pathKey(sampleUrl) === pathKey(pageUrl) ? page : await live(sampleUrl); } catch {
-        return blocked('group-sample-unreachable', `Cannot read this page's group sample (${assigned.sample}) to compare against, and a stale design is not used.`, { groupId: assigned.id });
+      let sampleLive; let sampleGone = null;
+      try { sampleLive = pathKey(sampleUrl) === pathKey(pageUrl) ? page : await live(sampleUrl); } catch (err) {
+        // The real HTTP status is kept. A 404/410 sample was DELETED: that is a fact about one page, not an outage, and it must not
+        // park every other page of the group (29 Mobilise blog pages were held for one deleted sample). Anything else (timeout,
+        // 5xx, network) is a genuine "cannot read it right now" and stays a transient block.
+        if (!isGone(err)) {
+          return blocked('group-sample-unreachable', `Cannot read this page's group sample (${assigned.sample}) to compare against, and a stale design is not used.`, { groupId: assigned.id, httpStatus: err?.httpStatus ?? null });
+        }
+        sampleGone = err.httpStatus;
       }
-      assignedSignals = compareLayouts(page.fp, sampleLive.fp);
-      if (assignedSignals.verdict === 'match') {
+      if (sampleGone) {
+        // sample_gone: pick another page of the SAME group, confirmed by layout, then re-capture and propose it as the group's new
+        // sample (a baseline decision, so proposed and reviewed, never applied automatically). Never a page from another group.
+        const rep = await findReplacementSample(assigned);
+        if (rep.ok) {
+          const r = await provisionalCapture(
+            `the group's recorded sample ${assigned.sample} no longer exists (HTTP ${sampleGone}); ${rep.self ? 'this page is the only reachable member' : `this page shares its layout with ${rep.url}, another member of the group`}, so this page is captured as the replacement`,
+            { ...(rep.signals || {}), sampleGone: { sample: assigned.sample, httpStatus: sampleGone, replacement: pageUrl, confirmedAgainst: rep.self ? null : rep.url } }, 'replace-sample', assigned.id,
+          );
+          return r.status === 'provisional' ? { ...r, sampleGone: true } : r;
+        }
+        assignedSignals = rep.nearest || null; // this page does not look like its group's other members: fall through to the other-group scan
+      } else {
+        assignedSignals = compareLayouts(page.fp, sampleLive.fp);
+      }
+      if (assignedSignals?.verdict === 'match') {
         const cur = await sampleCurrent(assigned);
         if (!cur.fail) {
           const vis = await visuallyConfirm(assigned, assignedSignals);
@@ -514,7 +553,7 @@ export async function validatePageDesign(site, pageUrl, {
     }
 
     const nearest = [assignedSignals, best?.cmp].filter(Boolean).sort((a, b) => b.similarity - a.similarity)[0] || null;
-    const why = assigned ? `its group's layout no longer matches (${assignedSignals.similarity} similar)` : 'it has no layout group yet';
+    const why = assigned ? (assignedSignals ? `its group's layout no longer matches (${assignedSignals.similarity} similar)` : 'its group has no readable sample and it does not match the group\'s other pages') : 'it has no layout group yet';
     const uncertain = nearest && nearest.verdict === 'uncertain';
     return provisionalCapture(
       uncertain ? `${why}; closest known layout is only an uncertain match` : why,

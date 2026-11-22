@@ -1,6 +1,7 @@
 import { test, describe, mock, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import bcrypt from 'bcryptjs';
+import { strictExports } from '../test-support/strict-exports.js';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
@@ -33,12 +34,12 @@ mock.module(resolve('../store/workspaces.js'), {
 let userStatus;
 let siteStatus;
 mock.module(resolve('../store/users.js'), {
-  namedExports: {
+  namedExports: await strictExports(resolve('../store/users.js'), {
     getUserById: async () => ({ id: 10, role: 'tenant_admin', site_id: 2 }),
     getUserByEmail: async () => loginUser,
     updateUserPassword: async () => { throw new Error('not exercised by these tests'); },
     getUserStatus: async () => userStatus,
-  },
+  }),
 });
 mock.module(resolve('../store/read.js'), {
   namedExports: { getSiteById: async () => null, getSiteStatus: async () => siteStatus },

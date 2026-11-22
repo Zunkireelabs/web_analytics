@@ -1,6 +1,9 @@
 import { getSiteById } from '../store/read.js';
 import { ownDomains, hostnameOf } from '../agents/lib/site-domain.js';
 import { analyzePageUrl } from '../agents/lib/page-content.js';
+import { isSharedTemplateFile, resolveAdapter, resolveFile } from '../implementers/lib/url-file-map.js';
+import { supportsTemplateBreadcrumbs } from '../implementers/lib/template-breadcrumbs.js';
+import { resolvePageMove } from '../lib/redirect-resolution.js';
 
 // Pure, deterministic generator — no LLM call, same shape as canonical.js.
 // A BreadcrumbList's correct value here is simply the page's own real URL
@@ -24,7 +27,21 @@ function titleCaseSlug(slug) {
 }
 
 // params: { page: string }
-export async function generate({ siteId, params }) {
+const siteNameOf = (site, url) => site?.name || url.hostname;
+// "Page title | Site name" -> "Page title". Kept only when it is a sensible length; otherwise the caller falls back to the slug.
+export function cleanTitle(title, siteName) {
+  let t = String(title || '').replace(/&amp;/g, '&').trim();
+  if (!t) return null;
+  const parts = t.split(/\s+[|\u2013\u2014-]\s+/).map((x) => x.trim()).filter(Boolean);
+  if (parts.length > 1) {
+    const name = String(siteName || '').toLowerCase();
+    const kept = parts.filter((p) => !name || !p.toLowerCase().includes(name.split(' ')[0]));
+    t = (kept.length ? kept : parts)[0];
+  }
+  return t.length >= 2 && t.length <= 90 ? t : null;
+}
+
+export async function generate({ siteId, params }, deps = {}) {
   const { page } = params || {};
   if (!page) throw Object.assign(new Error('page is required'), { status: 400 });
 
@@ -42,6 +59,22 @@ export async function generate({ siteId, params }) {
     throw Object.assign(new Error(`"${page}" is not on this site's own domain (${domains.join(', ')}) — refusing to draft breadcrumbs for a page we can't confirm is real.`), { status: 400 });
   }
 
+  // A page whose file is a template shared by many URLs cannot take a static, page-specific trail: it would appear on every page that
+  // uses the template. For a template of a supported stack (Next.js app router, Astro dynamic page, Eleventy/Nunjucks) the draft is instead ONE edit to the template that builds the trail from the
+  // page's own address and heading (implementers/lib/template-breadcrumbs.js), so every page using it is covered at once. Any
+  // other kind of shared template needs a person: parked once with the reason, never a wrong trail written everywhere.
+  const shared = site && !resolveAdapter(site, page, 'breadcrumbs') && isSharedTemplateFile(site, page);
+  let templateFile = null;
+  if (shared) {
+    templateFile = resolveFile(site, page);
+    if (!supportsTemplateBreadcrumbs(templateFile)) {
+      throw Object.assign(
+        new Error('This page is built from a template shared by many pages, so one fixed breadcrumb trail would appear on all of them. It needs a template change that builds the trail from each page\'s own name and URL.'),
+        { status: 400, userFacing: true, needsInput: true, reason: 'needs-input:shared-template-breadcrumbs' },
+      );
+    }
+  }
+
   // The page already carries a real BreadcrumbList — drafting another would
   // produce a second, duplicate JSON-LD block rather than filling a real
   // gap. Same "re-check live rather than trust the caller" reasoning as
@@ -56,19 +89,45 @@ export async function generate({ siteId, params }) {
     );
   }
 
-  const siteName = site?.name || url.hostname;
-  const itemListElement = [{ '@type': 'ListItem', position: 1, name: siteName, item: `${url.origin}/` }];
+  if (templateFile) {
+    return {
+      content: { page, templateEdit: { file: templateFile, origin: url.origin, pagePath: url.pathname } },
+      summary: `Breadcrumbs for every page built from ${templateFile} (one template edit; each page's trail is built from its own address and heading)`,
+    };
+  }
+
+  // Only REAL pages go in the trail: an ancestor that is a 404 (for example /category when only /category/<name> exists) is skipped,
+  // so the markup never points a search engine at a page that is not there. The last crumb is the page's own title when it can be read
+  // (the slug is only the fallback); the first is "Home".
+  const liveStatus = deps.liveStatus || (async (u) => { const r = await resolvePageMove(u).catch(() => null); return r?.ok && !r.moved && r.status === 200; });
+  const ownTitle = fetched.ok ? cleanTitle(fetched.analysis.title, siteNameOf(site, url)) : null;
+  const itemListElement = [{ '@type': 'ListItem', position: 1, name: 'Home', item: `${url.origin}/` }];
   let pathSoFar = '';
-  segments.forEach((seg, i) => {
-    pathSoFar += `/${seg}`;
-    itemListElement.push({
-      '@type': 'ListItem', position: i + 2, name: titleCaseSlug(seg), item: `${url.origin}${pathSoFar}`,
-    });
-  });
+  for (let i = 0; i < segments.length; i++) {
+    pathSoFar += `/${segments[i]}`;
+    const isLast = i === segments.length - 1;
+    const item = `${url.origin}${pathSoFar}`;
+    // eslint-disable-next-line no-await-in-loop
+    if (!isLast && !(await liveStatus(item))) continue;
+    itemListElement.push({ '@type': 'ListItem', position: itemListElement.length + 1, name: isLast ? (ownTitle || titleCaseSlug(segments[i])) : titleCaseSlug(segments[i]), item });
+  }
 
   const jsonLd = { '@context': 'https://schema.org', '@type': 'BreadcrumbList', itemListElement };
   return {
     content: { page, jsonLd },
     summary: `Breadcrumbs (${itemListElement.length} levels) for ${page}`,
   };
+}
+
+// Is the trail already there? Re-reads the LIVE page (following redirects). A BreadcrumbList that is already on the page is the outcome this
+// generator exists to produce, so there is nothing left to draft. A fetch failure says nothing about the page and never closes anything.
+export async function verifyCurrentState(rec) {
+  const page = rec.params?.page || rec.page;
+  if (!page) return { decision: 'still_valid', reason: 'missing-params', evidence: null };
+  const fetched = await analyzePageUrl(page);
+  if (!fetched.ok) return { decision: 'still_valid', reason: 'unreachable', evidence: { page, error: fetched.error } };
+  const { schemaTypes = [], isRootPage } = fetched.analysis;
+  if (schemaTypes.includes('BreadcrumbList')) return { decision: 'already_resolved', reason: 'breadcrumb-list-already-present', evidence: { page, schemaTypes } };
+  if (isRootPage) return { decision: 'already_resolved', reason: 'homepage-needs-no-trail', evidence: { page } };
+  return { decision: 'still_valid', reason: 'breadcrumb-list-absent', evidence: { page, schemaTypes } };
 }

@@ -20,10 +20,13 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { readSandboxFile, writeSandboxFile, listSandboxFiles, runSandboxCommand } from './sandbox.js';
 
-function pickProvider() {
+export function pickProvider() {
   if (process.env.NATIVE_REPAIR_PROVIDER) return process.env.NATIVE_REPAIR_PROVIDER.toLowerCase();
   const oa = process.env.OPENAI_API_KEY;
-  if (oa && !oa.startsWith('sk-xxxx')) return 'openai';
+  // LLM_OPENAI_PAUSED (see llm.js openAiPaused): OpenAI's spend limit is hit, so go straight to Claude instead of failing a whole repair
+  // run on a 429 first. Same rule as llm.js; duplicated because this module must not import llm.js (see the note above extractJson).
+  const paused = /^(1|true|on|yes)$/i.test(String(process.env.LLM_OPENAI_PAUSED || '').trim()) && Boolean(process.env.ANTHROPIC_API_KEY);
+  if (oa && !oa.startsWith('sk-xxxx') && !paused) return 'openai';
   return 'anthropic';
 }
 

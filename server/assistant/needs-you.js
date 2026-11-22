@@ -17,13 +17,33 @@ export const KIND = { APPROVAL: 'approval', ISSUE: 'issue', DECISION: 'decision'
 
 const WAITING_FOR_APPROVAL = new Set(['draft', 'edited', 'submitted_for_approval']);
 const DAY = 86_400_000;
+export const OVERDUE_AFTER_DAYS = 2;
 
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const ageDays = (at, now) => (at ? Math.max(0, Math.floor((now - new Date(at).getTime()) / DAY)) : 0);
 
 // Pure: raw rows in, ordered items out. `now` is passed in so it is testable.
-export function buildNeedsYou({ drafts = [], stagePromotions = [], agentRuns = [], unresolved = [], connections = [], now = Date.now() } = {}) {
+export function buildNeedsYou({ drafts = [], stagePromotions = [], agentRuns = [], unresolved = [], connections = [], stageBranch = null, now = Date.now() } = {}) {
   const items = [];
+
+  // The agent's own pull requests into STAGE that are open and waiting for the person's word. The person answers in conversation ("looks
+  // good, go ahead"); see assistant/approval-chat.js. One item per PR so a reply can name it. Never main: that PR is merged by a person on GitHub.
+  if (stageBranch) {
+    const byPr = new Map();
+    for (const d of drafts.filter((x) => x.status === 'pr_opened' && x.pr_number && x.pr_base_branch === stageBranch && x.pr_state !== 'closed')) {
+      const e = byPr.get(d.pr_number) || { pr: d.pr_number, url: d.pr_url, types: new Set(), count: 0, created: d.created_at };
+      e.types.add(d.action_type); e.count += 1; byPr.set(d.pr_number, e);
+    }
+    for (const e of byPr.values()) {
+      items.push({
+        key: `approval:stage-pr:${e.pr}`, kind: KIND.APPROVAL, blocksShipping: false, prNumber: e.pr,
+        title: `Ready to merge to stage: pull request #${e.pr} (${plural(e.count, 'change', 'changes')})`,
+        detail: `${[...e.types].slice(0, 5).join(', ')}. Tell me to go ahead and I will merge it to ${stageBranch} once the checks pass, then open the pull request to main for you.`,
+        ageDays: ageDays(e.created, now), count: e.count,
+        actions: [{ id: 'merge_stage_pr', label: 'Go ahead', pr: e.pr }], link: e.url || null,
+      });
+    }
+  }
 
   // Waiting for approval, one item per page it belongs to: fixes are reviewed in Action Center, writing (blog posts, landing pages,
   // translations) in Content. Each item's Review button goes to its own page. There is no "approve all" here: approving a draft is
@@ -111,8 +131,15 @@ export function buildNeedsYou({ drafts = [], stagePromotions = [], agentRuns = [
     });
   }
 
-  // Shipping blockers first, then approvals, then the rest; oldest first inside a group.
-  const rank = (i) => (i.blocksShipping ? 0 : i.kind === KIND.APPROVAL ? 1 : i.kind === KIND.DECISION ? 2 : 3);
+  // Anything that has waited on a person for OVERDUE_AFTER_DAYS or more is overdue: it says so in its title, sorts ahead of fresh approvals,
+  // and is what the assistant raises unprompted and the daily reminder (lib/approval-reminders.js) is about. Computed from the record's age
+  // every time, so a person who answers it makes it vanish and nothing needs "un-snoozing".
+  for (const i of items) {
+    if (i.kind === KIND.APPROVAL && i.ageDays >= OVERDUE_AFTER_DAYS) { i.overdue = true; i.title = `${i.title} — waiting ${plural(i.ageDays, 'day', 'days')}`; }
+  }
+
+  // Shipping blockers first, then overdue approvals, then approvals, then the rest; oldest first inside a group.
+  const rank = (i) => (i.blocksShipping ? 0 : i.overdue ? 0.5 : i.kind === KIND.APPROVAL ? 1 : i.kind === KIND.DECISION ? 2 : 3);
   return items.sort((a, b) => rank(a) - rank(b) || b.ageDays - a.ageDays);
 }
 
@@ -120,7 +147,7 @@ export function buildNeedsYou({ drafts = [], stagePromotions = [], agentRuns = [
 export async function collectNeedsYou(siteId, { now = Date.now(), googleFn = getGoogleConnection, posthogFn = getPosthogConnectionState, db = query, unresolvedFn = listUnresolved, runsFn = async (id) => getLatestAgentRunSummaries(id, (await listAgentMeta()).map((m) => m.id)) } = {}) {
   const safe = (p) => p.catch(() => []);
   const [drafts, stagePromotions, unresolved, agentRuns, google, posthog] = await Promise.all([
-    safe(db(`SELECT id, action_type, status, created_at, apply_error, pr_state FROM drafts
+    safe(db(`SELECT id, action_type, status, created_at, apply_error, pr_state, pr_number, pr_url, pr_base_branch FROM drafts
              WHERE site_id = $1 AND status NOT IN ('implemented', 'abandoned', 'rejected') ORDER BY created_at DESC LIMIT 500`, [siteId]).then((r) => r.rows)),
     safe(db(`SELECT source_pr_number, status, promotion_pr_number, promotion_pr_url, created_at, updated_at FROM stage_promotions
              WHERE site_id = $1 AND status = 'opened'`, [siteId]).then((r) => r.rows)),
@@ -133,5 +160,6 @@ export async function collectNeedsYou(siteId, { now = Date.now(), googleFn = get
     google && { provider: 'google', siteId, status: google.status, status_error: google.status_error, status_at: google.status_at },
     posthog?.connected && { provider: 'posthog', siteId, status: posthog.status },
   ].filter(Boolean);
-  return buildNeedsYou({ drafts, stagePromotions, unresolved, agentRuns: Array.isArray(agentRuns) ? agentRuns : [], connections, now });
+  const stageBranch = await Promise.resolve(db(`SELECT pr_target_branch FROM sites WHERE id = $1`, [siteId]).then((r) => String(r.rows[0]?.pr_target_branch || '').trim() || null)).catch(() => null);
+  return buildNeedsYou({ drafts, stagePromotions, stageBranch, unresolved, agentRuns: Array.isArray(agentRuns) ? agentRuns : [], connections, now });
 }

@@ -99,3 +99,28 @@ describe('layoutRoleFromContract', () => {
     assert.equal(r.role, 'inline-article');
   });
 });
+
+describe('direct-answer is a DEFAULT role, not an intrinsic one', () => {
+  const O = 'https://x.test';
+  const withPages = (pages, extra = {}) => ({ url_file_map: { siteRoot: { designProfile: { pages } }, ...extra } });
+  test('with no site evidence it is still an article body (medium confidence)', () => {
+    const r = resolvePageRole(withPages([]), { actionType: 'direct-answer', pageUrl: `${O}/answers/q` });
+    assert.equal(r.role, 'inline-article');
+    assert.equal(r.source, 'action-type-default');
+  });
+  test('captured pages under that prefix that are NOT articles make it a section page', () => {
+    const site = withPages([{ url: `${O}/answers/a`, pageType: 'service' }, { url: `${O}/answers/b`, pageType: 'landing' }]);
+    assert.equal(resolvePageRole(site, { actionType: 'direct-answer', pageUrl: `${O}/answers/q` }).role, 'section-page');
+  });
+  test('tenant config for the prefix or the target still wins', () => {
+    const site = withPages([], { newContentTargets: { 'direct-answer': { pageRole: 'section-page' } } });
+    assert.equal(resolvePageRole(site, { actionType: 'direct-answer', pageUrl: `${O}/answers/q` }).role, 'section-page');
+  });
+  test('a repo layout verdict wins over the default', () => {
+    assert.equal(resolvePageRole(withPages([]), { actionType: 'direct-answer', pageUrl: `${O}/answers/q`, layoutRole: 'section-page' }).role, 'section-page');
+  });
+  test('blog-outline and translation stay intrinsically articles whatever the site says', () => {
+    const site = withPages([{ url: `${O}/blog/a`, pageType: 'service' }]);
+    assert.equal(resolvePageRole(site, { actionType: 'blog-outline', pageUrl: `${O}/blog/q` }).role, 'inline-article');
+  });
+});

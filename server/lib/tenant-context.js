@@ -243,7 +243,11 @@ export async function loadBusinessContext(siteId, { agent = 'all', refresh = fal
   const resolved = bp.resolveBusinessContext({
     current: ctx.businessProfile, siteProfile: ctx.siteProfile, seoPolicy: ctx.seoPolicy, growthConfig: ctx.growthConfig,
   });
+  // Sibling awareness: a site that shares its domain with another project (marketplace + business) is told the other section exists.
+  // Empty, and the description untouched, for every site with no path scope.
+  const siblingNote = await siblingNoteFor(ctx.site);
   return {
+    siblingNote,
     status: resolved.status,
     siteId,
     agent,
@@ -255,15 +259,35 @@ export async function loadBusinessContext(siteId, { agent = 'all', refresh = fal
     pending: resolved.pending,
     profile: resolved.profile,
     slice: bp.projectForAgent(resolved.profile, agent),
-    description: bp.describeCompany(resolved.profile),
+    description: [bp.describeCompany(resolved.profile), siblingNote].filter(Boolean).join(' '),
     ownIndustry: bp.ownIndustryLabel(resolved.profile),
     groundingTerms: bp.groundingTerms(resolved.profile),
   };
 }
 
+// Other projects on the same workspace and domain. Soft: any failure is "no sibling names", and the scope alone still words the note.
+async function siblingNoteFor(site) {
+  try {
+    const { hasScope, siblingSectionNote } = await import('../agents/lib/site-scope.js');
+    if (!hasScope(site)) return '';
+    let siblings = [];
+    if (site.workspace_id != null && site.website_domain) {
+      const { query } = await import('../db.js');
+      const { rows } = await query(
+        `SELECT name FROM sites WHERE workspace_id = $1 AND website_domain = $2 AND id <> $3 AND status IS DISTINCT FROM 'soft_deleted'`,
+        [site.workspace_id, site.website_domain, site.id]);
+      siblings = rows;
+    }
+    return siblingSectionNote(site, siblings);
+  } catch {
+    return '';
+  }
+}
+
 // Prompt text for a resolved business context. '' unless a profile is canonical: until one exists every agent keeps the prompt it had,
 // and once one exists it replaces the bare industry label with the five separated concepts.
 export function businessContextPrompt(bc) {
+  if (bc && bc.status !== 'canonical' && bc.siblingNote) return bc.siblingNote; // a scoped site is told about its sibling even before its profile is usable
   if (!bc || bc.status !== 'canonical' || !bc.description) return '';
   const note = bc.state === 'confirmed' ? '' : ' (detected from the company\'s own website; not yet confirmed by a person)';
   return `About this company${note}: ${bc.description}`;

@@ -204,7 +204,7 @@ export async function getLearnedConfidenceMap(siteId) {
          SELECT generator_id, outcome, created_at,
                 row_number() OVER (PARTITION BY generator_id, (outcome LIKE 'impact-%') ORDER BY created_at DESC) AS rn
          FROM generator_outcomes WHERE site_id = $1
-           AND NOT (outcome = 'failed' AND detail ILIKE $3 AND created_at < $4::timestamptz)
+           AND NOT (outcome = 'failed' AND COALESCE(detail, '') ILIKE $3 AND created_at < $4::timestamptz) -- COALESCE: a NULL detail made the NOT evaluate to NULL, silently dropping the failure
            AND (outcome LIKE 'impact-%' OR created_at > now() - ($5 || ' days')::interval)
        ) windowed WHERE rn <= $2`,
       [siteId, WINDOW_SIZE, MISLABELED_OUTAGE_DETAIL, MISLABELED_OUTAGE_CUTOFF, String(TECHNICAL_EVIDENCE_DAYS)]

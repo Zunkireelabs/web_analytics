@@ -30,6 +30,8 @@ import { saveAgentRun } from '../store/agent-runs.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import { runQualityGate } from '../generators/lib/quality-gate.js';
+import { neverSayPhrasesFor } from '../generators/lib/visible-claim-guard.js';
+import { ensureClassification, isArticleClassification, resolveContentType, needsTypeReview, typeDependentRestrictionsApply } from '../generators/lib/content-type.js';
 import { extractEditLesson } from '../agents/lib/draft-lesson-extraction.js';
 import { recordFixOutcome, findRelevantMemory, getActiveAutoMemories } from '../agent-memory.js';
 import { VERIFIABLE_GENERATOR_IDS, scheduleVerificationForDraft, attachDeploymentToDraftVerifications, verificationMethodFor } from '../store/fix-verifications.js';
@@ -40,7 +42,7 @@ import { evaluateApprovalGate } from './lib/approval-gate.js';
 import { validateRendering, validateRenderingBatch, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
 import { reviewPrChecks, generatedFilePaths, AGENT_REVIEW_STATE } from '../implementers/lib/pr-self-review.js';
 import {
-  createDraft, getDraftByFindingId, listDrafts, listDraftsForBoard, countDraftsByLifecycle, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
+  createDraft, saveDraftPageClassification, getDraftByFindingId, listDrafts, listDraftsForBoard, countDraftsByLifecycle, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, markCmsDraftPublished, recordAgentReviewState, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds, countDesignDeferralsForFinding,
 } from '../store/drafts.js';
@@ -381,6 +383,20 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   // re-fetching from the DB) so the render step right below sees it
   // immediately, even on the very same call that just derived+saved it.
   let effectiveSite = await getSiteById(siteId);
+  // WHAT KIND OF CONTENT IS THIS (blog post, landing page, service page, ...). Resolved ONCE, here, by the one shared classifier
+  // (generators/lib/content-type.js) from the task, the generator, the site's own declarations and the page — and stored on the draft's
+  // input with its evidence, so the generator, the Quality Gate, repair, approval and publishing all read the same answer and nothing
+  // downstream derives it again. A failure here never blocks a draft: it falls back to "unknown", which keeps the STRICT rules.
+  let pageClassification = null;
+  try {
+    const resolved = await ensureClassification({ site: effectiveSite, generatorId, params });
+    params = resolved.params;
+    pageClassification = resolved.classification;
+  } catch (err) {
+    console.error(`[action-center] page-type classification failed for ${generatorId}, using the strict fallback:`, err.message);
+    pageClassification = { status: 'unknown', pageType: null, group: null, confidence: null, evidence: [{ source: 'error', detail: String(err.message).slice(0, 160) }], tentativeType: null, resolvedAt: new Date().toISOString() };
+    params = { ...(params || {}), pageClassification };
+  }
   // LIVE DESIGN VALIDATION (design-agent/lib/design-validation-stage.js) — for edits that
   // change what a visitor sees on an EXISTING page, confirm the design the agent will
   // follow is that page's CURRENT design. The stage decides scope (net-new pages and
@@ -540,7 +556,12 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     family: designPageUrl ? pageFamilyOf(designPageUrl) : null, pageType: designPageType,
   });
   const knowledgeBlock = formatDesignKnowledge(priorKnowledge);
-  let designCorrections = knowledgeBlock;
+  // Client wording rules go to the generator on attempt 1, not only after the gate rejects a draft (neverSayPhrases: skipped for blog posts and exempt URLs).
+  const neverSay = neverSayPhrasesFor(effectiveSite, { isArticlePage: isArticleClassification(pageClassification), pageUrl: designPageUrl });
+  const neverSayBlock = neverSay.length
+    ? `CLIENT WORDING RULE (this page is not a blog post or a Nepal page): never write ${neverSay.map((p) => `"${p}"`).join(', ')}. Each word may be used on its own; only that exact combination is not allowed. Rephrase instead.`
+    : '';
+  let designCorrections = [neverSayBlock, knowledgeBlock].filter(Boolean).join('\n\n');
   let attemptsUsed = 0;
   let profileRepairAttempted = false;
   for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
@@ -554,7 +575,7 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
       siteId,
       params: { ...(params || {}), ...(designCorrections ? { designCorrections } : {}) },
     })));
-    gateResult = await runQualityGate(content, generatorId, siteId, { site: effectiveSite, enforceDesignIntegrity });
+    gateResult = await runQualityGate(content, generatorId, siteId, { site: effectiveSite, enforceDesignIntegrity, page: params?.page || content?.page || null, pageType: params?.pageType || null, pageClassification });
     if (attempt === 1 && !gateResult.clean) firstAttemptIssues = gateResult.issues;
     if (gateResult.clean) break;
 
@@ -988,7 +1009,7 @@ async function runDesignRepairStage({ site, siteId, draft, resolved, renderMode 
       })).catch((err) => { console.error(`[action-center] design repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
       if (!repaired?.content) return null;
       // A repair the model writes is new content, not a human edit: it must clear the same Quality Gate generation does.
-      const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site });
+      const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site, page: draft.content?.page || draft.input?.page || null, pageType: draft.input?.pageType || null, pageClassification: draft.input?.pageClassification || null });
       if (!repairGate.clean) { console.warn(`[action-center] draft ${draft.id}'s design repair failed the Quality Gate, abandoning repair`); return null; }
       return repaired.content;
     },
@@ -1072,7 +1093,20 @@ export async function validateDraft(siteId, draftId, { renderMode, afterQualityG
   // never reach a real PR. No regeneration possible here (a human already
   // wrote this content) — just refuse approval with the specific issues so
   // they know what to fix.
-  const gateResult = await runQualityGate(draft.content, draft.action_type, siteId, { site });
+  // A draft made before page-type classification existed carries none. Resolve it here (the same shared function generateDraft uses) and
+  // save it back, so no later step has to work it out again. Only when the site has a rule that depends on the page type.
+  let storedClassification = draft.input?.pageClassification || null;
+  let storedPageType = draft.input?.pageType || null;
+  if (!storedClassification && typeDependentRestrictionsApply(site)) {
+    storedClassification = await resolveContentType({
+      site, generatorId: draft.action_type, params: { ...(draft.input || {}), page: draft.content?.page || draft.input?.page || undefined },
+    }).catch((err) => { console.error(`[action-center] page-type classification failed for draft ${draft.id}:`, err.message); return null; });
+    if (storedClassification) {
+      storedPageType = storedClassification.status === 'resolved' ? storedClassification.pageType : null;
+      await saveDraftPageClassification(siteId, draft.id, storedClassification).catch((err) => console.error(`[action-center] could not save page-type classification for draft ${draft.id}:`, err.message));
+    }
+  }
+  const gateResult = await runQualityGate(draft.content, draft.action_type, siteId, { site, page: draft.content?.page || draft.input?.page || null, pageType: storedPageType, pageClassification: storedClassification });
   // Approval Gate (routes/lib/approval-gate.js): recorded whether it passes
   // or fails, so Action Center can show "quality gate: ok" as real evidence,
   // not just silence-means-fine — see that module's comment for the
@@ -1182,7 +1216,7 @@ export async function validateDraft(siteId, draftId, { renderMode, afterQualityG
         })).catch((err) => { console.error(`[action-center] seo/tech-validate repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
         if (!repaired?.content) break;
         // eslint-disable-next-line no-await-in-loop
-        const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site });
+        const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site, page: draft.content?.page || draft.input?.page || null, pageType: draft.input?.pageType || null, pageClassification: draft.input?.pageClassification || null });
         if (!repairGate.clean) { console.warn(`[action-center] draft ${draft.id}'s seo/tech-validate repair failed the Quality Gate, abandoning repair`); break; }
         activeContent = repaired.content;
         // eslint-disable-next-line no-await-in-loop
@@ -1538,6 +1572,14 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false,
     if (autoSelected) {
       const updated = await updateDraft(siteId, draft.id, { content: autoSelected });
       if (updated) draft.content = updated.content;
+    }
+
+    // Page type could not be identified on a site with a rule that depends on it: the strict rules already apply, but a person should look
+    // before this goes out. Left exactly as drafted ('draft' status, listed as waiting for approval), reported honestly like a draft a
+    // person is already reviewing — never submitted, approved or pushed on a guess.
+    if (needsTypeReview(draft.input?.pageClassification, await getSiteById(siteId))) {
+      await updateJobRecommendationStatus(jobRec.id, 'failed', { error: `Draft #${draft.id} is left for review: its page type could not be identified, and this site has rules that depend on it.` });
+      return { ok: false, heldForReview: true };
     }
 
     const submitted = await submitDraftForApproval(siteId, draft.id);

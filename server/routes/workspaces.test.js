@@ -27,6 +27,8 @@ mock.module(resolve('../store/users.js'), {
     getUserByEmail: async (email) => Object.values(users).find((u) => u.email === email) || null,
     updateUserPassword: async () => { throw new Error('not exercised'); },
     getUserStatus: async () => 'active',
+    // routes/user-invitations.js (loaded by the router under test) imports it; without an export the module cannot even be linked.
+    createUser: async () => { throw new Error('not exercised'); },
   },
 });
 mock.module(resolve('../store/read.js'), {
@@ -46,6 +48,8 @@ mock.module(resolve('../report/email.js'), {
     sendPasswordResetEmail: async () => true,
     sendSignupReceivedEmail: async () => true, sendLoginCodeEmail: async () => true,
     sendSignupStaffNotice: async () => true,
+    sendReturnRequestStaffNotice: async () => true,
+    sendReturnWaitingEmail: async () => true,
   },
 });
 mock.module(resolve('../store/admin/audit-log.js'), {

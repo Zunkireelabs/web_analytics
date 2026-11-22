@@ -628,3 +628,25 @@ describe('renderBlogOutlineBody — page role from evidence, not the URL regex',
     assert.equal(headingClass(unknownPrefix), headingClass(knownPrefix));
   });
 });
+
+import { renderBlogOutlineBodyTsx as _renderPost } from './newpage-render.js';
+import { test as _t } from 'node:test';
+import _assert from 'node:assert/strict';
+_t('blog TSX: quickAnswer / faqItems / Sources are emitted only when the draft really has them (never invented)', () => {
+  const base = { title: 'A Post', metaDescription: 'd', sections: [{ heading: 'H', body: 'b' }] };
+  const bare = _renderPost(base, {}, { canonicalUrl: 'https://x.com/a-post' });
+  _assert.doesNotMatch(bare, /quickAnswer|faqItems|"Sources"/);
+  const full = _renderPost({ ...base, quickAnswer: 'A real answer-first summary sentence.', faqItems: [{ question: 'Q?', answer: 'A.' }], sources: [{ label: 'GOV.UK', url: 'https://www.gov.uk/x' }, { label: 'bad', url: 'http://no' }] }, {}, { canonicalUrl: 'https://x.com/a-post' });
+  _assert.match(full, /"quickAnswer": "A real answer-first/);
+  _assert.match(full, /"faqItems": \[/);
+  _assert.match(full, /"heading": "Sources"/);
+  _assert.match(full, /\[GOV\.UK\]\(https:\/\/www\.gov\.uk\/x\)/);
+  _assert.doesNotMatch(full, /http:\/\/no/);
+});
+
+_t('blog TSX: `post` is NOT exported by default (Next rejects extra page exports) — only when the site opts in', () => {
+  const c = { title: 'A Post', metaDescription: 'd', sections: [{ heading: 'H', body: 'b' }] };
+  _assert.match(_renderPost(c, {}, {}), /^const post = /m);
+  _assert.doesNotMatch(_renderPost(c, {}, {}), /export const post/);
+  _assert.match(_renderPost(c, { url_file_map: { newContentTargets: { 'blog-outline': { exportPost: true } } } }, {}), /^export const post = /m);
+});

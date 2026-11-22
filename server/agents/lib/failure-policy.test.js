@@ -62,3 +62,35 @@ describe('failureFamilyKey', () => {
     assert.notEqual(a, b);
   });
 });
+
+import { classifyRefusal, REFUSAL_KIND, countsAgainstGenerator, refusalReasonOf, refusalFamilyKey, UNSPECIFIED_REFUSAL } from './failure-policy.js';
+
+describe('refusal classification', () => {
+  test('each kind is recognised', () => {
+    assert.equal(classifyRefusal({ needsInput: true }), REFUSAL_KIND.NEEDS_INPUT);
+    assert.equal(classifyRefusal({ reason: 'no-file-mapping' }), REFUSAL_KIND.NEEDS_INPUT);
+    assert.equal(classifyRefusal({ reason: 'ga4-id-missing' }), REFUSAL_KIND.NEEDS_INPUT);
+    assert.equal(classifyRefusal({ stale: true }), REFUSAL_KIND.STALE);
+    assert.equal(classifyRefusal({ alreadyResolved: true }), REFUSAL_KIND.ALREADY_RESOLVED);
+    assert.equal(classifyRefusal({ designPending: true }), REFUSAL_KIND.DESIGN_VALIDATION_PENDING);
+    assert.equal(classifyRefusal({ temporary: true }), REFUSAL_KIND.TEMPORARY_EXTERNAL);
+    assert.equal(classifyRefusal({ reason: 'awaiting-human-review' }), REFUSAL_KIND.HUMAN_APPROVAL_REQUIRED);
+    assert.equal(classifyRefusal({ unsupported: true }), REFUSAL_KIND.UNSUPPORTED);
+    assert.equal(classifyRefusal({ reason: 'design-integrity-failed' }), REFUSAL_KIND.GENERATOR_DEFECT);
+    assert.equal(classifyRefusal({}), REFUSAL_KIND.GENERATOR_DEFECT, 'a refusal nobody explained is treated as a defect, never as success');
+  });
+  test('only real generator signals count against a generator', () => {
+    for (const k of [REFUSAL_KIND.NEEDS_INPUT, REFUSAL_KIND.STALE, REFUSAL_KIND.ALREADY_RESOLVED, REFUSAL_KIND.TEMPORARY_EXTERNAL, REFUSAL_KIND.DESIGN_VALIDATION_PENDING, REFUSAL_KIND.HUMAN_APPROVAL_REQUIRED]) assert.equal(countsAgainstGenerator(k), false, k);
+    assert.equal(countsAgainstGenerator(REFUSAL_KIND.GENERATOR_DEFECT), true);
+    assert.equal(countsAgainstGenerator(REFUSAL_KIND.UNSUPPORTED), true);
+  });
+  test('an empty reason is labelled, never blank, and stays attributable to its generator', () => {
+    assert.equal(refusalReasonOf({}), UNSPECIFIED_REFUSAL);
+    assert.match(refusalReasonOf({ message: 'something odd' }), /^unspecified-refusal: something odd/);
+    assert.notEqual(refusalFamilyKey('schema-repair', {}), refusalFamilyKey('faq', {}));
+  });
+  test('same generator + same reason share one family, different reasons do not', () => {
+    assert.equal(refusalFamilyKey('schema', { reason: 'a' }), refusalFamilyKey('schema', { reason: 'a' }));
+    assert.notEqual(refusalFamilyKey('schema', { reason: 'a' }), refusalFamilyKey('schema', { reason: 'b' }));
+  });
+});

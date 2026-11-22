@@ -198,3 +198,30 @@ describe('describeResponsiveRegressions', () => {
     assert.match(summary, /1 new undersized tap target.*390px \(mobile\)/);
   });
 });
+
+import { newlyAffected } from './responsive-preview-gate.js';
+describe('newlyAffected — stable element identity, not raw markup', () => {
+  test('an element that was already clipped is NOT new even though its markup changed (the draft\'s content sits inside it)', () => {
+    const before = [{ tag: 'section', classes: 'hero overflow-hidden', text: 'Welcome', clippedBy: 30, outerHtml: '<section class="hero overflow-hidden">old</section>' }];
+    const after = [{ tag: 'section', classes: 'overflow-hidden hero', text: 'Welcome', clippedBy: 30, outerHtml: '<section class="hero overflow-hidden">old<div>NEW FAQ</div></section>' }];
+    assert.deepEqual(newlyAffected(before, after, { magnitudeKey: 'clippedBy', tolerance: 8 }), []);
+  });
+  test('a genuinely new clipped element is flagged', () => {
+    const after = [{ tag: 'div', classes: 'faq-wrap', text: 'Q1', clippedBy: 50 }];
+    assert.equal(newlyAffected([], after, { magnitudeKey: 'clippedBy', tolerance: 8 }).length, 1);
+  });
+  test('an already-clipped element that is now clipped by clearly MORE is a real worsening', () => {
+    const b = [{ tag: 'section', classes: 'hero', text: 'x', clippedBy: 10 }];
+    const a = [{ tag: 'section', classes: 'hero', text: 'x', clippedBy: 120 }];
+    const out = newlyAffected(b, a, { magnitudeKey: 'clippedBy', tolerance: 8 });
+    assert.equal(out.length, 1);
+    assert.equal(out[0].wasAlready, 10);
+  });
+  test('a second element with the same identity is matched one-for-one, so the extra one is new', () => {
+    const one = { tag: 'p', classes: 'note', text: 'same', clippedBy: 20 };
+    assert.equal(newlyAffected([one], [one, { ...one }], { magnitudeKey: 'clippedBy', tolerance: 8 }).length, 1);
+  });
+  test('different text or classes is a different element', () => {
+    assert.equal(newlyAffected([{ tag: 'a', classes: 'btn', text: 'Apply' }], [{ tag: 'a', classes: 'btn', text: 'Contact' }]).length, 1);
+  });
+});

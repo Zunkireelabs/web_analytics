@@ -15,6 +15,9 @@ import { tenantContextTextFor, loadBusinessContext, businessContextPrompt } from
 import { contentFocusLine } from '../lib/business-profile.js';
 import { attributionNote, globalGrowthNote, agencyCreditLine } from '../agents/lib/zunkireelabs-growth-policy.js';
 import { llmFailure } from './lib/llm-error.js';
+import { getFileContent } from '../github/client.js';
+import { acceptQuickAnswer, acceptFaqItems } from './lib/blog-contract-fields.js';
+import { baseBranch } from '../implementers/lib/github-ops.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
 // changed 2026-08-07 because that shape was shipping straight into a real PR
@@ -73,21 +76,46 @@ const SANITY_DEFAULT_API_VERSION = '2026-02-10';
 // unconfigured lookup means no categories are offered, never a hard failure
 // for the whole post — matches this file's existing posture for the
 // homepage-grounding fetch and image search above.
+// Repo-file source (preferred; no CMS dependency): categoriesSource = { file, slugPath?, titlePath? } names a JSON array in the CLIENT'S OWN
+// repo (e.g. src/content/blog/categories.json). slugPath / titlePath are dot paths into each item (default "slug" / "title"; Sanity-shaped
+// exports use "slug.current"). The website's own file is the source of truth — a category that is not in it is never offered.
+const getPath = (o, path) => String(path).split('.').reduce((v, k) => (v == null ? v : v[k]), o);
+export async function fetchRepoCategories(site, source, fetchFile = getFileContent) {
+  let file;
+  try { file = await fetchFile(site, source.file, baseBranch(site)); } catch { return lookupFailed(); }
+  if (!file) return lookupFailed();
+  let items;
+  try { items = JSON.parse(file.content); } catch { return lookupFailed(); }
+  if (!Array.isArray(items)) return lookupFailed();
+  return items
+    .map((c) => ({ title: getPath(c, source.titlePath || 'title'), slug: getPath(c, source.slugPath || 'slug') }))
+    .filter((c) => typeof c.title === 'string' && c.title && typeof c.slug === 'string' && c.slug);
+}
+
 async function fetchRealCategories(site) {
   const source = site?.url_file_map?.newContentTargets?.['blog-outline']?.categoriesSource;
+  if (source?.file) return fetchRepoCategories(site, source);
   if (!source?.projectId || !source?.dataset) return [];
   try {
     const query = '*[_type=="category"]{title,"slug":slug.current}';
     const url = `https://${source.projectId}.${SANITY_CDN_HOST}/v${source.apiVersion || SANITY_DEFAULT_API_VERSION}/data/query/${source.dataset}` +
       `?query=${encodeURIComponent(query)}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (!res.ok) return [];
+    if (!res.ok) return lookupFailed();
     const json = await res.json();
     return (Array.isArray(json?.result) ? json.result : [])
       .filter((c) => c && typeof c.title === 'string' && typeof c.slug === 'string');
   } catch {
-    return [];
+    return lookupFailed();
   }
+}
+// A configured source that could not be read is NOT the same as "no categories exist": the result is an empty list tagged so the
+// draft can say so (content.categoriesLookupFailed) and a site that requires a category refuses to apply it, instead of publishing
+// an uncategorised post that its own build then rejects.
+function lookupFailed() {
+  const empty = [];
+  empty.lookupFailed = true;
+  return empty;
 }
 
 // Strips any inline Markdown link [text](url) whose url is NOT in the real
@@ -223,7 +251,13 @@ export async function generate({ siteId, params }) {
         'these genuinely fit this post\'s topic, list their exact titles in "categories" — choosing ONLY from that ' +
         'list, never inventing one; an empty array if none fit. '
       : '') +
+    // quickAnswer / faqItems: some clients' builds require an answer-first summary and visible FAQ items on every post. They are written from the
+    // article just produced and checked afterwards (lib/blog-contract-fields.js): any figure that is not in the sections is dropped. No sources or URLs.
+    'Also write "quickAnswer": one or two plain sentences (40 to 300 characters) that directly answer the post\'s main question, and ' +
+    '"faqItems": 3 to 5 question-and-answer pairs a reader would ask, each answer 40 to 500 characters. Use ONLY facts, names and figures ' +
+    'already stated in the sections you wrote — never add a new number, date, price or claim, and never include a URL or a source link. ' +
     'Respond with ONLY a JSON object: {"title": "...", "metaDescription": "...", ' +
+    '"quickAnswer": "...", "faqItems": [{"question": "...?", "answer": "..."}], ' +
     '"sections": [{"heading": "...", "body": "..."}], "suggestedFaqTopics": ["...", "..."], ' +
     '"suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]' +
     (realCategories.length ? ', "categories": ["..."]' : '') + '}';
@@ -254,7 +288,7 @@ export async function generate({ siteId, params }) {
     + (designCorrections ? `\n\n${designCorrections}` : '');
   let parsed;
   try {
-    parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 2500, generatorId: meta.id, siteId });
+    parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 3200, generatorId: meta.id, siteId });
   } catch (err) {
     throw llmFailure(err, 'Blog post generation failed: model did not return valid JSON', { status: 400 });
   }
@@ -347,9 +381,14 @@ export async function generate({ siteId, params }) {
     title: parsed.title || '',
     metaDescription: parsed.metaDescription || '',
     sections,
+    // Only what is demonstrably grounded in the final sections survives; sources are never generated (a person supplies them).
+    ...(() => { const qa = acceptQuickAnswer(parsed.quickAnswer, sections); const faq = acceptFaqItems(parsed.faqItems, sections); return { ...(qa ? { quickAnswer: qa } : {}), ...(faq.length ? { faqItems: faq } : {}) }; })(),
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
     categories,
+    ...(realCategories.lookupFailed ? { categoriesLookupFailed: true } : {}),
+    // Stamped ONCE here so the page and the manifest entry agree on the publish time (they were each calling new Date()).
+    publishedAt: new Date().toISOString(),
     ...(category ? { category } : {}),
     ...(featuredImage ? { featuredImage } : {}),
     // The real supporting text this draft was grounded in — same

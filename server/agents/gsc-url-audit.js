@@ -1,6 +1,7 @@
 import { getSiteById } from '../store/read.js';
 import { getSearchConsole } from '../auth/google.js';
 import { ownDomains } from './lib/site-domain.js';
+import { urlInScope } from './lib/site-scope.js';
 import { isPrivateOrLocalHost } from './lib/page-content.js';
 import {
   classifyHost, isTombstoned, classifyProbe, hasNoindexSignal, groupByHost,
@@ -152,7 +153,8 @@ export async function run({ siteId }) {
     };
   }
 
-  const pages = await fetchIndexedPages(site);
+  // Another site's section of a shared domain (path scope, migration 261) is neither probed nor reported on.
+  const pages = (await fetchIndexedPages(site)).filter((p) => urlInScope(site, p.url));
   if (!pages.length) {
     return {
       meta, status: 'insufficient-data', facts: null, narrative: null,

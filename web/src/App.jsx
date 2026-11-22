@@ -184,12 +184,12 @@ export default function App() {
   // The Agent speaks first, quietly: when something needs the client (an approval, an issue it found, a decision it cannot
   // make) a small sign appears bottom-right with the count, and pulses when there is something new. Pressing it opens the
   // small chat with what it is and the buttons to deal with it. It does not open over the page by itself, and follows up on
-  // a growing interval until it is resolved. Not for staff browsing a client's project, and not while the project is locked.
+  // a growing interval until it is resolved. A platform admin gets the same popup for whichever project they have open (every call carries that project's id, which the server only honors for platform admins). Not while the project is locked.
   // These hooks MUST stay above the early returns below: a hook after a return changes the hook count between renders.
-  const needsYou = useNeedsYou(siteId, { enabled: Boolean(authed && siteId && !noProject && role !== 'platform_admin' && !access?.locked) });
+  const needsYou = useNeedsYou(siteId, { enabled: Boolean(authed && siteId && !noProject && !access?.locked) });
   // The agent's questions about shipping approved work (commit and push, open the PR, merge to stage, open the PR to main) are asked in
   // its popup. Each open question counts on the bubble. A PR waiting for a person to merge is information, not a question.
-  const shipping = useShipping(siteId, { enabled: Boolean(authed && siteId && !noProject && role !== 'platform_admin' && !access?.locked) });
+  const shipping = useShipping(siteId, { enabled: Boolean(authed && siteId && !noProject && !access?.locked) });
   const shipAsks = ['fixes', 'content'].filter((k) => shipping[k]?.step && shipping[k].step !== 'waiting').length;
   // A pull request that is open and waiting for a person to merge it on GitHub (step 'waiting') is not a button here, but it is still
   // something left undone: it counts, so the bubble and its reminder ("a pull request is waiting for someone to merge it") show.
@@ -238,10 +238,9 @@ export default function App() {
   // guards every route these pages call.
   const isPlatformAdmin = role === 'platform_admin';
 
-  // A platform admin on /analyst has the staff Admin Assistant there (AnalystChatDrawer), so the app-wide
-  // Agent panel is hidden on that page for them: two floating assistants would fight for the same corner.
-  // Clients have no admin assistant, so they keep the Agent panel on every page, Analyst included.
-  const hideAssistant = (isPlatformAdmin && location.pathname === '/analyst') || noProject; // no project, nothing to ask the Agent about
+  // The Agent bubble shows on every page with a project, the Analyst page included, for clients and platform admins alike. On the
+  // Analyst page the staff drawer (AnalystChatDrawer) opens in the same corner, so the bubble steps aside only while that drawer is open.
+  const hideAssistant = noProject; // no project, nothing to ask the Agent about
   const agentAvailable = !hideAssistant;
   const agentOpen = assistantOpen && agentAvailable;
   const isProduct = currentSiteOf(sites, siteId)?.property_type === 'product';

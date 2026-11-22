@@ -483,6 +483,35 @@ describe('analyzePage — duplicate/invalid structured data (Phase 3 technical c
     assert.deepEqual(a.duplicateSchemaTypes, []);
   });
 
+  describe('distinct @ids are distinct entities (a head office and a branch are both LocalBusiness)', () => {
+    const wrap = (...blocks) => `<html><body>${blocks.map((b) => `<script type="application/ld+json">${JSON.stringify(b)}</script>`).join('')}</body></html>`;
+    test('the Admizz shape: two LocalBusiness nodes in one @graph, each with its own @id, are NOT duplicates', () => {
+      const a = analyzePage(wrap({ '@context': 'https://schema.org', '@graph': [
+        { '@type': 'LocalBusiness', '@id': 'https://x.test/#office-kathmandu', name: 'X Kathmandu' },
+        { '@type': 'LocalBusiness', '@id': 'https://x.test/#office-bengaluru', name: 'X Bengaluru' },
+      ] }), PAGE_URL);
+      assert.deepEqual(a.duplicateSchemaTypes, []);
+    });
+    test('the same holds across separate script tags and for other types (Person, Product, Event)', () => {
+      for (const type of ['Person', 'Product', 'Event', 'LocalBusiness']) {
+        const a = analyzePage(wrap({ '@type': type, '@id': '#a', name: 'A' }, { '@type': type, '@id': '#b', name: 'B' }), PAGE_URL);
+        assert.deepEqual(a.duplicateSchemaTypes, [], type);
+      }
+    });
+    test('the SAME @id described twice IS a duplicate', () => {
+      const a = analyzePage(wrap({ '@type': 'LocalBusiness', '@id': '#a', name: 'A' }, { '@type': 'LocalBusiness', '@id': '#a', name: 'A again' }), PAGE_URL);
+      assert.deepEqual(a.duplicateSchemaTypes, ['LocalBusiness']);
+    });
+    test('an unlabelled node next to a labelled one cannot be told apart, so it is still flagged', () => {
+      const a = analyzePage(wrap({ '@type': 'Organization', '@id': '#a', name: 'A' }, { '@type': 'Organization', name: 'B' }), PAGE_URL);
+      assert.deepEqual(a.duplicateSchemaTypes, ['Organization']);
+    });
+    test('a whitespace-only or non-string @id counts as no @id', () => {
+      const a = analyzePage(wrap({ '@type': 'Product', '@id': '  ', name: 'A' }, { '@type': 'Product', '@id': 5, name: 'B' }), PAGE_URL);
+      assert.deepEqual(a.duplicateSchemaTypes, ['Product']);
+    });
+  });
+
   // The fabrication loop, cut at its source. This app's own
   // schema-repair-inject.js writes `<script type="application/ld+json"></script>`
   // when it removes a duplicate. `JSON.parse('')` throws, so this function
@@ -970,5 +999,25 @@ describe('isDeclaredDuplicate', () => {
 
   test('a declared duplicate raises no content gaps', () => {
     assert.deepEqual(contentGapsFor({ isDeclaredDuplicate: true, h1Count: 0, h2Count: 0 }, []), []);
+  });
+});
+
+describe('noindex pages are not flagged for a missing canonical', () => {
+  const PAGE_URL = 'https://example.com/dashboard';
+  const doc = (robots) => `<html><head><title>Dashboard</title>${robots ? `<meta name="robots" content="${robots}"/>` : ''}</head><body><main><h1>x</h1><p>hello</p></main></body></html>`;
+  const gapTypes = (html) => contentGapsFor(analyzePage(html, PAGE_URL), []).map((g) => g.type);
+
+  test('noindex, nofollow page: no Missing canonical tag gap', () => {
+    assert.equal(analyzePage(doc('noindex, nofollow'), PAGE_URL).isNoindex, true);
+    assert.ok(!gapTypes(doc('noindex, nofollow')).includes('Missing canonical tag'));
+  });
+
+  test('an indexable page without a canonical is still flagged', () => {
+    assert.ok(gapTypes(doc(null)).includes('Missing canonical tag'));
+    assert.ok(gapTypes(doc('index, follow')).includes('Missing canonical tag'));
+  });
+
+  test('a robots value that merely contains the letters does not count (nonindexable-ish strings)', () => {
+    assert.equal(analyzePage(doc('max-snippet:-1'), PAGE_URL).isNoindex, false);
   });
 });

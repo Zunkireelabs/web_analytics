@@ -1,8 +1,9 @@
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 import { callLLM, callLLMForJson } from '../llm.js';
 import { getSiteById } from '../store/read.js';
-import { searchClaimsFor } from './lib/visible-claim-guard.js';
+import { searchClaimsFor, titleClaimBansFor, neverSayPhrasesFor, findBannedPhrases } from './lib/visible-claim-guard.js';
 import { llmFailure } from './lib/llm-error.js';
+import { resolveContentType, isArticleClassification } from './lib/content-type.js';
 
 export const meta = {
   id: 'meta-title',
@@ -54,6 +55,7 @@ export async function generate({ siteId, params }) {
 
   let pageContext = null;
   let previous = null;
+  let pageAnalysisForType = null;
   if (page) {
     const fetched = await analyzePageUrl(page);
     // Same "thin extraction treated as failed fetch" rule as faq.js — falls
@@ -61,6 +63,7 @@ export async function generate({ siteId, params }) {
     // rather than grounding the title/description in leftover boilerplate.
     // What the page has now, kept on the draft so an automatic change on a protected page can be put back
     // (protected-title-trials.js). Recorded even when the page is too thin to ground a rewrite.
+    pageAnalysisForType = fetched.ok ? fetched.analysis : null;
     if (fetched.ok) previous = { title: fetched.analysis.title || null, description: fetched.analysis.metaDescription || null };
     if (fetched.ok && hasSufficientGroundingContent(fetched.analysis)) {
       pageContext = { currentTitle: fetched.analysis.title, bodyExcerpt: fetched.analysis.bodyText.slice(0, 1500) };
@@ -71,7 +74,22 @@ export async function generate({ siteId, params }) {
   // the title tag and meta description (never on the page body — see
   // visible-claim-guard.js), so the owner's wording is honoured where search
   // engines read it. A site with none configured is unchanged.
-  const searchClaims = searchClaimsFor(await getSiteById(siteId).catch(() => null));
+  const site = await getSiteById(siteId).catch(() => null);
+  const searchClaims = searchClaimsFor(site);
+  // What kind of page this is comes from the one shared classifier (lib/content-type.js). generateDraft normally stored it on the params
+  // already; a direct call resolves it here, reusing the page read above. Nothing about page types is decided in this generator.
+  const classification = (params.pageClassification && params.pageClassification.status)
+    ? params.pageClassification
+    : await resolveContentType({ site, generatorId: meta.id, params, pageAnalysis: pageAnalysisForType });
+  // Words this site never wants in a title or description (titleClaimBans), on every page except a blog post / article.
+  const titleBans = [...(isArticleClassification(classification) ? [] : titleClaimBansFor(site)), ...neverSayPhrasesFor(site, { isArticlePage: isArticleClassification(classification), pageUrl: page })];
+  // Type unclear: the ban stays on (the strict side) and the summary says why, so a person reading the draft knows. It goes in the
+  // summary, never in `content`, which the apply step reads.
+  const pageTypeUnknown = titleBans.length > 0 && classification.status !== 'resolved';
+  const titleBanNote = titleBans.length
+    ? ` Never use any of these words or phrases anywhere in a title or the meta description: ${titleBans.map((b) => `"${b}"`).join(', ')}. ` +
+      'Describe the business in other plain, accurate words instead (for example "partner" or "advisors").'
+    : '';
   const searchClaimNote = searchClaims.length
     ? ` This business wants to be found in search for: ${searchClaims.map((c) => `"${c}"`).join(', ')}. ` +
       'When a phrase fits the query and the page topic, use it naturally and verbatim in at least one title candidate ' +
@@ -86,23 +104,37 @@ export async function generate({ siteId, params }) {
     'page on the same site that owns a different query. If the body text shows real E-E-A-T signals (author ' +
     'expertise, credentials, first-hand experience, cited sources), you may reflect them in the meta description ' +
     '— but ground every claim ONLY in the page content given; never invent a feature, price, credential, or fact ' +
-    'not present in the excerpt.' + searchClaimNote + ' If no page content is given, write generically around the query only. Respond ' +
+    'not present in the excerpt.' + searchClaimNote + titleBanNote + ' If no page content is given, write generically around the query only. Respond ' +
     'with ONLY a JSON object: {"titles": ["...", "...", "..."], "metaDescription": "..."}';
   const user = `Query: ${query}\n${pageContext ? `Current title: ${pageContext.currentTitle}\nPage text: ${pageContext.bodyExcerpt}` : 'No existing page — new content.'}`;
-  let parsed;
-  try {
-    parsed = await callLLMForJson(system, user, { task: 'content', maxTokens: 400, generatorId: meta.id, siteId });
-  } catch (err) {
-    throw llmFailure(err, 'Meta title generation failed: model did not return valid JSON', { status: 400 });
+  const attempt = async (extraSystem = '') => {
+    let parsed;
+    try {
+      parsed = await callLLMForJson(system + extraSystem, user, { task: 'content', maxTokens: 400, generatorId: meta.id, siteId });
+    } catch (err) {
+      throw llmFailure(err, 'Meta title generation failed: model did not return valid JSON', { status: 400 });
+    }
+    const rawTitles = Array.isArray(parsed.titles) ? parsed.titles.slice(0, 3) : [];
+    const candidateTitles = await Promise.all(
+      rawTitles.map((t) => enforceLength(t, 'title', TITLE_MIN, TITLE_MAX, query, meta.id, siteId)),
+    );
+    const rawDescription = typeof parsed.metaDescription === 'string' ? parsed.metaDescription : '';
+    const description = await enforceLength(rawDescription, 'meta description', DESC_MIN, DESC_MAX, query, meta.id, siteId);
+    return { titles: candidateTitles, metaDescription: description };
+  };
+  const banned = (r) => findBannedPhrases(`${r.titles.join(' ')} ${r.metaDescription}`, titleBans);
+  let result = await attempt();
+  if (titleBans.length && banned(result).length) {
+    // One retry that names the offending words, then drop any title still carrying one. A draft is never refused for a single bad
+    // candidate, only when nothing clean is left — and a description that still has the word fails loudly instead of shipping it.
+    result = await attempt(` Your previous answer used a word this site does not allow (${banned(result).map((b) => `"${b}"`).join(', ')}). Rewrite without it.`);
+    result = { titles: result.titles.filter((t) => !findBannedPhrases(t, titleBans).length), metaDescription: result.metaDescription };
+    if (!result.titles.length || findBannedPhrases(result.metaDescription, titleBans).length) {
+      throw Object.assign(new Error(`Meta title generation failed: the model kept using a phrase this site does not allow (${titleBans.join(', ')}). Try again or write the title by hand.`), { status: 400 });
+    }
   }
-
-  const rawTitles = Array.isArray(parsed.titles) ? parsed.titles.slice(0, 3) : [];
-  const titles = await Promise.all(
-    rawTitles.map((t) => enforceLength(t, 'title', TITLE_MIN, TITLE_MAX, query, meta.id, siteId)),
-  );
-  const rawDescription = typeof parsed.metaDescription === 'string' ? parsed.metaDescription : '';
-  const metaDescription = await enforceLength(rawDescription, 'meta description', DESC_MIN, DESC_MAX, query, meta.id, siteId);
+  const { titles, metaDescription } = result;
 
   const content = { query, page: page || null, titles, metaDescription, ...(previous ? { previous } : {}) };
-  return { content, summary: `${content.titles.length} title option(s) + meta description for "${query}"` };
+  return { content, summary: `${content.titles.length} title option(s) + meta description for "${query}"${pageTypeUnknown ? ' — page type could not be identified, so words this site does not allow were avoided' : ''}` };
 }

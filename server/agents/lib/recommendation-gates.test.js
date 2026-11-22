@@ -736,3 +736,78 @@ describe('createRecommendationGates — numbered list pages are not reported as 
     assert.match(out.blockedReason, /No url_file_map entry resolves/);
   });
 });
+
+describe('createRecommendationGates — GA4 measurement id (property id is not a measurement id)', () => {
+  const ga4Site = { ...baseSite, ga4_property_id: '561094281', ga4_measurement_id: null };
+  const gates = (ensureGa4Id, site = ga4Site) => createRecommendationGates(1, site, { ...neutralDeps(), ensureGa4Id });
+
+  test('blocks with the exact thing needed when no measurement id can be found', async () => {
+    const g = gates(async () => ({ status: 'no-web-stream' }));
+    const r = await g.evaluate('analytics-install', { provider: 'ga4', page: 'https://example.com/' });
+    assert.match(r.blockedReason, /^Needs input: .*no web data stream/i);
+  });
+  test('does not block when the id is discovered from the connected property', async () => {
+    const g = gates(async () => ({ status: 'found', measurementId: 'G-FOUND0001', saved: true }));
+    const r = await g.evaluate('analytics-install', { provider: 'ga4', page: 'https://example.com/' });
+    assert.doesNotMatch(r.blockedReason || '', /Needs input/);
+  });
+  test('a temporary lookup failure never blocks (it is not a client problem)', async () => {
+    const g = gates(async () => ({ status: 'unavailable' }));
+    const r = await g.evaluate('analytics-install', { provider: 'ga4', page: 'https://example.com/' });
+    assert.doesNotMatch(r.blockedReason || '', /Needs input/);
+    const g2 = gates(async () => { throw new Error('boom'); });
+    assert.doesNotMatch((await g2.evaluate('analytics-install', { provider: 'ga4', page: 'https://example.com/' })).blockedReason || '', /Needs input/);
+  });
+  test('a stored measurement id skips discovery entirely', async () => {
+    const g = gates(async () => { throw new Error('must not be called'); }, { ...ga4Site, ga4_measurement_id: 'G-STORED0001' });
+    const r = await g.evaluate('analytics-install', { provider: 'ga4', page: 'https://example.com/' });
+    assert.doesNotMatch(r.blockedReason || '', /Needs input/);
+  });
+  test('Facebook Pixel is never gated on the GA4 lookup', async () => {
+    const g = gates(async () => { throw new Error('must not be called'); });
+    const r = await g.evaluate('analytics-install', { provider: 'facebook-pixel', page: 'https://example.com/' });
+    assert.doesNotMatch(r.blockedReason || '', /Needs input/);
+  });
+});
+
+// The tests above only show that the GA4 gate itself stays quiet. These use a site that is otherwise COMPLETELY ready for an
+// analytics install (its homepage mapped to a real file that exists), so the result is the whole gate system's verdict: the only
+// thing that differs between "blocked" and "unblocked" is whether a valid measurement ID exists.
+describe('createRecommendationGates — a valid GA4 measurement ID fully unblocks the install', () => {
+  const PAGE = 'https://example.com/';
+  const ready = (over = {}) => ({ ...baseSite, ga4_property_id: '561094281', ga4_measurement_id: null, url_file_map: { pages: { '/': { file: 'src/pages/index.njk' } } }, ...over });
+  const gates = (site, ensureGa4Id) => createRecommendationGates(1, site, {
+    ...neutralDeps(), ensureGa4Id,
+    fetchFile: async () => ({ content: '<html><head></head><body>home</body></html>' }),
+  });
+
+  test('control: with no measurement ID anywhere, the ready site is blocked with "Needs input"', async () => {
+    const r = await gates(ready(), async () => ({ status: 'no-web-stream' })).evaluate('analytics-install', { provider: 'ga4', page: PAGE });
+    assert.equal(r.drop, null);
+    assert.match(r.blockedReason, /^Needs input:/);
+  });
+  test('a measurement ID discovered from the connected property leaves NO block and NO drop', async () => {
+    const r = await gates(ready(), async () => ({ status: 'found', measurementId: 'G-FOUND0001', saved: true })).evaluate('analytics-install', { provider: 'ga4', page: PAGE });
+    assert.equal(r.drop, null);
+    assert.equal(r.blockedReason, null);
+  });
+  test('a stored measurement ID leaves NO block, and discovery is not called', async () => {
+    let called = 0;
+    const r = await gates(ready({ ga4_measurement_id: 'G-STORED0001' }), async () => { called++; return { status: 'no-web-stream' }; }).evaluate('analytics-install', { provider: 'ga4', page: PAGE });
+    assert.equal(r.blockedReason, null);
+    assert.equal(called, 0);
+  });
+  test('the same recommendation clears on the next sync once the ID appears (blocked -> unblocked, nothing else changed)', async () => {
+    let id = null;
+    const site = ready();
+    const g = gates(site, async () => (id ? { status: 'found', measurementId: id } : { status: 'ambiguous' }));
+    assert.match((await g.evaluate('analytics-install', { provider: 'ga4', page: PAGE })).blockedReason, /^Needs input:/);
+    id = 'G-LATER00001';
+    assert.equal((await gates(site, async () => ({ status: 'found', measurementId: id })).evaluate('analytics-install', { provider: 'ga4', page: PAGE })).blockedReason, null);
+  });
+  test('a property ID typed into the measurement-ID field is not accepted as one', async () => {
+    const r = await gates(ready({ ga4_measurement_id: '561094281' }), async () => ({ status: 'no-web-stream' })).evaluate('analytics-install', { provider: 'ga4', page: PAGE });
+    assert.match(r.blockedReason, /^Needs input:/);
+  });
+});
+

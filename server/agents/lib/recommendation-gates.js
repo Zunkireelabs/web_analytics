@@ -1,3 +1,6 @@
+import { sharedTemplateTargetBlock, templateDrivenBodyBlock } from '../../implementers/lib/action-scope.js';
+import { ensureMeasurementId, needsInputMessage, isMeasurementId } from '../../lib/ga4-measurement-id.js';
+import { generatedPageBlockReason } from './page-type.js';
 import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget } from '../../implementers/lib/url-file-map.js';
 import { hasExistingFaqSchema, INSPECTABLE_ACTION_TYPES } from '../../implementers/lib/render-inspector.js';
 import { templateRendersItemsField } from '../../implementers/lib/faq-render-mode.js';
@@ -5,6 +8,7 @@ import { componentTemplateVerification, componentTemplateActionTypeFor, getDesig
 import { projectComponentTemplate } from '../../design-agent/lib/design-profile.js';
 import { getDesignAgentStatus } from '../../implementers/lib/design-agent-status.js';
 import { isDataReady } from '../../implementers/adapters/data-array-content.js';
+import { isDataReady as isTsNamedExportReady } from '../../implementers/adapters/ts-named-export-content.js';
 import { fetchSoftNotFoundFingerprint, isSoftNotFound } from './technical-seo-analysis.js';
 import { FRONTEND_ACTION_TYPES } from '../../implementers/frontend.js';
 import { getFileContent, getRepoTree } from '../../github/client.js';
@@ -106,6 +110,8 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     saveGap = saveGapEvaluation,
     findOpenRec = findOpenRecommendation,
     insertRec = insertRecommendation,
+    // GA4 measurement-ID discovery (lib/ga4-measurement-id.js). Injectable for tests.
+    ensureGa4Id = ensureMeasurementId,
   } = deps;
 
   // Reassignable: healing persists newly-discovered url_file_map entries and
@@ -407,6 +413,20 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     if (!site) return { drop: null, blockedReason: null };
     const page = params?.page;
 
+    // GA4 install needs the MEASUREMENT id (G-…), which is not the property id a connected analytics account stores. Resolve it
+    // here, before anything is drafted: stored, else discovered from the connected property's web data stream. When it cannot be
+    // found the recommendation is BLOCKED with the exact thing needed (a "needs input" card, not an endless retry), and it clears
+    // itself on the next sync once the id exists. A temporary lookup failure never blocks.
+    if (generatorId === 'analytics-install' && params?.provider === 'ga4' && !isMeasurementId(site.ga4_measurement_id)) {
+      let found = null;
+      try { found = await ensureGa4Id(site); } catch { found = { status: 'unavailable' }; }
+      if (found?.measurementId) site = { ...site, ga4_measurement_id: found.measurementId };
+      else {
+        const blockedReason = needsInputMessage(found?.status);
+        if (blockedReason) return { drop: null, blockedReason };
+      }
+    }
+
     // The net-new counterpart of the page-mapping gate. Net-new content
     // (blog-outline, direct-answer, landing-page, the legal pages) has no
     // params.page to map — it resolves its destination through
@@ -440,6 +460,10 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     // url_file_map" isn't fatal for it the way it is for every other
     // generatorId.
     const pageGated = generatorId !== 'broken-link-fix' && !!page;
+
+    // Pages the application generates from data (marketplace categories, listings, seller and search pages) are never content-edited.
+    const generatedReason = pageGated ? generatedPageBlockReason(site, page, generatorId) : null;
+    if (generatedReason) return { drop: null, blockedReason: generatedReason };
 
     if (pageGated && !isPageMapped(site, page, generatorId)) {
       // Classify BEFORE attempting to heal, not after. Healing is a write
@@ -537,6 +561,8 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
         // same dead end at apply time — see store/drafts.js's redraft-churn
         // comment (24 attempts across 6 findings historically for exactly
         // this failure).
+        const templateDriven = file ? templateDrivenBodyBlock(file.content, generatorId, filePath) : null;
+        if (templateDriven && !resolveAdapter(site, page, generatorId)) return { drop: null, blockedReason: templateDriven };
         if (file && INSPECTABLE_ACTION_TYPES.includes(generatorId) && hasExistingFaqSchema(file.content)) {
           return { drop: 'faq-schema-already-present', blockedReason: null };
         }
@@ -552,6 +578,17 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     // stops resurfacing every refresh.
     if (pageGated) {
       const adapterConfig = resolveAdapter(site, page, generatorId);
+      // Shared-template targets are stopped here, before any draft exists (see sharedTemplateTargetBlock).
+      if (!FRONTEND_ACTION_TYPES.has(generatorId)) {
+        const sharedReason = sharedTemplateTargetBlock(site, page, generatorId, { file: resolveFile(site, page), adapterConfig });
+        if (sharedReason) return { drop: null, blockedReason: sharedReason };
+      }
+      // ts-named-export-content (a named TS data export, e.g. post-faqs.ts): same "route exists but is the DATA identified" question,
+      // answered by the adapter's own identifyTarget — one definition. Not identified -> dropped, never routed to a shared template.
+      if (adapterConfig?.id === 'ts-named-export-content'
+        && !(await isTsNamedExportReady(site, page, adapterConfig, cachedFetchFile, baseBranch(site)))) {
+        return { drop: 'adapter-data-not-ready', blockedReason: null };
+      }
       if (adapterConfig?.id === 'data-array-content'
         && !(await isDataReady(site, page, adapterConfig, cachedFetchFile, baseBranch(site)))) {
         // Nested (location×service) gaps get one more, real chance before

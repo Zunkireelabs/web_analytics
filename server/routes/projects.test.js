@@ -1,5 +1,6 @@
 import { test, describe, mock, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { strictExports } from '../test-support/strict-exports.js';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
@@ -21,33 +22,36 @@ let wsRoles; // `${userId}:${workspaceId}` -> membership role (target workspaces
 const resetCalls = () => { calls = { softDeleted: [], transfers: [], goals: [], tokens: [], revoked: [], invitations: [], emails: [], projectMembers: [], roleUpdates: [], removals: [], audit: [] }; };
 const SITES = { 1: { id: 1, name: 'Zunkiree Labs', website_domain: 'zunkiree.com', workspace_id: 8 }, [ADMIZZ]: { id: ADMIZZ, name: 'Admizz Education', website_domain: 'admizz.com', workspace_id: 8, gsc_property: 'sc-domain:admizz.com', ga4_property_id: '1' }, [CHAYCE]: { id: CHAYCE, name: 'Chayceproperties', website_domain: 'chayce.com', workspace_id: 8, gsc_property: null, ga4_property_id: null } };
 
+// The Google Business Profile read (db.js getSiteBusinessProfile, added after this file) is not under test here: no profile is connected.
+const realDb = await import(resolve('../db.js'));
+mock.module(resolve('../db.js'), { namedExports: { ...realDb, getSiteBusinessProfile: async () => ({ gbp_status: null, gbp_url: null }) } });
 mock.module(resolve('../store/users.js'), {
-  namedExports: {
+  namedExports: await strictExports(resolve('../store/users.js'), {
     getUserById: async (id) => users[id] || null,
     getUserByEmail: async (email) => Object.values(users).find((u) => u.email === email) || null,
     updateUserPassword: async () => { throw new Error('not exercised'); },
     getUserStatus: async () => 'active',
-  },
+  }),
 });
-mock.module(resolve('../store/read.js'), { namedExports: { getSiteById: async () => null, getSiteStatus: async () => 'active' } });
+mock.module(resolve('../store/read.js'), { namedExports: await strictExports(resolve('../store/read.js'), { getSiteById: async () => null, getSiteStatus: async () => 'active' }) });
 mock.module(resolve('../store/user-invitations.js'), {
-  namedExports: {
+  namedExports: await strictExports(resolve('../store/user-invitations.js'), {
     createInvitation: async (o) => { calls.invitations.push(o); return { id: 99, token: 't0ken', expires_at: 'soon' }; },
     acceptInvitation: async () => null,
-  },
+  }),
 });
 mock.module(resolve('../report/email.js'), {
-  namedExports: {
+  namedExports: await strictExports(resolve('../report/email.js'), {
     sendInvitationEmail: async (o) => { calls.emails.push(o); return true; },
     sendContactLeadEmail: async () => true,
     sendPasswordResetEmail: async () => true,
     sendSignupReceivedEmail: async () => true, sendLoginCodeEmail: async () => true,
     sendSignupStaffNotice: async () => true,
-  },
+  }),
 });
-mock.module(resolve('../store/admin/audit-log.js'), { namedExports: { recordAuditEvent: async (req, e) => { calls.audit.push(e.action); } } });
+mock.module(resolve('../store/admin/audit-log.js'), { namedExports: await strictExports(resolve('../store/admin/audit-log.js'), { recordAuditEvent: async (req, e) => { calls.audit.push(e.action); } }) });
 mock.module(resolve('../store/workspaces.js'), {
-  namedExports: {
+  namedExports: await strictExports(resolve('../store/workspaces.js'), {
     ...real,
     getAccessContext: async (userId, siteId) => {
       const u = users[userId]; if (!u) return null;
@@ -73,18 +77,18 @@ mock.module(resolve('../store/workspaces.js'), {
     addProjectMember: async (siteId, userId, role, by) => { calls.projectMembers.push([siteId, userId, role, by]); return true; },
     updateProjectMemberRole: async (siteId, userId, role) => { calls.roleUpdates.push([siteId, userId, role]); return { role }; },
     removeProjectMember: async (siteId, userId) => { calls.removals.push([siteId, userId]); return true; },
-  },
+  }),
 });
 mock.module(resolve('../store/api-tokens.js'), {
-  namedExports: {
+  namedExports: await strictExports(resolve('../store/api-tokens.js'), {
     createApiToken: async (siteId, o) => { calls.tokens.push({ siteId, ...o }); return { id: 31, site_id: siteId, label: o.label, permission_level: o.permissionLevel, token: 'raw-secret' }; },
     listApiTokensForSite: async () => [{ id: 31, token_prefix: 'sr_ab', label: 'Claude', permission_level: 'read_only' }],
     revokeApiToken: async (siteId, id) => { calls.revoked.push([siteId, id]); return id === 31; },
     listApiTokensForWorkspace: async () => [], revokeApiTokenInWorkspace: async () => null,
-  },
+  }),
 });
-mock.module(resolve('../store/data-freshness.js'), { namedExports: { gscDailyDataAsOf: async () => ({ as_of: new Date().toISOString().slice(0, 10) }) } });
-mock.module(resolve('../store/admin/system-health.js'), { namedExports: { getRecentAgentRunFailureCounts: async () => [] } });
+mock.module(resolve('../store/data-freshness.js'), { namedExports: await strictExports(resolve('../store/data-freshness.js'), { gscDailyDataAsOf: async () => ({ as_of: new Date().toISOString().slice(0, 10) }) }) });
+mock.module(resolve('../store/admin/system-health.js'), { namedExports: await strictExports(resolve('../store/admin/system-health.js'), { getRecentAgentRunFailureCounts: async () => [] }) });
 
 const realConnect = await import(resolve('./lib/project-connect.js') + '?real');
 mock.module(resolve('./lib/project-connect.js'), {
@@ -112,12 +116,12 @@ const SHARED_LISTS = {
   analytics: [...OWN_LISTS.analytics, { propertyId: '999', name: 'other-client.com' }],
 };
 mock.module(resolve('../store/project-google.js'), {
-  namedExports: {
+  namedExports: await strictExports(resolve('../store/project-google.js'), {
     getGoogleConnection: async () => ownGoogle,
     saveGoogleConnection: async (o) => { savedConnections.push(o); },
     deleteGoogleConnection: async () => true,
     clearSiteGoogleProperties: async (id) => { clearedProperties.push(id); },
-  },
+  }),
 });
 const clearedProperties = [];
 let baselineLock = null;

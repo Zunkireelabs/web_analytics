@@ -19,7 +19,7 @@ export const NEWS_PRESETS = {
       'Say "Nepali", never "Nepalese". Dates month first (November 30, 2026). Money with commas (£6,000). Write "US" in sentences.',
       'Keep official names exactly as the official page writes them (Confirmation of Enrolment, Dependants, sponsor licence).',
       'Put the year and the Nepal angle in the title where true. Audience: students from Nepal and their families.',
-      'Link to a related post and to a hub page such as /top-education-consultancy-in-nepal or /study-in-<country>-from-nepal.',
+      'Link to a related post and to a hub page such as /top-education-partner-in-nepal or /study-in-<country>-from-nepal.',
       'Never make claims about named competitors.',
     ].join('\n'),
   },

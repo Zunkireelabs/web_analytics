@@ -1,3 +1,4 @@
+import { scopeOf } from '../../agents/lib/site-scope.js';
 import { createHash } from 'crypto';
 import { ownPageGuidance } from '../../generators/lib/design-aware-composer.js';
 import { safeMessage } from '../../lib/errors.js';
@@ -1694,7 +1695,11 @@ export function recordRejectedTemplateLesson({
 export function sitePageUrl(site) {
   const domain = site?.website_domain || site?.gsc_property?.replace(/^sc-domain:/, '');
   if (!domain) return null;
-  return /^https?:\/\//i.test(domain) ? domain : `https://${domain}`;
+  const origin = /^https?:\/\//i.test(domain) ? domain : `https://${domain}`;
+  // A site that owns only part of a shared domain (path scope, migration 261) is designed, and its pages are checked, from ITS section
+  // root, not from the domain's homepage, which may belong to another site with a different design.
+  const section = scopeOf(site).include[0];
+  return section ? `${origin.replace(/\/+$/, '')}${section}` : origin;
 }
 
 // A synthetic req-like shape for recordAuditEvent — this resolver runs

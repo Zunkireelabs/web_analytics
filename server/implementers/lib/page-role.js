@@ -29,7 +29,12 @@ export const PAGE_ROLES = Object.freeze(['inline-article', 'section-page', 'unkn
 
 // Intrinsically article bodies: the generated artifact IS prose in an
 // article layout, regardless of where the URL puts it.
-const INLINE_ACTION_TYPES = new Set(['blog-outline', 'direct-answer', 'translation']);
+const INLINE_ACTION_TYPES = new Set(['blog-outline', 'translation']);
+// A direct-answer page is only USUALLY an article body. It lives wherever the site puts answers (a blog directory, an /answers/ or
+// /faq/ section, a section-built page), so the action type is a DEFAULT, applied after tenant config, the repo layout and the
+// site's own captured pages have had their say. Treating it as intrinsically an article judged every direct-answer draft against
+// article-scale design rules even on sites whose answers pages are built from sections.
+const DEFAULT_INLINE_ACTION_TYPES = new Set(['direct-answer']);
 // Intrinsically built from sections.
 const SECTION_ACTION_TYPES = new Set(['landing-page']);
 
@@ -107,6 +112,11 @@ export function resolvePageRole(site, { pageUrl = null, permalink = null, action
     if (sameSection.length && articles === 0) {
       return { role: 'section-page', confidence: 'medium', source: 'captured-profile', evidence: `${sameSection.length} captured /${prefix}/ page(s), none article` };
     }
+  }
+
+  // The action type's DEFAULT (direct-answer): stronger than the URL regex, weaker than anything the site itself told us above.
+  if (actionType && DEFAULT_INLINE_ACTION_TYPES.has(actionType)) {
+    return { role: 'inline-article', confidence: 'medium', source: 'action-type-default', evidence: `${actionType} (no site-specific evidence of a different role)` };
   }
 
   // Tier D — the regex, last, and honest about its weakness.

@@ -1,5 +1,6 @@
 import { BetaAnalyticsDataClient } from '@google-analytics/data';
 import { getGa4ClientOptionsAsync } from '../auth/google.js';
+import { withGa4Scope } from '../agents/lib/site-scope.js';
 
 // One cached client per distinct credential set, keyed by site id — a single
 // shared singleton would silently reuse the wrong client's credentials for
@@ -14,9 +15,14 @@ async function ga4(site) {
     const client = new BetaAnalyticsDataClient(await getGa4ClientOptionsAsync(site));
     // Analytics Data calls go through gRPC, not googleapis, so they need their own time limit.
     const run = client.runReport.bind(client);
-    client.runReport = (request, options, callback) => (typeof options === 'function'
-      ? run(request, { timeout: GA4_TIMEOUT_MS }, options)
-      : run(request, { timeout: GA4_TIMEOUT_MS, ...(options || {}) }, callback));
+    // Every report is narrowed to the site's path scope (migration 261) here, once, so no query can forget it. An unscoped site's
+    // request is passed through untouched. The client is cached per site id, so `site` is this site's own row.
+    client.runReport = (request, options, callback) => {
+      const req = withGa4Scope(request, site);
+      return typeof options === 'function'
+        ? run(req, { timeout: GA4_TIMEOUT_MS }, options)
+        : run(req, { timeout: GA4_TIMEOUT_MS, ...(options || {}) }, callback);
+    };
     clients.set(key, client);
   }
   return clients.get(key);

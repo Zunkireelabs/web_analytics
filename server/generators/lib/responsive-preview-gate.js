@@ -90,6 +90,28 @@ const MIN_TAP_TARGET_PX = 24;
 // static page are real and must not read as this draft's fault.
 const OVERFLOW_TOLERANCE_PX = 2;
 
+// WHICH elements are "the same element" before and after the edit. The previous comparison used each element's raw outerHTML, so a
+// top-level section that was ALREADY clipped before the edit came back with different markup afterwards (the draft's new content sits
+// inside it) and was reported as newly clipped, a regression the draft did not cause. Identity here is what does not change when
+// content is spliced inside an element: its tag, its classes and (for small controls) its own text. A true duplicate is matched
+// one-for-one, so a second element with the same identity IS new.
+const CLIP_GROWTH_TOLERANCE_PX = 8; // an element that was clipped before and is clipped by noticeably MORE now is a real worsening
+function elementIdentity(e) {
+  const classes = String(e?.classes || '').split(/\s+/).filter(Boolean).sort().join('.');
+  return `${String(e?.tag || '').toLowerCase()}|${classes}|${String(e?.text || '').replace(/\s+/g, ' ').trim().slice(0, 40).toLowerCase()}`;
+}
+export function newlyAffected(beforeList = [], afterList = [], { magnitudeKey = null, tolerance = 0 } = {}) {
+  const pool = new Map();
+  for (const b of beforeList) { const k = elementIdentity(b); (pool.get(k) || pool.set(k, []).get(k)).push(b); }
+  const out = [];
+  for (const a of afterList) {
+    const hit = pool.get(elementIdentity(a))?.shift();
+    if (!hit) { out.push(a); continue; }                       // not present before: newly introduced
+    if (magnitudeKey && Number(a[magnitudeKey]) > Number(hit[magnitudeKey] || 0) + tolerance) out.push({ ...a, wasAlready: hit[magnitudeKey] ?? 0 }); // present before but clearly worse
+  }
+  return out;
+}
+
 function diffMeasurement(before, after, viewport) {
   const regressions = [];
   if (after.overflowPx > before.overflowPx + OVERFLOW_TOLERANCE_PX) {
@@ -99,8 +121,7 @@ function diffMeasurement(before, after, viewport) {
       elements: after.overflowingElements,
     });
   }
-  const beforeClipped = new Set(before.clippedElements.map((e) => e.outerHtml));
-  const newClipped = after.clippedElements.filter((e) => !beforeClipped.has(e.outerHtml));
+  const newClipped = newlyAffected(before.clippedElements, after.clippedElements, { magnitudeKey: 'clippedBy', tolerance: CLIP_GROWTH_TOLERANCE_PX });
   if (newClipped.length) {
     regressions.push({ viewport: viewport.name, width: viewport.width, kind: 'clipped-content', elements: newClipped });
   }
@@ -110,8 +131,7 @@ function diffMeasurement(before, after, viewport) {
   // of the content cannot enlarge it, so measuring it there only produced
   // failures no repair could clear — the draft was retried to its cap and
   // retired for something that is not a layout break.
-  const beforeSmall = new Set(before.smallTapTargets.map((e) => e.outerHtml));
-  const newSmall = viewport.name === 'desktop' ? [] : after.smallTapTargets.filter((e) => !beforeSmall.has(e.outerHtml));
+  const newSmall = viewport.name === 'desktop' ? [] : newlyAffected(before.smallTapTargets, after.smallTapTargets);
   if (newSmall.length) {
     regressions.push({ viewport: viewport.name, width: viewport.width, kind: 'undersized-tap-target', elements: newSmall });
   }

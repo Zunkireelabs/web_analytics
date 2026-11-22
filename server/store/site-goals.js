@@ -13,6 +13,9 @@ export const GOAL_TYPES = Object.freeze([
   // Product-site goals (migration 177) — see store/product-funnel.js for how
   // progress against these is read from prospects / trial_signups.
   'book_demos', 'grow_signups', 'activate_users',
+  // Marketplace goals (migration 260): growing each side of a two-sided
+  // marketplace is a different job from leads or sales.
+  'grow_supply', 'grow_demand', 'grow_listings',
   'custom',
 ]);
 

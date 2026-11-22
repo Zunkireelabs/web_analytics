@@ -222,7 +222,7 @@ export function pickLayoutGroupSamples(knownUrls, alreadyChosen, { budget = DEFA
   return [...groups.values()].sort((a, b) => b.size - a.size).slice(0, budget).map((g) => g.url);
 }
 
-export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAULT_MAX_PAGES, knownUrls = [], propertyType, layoutGroupBudget = DEFAULT_LAYOUT_GROUP_PAGES, layoutSurvey = null } = {}) {
+export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAULT_MAX_PAGES, knownUrls = [], propertyType, layoutGroupBudget = DEFAULT_LAYOUT_GROUP_PAGES, layoutSurvey = null, inScope = () => true } = {}) {
   await browserPage.goto(homepageUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   const rawLinks = await browserPage.evaluate(collectLinksInPage);
 
@@ -234,7 +234,7 @@ export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAU
     if (total >= maxPages) return false;
     let abs;
     try { abs = new URL(href, homepageUrl).href.split('#')[0]; } catch { return true; }
-    if (!sameOrigin(abs, homepageUrl) || seen.has(abs)) return true;
+    if (!sameOrigin(abs, homepageUrl) || seen.has(abs) || !inScope(abs)) return true;
     if (/\.(pdf|jpg|jpeg|png|svg|gif|zip|css|js|xml)$/i.test(abs)) return true;
 
     const type = classifyPageType(abs, { propertyType });
@@ -295,7 +295,7 @@ export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAU
     for (const href of listingLinks) {
       let abs;
       try { abs = new URL(href, listingUrl).href.split('#')[0]; } catch { continue; }
-      if (!sameOrigin(abs, homepageUrl) || seen.has(abs)) continue;
+      if (!sameOrigin(abs, homepageUrl) || seen.has(abs) || !inScope(abs)) continue;
       if (/\.(pdf|jpg|jpeg|png|svg|gif|zip|css|js|xml)$/i.test(abs)) continue;
       seen.add(abs);
       if (classifyPageType(abs, { propertyType }) !== articleType) continue;
@@ -307,7 +307,7 @@ export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAU
 
   // One sample of every layout group the steps above did not reach, on a
   // reserved budget so they cannot be crowded out by 'other' pages.
-  const sameOriginKnown = knownUrls.filter((u) => sameOrigin(u, homepageUrl));
+  const sameOriginKnown = knownUrls.filter((u) => sameOrigin(u, homepageUrl) && inScope(u));
   const chosen = [...byType.values()].flat();
   // Preferred: the survey's REAL groups (every known page was fetched and
   // compared) — one sample per group none of whose pages is already chosen.
@@ -863,6 +863,9 @@ export async function captureSite(homepageUrl, {
   // sites.property_type — 'product' sites get product page types (pricing/
   // features/how-it-works/demo/case-study); omitted/'website' is unchanged.
   propertyType,
+  // A path scope (migration 261): pages outside it are never sampled, so a site that shares its domain with another is designed from
+  // its own pages only. Defaults to everything.
+  inScope = () => true,
   // Injectable for tests; set to null to skip the survey.
   surveyFn = surveyLayouts,
 } = {}) {
@@ -876,12 +879,12 @@ export async function captureSite(homepageUrl, {
     // pages are chosen from what the pages actually look like.
     let layoutSurvey = null;
     if (surveyFn) {
-      layoutSurvey = await surveyFn([homepageUrl, ...knownUrls.filter((u) => sameOrigin(u, homepageUrl))]).catch((err) => {
+      layoutSurvey = await surveyFn([homepageUrl, ...knownUrls.filter((u) => sameOrigin(u, homepageUrl) && inScope(u))]).catch((err) => {
         console.warn(`[design-agent/capture] layout survey failed, falling back to URL-shape sampling: ${err.message}`);
         return null;
       });
     }
-    const targets = await discoverPages(page, homepageUrl, { maxPages, knownUrls, propertyType, layoutSurvey });
+    const targets = await discoverPages(page, homepageUrl, { maxPages, knownUrls, propertyType, layoutSurvey, inScope });
 
     const pages = [];
     for (const { url, pageType } of targets) {

@@ -161,3 +161,64 @@ export function failureFamilyKey(generatorId, err) {
   // underlying fault still coalesce under it.
   return sanitizeForCustomer(`${generatorId}::${message}`, `${generatorId}::unspecified-error`);
 }
+
+// ── Refusals ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// A refusal is the no-fabrication policy working, but "refused" says nothing about WHY, and the why decides what happens next.
+// Eight unrelated kinds used to share one counter, so a run of "waiting for the client" refusals stopped the whole site's run
+// (Admizz: 4 runs, 0 shipped, 131 safe fixes waiting).
+export const REFUSAL_KIND = {
+  NEEDS_INPUT: 'needs_input',                       // a person must supply something; retrying cannot help until they do
+  STALE: 'stale',                                   // the recommendation's premise no longer holds
+  ALREADY_RESOLVED: 'already_resolved',             // nothing left to fix
+  UNSUPPORTED: 'unsupported',                       // this generator cannot do this operation here (e.g. shared layout)
+  DESIGN_VALIDATION_PENDING: 'design_validation_pending',
+  TEMPORARY_EXTERNAL: 'temporary_external_failure', // a service we depend on was unavailable; try again later
+  HUMAN_APPROVAL_REQUIRED: 'human_approval_required',
+  GENERATOR_DEFECT: 'generator_defect',             // the generator produced something the gates rejected, or gave no reason
+};
+
+// Kinds that say NOTHING about the generator: they never count toward quarantining it.
+const NOT_A_GENERATOR_SIGNAL = new Set([
+  REFUSAL_KIND.NEEDS_INPUT, REFUSAL_KIND.STALE, REFUSAL_KIND.ALREADY_RESOLVED, REFUSAL_KIND.DESIGN_VALIDATION_PENDING,
+  REFUSAL_KIND.TEMPORARY_EXTERNAL, REFUSAL_KIND.HUMAN_APPROVAL_REQUIRED,
+]);
+
+export function classifyRefusal(err) {
+  if (err?.needsInput === true) return REFUSAL_KIND.NEEDS_INPUT;
+  if (err?.alreadyResolved === true) return REFUSAL_KIND.ALREADY_RESOLVED;
+  if (err?.stale === true) return REFUSAL_KIND.STALE;
+  if (err?.designPending === true) return REFUSAL_KIND.DESIGN_VALIDATION_PENDING;
+  if (err?.temporary === true || err?.llmProvider === true) return REFUSAL_KIND.TEMPORARY_EXTERNAL;
+  if (err?.humanApproval === true) return REFUSAL_KIND.HUMAN_APPROVAL_REQUIRED;
+  if (err?.unsupported === true) return REFUSAL_KIND.UNSUPPORTED;
+  const reason = String(err?.reason || '');
+  if (/^(no-file-mapping|no-insertion-marker|no-markers|needs-input|missing-input|unverified-placeholder-field)/i.test(reason) || /-id-missing$/.test(reason)) return REFUSAL_KIND.NEEDS_INPUT;
+  if (/^awaiting-human-review/i.test(reason)) return REFUSAL_KIND.HUMAN_APPROVAL_REQUIRED;
+  if (/^(draft-reset|ga4-lookup-unavailable)/i.test(reason)) return REFUSAL_KIND.TEMPORARY_EXTERNAL;
+  if (/shared (template|layout)|unsupported/i.test(reason)) return REFUSAL_KIND.UNSUPPORTED;
+  return REFUSAL_KIND.GENERATOR_DEFECT;
+}
+
+export const countsAgainstGenerator = (kind) => !NOT_A_GENERATOR_SIGNAL.has(kind);
+
+// How many same-reason refusals from ONE generator quarantine that generator for the rest of the run. The first can be one
+// unlucky page; the second establishes the pattern; every later one only pays another generation call to hear the same answer.
+export const REFUSAL_FAMILY_LIMIT = 2;
+
+// A refusal with no reason is NOT the same thing as every other reasonless refusal from some other generator, and it must not
+// vanish into a blank string. It gets an explicit label so it stays visible, groupable and attributable.
+export const UNSPECIFIED_REFUSAL = 'unspecified-refusal';
+
+export function refusalReasonOf(err) {
+  const reason = String(err?.reason || '').trim();
+  if (reason) return reason.slice(0, 120);
+  // Persisted (generator_outcomes.detail, run summaries), so the raw message goes through the same customer-safety net as every
+  // other persistence boundary; a message that trips it collapses to the bare label rather than leaking.
+  const message = (err?.message || '').trim();
+  if (!message) return UNSPECIFIED_REFUSAL;
+  return sanitizeForCustomer(`${UNSPECIFIED_REFUSAL}: ${message.slice(0, 100)}`, UNSPECIFIED_REFUSAL);
+}
+
+export function refusalFamilyKey(generatorId, err) {
+  return failureFamilyKey(generatorId, { message: refusalReasonOf(err) });
+}

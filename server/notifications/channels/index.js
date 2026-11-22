@@ -56,6 +56,12 @@ export function collapseForInApp(events, max = MAX_IN_APP_PER_BATCH) {
 // deciding after kicking the channels off would be too late to withhold
 // anything. In log-only mode (ALERT_GATE_ENABLED unset) it returns every
 // event unchanged, so this call is behaviourally inert until enabled.
+// An event may name the channels it is for (`channels: ['in-app']`); with none named it goes everywhere, as always. Approval reminders are
+// in-app only: they are a nudge in the dashboard, never an email.
+export function eventsForChannel(channelId, events) {
+  return events.filter((e) => !Array.isArray(e.channels) || e.channels.includes(channelId));
+}
+
 export async function deliverToAllChannels(siteId, events) {
   if (!events.length) return;
   const { deliver: gated } = await gateEvents(siteId, events)
@@ -67,8 +73,10 @@ export async function deliverToAllChannels(siteId, events) {
   if (!gated.length) return;
   const site = await getSiteById(siteId).catch(() => null);
   const canEmail = site ? !(await hasNotificationToday(siteId, site.timezone || 'UTC').catch(() => false)) : true;
-  await Promise.all(CHANNELS.map((c) =>
-    c.deliver(siteId, c.id === 'in-app' ? collapseForInApp(gated) : gated, { canEmail })
-      .catch((err) => console.error(`[notifications] channel "${c.id}" failed:`, err.message))
-  ));
+  await Promise.all(CHANNELS.map((c) => {
+    const mine = eventsForChannel(c.id, gated);
+    if (!mine.length) return undefined;
+    return c.deliver(siteId, c.id === 'in-app' ? collapseForInApp(mine) : mine, { canEmail })
+      .catch((err) => console.error(`[notifications] channel "${c.id}" failed:`, err.message));
+  }));
 }

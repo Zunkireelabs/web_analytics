@@ -3,7 +3,7 @@ import { withJobLock, jobKeyFor } from '../lib/job-lock.js';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requirePlatformRole } from './login.js';
 
-import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteLearnedRepair, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, updateSiteAutoRemediation, updateSiteDesignReview, updateSiteAnalyticsIds, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
+import { query, createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteLearnedRepair, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, updateSiteAutoRemediation, updateSiteDesignReview, updateSiteAnalyticsIds, updateSiteScope, patchUrlFileMap, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
 import {
   getDesignProfile, siteHasUsableDesignProfile, designReviewFingerprint,
   verifyProfileRoles, checkTypographyRole, TYPOGRAPHY_ROLE_SOURCE, observedClassesByRole,
@@ -11,6 +11,8 @@ import {
 import { projectAllComponentTemplates } from '../design-agent/lib/design-profile.js';
 
 import { getSiteById, listSites, getHealthScoreOnOrBefore } from '../store/read.js';
+import { ga4Readiness } from '../lib/ga4-readiness.js';
+import { query as dbQuery } from '../db.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
@@ -36,6 +38,7 @@ import { buildBaselineReport } from '../agents/lib/baseline-report.js';
 import { buildDesignReviewReport } from '../agents/lib/design-review.js';
 import { buildGrowthSummary } from '../agents/lib/growth-summary.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
+import { readSharedDomain, validateSharedDomain, applyToUrlFileMap } from '../lib/shared-domain-settings.js';
 import { runDiscovery } from '../discovery/run-discovery.js';
 import { auditSite } from '../scripts/audit-url-file-map.js';
 import { persistDerivedContentConfig } from '../lib/derive-repo-content-config.js';
@@ -69,6 +72,16 @@ const TEST_FIXTURE_SITE_NAMES = new Set(['design-agent-worker.test.js fixture'])
 router.get('/internal/clients', async (req, res, next) => {
   try {
     const sites = (await listSites()).filter((s) => !TEST_FIXTURE_SITE_NAMES.has(s.name));
+    // Latest GA4 install live-check outcome per project (a GA4 row is the one whose expected tracking ID is a G- measurement ID;
+    // the finding id says 'analytics', not 'ga4', so it cannot be used to tell GA4 from Pixel), so the list can say where GA4 really is. Best effort: without it the
+    // state is simply "installation pending", never a false "verified".
+    const installByGa4Site = new Map();
+    try {
+      const { rows } = await dbQuery(
+        `SELECT DISTINCT ON (site_id) site_id, outcome FROM fix_verifications WHERE generator_id = 'analytics-install' AND expected->>'trackingId' LIKE 'G-%' ORDER BY site_id, created_at DESC`,
+      );
+      for (const r of rows) installByGa4Site.set(r.site_id, r.outcome);
+    } catch { /* readiness falls back to the stored ids alone */ }
     res.json(sites.map((s) => ({
       id: s.id, name: s.name, websiteDomain: s.website_domain, timezone: s.timezone,
       propertyType: s.property_type,
@@ -91,6 +104,7 @@ router.get('/internal/clients', async (req, res, next) => {
       autoRemediationEnabled: s.auto_remediation_enabled,
       autoRemediationDailyLimit: s.auto_remediation_daily_limit,
       ga4MeasurementId: s.ga4_measurement_id,
+      ga4Readiness: ga4Readiness(s, installByGa4Site.get(s.id) ?? null),
       facebookPixelId: s.facebook_pixel_id,
       status: s.status,
       deactivatedAt: s.deactivated_at,
@@ -1306,6 +1320,61 @@ router.post('/internal/clients/:id/analytics-ids', async (req, res, next) => {
     });
 
     res.json({ id: site.id, ga4MeasurementId: site.ga4_measurement_id, facebookPixelId: site.facebook_pixel_id });
+  } catch (e) { next(e); }
+});
+
+// Shared-domain settings: the path scope, repo write scope, allowed links to the other section, and the markers-only setup switch.
+// For a domain that hosts two projects (a marketplace at / and a business site under /business). Staff only, like everything here,
+// because a wrong value points an agent at the wrong pages or files. Every change is audited.
+router.get('/internal/clients/:id/shared-domain', async (req, res, next) => {
+  try {
+    const site = await getSiteById(Number(req.params.id));
+    if (!site) return res.status(404).json({ error: 'No site found with that id.' });
+    const { rows } = await query(
+      `SELECT id, name FROM sites WHERE workspace_id IS NOT DISTINCT FROM $1 AND website_domain = $2 AND id <> $3 AND status IS DISTINCT FROM 'soft_deleted' ORDER BY name`,
+      [site.workspace_id, site.website_domain, site.id]);
+    res.json({ domain: site.website_domain, repoConnected: !!(site.repo_owner && site.repo_name), ...readSharedDomain(site), siblings: rows.map((r) => ({ id: r.id, name: r.name })) });
+  } catch (e) { next(e); }
+});
+
+router.post('/internal/clients/:id/shared-domain', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+    const checked = validateSharedDomain(req.body, existing);
+    if (!checked.ok) return res.status(400).json({ error: checked.errors.join(' '), errors: checked.errors });
+    const { changes } = checked;
+
+    let site = existing;
+    if (changes.scopeIncludePaths !== undefined || changes.scopeExcludePaths !== undefined) {
+      const cur = readSharedDomain(existing);
+      try {
+        site = await updateSiteScope({
+          siteId,
+          include: changes.scopeIncludePaths ?? cur.scopeIncludePaths,
+          exclude: changes.scopeExcludePaths ?? cur.scopeExcludePaths,
+        });
+      } catch (err) {
+        if (err?.code === '23505') return res.status(409).json({ error: 'Another project on this domain already has exactly this scope. Give each project its own paths.' });
+        throw err;
+      }
+    }
+    if (['writeAllow', 'writeDeny', 'crossSiteLinks', 'markerSetupEnabled'].some((k) => changes[k] !== undefined)) {
+      const { urlFileMap } = await patchUrlFileMap(siteId, (map) => applyToUrlFileMap(map, changes));
+      site = { ...site, url_file_map: urlFileMap };
+    }
+
+    await recordAuditEvent(req, {
+      action: 'tenant.shared_domain_updated',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { changed: Object.keys(changes), ...(changes.markerSetupEnabled !== undefined ? { markerSetupEnabled: changes.markerSetupEnabled } : {}) },
+      success: true,
+    });
+    res.json({ domain: site.website_domain, repoConnected: !!(site.repo_owner && site.repo_name), ...readSharedDomain(site) });
   } catch (e) { next(e); }
 });
 

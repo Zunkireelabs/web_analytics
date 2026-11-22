@@ -7,7 +7,7 @@ export default function useShipping(siteId, { enabled = true } = {}) {
   const [state, setState] = useState({ fixes: null, content: null });
   const reload = useCallback(() => {
     if (!siteId) return Promise.resolve();
-    return Promise.all(['fixes', 'content'].map((scope) => api.actionCenter.shipState(scope, undefined).then((s) => [scope, s]).catch(() => [scope, null])))
+    return Promise.all(['fixes', 'content'].map((scope) => api.actionCenter.shipState(scope, siteId).then((s) => [scope, s]).catch(() => [scope, null])))
       .then((rows) => setState(Object.fromEntries(rows)));
   }, [siteId]);
   useEffect(() => {

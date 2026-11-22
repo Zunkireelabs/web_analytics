@@ -148,6 +148,16 @@ export function buildComplianceDesignDriftFindings(resolvedPages, wrapperVerific
   }));
 }
 
+// Which tracker checks may produce a finding for this project. GA4 is the REQUIRED analytics install. Facebook Pixel is OPTIONAL
+// (business decision 2026-11-22): it is only ever recommended for a project that opted in by storing a Pixel ID, and it is never a
+// dependency or blocker of anything. A project that says it does not run ads (facebook_pixel_not_applicable, migration 165) is
+// excluded outright.
+export function trackerCheckApplies(checkId, site) {
+  if (checkId !== 'facebook-pixel') return true;
+  if (site?.facebook_pixel_not_applicable) return false;
+  return Boolean(site?.facebook_pixel_id);
+}
+
 export async function run({ siteId, start, end }) {
   const site = await getSiteById(siteId);
   const domain = knownDomain(site) || (await resolveOwnDomain(site, siteId, start, end));
@@ -288,7 +298,7 @@ export async function run({ siteId, start, end }) {
     // migration 165) would otherwise re-file this same unresolvable finding
     // every detection pass forever — not a false positive, a real business
     // fact ("we don't run Facebook/Instagram ads") that no draft can fix.
-    .filter((t) => !(t.id === 'facebook-pixel' && site.facebook_pixel_not_applicable))
+    .filter((t) => trackerCheckApplies(t.id, site))
     .map((t) => makeFinding({
     id: `trust-compliance:${t.id}:missing`,
     evidence: { page: homepageUrl, trackersDetected: trackerFacts.trackersDetected },

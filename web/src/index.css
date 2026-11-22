@@ -499,3 +499,7 @@
 /* The agent's sign pulses while there is something new for the client */
 @keyframes agent-pulse { 0% { box-shadow: 0 12px 30px -8px rgba(213,78,0,.55), 0 0 0 0 rgba(213,78,0,.35); } 70% { box-shadow: 0 12px 30px -8px rgba(213,78,0,.55), 0 0 0 12px rgba(213,78,0,0); } 100% { box-shadow: 0 12px 30px -8px rgba(213,78,0,.55), 0 0 0 0 rgba(213,78,0,0); } }
 .agent-pulse { animation: agent-pulse 2.4s infinite; }
+
+/* The Analyst page's staff drawer opens in the same corner as the Agent bubble; the bubble and its reminder step aside while it is open. */
+body[data-analyst-drawer='open'] [data-agent-bubble],
+body[data-analyst-drawer='open'] [data-agent-reminder] { display: none; }

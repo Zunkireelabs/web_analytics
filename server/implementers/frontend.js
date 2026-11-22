@@ -302,11 +302,53 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
 // genuine failure — callers must treat a failure here as fatal to the whole
 // apply, never push the post file without its manifest entry landing in the
 // same commit.
-export async function computeGeneratedPostsManifestUpdate(site, entry, fetchFile, beforeRef) {
-  const manifestPath = site.url_file_map?.newContentTargets?.['blog-outline']?.manifestFile;
+// A client's own build may require content a generator cannot honestly invent (an answer-first summary, visible FAQ items, official
+// sources). Per-site newContentTargets['blog-outline'].postContract.requiredContent lists them by name; a draft missing any is refused
+// BEFORE it is written, with the exact list, so a human supplies it (never a guess, never a post the client's build then rejects).
+export function checkPostContract(site, content) {
+  const required = site.url_file_map?.newContentTargets?.['blog-outline']?.postContract?.requiredContent || [];
+  const has = {
+    quickAnswer: typeof content?.quickAnswer === 'string' && content.quickAnswer.trim().length >= 20,
+    faqItems: Array.isArray(content?.faqItems) && content.faqItems.some((x) => x?.question && x?.answer),
+    sources: Array.isArray(content?.sources) && content.sources.some((x) => x?.label && /^https:\/\//.test(x.url || '')),
+  };
+  const missing = required.filter((k) => !has[k]);
+  return missing.length
+    ? { ok: false, reason: 'draft-not-ready', error: `This site's build requires ${missing.join(', ')} on every new post, and this draft has none of ${missing.length === 1 ? 'it' : 'them'}. A person must supply ${missing.length === 1 ? 'it' : 'them'} (official sources in particular are never generated) before this can be applied.` }
+    : { ok: true };
+}
+
+export async function computeGeneratedPostsManifestUpdate(site, entry, fetchFile, beforeRef, { ownFilePath = null, categoriesLookupFailed = false } = {}) {
+  const target = site.url_file_map?.newContentTargets?.['blog-outline'] || {};
+  const manifestPath = target.manifestFile;
   if (!manifestPath) return null;
 
+  // Required manifest fields (per-site, from the client's own build rules): refuse BEFORE writing rather than push a post the
+  // client's build will reject. A failed category lookup is named as the cause when that is why categories are empty.
+  for (const field of target.manifestRequired || []) {
+    const v = entry[field];
+    if (v == null || String(v).trim() === '' || (Array.isArray(v) && !v.length)) {
+      const why = field === 'categories' && categoriesLookupFailed ? ' (the category source could not be read — retry later, nothing was written)' : '';
+      return { ok: false, reason: 'draft-not-ready', error: `This site requires "${field}" on every new post and the draft has none${why}.` };
+    }
+  }
+
+  // The post's slug must not collide with an existing route or post (site-specific paths, `{slug}` substituted). Skipped for the
+  // draft's own file so re-applying the same draft stays idempotent.
+  for (const tpl of target.collisionChecks || []) {
+    const path = tpl.replaceAll('{slug}', entry.slug);
+    if (path === ownFilePath) continue;
+    if (await fetchFile(site, path, beforeRef)) {
+      return { ok: false, reason: 'slug-conflict', error: `"${entry.slug}" already exists in this site (${path}) — refusing to create a second page at the same address.` };
+    }
+  }
+
   const file = await fetchFile(site, manifestPath, beforeRef);
+  // A configured manifest that cannot be read must never be silently re-created as a one-entry file: that would drop every existing
+  // post from listings and sitemaps. Only an explicit opt-in may start a new manifest.
+  if (!file && !target.manifestMayBeCreated) {
+    return { ok: false, reason: 'invalid-edit', error: `${manifestPath} is configured but does not exist on "${beforeRef}" — refusing to create it from scratch (set manifestMayBeCreated to allow).` };
+  }
   const content = file ? file.content : '[]';
   const arrayRange = findRootArrayBounds(content, 'json-array');
   if (!arrayRange) {
@@ -316,6 +358,10 @@ export async function computeGeneratedPostsManifestUpdate(site, entry, fetchFile
   let existing;
   try { existing = interior.trim() ? JSON.parse(`[${interior}]`) : []; } catch {
     return { ok: false, reason: 'invalid-edit', error: `${manifestPath} is not valid JSON — refusing to guess its shape.` };
+  }
+  const handAuthoredClash = existing.find((it) => it && !it._aiManaged && it.slug === entry.slug);
+  if (handAuthoredClash) {
+    return { ok: false, reason: 'slug-conflict', error: `${manifestPath} already has a hand-authored post "${entry.slug}" — refusing to overwrite or duplicate it.` };
   }
   const aiManaged = existing.filter((it) => it && it._aiManaged);
   const nextSet = [...aiManaged.filter((it) => it.slug !== entry.slug), entry];
@@ -418,6 +464,8 @@ export async function apply(site, draft) {
   // only combination with a manifest to update — see
   // computeGeneratedPostsManifestUpdate's own comment.
   if (draft.action_type === 'blog-outline' && resolved.contentFormat === 'jsx') {
+    const contract = checkPostContract(site, draft.content);
+    if (!contract.ok) return contract;
     const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
     const title = draft.content?.title || draft.content?.topic || 'Untitled';
     const manifestUpdate = await computeGeneratedPostsManifestUpdate(site, {
@@ -427,9 +475,9 @@ export async function apply(site, draft) {
       imageUrl: draft.content?.featuredImage?.url || null,
       imageAlt: draft.content?.featuredImage?.alt || null,
       categories: Array.isArray(draft.content?.categories) ? draft.content.categories : [],
-      publishedAt: new Date().toISOString(),
+      publishedAt: draft.content?.publishedAt || new Date().toISOString(),
       href: resolveNewContentUrl(site, 'blog-outline', title),
-    }, getFileContent, beforeRef);
+    }, getFileContent, beforeRef, { ownFilePath: resolved.filePath, categoriesLookupFailed: !!draft.content?.categoriesLookupFailed });
     if (manifestUpdate) {
       // Fatal to the whole apply — never push the post file without its
       // manifest entry landing in the same commit (see the atomic-workflow

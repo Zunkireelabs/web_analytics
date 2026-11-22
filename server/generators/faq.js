@@ -166,3 +166,17 @@ export async function generate({ siteId, params }) {
   const content = { subject, page: page || null, items, schemaJsonLd };
   return { content, summary: `${items.length} FAQ item(s) for "${subject}"` };
 }
+
+// Does the page already carry an FAQ that search engines can read AND visitors can see? Both are required: FAQPage schema with no visible
+// FAQ is its own defect (the schema must mirror visible content), so it is not "resolved". A fetch failure never closes anything.
+export async function verifyCurrentState(rec) {
+  const page = rec.params?.page || rec.page;
+  if (!page || !/^https?:\/\//i.test(page)) return { decision: 'still_valid', reason: 'missing-params', evidence: null };
+  const fetched = await analyzePageUrl(page);
+  if (!fetched.ok) return { decision: 'still_valid', reason: 'unreachable', evidence: { page, error: fetched.error } };
+  const a = fetched.analysis;
+  if (a.hasFaqSchema && a.hasVisibleFaqContent) {
+    return { decision: 'already_resolved', reason: 'faq-schema-and-visible-faq-present', evidence: { page, hasFaqSchema: true, hasVisibleFaqContent: true, wasRedirected: !!a.wasRedirected } };
+  }
+  return { decision: 'still_valid', reason: a.hasFaqSchema ? 'faq-schema-without-visible-faq' : 'faq-absent', evidence: { page, hasFaqSchema: !!a.hasFaqSchema, hasVisibleFaqContent: !!a.hasVisibleFaqContent } };
+}

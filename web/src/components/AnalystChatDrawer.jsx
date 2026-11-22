@@ -8,16 +8,23 @@ import PageToolbar from './PageToolbar.jsx';
 // third of the page's width whether or not anyone was using it. Collapsed
 // here into a toolbar trigger + slide-up drawer instead, so the content
 // column (Growth Outlook, Keyword Opportunities, Impression Forecast) gets
-// the full page width by default. The global client Assistant bubble
-// (App.jsx's hideAssistant) is hidden on this route specifically so this is
-// the only floating assistant trigger on the Analyst page — the staff-only
-// AdminAssistantPanel, not the client-facing one.
+// the full page width by default. The staff-only AdminAssistantPanel opens
+// here from a toolbar button; the app-wide Agent bubble stays on this page
+// (it carries the project's waiting approvals) and steps aside only while
+// this drawer is open.
 export default function AnalystChatDrawer({ clientId, dashboard }) {
   const [open, setOpen] = useState(false);
 
   // Closing on client switch avoids one client's conversation staying open
   // (and visibly attached) while another client's data is on screen.
   useEffect(() => { setOpen(false); }, [clientId]);
+
+  // The app-wide Agent bubble also shows on this page now (platform admins get the same popup as clients). While this drawer is open in the
+  // same corner the bubble steps aside (index.css hides it on this attribute) so the two never sit on top of each other.
+  useEffect(() => {
+    if (open) document.body.dataset.analystDrawer = 'open'; else delete document.body.dataset.analystDrawer;
+    return () => { delete document.body.dataset.analystDrawer; };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;

@@ -392,3 +392,22 @@ test('the deferral wording the approval stage throws is recognised by the classi
     assert.equal(classifyAbandonReason(`Auto-ship failed: ${message} Root cause: x.`).retryPolicy, RETRY_POLICY.RETRY, key);
   }
 });
+
+test('a schema-only FAQ whose questions are not on the page closes the recommendation, never counts against the item', () => {
+  // faq-render-mode.js's checkSchemaOnlyFaqMatchesVisible. The page already
+  // shows its own FAQ, so there is nothing to add; nothing was published.
+  for (const reason of [
+    'faq-schema-not-visible',
+    'FAQ structured data was not published: 5 of 11 question(s) in this draft are not shown on https://example.com/resources/ (for example "What is the current state of AI?"). FAQ schema must match the visible FAQ, and this page already shows its own.',
+  ]) {
+    const { retryPolicy } = classifyAbandonReason(reason);
+    assert.equal(retryPolicy, RETRY_POLICY.ALREADY_RESOLVED);
+    assert.equal(isAutoRetryable(retryPolicy), false);
+  }
+});
+
+test('an unreadable live page during the FAQ visibility check is transient', () => {
+  const { retryPolicy } = classifyAbandonReason('faq-schema-unverifiable');
+  assert.equal(retryPolicy, RETRY_POLICY.RETRY);
+  assert.equal(isAutoRetryable(retryPolicy), true);
+});

@@ -1,5 +1,6 @@
 import { getGa4BreakdownRange, getBreakdownDataDates, getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { knownDomain, filterOwnDomainPages } from './lib/site-domain.js';
+import { filterByScope } from './lib/site-scope.js';
 import { flagLowCtrSignificant } from './lib/ctr-anomaly.js';
 import { assessWindows, clipWindowToLag, computeShareShifts, splitShareShifts, isUnattributedDim, GSC_LAG_DAYS } from './lib/window-coverage.js';
 import { effortForGenerator } from './lib/page-content.js';
@@ -95,7 +96,7 @@ export async function run({ siteId, start, end }) {
   // draft at — the site's own single top-traffic page (by impressions) is
   // the most defensible real, grounded stand-in. Without SOME page attached,
   // generators/translation.js has nothing to fetch and always 400s.
-  const topPage = filterOwnDomainPages(gscTopPagesRaw, domain)[0]?.dim_value || null;
+  const topPage = filterByScope(filterOwnDomainPages(gscTopPagesRaw, domain), site)[0]?.dim_value || null;
 
   // GA4's own 'country' dimension already returns readable names (e.g.
   // "Nepal"); GSC's country breakdown uses ISO-3 codes, so it's converted

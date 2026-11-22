@@ -23,6 +23,7 @@ export const FIELD_KEYS = Object.freeze([
   'geographicMarkets',
   'competitorCategories',
   'coreTopics',
+  'marketplace',
 ]);
 
 // Fields that must be confirmed before a profile counts as confirmed overall.
@@ -32,6 +33,10 @@ export const FIELD_STATUS = Object.freeze(['confirmed', 'detected', 'assumed', '
 export const CONFIDENCE = Object.freeze(['low', 'medium', 'high']);
 export const EVIDENCE_SOURCES = Object.freeze(['page', 'search', 'capability', 'onboarding', 'competitor', 'legacy', 'human']);
 export const BUSINESS_MODELS = Object.freeze(['saas', 'agency', 'professional-services', 'local-service', 'marketplace', 'ecommerce', 'publisher', 'consultancy', 'other']);
+
+// Where a marketplace's listings come from. Decides how an agent may treat listing pages: user-generated ones are never edited by
+// hand and are usually thin or near-duplicate, curated ones are the company's own content.
+export const LISTING_SOURCES = Object.freeze(['user-generated', 'curated', 'imported', 'mixed']);
 
 // What kinds of domain are never a business competitor, unless a person removes the kind from the profile.
 export const DEFAULT_EXCLUDED_COMPETITOR_KINDS = Object.freeze(['government', 'embassy', 'directory', 'marketplace', 'review-site', 'social-platform', 'news-media']);
@@ -85,6 +90,20 @@ const VALUE_CLEANERS = {
     return { include: cleanList(v.include), exclude: cleanList(v.exclude) };
   },
   coreTopics: cleanList,
+  // Only meaningful for a two-sided marketplace (businessModel.model === 'marketplace'). Kept separate from productsServices and
+  // targetCustomers because a marketplace has TWO customer sides and sells neither side's goods itself.
+  marketplace: (v) => {
+    if (!isObj(v)) return null;
+    const out = {
+      supply: clip(v.supply, 300) || null,
+      demand: clip(v.demand, 300) || null,
+      listingTypes: cleanList(v.listingTypes),
+      categories: cleanList(v.categories),
+      listingSource: LISTING_SOURCES.includes(v.listingSource) ? v.listingSource : null,
+      monetisation: clip(v.monetisation, 200) || null,
+    };
+    return isEmptyValue(out) ? null : out;
+  },
 };
 
 // Free text from a model can be a string, or (for revenue and pricing) a nested object such as {value, confidence, evidence}.
@@ -320,6 +339,19 @@ export function groundingTerms(profile) {
   return [...new Set(terms)];
 }
 
+// How a marketplace works, in one or two sentences, so an agent never treats a two-sided marketplace as a company that sells its own
+// goods. Empty when the profile holds no marketplace detail.
+export function marketplaceLine(m) {
+  if (!m) return '';
+  const parts = [];
+  if (m.supply || m.demand) parts.push(`Two-sided marketplace${m.supply ? `: supply side is ${m.supply}` : ''}${m.demand ? `${m.supply ? '; ' : ': '}demand side is ${m.demand}` : ''}.`);
+  if (m.listingTypes?.length) parts.push(`What is listed: ${m.listingTypes.join('; ')}.`);
+  if (m.categories?.length) parts.push(`Categories: ${m.categories.join(', ')}.`);
+  if (m.listingSource) parts.push(`Listings are ${m.listingSource}${m.listingSource === 'user-generated' ? ' (never write or edit individual listings; they are not the company\'s own copy)' : ''}.`);
+  if (m.monetisation) parts.push(`It earns by: ${m.monetisation}.`);
+  return parts.join(' ');
+}
+
 // One sentence that keeps the five concepts apart. This is the text prompts should receive in place of a bare industry label.
 export function describeCompany(profile) {
   const f = normalizeProfile(profile).fields;
@@ -337,20 +369,22 @@ export function describeCompany(profile) {
   if (problems.length) parts.push(`Problems it solves for them: ${problems.join('; ')}.`);
   const markets = f.geographicMarkets.value || [];
   if (markets.length) parts.push(`Markets: ${markets.join(', ')}.`);
+  const mp = marketplaceLine(f.marketplace.value);
+  if (mp) parts.push(mp);
   return parts.join(' ');
 }
 
 // Per-agent slices. An agent gets what it needs, nothing it should not weigh, so no agent re-derives the business on its own.
 export const AGENT_SLICES = Object.freeze({
   'trend-radar': ['ownIndustry', 'subIndustry', 'businessModel', 'productsServices', 'targetCustomerIndustries', 'customerProblems', 'coreTopics'],
-  content: ['description', 'ownIndustry', 'productsServices', 'targetCustomers', 'targetCustomerIndustries', 'customerProblems', 'coreTopics', 'geographicMarkets'],
-  competitor: ['description', 'ownIndustry', 'subIndustry', 'businessModel', 'productsServices', 'targetCustomers', 'geographicMarkets', 'competitorCategories'],
-  keyword: ['ownIndustry', 'productsServices', 'targetCustomers', 'customerProblems', 'coreTopics', 'geographicMarkets'],
-  seo: ['description', 'ownIndustry', 'productsServices', 'targetCustomers', 'customerProblems', 'geographicMarkets', 'coreTopics'],
+  content: ['description', 'ownIndustry', 'productsServices', 'targetCustomers', 'targetCustomerIndustries', 'customerProblems', 'coreTopics', 'geographicMarkets', 'marketplace'],
+  competitor: ['description', 'ownIndustry', 'subIndustry', 'businessModel', 'productsServices', 'targetCustomers', 'geographicMarkets', 'competitorCategories', 'marketplace'],
+  keyword: ['ownIndustry', 'productsServices', 'targetCustomers', 'customerProblems', 'coreTopics', 'geographicMarkets', 'marketplace'],
+  seo: ['description', 'ownIndustry', 'productsServices', 'targetCustomers', 'customerProblems', 'geographicMarkets', 'coreTopics', 'marketplace'],
   geo: ['description', 'ownIndustry', 'productsServices', 'targetCustomers', 'customerProblems', 'geographicMarkets'],
   aeo: ['description', 'ownIndustry', 'productsServices', 'targetCustomers', 'customerProblems', 'geographicMarkets'],
-  analytics: ['description', 'ownIndustry', 'businessModel', 'targetCustomers', 'geographicMarkets'],
-  growth: ['description', 'ownIndustry', 'businessModel', 'productsServices', 'targetCustomers', 'customerProblems', 'geographicMarkets', 'competitorCategories'],
+  analytics: ['description', 'ownIndustry', 'businessModel', 'targetCustomers', 'geographicMarkets', 'marketplace'],
+  growth: ['description', 'ownIndustry', 'businessModel', 'productsServices', 'targetCustomers', 'customerProblems', 'geographicMarkets', 'competitorCategories', 'marketplace'],
   all: FIELD_KEYS,
 });
 
@@ -429,6 +463,15 @@ export function contentFocusLine(profile) {
   const buyers = (f.targetCustomers.value || []).map((x) => x.segment).slice(0, 4);
   const sells = (f.productsServices.value || []).map((x) => x.name).slice(0, 5);
   const problems = (f.customerProblems.value || []).slice(0, 4);
+  const mp = f.marketplace.value;
+  // A two-sided marketplace has two audiences and sells neither side's goods: write for both, about doing the job well, never about
+  // individual listings, sellers or reviews (those are the application's data, and inventing them is fabrication).
+  if (mp && (mp.supply || mp.demand)) {
+    const sides = [mp.supply && `${mp.supply} (who list)`, mp.demand && `${mp.demand} (who buy or book)`].filter(Boolean).join(' and ');
+    const cats = (mp.categories || []).slice(0, 8);
+    return `Write for ${sides}: practical guides that help sellers list well and buyers choose well${cats.length ? `, within these categories: ${cats.join(', ')}` : ''}. ` +
+      'Never write about, name or invent individual listings, sellers, prices or reviews, and do not suggest general topics unrelated to how this marketplace works.';
+  }
   if (!buyers.length && !sells.length && !problems.length) return '';
   const parts = [];
   if (buyers.length) parts.push(`Write for ${buyers.join('; ')}`);

@@ -32,6 +32,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { faqSchemaRequiresVisible } from '../lib/faq-policy.js';
 
 function walk(dir, out = []) {
   for (const entry of readdirSync(dir)) {
@@ -83,6 +84,15 @@ export async function enforceVisibleFaqCap(repoDir, cap, configuredFaqWrapper, {
 
   if (visible.length <= cap) return { cap, visibleFound: visible.length, demoted: 0, changedPaths: [] };
 
+  // Demoting a page to schema-only leaves FAQPage JSON-LD for questions the
+  // page no longer shows, which search engines treat as a violation (and which
+  // the client's own CI can reject). While FAQ schema is required to match the
+  // visible FAQ, going over the cap is the lesser problem, so demote nothing.
+  // Set FAQ_SCHEMA_REQUIRES_VISIBLE=false to restore the old behaviour.
+  if (faqSchemaRequiresVisible()) {
+    return { cap, visibleFound: visible.length, demoted: 0, changedPaths: [], skipped: 'faq-schema-requires-visible' };
+  }
+
   // The site's own component first, then alphabetical for a stable, reviewable
   // ordering rather than filesystem order.
   visible.sort((a, b) => (b.isSiteComponent - a.isSiteComponent) || a.rel.localeCompare(b.rel));
@@ -123,7 +133,10 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
     repo, cap, rows[0].url_file_map?.siteRoot?.componentTemplates?.faq?.wrapper, { write },
   );
   console.log(`visible_faq_cap = ${result.cap}; found ${result.visibleFound} page(s) with a visible FAQ.\n`);
-  if (result.demoted) {
+  if (result.skipped === 'faq-schema-requires-visible') {
+    console.log('Over the cap, but nothing was demoted: schema-only FAQs would publish structured data for questions the page does not show.');
+    console.log('Set FAQ_SCHEMA_REQUIRES_VISIBLE=false to demote anyway.');
+  } else if (result.demoted) {
     console.log('DEMOTED to schema-only:');
     for (const p of result.changedPaths) console.log(`   ${p}`);
   } else {

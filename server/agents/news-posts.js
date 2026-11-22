@@ -34,7 +34,7 @@ const MAX_CANDIDATES = 6;
 const MAX_PAGES_PER_CANDIDATE = 3;
 const PAGE_TEXT_FOR_MODEL = 7000;
 
-const CANDIDATE_SYSTEM = 'You read a numbered list of real, recent news headlines for a study-abroad consultancy whose clients are students from Nepal. ' +
+const CANDIDATE_SYSTEM = 'You read a numbered list of real, recent news headlines for a study-abroad partner whose clients are students from Nepal. ' +
   'Pick headlines that report a CHANGE to a rule, requirement, fee, deadline, cap, policy or scholarship window that affects such students, in one of the listed countries. ' +
   'Respond with ONLY JSON {"candidates":[{"topic":"plain-English article topic including the country and year","country":"one of the listed countries",' +
   '"claim":"one sentence stating the change exactly as the headline reports it","sources":[headline indexes]}]}. ' +

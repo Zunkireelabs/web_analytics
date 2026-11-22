@@ -15,10 +15,15 @@ let rewriteResponses;  // queued callLLM replies, one per rewrite attempt
 let rewriteCalls;      // every callLLM invocation, for asserting on/off
 let pageAnalysis;      // what analyzePageUrl returns
 let sufficientGrounding;
+let jsonQueue;         // optional: successive callLLMForJson replies (shifted per call) — for the retry path
+let jsonCalls;         // every callLLMForJson system prompt
+let siteRow;           // what getSiteById returns
 
 mock.module(resolve('../llm.js'), {
   namedExports: {
-    callLLMForJson: async () => {
+    callLLMForJson: async (system) => {
+      jsonCalls.push(system);
+      if (jsonQueue.length) return jsonQueue.shift();
       if (jsonResponse instanceof Error) throw jsonResponse;
       return jsonResponse;
     },
@@ -31,6 +36,10 @@ mock.module(resolve('../llm.js'), {
       return next ?? 'unqueued rewrite response';
     },
   },
+});
+
+mock.module(resolve('../store/read.js'), {
+  namedExports: { getSiteById: async () => siteRow },
 });
 
 mock.module(resolve('../agents/lib/page-content.js'), {
@@ -51,6 +60,9 @@ beforeEach(() => {
   jsonResponse = { titles: [inRangeTitle], metaDescription: inRangeDescription };
   rewriteResponses = [];
   rewriteCalls = [];
+  jsonQueue = [];
+  jsonCalls = [];
+  siteRow = null;
   pageAnalysis = { ok: false };
   sufficientGrounding = false;
 });
@@ -152,5 +164,100 @@ describe('meta-title generator — page grounding', () => {
   test('page is null on the draft when none was requested', async () => {
     const { content } = await generate({ siteId: 1, params: { query: 'q' } });
     assert.equal(content.page, null);
+  });
+});
+
+describe('meta-title generator — per-site titleClaimBans', () => {
+  const bannedSite = { url_file_map: { siteRoot: { titleClaimBans: ['consultancy'] } } };
+  const cleanTitle = 'C'.repeat(55);
+
+  test('the prompt names the banned words', async () => {
+    siteRow = bannedSite;
+    await generate({ siteId: 1, params: { query: 'q' } });
+    assert.match(jsonCalls[0], /Never use any of these words[^.]*"consultancy"/);
+  });
+
+  test('a banned word triggers one retry, and the clean second answer is used', async () => {
+    siteRow = bannedSite;
+    jsonQueue = [
+      { titles: ['consultancy ' + 'A'.repeat(44)], metaDescription: inRangeDescription },
+      { titles: [cleanTitle], metaDescription: inRangeDescription },
+    ];
+    const { content } = await generate({ siteId: 1, params: { query: 'q' } });
+    assert.deepEqual(content.titles, [cleanTitle]);
+    assert.equal(jsonCalls.length, 2);
+    assert.match(jsonCalls[1], /previous answer used a word this site does not allow/);
+  });
+
+  test('a description that still carries the word after the retry fails loudly instead of shipping', async () => {
+    siteRow = bannedSite;
+    const bad = { titles: [cleanTitle], metaDescription: 'A study abroad consultancy ' + 'B'.repeat(130) };
+    jsonQueue = [bad, bad];
+    await assert.rejects(() => generate({ siteId: 1, params: { query: 'q' } }), (err) => err.status === 400 && /does not allow/.test(err.message));
+  });
+
+  test('a blog post (article-like page) is exempt, so no ban prompt and no retry', async () => {
+    siteRow = bannedSite;
+    pageAnalysis = { ok: true, analysis: { title: 't', metaDescription: 'd', bodyText: 'x'.repeat(500), isArticlePage: true } };
+    sufficientGrounding = true;
+    jsonResponse = { titles: ['consultancy ' + 'A'.repeat(44)], metaDescription: inRangeDescription };
+    const { content } = await generate({ siteId: 1, params: { query: 'q', page: 'https://x.test/blog/post' } });
+    assert.match(content.titles[0], /consultancy/);
+    assert.equal(jsonCalls.length, 1);
+    assert.doesNotMatch(jsonCalls[0], /Never use any of these words/);
+  });
+
+  test('a blog post that is not published yet (page cannot be read) is exempt by the site\'s own blog URL pattern', async () => {
+    siteRow = { url_file_map: { siteRoot: { titleClaimBans: ['consultancy'] }, newContentTargets: { 'blog-outline': { urlPattern: '/blogs/{slug}' } } } };
+    pageAnalysis = { ok: false };
+    jsonResponse = { titles: ['consultancy ' + 'A'.repeat(44)], metaDescription: inRangeDescription };
+    const { content } = await generate({ siteId: 1, params: { query: 'q', page: 'https://x.test/blogs/draft-post' } });
+    assert.match(content.titles[0], /consultancy/);
+    assert.equal(jsonCalls.length, 1);
+    assert.doesNotMatch(jsonCalls[0], /Never use any of these words/);
+  });
+
+  test('an unpublished page that is NOT under the blog pattern is still banned', async () => {
+    siteRow = { url_file_map: { siteRoot: { titleClaimBans: ['consultancy'] }, newContentTargets: { 'blog-outline': { urlPattern: '/blogs/{slug}' } } } };
+    pageAnalysis = { ok: false };
+    await generate({ siteId: 1, params: { query: 'q', page: 'https://x.test/new-landing' } });
+    assert.match(jsonCalls[0], /Never use any of these words/);
+  });
+
+  test('no page URL and no declared type: the ban stays on, and the summary says why', async () => {
+    siteRow = bannedSite;
+    const { summary } = await generate({ siteId: 1, params: { query: 'q' } });
+    assert.match(jsonCalls[0], /Never use any of these words/);
+    assert.match(summary, /page type could not be identified/);
+  });
+
+  test('no page URL but pageType "blog": exempt, no ban prompt, no caution note', async () => {
+    siteRow = bannedSite;
+    jsonResponse = { titles: ['consultancy ' + 'A'.repeat(44)], metaDescription: inRangeDescription };
+    const { content, summary } = await generate({ siteId: 1, params: { query: 'q', pageType: 'blog' } });
+    assert.match(content.titles[0], /consultancy/);
+    assert.doesNotMatch(jsonCalls[0], /Never use any of these words/);
+    assert.doesNotMatch(summary, /could not be identified/);
+  });
+
+  test('a declared "landing-page" with no URL is a RESOLVED type: still banned, and not called unknown', async () => {
+    siteRow = bannedSite;
+    const { summary } = await generate({ siteId: 1, params: { query: 'q', pageType: 'landing-page' } });
+    assert.match(jsonCalls[0], /Never use any of these words/);
+    assert.doesNotMatch(summary, /could not be identified/);
+  });
+
+  test('the caution note never goes into content, which the apply step reads', async () => {
+    siteRow = bannedSite;
+    const { content } = await generate({ siteId: 1, params: { query: 'q' } });
+    assert.deepEqual(Object.keys(content).sort(), ['metaDescription', 'page', 'query', 'titles']);
+  });
+
+  test('a site with no titleClaimBans is unaffected', async () => {
+    siteRow = { url_file_map: { siteRoot: {} } };
+    jsonResponse = { titles: ['consultancy ' + 'A'.repeat(44)], metaDescription: inRangeDescription };
+    const { content } = await generate({ siteId: 1, params: { query: 'q' } });
+    assert.match(content.titles[0], /consultancy/);
+    assert.equal(jsonCalls.length, 1);
   });
 });

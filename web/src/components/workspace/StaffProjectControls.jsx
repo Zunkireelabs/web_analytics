@@ -27,6 +27,71 @@ const Toggle = ({ options, value, onChange, disabledKeys = [], label }) => (
   </div>
 );
 
+// One path or link per line in the boxes; the server cleans and checks them, and says what is wrong in plain words.
+const lines = (text) => String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+const toText = (list) => (list || []).join('\n');
+
+// Two projects on one domain (a marketplace at / and a business site under /business). Reads and saves through its own route, so it
+// never touches the other cards' values. A project with no paths set behaves exactly as before.
+function SharedDomainCard({ project, onChanged }) {
+  const [data, setData] = useState(null);
+  const [f, setF] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null); // { ok, text }
+  const fill = (d) => setF({ inc: toText(d.scopeIncludePaths), exc: toText(d.scopeExcludePaths), allow: toText(d.writeAllow), deny: toText(d.writeDeny), links: toText(d.crossSiteLinks), markers: !!d.markerSetupEnabled });
+  useEffect(() => {
+    setData(null); setF(null); setMsg(null);
+    api.clients.sharedDomain(project.id).then((d) => { setData(d); fill(d); }).catch((e) => setMsg({ ok: false, text: e.message || 'Could not load these settings.' }));
+  }, [project.id]);
+  const set = (k) => (e) => setF((x) => ({ ...x, [k]: e.target.value }));
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const d = await api.clients.setSharedDomain(project.id, {
+        scopeIncludePaths: lines(f.inc), scopeExcludePaths: lines(f.exc), writeAllow: lines(f.allow), writeDeny: lines(f.deny),
+        crossSiteLinks: lines(f.links), markerSetupEnabled: f.markers,
+      });
+      setData((x) => ({ ...x, ...d })); fill(d); setMsg({ ok: true, text: 'Saved.' }); await onChanged?.();
+    } catch (e) { setMsg({ ok: false, text: e.message || 'That did not work.' }); } finally { setBusy(false); }
+  };
+  const siblings = data?.siblings || [];
+  return (
+    <Card title="Shared domain">
+      {!f && !msg && <div className="h-16 bg-muted rounded-card animate-pulse" />}
+      {f && (
+        <>
+          <p className="text-xs text-faint">
+            Only for a domain that hosts two projects{data?.domain ? ` (${data.domain})` : ''}. Leave every box empty and this project covers the whole domain, as before.
+            {siblings.length > 0 && <> Also on this domain: <b className="font-medium text-text">{siblings.map((s) => s.name).join(', ')}</b>.</>}
+          </p>
+          <div className="grid sm:grid-cols-2 gap-2">
+            <Field as="textarea" rows={3} label="Pages this project owns" value={f.inc} onChange={set('inc')} placeholder="/business" hint="One path per line. Empty means everything." />
+            <Field as="textarea" rows={3} label="Pages it leaves out" value={f.exc} onChange={set('exc')} placeholder="/business" hint="The other project's paths." />
+          </div>
+          <div className="grid sm:grid-cols-2 gap-2">
+            <Field as="textarea" rows={3} label="Files it may write" value={f.allow} onChange={set('allow')} placeholder="src/marketplace" hint="Repository folders. Empty means the whole repo." />
+            <Field as="textarea" rows={3} label="Files it may never write" value={f.deny} onChange={set('deny')} placeholder="src/business" hint="Shared files go here. This always wins." />
+          </div>
+          <Field as="textarea" rows={2} label="Links to the other project it may add" value={f.links} onChange={set('links')} placeholder={`https://${data?.domain || 'example.com'}/business`} hint="Full links on this domain, one per line. Empty means none." />
+          <div className="flex items-start justify-between gap-3 border-t border-border pt-3">
+            <div className="min-w-0">
+              <div className="text-[13px] font-medium text-fg">Open the agent-markers pull request after the baseline</div>
+              <div className="text-xs text-faint mt-0.5">{data?.repoConnected ? 'One pull request that only adds markers. Nothing is merged for you.' : 'Connect a GitHub repository first.'}</div>
+            </div>
+            <button type="button" role="switch" aria-checked={f.markers} aria-label="Open the agent-markers pull request after the baseline" disabled={!data?.repoConnected && !f.markers}
+              onClick={() => setF((x) => ({ ...x, markers: !x.markers }))}
+              className="relative w-9 h-5 rounded-full shrink-0 mt-0.5 transition-colors" style={{ background: f.markers ? 'var(--primary)' : '#d4d4d4', opacity: !data?.repoConnected && !f.markers ? 0.45 : 1 }}>
+              <span className="absolute top-0.5 size-4 rounded-full bg-white transition-all" style={{ left: f.markers ? 18 : 2, boxShadow: '0 1px 2px rgba(0,0,0,.25)' }} />
+            </button>
+          </div>
+          <Button variant="light" disabled={busy} onClick={save}>Save</Button>
+        </>
+      )}
+      {msg && <p className="text-[13px]" style={msg.ok ? undefined : { color: '#b42318' }} role={msg.ok ? 'status' : 'alert'}>{msg.text}</p>}
+    </Card>
+  );
+}
+
 // What each access state means, in words, and which changes the server allows from it.
 const STATE_TEXT = {
   client: ['Real client', 'No end date. Nothing is disconnected.'],
@@ -149,6 +214,8 @@ export default function StaffProjectControls({ project, isOpen, onClose, onChang
               </div>
               <Button variant="light" disabled={busy === 'ids'} onClick={() => run('ids', () => api.clients.setAnalyticsIds(row.id, ga4.trim(), pixel.trim()), 'Saved.')}>Save IDs</Button>
             </Card>
+
+            <SharedDomainCard project={project} onChanged={onChanged} />
 
             {status !== 'soft_deleted' && (
               <div ref={danger}>

@@ -361,3 +361,42 @@ describe('lineKeys placement', () => {
     assert.equal(resolveLineKeys({ website_domain: 'x.com', url_file_map: { pages: { '/p': { file: 'p.md' } } } }, 'https://x.com/p', 'meta-title'), null);
   });
 });
+
+describe('one site, several apps: mounts and otherApps (zennly.io = marketplace at "/" + web-zenly under /businesses)', async () => {
+  const { mapPathOf, resolveOwnership, resolveFile, isPageMapped } = await import('./url-file-map.js');
+  const site = {
+    website_domain: 'zennly.io',
+    url_file_map: {
+      mounts: [{ prefix: '/businesses' }],
+      otherApps: [{ name: 'zennly-marketplace', repo: 'Zunkireelabs/zennly-marketplace', paths: ['/'], prefixes: ['/search', '/providers', '/account'] }],
+      pages: { '/faq': { file: 'src/faq.njk' }, '/privacy-policy/': { file: 'src/privacy-policy.njk' }, '/': { file: 'src/index.njk' } },
+      patterns: [{ match: '^/blog/([a-z0-9-]+)/?$', file: 'src/blog/$1.njk' }],
+    },
+  };
+
+  test('a /businesses URL resolves to the repo file for the path inside the mount', () => {
+    assert.equal(resolveFile(site, 'https://zennly.io/businesses/faq'), 'src/faq.njk');
+    assert.equal(resolveFile(site, 'https://zennly.io/businesses/privacy-policy'), 'src/privacy-policy.njk');
+  });
+  test('pattern routes work under the mount too', () => {
+    assert.equal(resolveFile(site, 'https://zennly.io/businesses/blog/daily-reconciliation'), 'src/blog/daily-reconciliation.njk');
+  });
+  test('the mount root is the repo homepage, and the marketplace homepage is NOT mapped to it', () => {
+    assert.equal(resolveFile(site, 'https://zennly.io/businesses'), 'src/index.njk');
+    assert.equal(resolveFile(site, 'https://zennly.io/'), null);
+    assert.equal(isPageMapped(site, 'https://zennly.io/', 'schema'), false);
+  });
+  test('ownership: marketplace URLs belong to the other app, mounted ones to the connected repo', () => {
+    const home = resolveOwnership(site, 'https://zennly.io/');
+    assert.equal(home.owner, 'other'); assert.equal(home.repo, 'Zunkireelabs/zennly-marketplace'); assert.match(home.message, /zennly-marketplace/);
+    assert.equal(resolveOwnership(site, 'https://zennly.io/providers/nuad-thai-spa').owner, 'other');
+    assert.equal(resolveOwnership(site, 'https://zennly.io/businesses/faq').owner, 'connected');
+    assert.equal(resolveOwnership(site, 'https://zennly.io/businesses').owner, 'connected');
+  });
+  test('a site with no mounts or otherApps behaves exactly as before', () => {
+    const plain = { website_domain: 'a.com', url_file_map: { pages: { '/about': { file: 'about.njk' } } } };
+    assert.equal(mapPathOf(plain, 'https://a.com/about'), '/about');
+    assert.equal(resolveFile(plain, 'https://a.com/about'), 'about.njk');
+    assert.equal(resolveOwnership(plain, 'https://a.com/').owner, 'connected');
+  });
+});

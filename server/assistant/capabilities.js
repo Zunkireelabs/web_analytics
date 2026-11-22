@@ -10,6 +10,7 @@ import { callDataAnalystAgent } from '../lib/data-analyst-client.js';
 import { answerQuestion } from '../agents/lib/copilot.js';
 import { createConversation, getConversation, getRecentMessages, saveMessage } from '../store/copilot.js';
 import { query } from '../db.js';
+import { mergeStagePr } from '../lib/ship-flow.js';
 import { collectNeedsYou } from './needs-you.js';
 import { suggestedQuestions } from './questions.js';
 
@@ -152,6 +153,33 @@ export const CAPABILITIES = {
     run: async (ctx) => {
       const recs = await listOpenRecommendations(ctx.siteId);
       return summarizeAutonomy(recs);
+    },
+  },
+
+  // The person's "go ahead" on one of the agent's own pull requests into STAGE. The same guarded merge a button press runs
+  // (lib/ship-flow.js mergeStagePr): stage only, repository checks must exist and pass, no conflicts, never main. Only a pull request
+  // that is on THIS site's own needs-you list can be named (so a crafted call cannot merge an arbitrary PR). After a merge the drafts are
+  // re-read so the dashboard shows them merged, and the promotion pull request to main is requested (a person merges that one).
+  merge_stage_pr: {
+    description: "Merge one of the agent's open pull requests into the stage branch, after the person says go ahead. Never merges main.",
+    requiredRole: 'tenant_admin',
+    run: async (ctx, args = {}, deps = {}) => {
+      const prNumber = Number(args.prNumber);
+      if (!Number.isInteger(prNumber)) return { ok: false, reason: 'no-pr', message: 'Say which pull request.' };
+      const pending = await (deps.collectNeedsYou || collectNeedsYou)(ctx.siteId);
+      if (!pending.some((i) => i.prNumber === prNumber)) return { ok: false, reason: 'not-pending', message: `Pull request #${prNumber} is not waiting for approval on this site.` };
+      const site = await (deps.getSite || getSiteById)(ctx.siteId);
+      const r = await (deps.mergeStagePr || mergeStagePr)(site, prNumber, { userId: ctx.userId, requireChecks: true });
+      if (!r.ok) return { ...r, prNumber };
+      const after = deps.afterMerge || (async (siteId, n) => {
+        const { checkDraftPrStatus } = await import('../routes/action-center.js');
+        const { promoteMergedStageBatches } = await import('../lib/stage-promotion.js');
+        const { rows } = await query(`SELECT id FROM drafts WHERE site_id = $1 AND pr_number = $2`, [siteId, n]);
+        for (const { id } of rows) await checkDraftPrStatus(siteId, id).catch(() => {});
+        return promoteMergedStageBatches(siteId).catch(() => null);
+      });
+      const promotion = await after(ctx.siteId, prNumber).catch(() => null);
+      return { ok: true, prNumber, base: r.base, promotion, siteName: site?.name || null };
     },
   },
 

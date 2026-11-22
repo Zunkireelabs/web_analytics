@@ -84,3 +84,49 @@ describe('isVerifiableDraft — analytics-install (tracking-ID verification)', (
     assert.equal(isVerifiableDraft(analyticsDraft({ input: { trackingId: 'G-ABC123' } })), false);
   });
 });
+
+import { verificationMethodFor as vmf, VERIFICATION_METHOD as VM } from './fix-verifications.js';
+describe('verificationMethodFor — the three generators whose old needle was the wrong thing', () => {
+  test('internal-links verifies the links, not the rationale sentence', () => {
+    const plan = vmf({ action_type: 'internal-links', input: { page: 'https://s.test/a/' }, content: { page: 'https://s.test/a/', suggestions: [{ anchorText: 'study in the UK', targetUrl: 'https://s.test/uk/', rationale: 'This strengthens topical authority across the site.' }] } }, { siteOrigin: 'https://s.test' });
+    assert.equal(plan.method, VM.LINKS_PRESENT);
+    assert.deepEqual(plan.expected.links, [{ href: 'https://s.test/uk/', anchor: 'study in the UK' }]);
+    assert.equal(JSON.stringify(plan).includes('topical authority'), false, 'the rationale must never become a required match');
+  });
+  test('internal-links with no suggestions is unverifiable with a reason, not a vacuous pass', () => {
+    const plan = vmf({ action_type: 'internal-links', input: { page: 'https://s.test/a/' }, content: { page: 'x', suggestions: [] } });
+    assert.equal(plan.method, VM.UNVERIFIABLE);
+  });
+  test('schema-repair verifies the schema state, not a JSON slice', () => {
+    const dup = vmf({ action_type: 'schema-repair', input: { page: 'https://s.test/a/' }, content: { fixType: 'remove-duplicate', duplicateType: 'LocalBusiness', originalRaw: '{"@type":"LocalBusiness"}' } });
+    assert.equal(dup.method, VM.SCHEMA_STATE);
+    assert.equal(dup.expected.duplicateType, 'LocalBusiness');
+    const fix = vmf({ action_type: 'schema-repair', input: { page: 'https://s.test/a/' }, content: { fixType: 'repair-malformed', jsonLd: { '@type': 'Organization' } } });
+    assert.equal(fix.expected.fixType, 'repair-malformed');
+  });
+  test('meta-title verifies the chosen title AND the description', () => {
+    const plan = vmf({ action_type: 'meta-title', input: { page: 'https://s.test/a/' }, content: { titles: ['T1', 'T2'], selectedTitle: 'T2', metaDescription: 'A description long enough to matter here.' } });
+    assert.equal(plan.method, VM.META_TAGS);
+    assert.deepEqual(plan.expected, { title: 'T2', description: 'A description long enough to matter here.' });
+  });
+});
+
+import { checkContentAgainstExpectation as check } from '../agents/lib/fix-verification.js';
+describe('pre-approval check, end to end: plan from the draft, matched against the file the draft will write', () => {
+  const run = (draft, file) => { const p = vmf(draft, { siteOrigin: 'https://s.test' }); return check(p.method, p.expected, file, p.target); };
+  test('a correct internal-links draft passes (it used to be abandoned because its rationale is not in the file)', () => {
+    const draft = { action_type: 'internal-links', input: { page: 'https://s.test/a/' }, content: { suggestions: [{ anchorText: 'study in the UK', targetUrl: 'https://s.test/uk/', rationale: 'Builds topical authority.' }] } };
+    assert.equal(run(draft, '<p>Read how to <a href="/uk/">study in the UK</a>.</p>').present, true);
+    assert.equal(run(draft, '<p>Read how to study in the UK.</p>').present, false, 'but a draft that did not add the link still fails');
+  });
+  test('a correct meta-title draft passes despite entity/escape differences, and fails when the description is not written', () => {
+    const draft = { action_type: 'meta-title', input: { page: 'https://s.test/a/' }, content: { selectedTitle: 'Costs & Visas | S', metaDescription: "Everything you need — it's simple and clear." } };
+    assert.equal(run(draft, `title: 'Costs & Visas | S', description: 'Everything you need — it\\'s simple and clear.'`).present, true);
+    assert.equal(run(draft, `title: 'Costs & Visas | S', description: 'old text'`).present, false);
+  });
+  test('a correct schema duplicate removal passes on the file it produces', () => {
+    const draft = { action_type: 'schema-repair', input: { page: 'https://s.test/a/' }, content: { fixType: 'remove-duplicate', duplicateType: 'Thing', originalRaw: '{"@type":"Thing","a":2}' } };
+    assert.equal(run(draft, '<script type="application/ld+json">{"@type":"Thing","a":1}</script>').present, true);
+    assert.equal(run(draft, '<script type="application/ld+json">{"@type":"Thing","a":1}</script><script type="application/ld+json">{"@type":"Thing","a":2}</script>').present, false);
+  });
+});

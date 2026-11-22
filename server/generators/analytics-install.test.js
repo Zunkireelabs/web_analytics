@@ -18,7 +18,7 @@ mock.module(resolve('../store/read.js'), {
   },
 });
 
-const { generate, meta } = await import('./analytics-install.js');
+const { generate, meta, verifyCurrentState } = await import('./analytics-install.js');
 
 beforeEach(() => { siteFixture = null; siteLookupThrows = null; });
 
@@ -31,10 +31,49 @@ describe('analytics-install generator', () => {
     await assert.rejects(() => generate({ params: { provider: 'tiktok-pixel' } }));
   });
 
-  test('ships a placeholder-blocked draft when no real tracking ID is given anywhere', async () => {
-    const { content } = await generate({ params: { provider: 'ga4', page: 'https://example.com/' } });
-    assert.deepEqual(content.placeholderFields, ['trackingId']);
-    assert.match(content.script, /NEEDS INPUT/);
+  // 2026-11-22: no placeholder draft any more. Missing input is reported as missing input (needs_input), once, instead of a draft
+  // that is refused at the publish gate and retried every day.
+  test('refuses with needs-input (never a placeholder script) when no real tracking ID exists anywhere', async () => {
+    await assert.rejects(
+      () => generate({ params: { provider: 'ga4', page: 'https://example.com/' } }),
+      (err) => err.needsInput === true && err.refusal === true && err.reason === 'ga4-id-missing' && /Needs input/.test(err.message),
+    );
+  });
+
+  test('GA4: a property ID alone is NOT a measurement ID — discovery is tried, and a miss says exactly what is missing', async () => {
+    siteFixture = { id: 1, ga4_property_id: '561094281', ga4_measurement_id: null };
+    let asked = 0;
+    const ensureMeasurementId = async () => { asked++; return { status: 'no-web-stream' }; };
+    await assert.rejects(
+      () => generate({ siteId: 1, params: { provider: 'ga4' }, deps: { ensureMeasurementId } }),
+      (err) => err.needsInput === true && /no web data stream/i.test(err.message),
+    );
+    assert.equal(asked, 1);
+  });
+
+  test('GA4: a measurement ID discovered from the connected property is used', async () => {
+    siteFixture = { id: 1, ga4_property_id: '561094281', ga4_measurement_id: null };
+    const ensureMeasurementId = async () => ({ status: 'found', measurementId: 'G-DISCOVER01', saved: true });
+    const { content } = await generate({ siteId: 1, params: { provider: 'ga4' }, deps: { ensureMeasurementId } });
+    assert.match(content.script, /G-DISCOVER01/);
+    assert.equal(content.idSource, 'discovered-from-ga4-stream');
+  });
+
+  test('GA4: a temporary lookup failure is a retryable refusal, not a client request', async () => {
+    siteFixture = { id: 1, ga4_property_id: '561094281', ga4_measurement_id: null };
+    const ensureMeasurementId = async () => ({ status: 'unavailable' });
+    await assert.rejects(
+      () => generate({ siteId: 1, params: { provider: 'ga4' }, deps: { ensureMeasurementId } }),
+      (err) => err.needsInput === false && err.temporary === true && err.reason === 'ga4-lookup-unavailable',
+    );
+  });
+
+  test('a stored measurement ID is used without any discovery call', async () => {
+    siteFixture = { id: 1, ga4_property_id: '1', ga4_measurement_id: 'G-STORED0001' };
+    const ensureMeasurementId = async () => { throw new Error('must not be called'); };
+    const { content } = await generate({ siteId: 1, params: { provider: 'ga4' }, deps: { ensureMeasurementId } });
+    assert.match(content.script, /G-STORED0001/);
+    assert.equal(content.idSource, 'site-config');
   });
 
   test('drafts a real GA4 script when a valid measurement ID is given via params', async () => {
@@ -51,9 +90,8 @@ describe('analytics-install generator', () => {
     assert.match(content.script, /fbevents\.js/);
   });
 
-  test('falls back to a placeholder when the given ID does not match the provider\'s real ID shape', async () => {
-    const { content } = await generate({ params: { provider: 'ga4', trackingId: 'not-a-real-id' } });
-    assert.deepEqual(content.placeholderFields, ['trackingId']);
+  test('refuses when the given ID does not match the provider\'s real ID shape', async () => {
+    await assert.rejects(() => generate({ params: { provider: 'ga4', trackingId: 'not-a-real-id' } }), (err) => err.needsInput === true);
   });
 
   // ── The bug this file was written to catch: a stale recommendation's
@@ -86,10 +124,10 @@ describe('analytics-install generator', () => {
       assert.doesNotMatch(content.script, /G-STALEFROZEN/);
     });
 
-    test('a malformed value stored on the site still falls through to the placeholder gate', async () => {
+    test('a malformed value stored on the site is never used (shape is validated, not just presence)', async () => {
       siteFixture = { id: 1, ga4_measurement_id: 'not-a-real-id', facebook_pixel_id: null };
-      const { content } = await generate({ siteId: 1, params: { provider: 'ga4' } });
-      assert.deepEqual(content.placeholderFields, ['trackingId'], 'shape is still validated, not just presence');
+      const ensureMeasurementId = async () => ({ status: 'ambiguous' });
+      await assert.rejects(() => generate({ siteId: 1, params: { provider: 'ga4' }, deps: { ensureMeasurementId } }), (err) => err.needsInput === true);
     });
 
     test('a site lookup failure falls back to whatever params carry, never a hard error', async () => {
@@ -102,5 +140,66 @@ describe('analytics-install generator', () => {
       const { content } = await generate({ params: { provider: 'ga4', trackingId: 'G-DIRECTCALL1' } });
       assert.match(content.script, /G-DIRECTCALL1/);
     });
+  });
+});
+
+describe('analytics-install verifyCurrentState — never a duplicate tag', () => {
+  const rec = (provider = 'ga4') => ({ params: { provider, page: 'https://s.test/' } });
+  const html = (body) => async () => ({ ok: true, html: `<html><head>${body}</head></html>` });
+  test('GA4 already on the page -> already_resolved, with evidence, nothing to generate', async () => {
+    const r = await verifyCurrentState(rec(), { fetchHtml: html('<script async src="https://www.googletagmanager.com/gtag/js?id=G-ABC1234XYZ"></script>') });
+    assert.equal(r.decision, 'already_resolved');
+    assert.equal(r.evidence.tracker, 'Google Analytics (GA4)');
+  });
+  test('a tag manager container -> needs_human (a direct tag could double-count)', async () => {
+    const r = await verifyCurrentState(rec(), { fetchHtml: html('<script src="https://www.googletagmanager.com/gtm.js?id=GTM-ABCD123"></script>') });
+    assert.equal(r.decision, 'needs_human');
+    assert.match(r.evidence.message, /double-count/);
+  });
+  test('nothing installed -> still valid', async () => {
+    assert.equal((await verifyCurrentState(rec(), { fetchHtml: html('') })).decision, 'still_valid');
+  });
+  test('an unreadable page is never treated as installed or absent', async () => {
+    assert.equal((await verifyCurrentState(rec(), { fetchHtml: async () => ({ ok: false, error: 'timeout' }) })).reason, 'live-check-failed');
+    assert.equal((await verifyCurrentState(rec(), { fetchHtml: async () => { throw new Error('boom'); } })).decision, 'still_valid');
+  });
+  test('the Pixel check looks for the Pixel, not GA4', async () => {
+    const r = await verifyCurrentState(rec('facebook-pixel'), { fetchHtml: html('<script src="https://www.googletagmanager.com/gtag/js?id=G-ABC1234XYZ"></script>') });
+    assert.equal(r.decision, 'still_valid');
+  });
+});
+
+describe('analytics-install verifyCurrentState — the repository is read too (no duplicate, no blind install)', () => {
+  const site = { id: 8871, repo_owner: 'o', repo_name: 'r', repo_default_branch: 'main', pr_target_branch: null, ga4_measurement_id: 'G-7V8PXXZF3G', ga4_property_id: '1' };
+  const rec = { params: { provider: 'ga4', page: 'https://s.test/' } };
+  const noTagHtml = async () => ({ ok: true, html: '<html><head></head></html>' });
+  const scan = (hits) => async () => ({ ok: true, refs: [{ ref: 'main', hits }] });
+  const run = (over) => verifyCurrentState(rec, { site, fetchHtml: noTagHtml, ...over });
+
+  test('the project\'s own ID already in the repo (consent-gated loader the live HTML cannot show) -> already_resolved', async () => {
+    const r = await run({ scanRepo: scan([{ path: 'src/scripts/cookie-consent.js', ga4: ['G-7V8PXXZF3G'], gtm: [], gtag: true }]) });
+    assert.equal(r.decision, 'already_resolved');
+    assert.equal(r.reason, 'ga4-already-in-repo');
+  });
+  test('a DIFFERENT ID, or a GTM container, in the repo -> needs_human, never a second tag', async () => {
+    const other = await run({ scanRepo: scan([{ path: 'a.njk', ga4: ['G-OTHER00001'], gtm: [], gtag: true }]) });
+    assert.equal(other.decision, 'needs_human');
+    assert.equal(other.reason, 'other-tracking-in-repo');
+    const gtm = await run({ scanRepo: scan([{ path: 'b.html', ga4: [], gtm: ['GTM-ABCD123'], gtag: false }]) });
+    assert.equal(gtm.decision, 'needs_human');
+  });
+  test('an unreadable repo -> needs_human, never "nothing installed"', async () => {
+    const r = await run({ scanRepo: async () => ({ ok: false, error: 'the repository could not be read at main' }) });
+    assert.equal(r.decision, 'needs_human');
+    assert.equal(r.reason, 'repo-unreadable');
+  });
+  test('clean live page AND clean repo -> the install is still valid', async () => {
+    const r = await run({ scanRepo: scan([]) });
+    assert.equal(r.decision, 'still_valid');
+    assert.equal(r.reason, 'tracker-absent-on-live-page-and-in-repo');
+  });
+  test('with no stored ID the project\'s own stream ID is looked up (read-only) to recognise its own tag', async () => {
+    const r = await run({ site: { ...site, ga4_measurement_id: null }, discover: async () => ({ status: 'found', measurementId: 'G-6LYQRZY03B' }), scanRepo: scan([{ path: 'base.njk', ga4: ['G-6LYQRZY03B'], gtm: [], gtag: true }]) });
+    assert.equal(r.decision, 'already_resolved');
   });
 });

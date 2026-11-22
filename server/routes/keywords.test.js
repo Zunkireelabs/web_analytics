@@ -1,5 +1,6 @@
 import { test, describe, mock, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { strictExports } from '../test-support/strict-exports.js';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
@@ -91,12 +92,12 @@ mock.module(resolve('../llm.js'), {
 
 let actingUser;
 mock.module(resolve('../store/users.js'), {
-  namedExports: {
+  namedExports: await strictExports(resolve('../store/users.js'), {
     getUserById: async () => actingUser,
     getUserByEmail: async () => { throw new Error('not exercised by these tests'); },
     updateUserPassword: async () => { throw new Error('not exercised by these tests'); },
     getUserStatus: async () => { throw new Error('not exercised by these tests'); },
-  },
+  }),
 });
 
 const { default: keywordsRouter, clientKeywordsRouter } = await import('./keywords.js');
