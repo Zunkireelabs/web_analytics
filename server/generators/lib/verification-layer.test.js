@@ -59,3 +59,66 @@ describe('isAlreadyResolved', () => {
     assert.equal(isAlreadyResolved(null), false);
   });
 });
+
+describe('verifyRecommendation: whose page is it, and has it moved?', () => {
+  const siteWithApps = {
+    website_domain: 'example.com',
+    url_file_map: { mounts: [{ prefix: '/biz' }], otherApps: [{ name: 'shop-app', repo: 'org/shop-app', paths: ['/'], prefixes: ['/shop'] }] },
+  };
+  const noMove = async () => ({ ok: true, moved: false, finalUrl: 'x', hops: [] });
+
+  test('a page served by another app is parked with the reason, never drafted', async () => {
+    const r = await verifyRecommendation({ recommendation_type: 'schema', params: { page: 'https://example.com/shop/item' } }, { site: siteWithApps, resolvePageMove: noMove });
+    assert.equal(r.decision, 'needs_human'); assert.equal(r.reason, 'page-served-by-another-app');
+    assert.match(r.evidence.message, /shop-app/);
+  });
+
+  test('a page under the mount prefix is the connected repo\'s and continues to the normal check', async () => {
+    hasBrokenLinkFix = null;
+    const r = await verifyRecommendation({ recommendation_type: 'broken-link-fix', params: { page: 'https://example.com/biz/faq' } }, { site: siteWithApps, resolvePageMove: noMove });
+    assert.equal(r.reason, 'no-verifier-available');
+  });
+
+  test('a page-bound recommendation whose page permanently moved is obsolete, with the new address as evidence', async () => {
+    const moved = async () => ({ ok: true, moved: true, finalUrl: 'https://example.com/biz/blog/x', permanent: true, hops: [{ status: 308 }] });
+    const r = await verifyRecommendation({ recommendation_type: 'internal-links', params: { page: 'https://example.com/blog/x' } }, { site: { website_domain: 'example.com' }, resolvePageMove: moved });
+    assert.equal(r.decision, 'obsolete'); assert.equal(r.reason, 'page-moved');
+    assert.equal(r.evidence.finalUrl, 'https://example.com/biz/blog/x'); assert.equal(r.evidence.status, 308);
+  });
+
+  test('a generator that is NOT page-bound is never judged by redirects (sitemap/redirect work targets the redirect itself)', async () => {
+    let called = false;
+    const moved = async () => { called = true; return { ok: true, moved: true, finalUrl: 'y', hops: [] }; };
+    hasBrokenLinkFix = null;
+    const r = await verifyRecommendation({ recommendation_type: 'broken-link-fix', params: { page: 'https://example.com/a' } }, { site: {}, resolvePageMove: moved });
+    assert.equal(called, false); assert.equal(r.reason, 'no-verifier-available');
+  });
+
+  test('an unreadable redirect chain is not evidence of a move', async () => {
+    const r = await verifyRecommendation({ recommendation_type: 'faq', params: { page: 'https://example.com/a' } }, { site: {}, resolvePageMove: async () => ({ ok: false, moved: false }) });
+    assert.notEqual(r.decision, 'obsolete');
+  });
+
+  test('a redirect lookup that throws never breaks verification', async () => {
+    const r = await verifyRecommendation({ recommendation_type: 'faq', params: { page: 'https://example.com/a' } }, { site: {}, resolvePageMove: async () => { throw new Error('x'); } });
+    assert.notEqual(r.decision, 'obsolete');
+  });
+});
+
+describe('verifyRecommendation: verified page source', () => {
+  const rec = { recommendation_type: 'faq', params: { page: 'https://example.com/category/uk' } };
+  const noMove = async () => ({ ok: true, moved: false, hops: [] });
+  test('a shared-template page is stopped with an investigation request, never drafted', async () => {
+    const r = await verifyRecommendation(rec, { site: {}, resolvePageMove: noMove, resolveSource: async () => ({ kind: 'shared-template', file: 'src/app/category/[slug]/page.tsx' }) });
+    assert.equal(r.decision, 'needs_human'); assert.equal(r.reason, 'shared-template-page-specific-change');
+  });
+  test('a page with its own verified file continues to the normal check', async () => {
+    hasBrokenLinkFix = null;
+    const r = await verifyRecommendation(rec, { site: {}, resolvePageMove: noMove, resolveSource: async () => ({ kind: 'own-file', file: 'x.tsx' }) });
+    assert.notEqual(r.decision, 'needs_human');
+  });
+  test('a verifier that throws never blocks', async () => {
+    const r = await verifyRecommendation(rec, { site: {}, resolvePageMove: noMove, resolveSource: async () => { throw new Error('x'); } });
+    assert.notEqual(r.decision, 'needs_human');
+  });
+});

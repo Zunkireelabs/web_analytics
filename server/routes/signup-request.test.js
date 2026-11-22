@@ -1,5 +1,6 @@
 import { test, describe, mock, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { strictExports } from '../test-support/strict-exports.js';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
@@ -9,18 +10,18 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 
 let created; let notices; let existing;
 mock.module(resolve('../store/signup-requests.js'), {
-  namedExports: {
+  namedExports: await strictExports(resolve('../store/signup-requests.js'), {
     hasOpenSignupRequest: async () => (globalThis.__openSignup ?? false),
   createSignupRequest: async (o) => { created.push(o); return { id: 7, status: 'pending', company_name: o.companyName, website_domain: o.websiteDomain, message: o.message, full_name: o.fullName, role: o.role, heard_from: o.heardFrom }; },
     getActivationRequest: async () => null, getCompanyNameForEmail: async () => null, peekVerificationToken: async () => null,
     consumeVerificationToken: async () => ({ ok: false, reason: 'invalid' }),
-  },
+  }),
 });
-mock.module(resolve('../store/users.js'), { namedExports: { getUserByEmail: async () => existing, getUserById: async () => null, updateUserPassword: async () => {}, getUserStatus: async () => 'active' } });
-mock.module(resolve('../store/read.js'), { namedExports: { getSiteStatus: async () => 'active', getSiteById: async () => null } });
-mock.module(resolve('../store/admin/audit-log.js'), { namedExports: { recordAuditEvent: async () => {} } });
-mock.module(resolve('../report/email.js'), { namedExports: { sendContactLeadEmail: async () => true, sendPasswordResetEmail: async () => true, sendSignupReceivedEmail: async () => true, sendLoginCodeEmail: async () => true, sendSignupStaffNotice: async (o) => { notices.push(o); return true; } } });
-mock.module(resolve('../store/workspaces.js'), { namedExports: { getAccessContext: async () => null, decideSiteAccess: () => ({}), listWorkspacesForUser: async () => [], listSharedProjectsForUser: async () => [], pickLoginSite: async () => null, isBlockedForReadOnly: () => false, isAllowedWithoutProject: () => false } });
+mock.module(resolve('../store/users.js'), { namedExports: await strictExports(resolve('../store/users.js'), { getUserByEmail: async () => existing, getUserById: async () => null, updateUserPassword: async () => {}, getUserStatus: async () => 'active' }) });
+mock.module(resolve('../store/read.js'), { namedExports: await strictExports(resolve('../store/read.js'), { getSiteStatus: async () => 'active', getSiteById: async () => null }) });
+mock.module(resolve('../store/admin/audit-log.js'), { namedExports: await strictExports(resolve('../store/admin/audit-log.js'), { recordAuditEvent: async () => {} }) });
+mock.module(resolve('../report/email.js'), { namedExports: await strictExports(resolve('../report/email.js'), { sendContactLeadEmail: async () => true, sendPasswordResetEmail: async () => true, sendSignupReceivedEmail: async () => true, sendLoginCodeEmail: async () => true, sendSignupStaffNotice: async (o) => { notices.push(o); return true; } }) });
+mock.module(resolve('../store/workspaces.js'), { namedExports: await strictExports(resolve('../store/workspaces.js'), { getAccessContext: async () => null, decideSiteAccess: () => ({}), listWorkspacesForUser: async () => [], listSharedProjectsForUser: async () => [], pickLoginSite: async () => null, isBlockedForReadOnly: () => false, isAllowedWithoutProject: () => false }) });
 
 const router = (await import('./login.js')).default;
 

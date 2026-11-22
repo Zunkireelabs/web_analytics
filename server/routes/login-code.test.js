@@ -1,6 +1,7 @@
 import { test, describe, mock, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import bcrypt from 'bcryptjs';
+import { strictExports } from '../test-support/strict-exports.js';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
@@ -9,24 +10,29 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 // password does not use up the approval link, and a good one creates the login and the session together.
 
 let users; let issued; let sent; let checked; let activation; let consumed; let audit; let consumeCalls;
-mock.module(resolve('../store/users.js'), { namedExports: {
+mock.module(resolve('../store/users.js'), { namedExports: await strictExports(resolve('../store/users.js'), {
   getUserByEmail: async (e) => users[e] || null, getUserById: async (id) => Object.values(users).find((u) => u.id === id) || { id, email: 'new@acme.test' },
-  updateUserPassword: async () => {}, getUserStatus: async (id) => (Object.values(users).find((u) => u.id === id)?.status ?? 'active') } });
-mock.module(resolve('../store/login-codes.js'), { namedExports: {
+  updateUserPassword: async () => {}, getUserStatus: async (id) => (Object.values(users).find((u) => u.id === id)?.status ?? 'active') }) });
+mock.module(resolve('../store/login-codes.js'), { namedExports: await strictExports(resolve('../store/login-codes.js'), {
   CODE_MINUTES: 10,
   issueLoginCode: async (e) => issued(e),
-  checkLoginCode: async (e, c) => checked(e, c) } });
-mock.module(resolve('../store/signup-requests.js'), { namedExports: {
+  checkLoginCode: async (e, c) => checked(e, c) }) });
+mock.module(resolve('../store/signup-requests.js'), { namedExports: await strictExports(resolve('../store/signup-requests.js'), {
   hasOpenSignupRequest: async () => (globalThis.__openSignup ?? false),
   createSignupRequest: async () => { throw new Error('not exercised'); },
   peekVerificationToken: async () => null,
   getCompanyNameForEmail: async () => 'Acme Co',
   getActivationRequest: async (t) => activation(t),
-  consumeVerificationToken: async (t, opts) => { consumeCalls.push(t); return consumed(t, opts); } } });
-mock.module(resolve('../store/read.js'), { namedExports: { getSiteStatus: async () => 'active', getSiteById: async () => null } });
-mock.module(resolve('../store/admin/audit-log.js'), { namedExports: { recordAuditEvent: async (req, e) => { audit.push(e); } } });
-mock.module(resolve('../report/email.js'), { namedExports: { sendContactLeadEmail: async () => true, sendPasswordResetEmail: async () => true, sendSignupReceivedEmail: async () => true, sendSignupStaffNotice: async () => true, sendLoginCodeEmail: async (o) => { sent.push(o); return true; } } });
-mock.module(resolve('../store/workspaces.js'), { namedExports: { getAccessContext: async () => (globalThis.__access ?? null), decideSiteAccess: () => (globalThis.__decision ?? {}), listWorkspacesForUser: async () => (globalThis.__workspaces ?? []), listSharedProjectsForUser: async () => [], pickLoginSite: async () => null, isBlockedForReadOnly: () => Boolean(globalThis.__blocked), isAllowedWithoutProject: () => false } });
+  consumeVerificationToken: async (t, opts) => { consumeCalls.push(t); return consumed(t, opts); } }) });
+mock.module(resolve('../store/read.js'), { namedExports: await strictExports(resolve('../store/read.js'), { getSiteStatus: async () => 'active', getSiteById: async () => null }) });
+mock.module(resolve('../store/admin/audit-log.js'), { namedExports: await strictExports(resolve('../store/admin/audit-log.js'), { recordAuditEvent: async (req, e) => { audit.push(e); } }) });
+mock.module(resolve('../report/email.js'), { namedExports: await strictExports(resolve('../report/email.js'), { sendContactLeadEmail: async () => true, sendPasswordResetEmail: async () => true, sendSignupReceivedEmail: async () => true, sendSignupStaffNotice: async () => true, sendLoginCodeEmail: async (o) => { sent.push(o); return true; } }) });
+// The returning-account gate (store/returning.js, added after this file) is not what this file tests: everyone here still has a workspace.
+mock.module(resolve('../store/returning.js'), { namedExports: await strictExports(resolve('../store/returning.js'), { needsReturnApproval: async () => null }) });
+// The trial/demo access gate (store/signup-recovery.js getCodeGateFacts, added after this file) is not under test here: these accounts are clients.
+const realRecovery = await import(resolve('../store/signup-recovery.js'));
+mock.module(resolve('../store/signup-recovery.js'), { namedExports: { ...realRecovery, getCodeGateFacts: async () => ({ states: ['client'], started: false }) } });
+mock.module(resolve('../store/workspaces.js'), { namedExports: await strictExports(resolve('../store/workspaces.js'), { getAccessContext: async () => (globalThis.__access ?? null), decideSiteAccess: () => (globalThis.__decision ?? {}), listWorkspacesForUser: async () => (globalThis.__workspaces ?? []), listSharedProjectsForUser: async () => [], pickLoginSite: async () => null, isBlockedForReadOnly: () => Boolean(globalThis.__blocked), isAllowedWithoutProject: () => false }) });
 
 const router = (await import('./login.js')).default;
 

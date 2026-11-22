@@ -16,6 +16,7 @@
 // resynthesis when that fresh capture shows real drift from the stored
 // profile — outcome.skippedProfileDerivation tells worker.js to persist
 // only a refreshed lastCheckedAt instead of a full re-derivation.
+import { urlInScope } from '../agents/lib/site-scope.js';
 import { loadExpandStructurePrior } from './lib/expand-structure-loader.js';
 import { captureSite } from './live-analysis/capture.js';
 import { segmentSite } from './live-analysis/segment.js';
@@ -78,7 +79,7 @@ export function createLiveDesignAnalysisHandler({
       .map((path) => { try { return new URL(path, pageUrl).href; } catch { return null; } })
       .filter(Boolean);
 
-    const capture = await captureSiteFn(pageUrl, { knownUrls, propertyType: site?.property_type }).catch((err) => {
+    const capture = await captureSiteFn(pageUrl, { knownUrls, propertyType: site?.property_type, inScope: (u) => urlInScope(site, u) }).catch((err) => {
       const { message } = safeMessage('live-analysis-handler.capture', err, 'Could not load the live site to analyze its design');
       throw taggedError(message, 'live_capture');
     });

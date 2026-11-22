@@ -382,9 +382,20 @@ function composeRemediation(r) {
   if (r.stoppedReason === 'budget-exhausted') {
     return `Today's budget (${r.spentToday}/${r.dailyLimit}) is already used — nothing new attempted. It resumes tomorrow.`;
   }
+  const SKIP_TEXT = {
+    'credential-locked': 'This project was skipped: another project sharing its GitHub credential was shipping at the time. It is tried again on the next run.',
+    'site-locked': 'This project was skipped: another process held its shipping lock. It is tried again on the next run.',
+    'window-closed': 'This project was not reached: the morning shipping window closed first. The hourly catch-up picks it up.',
+    'global-ceiling-reached': 'This project was not reached: the platform-wide daily ceiling was already used.',
+    'timed-out': "This project's run exceeded its time limit and was left behind so other projects could run.",
+    'run-error': 'This project\'s run failed before it could start shipping. See the run record for the error.',
+  };
+  if (SKIP_TEXT[r.stoppedReason]) return `Nothing ran: ${SKIP_TEXT[r.stoppedReason]}`;
   const lines = [`Ran the safe-remediation loop: ${r.shipped} shipped, ${r.failed} failed, ${r.refused} declined honestly, ${r.skipped} left for later.`];
   if (r.stoppedReason === 'circuit-breaker') lines.push('Stopped early — several failures in a row suggested a systemic problem rather than one-off issues. The rest stayed untouched and open, not lost.');
   if (r.stoppedReason === 'refusal-streak') lines.push("Stopped early — several items in a row couldn't be drafted honestly. That's the no-fabrication policy working, not a fault.");
+  if (r.selection?.needsInput) lines.push(`${r.selection.needsInput} item(s) are waiting for something only you or the client can supply; each says exactly what. They are not retried until it changes.`);
+  if (r.selection?.quarantineNotes?.length) lines.push(`${r.selection.quarantineNotes.length} generator(s) were set aside for this run after repeating the same refusal or failure; everything else carried on.`);
   if (r.shipped) lines.push('Each shipped item ended at an open pull request — nothing merges without your review.');
   return lines.join('\n');
 }

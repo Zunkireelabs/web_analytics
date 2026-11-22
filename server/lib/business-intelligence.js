@@ -2,7 +2,7 @@ import { fetchMainPage, normalizeUrl } from '../free-audit/fetchPage.js';
 import { readPage, pickKeyLinks, KEY_PAGE } from '../onboarding/siteProfile.js';
 import { callLLMForJson } from '../llm.js';
 import {
-  FIELD_KEYS, BUSINESS_MODELS, normalizeProfile, groundEvidence, mergeDetected, emptyProfile, profileState,
+  FIELD_KEYS, BUSINESS_MODELS, LISTING_SOURCES, normalizeProfile, groundEvidence, mergeDetected, emptyProfile, profileState,
 } from './business-profile.js';
 
 // The Business Intelligence Engine: works out what a company SELLS, who BUYS it, what problem it solves and which market it serves,
@@ -36,12 +36,13 @@ Keep these five things apart. This is the most important rule:
 3. businessModel: how it earns. model must be one of ${BUSINESS_MODELS.join(', ')}. revenue: one line on how it charges, only if stated. pricing: ONLY if the text states a pricing model (subscription tiers, per-seat, retainer, per-project...). If pricing is not stated, pricing is null.
 4. targetCustomerIndustries: the industries of its CUSTOMERS. These are NOT the company's own industry.
 5. targetCustomers (who buys: roles or business types) and customerProblems (the problems the site says it solves for them).
+6. marketplace: ONLY if the company runs a two-sided marketplace (people or businesses list things and others buy, book or hire them); otherwise null. supply = who lists or sells on it, demand = who buys or books, listingTypes = what kinds of thing are listed, categories = the main browse categories, listingSource = one of ${LISTING_SOURCES.join(', ')} (user-generated when outside sellers publish their own listings), monetisation = how the marketplace earns (commission, listing fee, subscription, ads). A marketplace's productsServices are the marketplace itself, NOT the goods its sellers list.
 Also: geographicMarkets (where it serves), coreTopics (5 to 12 short phrases naming the subjects the company is an authority on), and competitorCategories: include = kinds of company that sell the same thing to the same buyers; exclude = kinds of website that rank for the same searches but are NOT competitors (for example directories, government bodies, news sites).
 
 For every field except competitorCategories give evidence: 1 to 3 items {"ref","quote"}. quote must be copied EXACTLY (verbatim, under 200 characters) from the provided text. ref is the page URL it came from, or "search" for a search query. A claim you cannot quote must have confidence "low".
 If you cannot find a verbatim quote for a claim, give an empty evidence list and confidence "low"; never paraphrase a quote and never invent one.
 Return ONLY raw JSON with these keys: ${FIELD_KEYS.join(', ')}. EVERY key is an object of exactly this form, including the object-valued ones: {"value": <the value>, "confidence": "low"|"medium"|"high", "evidence": [{"ref": string, "quote": string}]}. For example: "ownIndustry": {"value": {"label": "Software (SaaS)"}, "confidence": "high", "evidence": [{"ref": "https://example.com/", "quote": "..."}]}.
-Value shapes: description string; ownIndustry {"label": string}; subIndustry string; businessModel {"model","revenue","pricing"}; productsServices [{"name","description"}]; targetCustomerIndustries string[]; targetCustomers [{"segment","description"}]; customerProblems string[]; geographicMarkets string[]; competitorCategories {"include": string[], "exclude": string[]}; coreTopics string[].`;
+Value shapes: description string; ownIndustry {"label": string}; subIndustry string; businessModel {"model","revenue","pricing"}; productsServices [{"name","description"}]; targetCustomerIndustries string[]; targetCustomers [{"segment","description"}]; customerProblems string[]; geographicMarkets string[]; competitorCategories {"include": string[], "exclude": string[]}; coreTopics string[]; marketplace {"supply","demand","listingTypes": string[],"categories": string[],"listingSource","monetisation"}.`;
 
 const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 

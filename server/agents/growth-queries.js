@@ -2,6 +2,7 @@ import { getSiteById, getSearchPerformanceRange, getTopPagePerQuery, getQueryPer
 import { listPageInventory } from '../store/page-inventory.js';
 import { analyzePageUrl } from './lib/page-content.js';
 import { knownDomain, filterOwnDomainPages } from './lib/site-domain.js';
+import { filterByScope } from './lib/site-scope.js';
 import { sortByRotation } from './lib/rotation.js';
 import { filterSoftNotFoundPages } from './lib/candidate-pages.js';
 import {
@@ -191,7 +192,7 @@ export async function run({ siteId, start, end }) {
   ]);
   // knownDomain (primary domain only), not ownDomains — see candidate-pages.js's
   // own comment on this same 2026-08-24 fix.
-  const topPages = filterOwnDomainPages(topPagesRaw, knownDomain(site)).map((p) => p.dim_value);
+  const topPages = filterByScope(filterOwnDomainPages(topPagesRaw, knownDomain(site)), site).map((p) => p.dim_value);
   const pageByQuery = new Map(topPageByQueryRows.map((p) => [p.query, p.page]));
   const top20ByImpressions = new Set(
     [...gscQueriesRaw].sort((a, b) => Number(b.impressions) - Number(a.impressions)).slice(0, TOP_N_FOR_TRACTION).map((q) => q.dim_value)
@@ -243,7 +244,7 @@ export async function run({ siteId, start, end }) {
 
   // knownDomain (primary domain only), not ownDomains — see candidate-pages.js's
   // own comment on this same 2026-08-24 fix.
-  const inventory = filterOwnDomainPages(await listPageInventory(siteId, { limit: 500 }), knownDomain(site), (r) => r.page);
+  const inventory = filterByScope(filterOwnDomainPages(await listPageInventory(siteId, { limit: 500 }), knownDomain(site), (r) => r.page), site, (r) => r.page);
   // candidate-pages.js's own soft-404 filter, applied here too — otherwise
   // this module is the one page-listing path a site's catch-all misconfig
   // still reaches, contradicting the "every agent inherits it at once" design

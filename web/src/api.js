@@ -348,6 +348,8 @@ export const api = {
     list: () => req('/internal/clients'),
     // Staff controls for one project (Account settings -> Platform). All platform_admin on the server.
     setAutoRemediation: (id, enabled, dailyLimit) => req(`/internal/clients/${id}/auto-remediation`, { method: 'POST', body: JSON.stringify({ enabled, dailyLimit }) }),
+    sharedDomain: (id) => req(`/internal/clients/${id}/shared-domain`),
+    setSharedDomain: (id, body) => req(`/internal/clients/${id}/shared-domain`, { method: 'POST', body: JSON.stringify(body) }),
     setAnalyticsIds: (id, ga4MeasurementId, facebookPixelId) => req(`/internal/clients/${id}/analytics-ids`, { method: 'POST', body: JSON.stringify({ ga4MeasurementId, facebookPixelId }) }),
     suspend: (id) => req(`/internal/tenants/${id}/suspend`, { method: 'POST' }),
     reactivate: (id) => req(`/internal/tenants/${id}/reactivate`, { method: 'POST' }),

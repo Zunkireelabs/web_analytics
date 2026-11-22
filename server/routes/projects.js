@@ -1176,6 +1176,14 @@ router.post('/projects/:siteId/baseline', requireAuth, requireProjectRole('admin
     const after = (await getSiteById(req.projectId)) || site;
     if (result.running) return res.status(202).json({ running: true, state: connectionState(after) });
     if (result.error) return res.status(422).json({ ...result, state: connectionState(after) });
+    // A site that opted in (url_file_map.markerSetup.enabled) gets its markers-only setup PR as soon as the baseline is done, so the
+    // next scheduled run starts fixing. Never blocks or fails the baseline response; idempotent if a setup PR is already open.
+    if (after?.url_file_map?.markerSetup?.enabled === true) {
+      import('../implementers/lib/marker-setup-run.js')
+        .then((m) => m.setupMarkersForSite(after, { open: true }))
+        .then((r) => console.log(`[projects] marker setup for site ${req.projectId}: ${r.status}${r.prUrl ? ` ${r.prUrl}` : ''}`))
+        .catch((err) => console.error(`[projects] marker setup failed for site ${req.projectId}:`, err.message));
+    }
     res.json({ ...result, state: connectionState(after) });
   } catch (e) { next(e); }
 });

@@ -4,6 +4,7 @@ import { baseBranch } from './github-ops.js';
 import { inspectRenderMode, hasVisibleFaqSignal } from './render-inspector.js';
 import { hasImplementedVisibleFaqForPage, distinctVisibleFaqDraftPages } from '../../store/drafts.js';
 import { analyzePageUrl } from '../../agents/lib/page-content.js';
+export { faqSchemaRequiresVisible } from '../../lib/faq-policy.js';
 
 // A pagination/data-array route (e.g. /compare/*) has no per-page template
 // file of its own — every entry is rendered by ONE shared layout, driven by
@@ -218,4 +219,77 @@ export async function resolveFaqRenderMode(site, draft, { fetchFile = getFileCon
   }
 
   return decideFaqRenderMode(site, page, file.content);
+}
+
+// ---------------------------------------------------------------------------
+// Structured data must describe what the page SHOWS.
+//
+// 'schema-only' exists so a page that already has a visible FAQ never gets a
+// second visible one. It was never meant to publish questions the page does
+// not show, but that is what it did whenever the draft's questions differed
+// from the visible ones: a visible FAQ of 6 plus a schema-only draft of 11
+// left FAQPage JSON-LD listing 5 questions no visitor can read. Search engines
+// require FAQ markup to match visible content (page-content.js already flags
+// the same defect as faqSchemaWithoutVisible / faqCountMismatch), so the writer
+// must not create it.
+//
+// A schema-only FAQ is therefore published only when every question in it is
+// already on the live page, whoever put it there. Anything else is refused and
+// the page keeps what it has.
+// ---------------------------------------------------------------------------
+
+// Question text compared the way a reader would: entities decoded, whitespace
+// collapsed, trailing "?" and case ignored.
+export function normalizeFaqQuestion(q) {
+  return String(q ?? '')
+    .replace(/&amp;/gi, '&').replace(/&#0?39;|&apos;/gi, "'").replace(/&quot;/gi, '"')
+    .replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
+    .replace(/\s+/g, ' ')
+    .replace(/[?？]\s*$/, '')
+    .trim()
+    .toLowerCase();
+}
+
+// The draft's questions that do not appear on the page. `visibleItems` is
+// page-content.js's faqVisibleItems ([{question, answer}]); `pageText` is the
+// page's visible text, which also covers a question shown in a form the FAQ
+// extractor did not recognise (a heading, a bold line).
+export function faqQuestionsNotVisible(draftItems, visibleItems = [], pageText = '') {
+  const visible = new Set((visibleItems || []).map((i) => normalizeFaqQuestion(i?.question)).filter(Boolean));
+  const text = String(pageText ?? '')
+    .replace(/&amp;/gi, '&').replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"').replace(/\s+/g, ' ').toLowerCase();
+  // Whole-phrase match: "a" must not be found inside "page".
+  const inText = (n) => new RegExp(`(^|[^a-z0-9])${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^a-z0-9])`).test(text);
+  return (draftItems || [])
+    .map((i) => i?.question)
+    .filter((q) => {
+      const n = normalizeFaqQuestion(q);
+      return n && !visible.has(n) && !inText(n);
+    });
+}
+
+// The gate backend.js applies to a 'schema-only' faq / qa-content draft.
+//   { ok: true }                                 every question is visible
+//   { ok: false, code: 'faq-schema-not-visible' } some are not (see `missing`)
+//   { ok: false, code: 'faq-schema-unverifiable' } the live page could not be read
+// Unverifiable is a refusal too: never publish structured data that was not
+// confirmed against the page.
+export async function checkSchemaOnlyFaqMatchesVisible(page, draftItems, { readLivePage = analyzePageUrl } = {}) {
+  const items = Array.isArray(draftItems) ? draftItems : [];
+  if (items.length === 0) return { ok: true }; // nothing to publish; marker-merge reports that itself
+  let live;
+  try { live = await readLivePage(page); } catch { live = null; }
+  if (!live?.ok) {
+    return {
+      ok: false, code: 'faq-schema-unverifiable',
+      error: `Could not read ${page} to confirm its FAQ questions are visible, so no FAQ structured data was published. FAQ schema is only published for questions the page shows.`,
+    };
+  }
+  const a = live.analysis || {};
+  const missing = faqQuestionsNotVisible(items, a.faqVisibleItems, a.fullText || a.bodyText || '');
+  if (missing.length === 0) return { ok: true };
+  return {
+    ok: false, code: 'faq-schema-not-visible', missing,
+    error: `FAQ structured data was not published: ${missing.length} of ${items.length} question(s) in this draft are not shown on ${page} (for example "${String(missing[0]).slice(0, 80)}"). FAQ schema must match the visible FAQ, and this page already shows its own.`,
+  };
 }

@@ -121,6 +121,10 @@ const TRANSIENT_REASON_CODES = new Set([
   // keep suppressing findings; the bare code has to say the same thing, and
   // is still the single largest code in site 1's live refusal log at 39 rows.
   'design-unreviewed',
+  // The live page could not be read to confirm a schema-only FAQ's questions are
+  // on it (faq-render-mode.js's checkSchemaOnlyFaqMatchesVisible). The page was
+  // unreachable, not the item's fault; try again later.
+  'faq-schema-unverifiable',
 ]);
 
 // The live page this item's design is compared against could not be read right
@@ -337,6 +341,17 @@ const RULES = [
   },
 
   // ---- Already resolved ------------------------------------------------
+  {
+    // A schema-only FAQ / Q&A draft whose questions are not the ones the page
+    // shows (faq-render-mode.js's checkSchemaOnlyFaqMatchesVisible). The page
+    // already has its own visible FAQ, so there is no FAQ to add, and publishing
+    // structured data for questions it does not show is exactly what search
+    // engines penalise. Nothing was written; the recommendation should close.
+    match: (r) => r === 'faq-schema-not-visible' || /FAQ structured data was not published/i.test(r),
+    failureClass: null,
+    policy: RETRY_POLICY.ALREADY_RESOLVED,
+    summary: 'The page already shows its own FAQ, and this draft’s questions are not on it, so no FAQ structured data was published.',
+  },
   {
     // "This page already has an FAQPage schema from another FAQ/Q&A draft —
     // nothing left to publish in schema-only mode." (25 live rows.) Another

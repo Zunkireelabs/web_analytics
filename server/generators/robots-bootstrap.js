@@ -1,3 +1,6 @@
+import { fetchTextIfExists } from '../agents/lib/page-content.js';
+import { siteOriginFor } from '../agents/lib/site-domain.js';
+
 // Pure, deterministic generator — no LLM call. Handles the case robots-fix.js
 // doesn't: a site with NO robots.txt at all, optionally carrying real,
 // evidence-backed Disallow rules for URL patterns technical-seo.js's
@@ -45,4 +48,17 @@ export async function generate({ params }) {
       ? `New robots.txt blocking ${patterns.length} legacy-spam pattern(s): ${patterns.join(', ')}.`
       : 'New baseline robots.txt (Allow: /).',
   };
+}
+
+// The premise is "this site has no robots.txt". Re-read it: a real, parseable file at the site root (with at least one User-agent group)
+// means there is nothing to bootstrap, and bootstrapping over it would overwrite someone's file.
+export async function verifyCurrentState(rec, { site } = {}) {
+  if (!site) return { decision: 'still_valid', reason: 'no-site-context', evidence: null };
+  const origin = siteOriginFor(site);
+  if (!origin) return { decision: 'still_valid', reason: 'no-checkable-target', evidence: null };
+  const fetched = await fetchTextIfExists(`${origin}/robots.txt`);
+  if (fetched.ok && /^\s*user-agent\s*:/im.test(fetched.text || '')) {
+    return { decision: 'already_resolved', reason: 'robots-txt-already-present', evidence: { origin, bytes: String(fetched.text).length } };
+  }
+  return { decision: 'still_valid', reason: 'robots-txt-absent', evidence: { origin } };
 }

@@ -1,5 +1,6 @@
 import { test, describe, mock, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { strictExports } from '../test-support/strict-exports.js';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
@@ -8,12 +9,12 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 // session's own site and nothing from the request.
 
 mock.module(resolve('../store/users.js'), {
-  namedExports: {
+  namedExports: await strictExports(resolve('../store/users.js'), {
     getUserById: async () => ({ role: 'tenant_admin' }),
     getUserByEmail: async () => { throw new Error('not exercised by these tests'); },
     updateUserPassword: async () => { throw new Error('not exercised by these tests'); },
     getUserStatus: async () => { throw new Error('not exercised by these tests'); },
-  },
+  }),
 });
 
 let healthRows;

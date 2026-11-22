@@ -149,6 +149,19 @@ describe('canonical verifyCurrentState (server/generators/lib/verification-layer
     assert.equal(result.reason, 'missing-params');
   });
 
+  test('a noindex page with no canonical needs none: already_resolved (a login-only dashboard must not get a canonical tag)', async () => {
+    analyzeResultByUrl = new Map([[page, { ok: true, analysis: { hasCanonical: false, isNoindex: true } }]]);
+    const result = await verifyCurrentState({ params: { page } }, {});
+    assert.equal(result.decision, 'already_resolved');
+    assert.equal(result.reason, 'page-is-noindex-no-canonical-needed');
+  });
+
+  test('an indexable page with no canonical is still valid (the noindex exemption must not swallow real gaps)', async () => {
+    analyzeResultByUrl = new Map([[page, { ok: true, analysis: { hasCanonical: false, isNoindex: false } }]]);
+    const result = await verifyCurrentState({ params: { page } }, {});
+    assert.equal(result.decision, 'still_valid');
+  });
+
   test('page already canonicalizes to exactly the intended target: already_resolved', async () => {
     analyzeResultByUrl = new Map([
       [page, { ok: true, analysis: { hasCanonical: true, canonicalUrl: target } }],

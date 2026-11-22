@@ -17,10 +17,11 @@ import { patchSoftNotFoundFallback } from './lib/soft-404-inject.js';
 import { patchRedirectChain } from './lib/redirect-chain-nginx-inject.js';
 import { removeUrlsFromSitemap } from './lib/sitemap-removal-inject.js';
 import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
+import { injectTemplateBreadcrumbs, hasTemplateBreadcrumbs } from './lib/template-breadcrumbs.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, hasExistingFaqSchema, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
-import { decideFaqRenderMode } from './lib/faq-render-mode.js';
+import { decideFaqRenderMode, checkSchemaOnlyFaqMatchesVisible, faqSchemaRequiresVisible } from './lib/faq-render-mode.js';
 import { COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, checkDesignIntegrityGate, resolvePageComponentTemplate, lacksDesignBaseline } from './lib/design-drift.js';
 import { designGateMode } from '../design-agent/lib/design-completeness.js';
 import { checkResponsivePreview, describeResponsiveRegressions } from '../generators/lib/responsive-preview-gate.js';
@@ -487,6 +488,42 @@ async function previewLiveHtmlLang(site, draft) {
     return { ok: false, reason: 'no-insertion-marker', error: `No <html> tag found in ${path} — it may have moved since this draft was implemented.` };
   }
   return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'lang', content: tag }] };
+}
+
+
+// BREADCRUMBS ON A SHARED NEXT.JS TEMPLATE: the draft carries content.templateEdit (not jsonLd). One edit to the shared route file
+// builds each page's trail from its own route parameter and heading (see implementers/lib/template-breadcrumbs.js). `already-applied`
+// (the batch branch already has it, because another page of the same template was drafted first) is benign, the same as html-lang.
+const isTemplateBreadcrumbs = (draft) => draft.action_type === 'breadcrumbs' && Boolean(draft.content?.templateEdit);
+
+async function computeTemplateBreadcrumbsMerge(site, draft, beforeRef) {
+  const { file: path, origin, pagePath } = draft.content.templateEdit;
+  const file = await getFileContent(site, path, beforeRef);
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
+  const injected = injectTemplateBreadcrumbs(file.content, { filePath: path, origin, pagePath });
+  if (!injected.ok) {
+    if (injected.reason === 'already-applied') return { ok: false, reason: 'already-applied', error: injected.error };
+    return { ok: false, reason: injected.reason, needsInput: injected.reason.startsWith('needs-input'), error: injected.error };
+  }
+  return {
+    ok: true, filePath: path, oldContent: file.content, newContent: injected.newContent,
+    changedRegions: [{ field: 'templateBreadcrumbs', before: injected.changedRegion.before, after: injected.changedRegion.after }],
+  };
+}
+
+async function pushTemplateBreadcrumbsBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeTemplateBreadcrumbsMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveTemplateBreadcrumbs(site, draft) {
+  const path = draft.content.templateEdit.file;
+  const file = await getFileContent(site, path, baseBranch(site));
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${baseBranch(site)}".` };
+  return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'templateBreadcrumbs', content: hasTemplateBreadcrumbs(file.content) ? 'The template already emits a breadcrumb trail.' : 'The template does not emit a breadcrumb trail yet.' }] };
 }
 
 // Direct insert-or-replace for the shared layout's <meta name="viewport">
@@ -1336,6 +1373,18 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     mode = inspection.mode;
   }
 
+  // A schema-only FAQ / Q&A draft publishes FAQPage JSON-LD and nothing a
+  // visitor can read, so it is only valid when every question in it is already
+  // shown on the page. The render-mode decision above says "this page already
+  // has a visible FAQ"; it does not say the draft's questions ARE that FAQ, and
+  // when they differ the page ends up with schema for questions it does not
+  // show (a visible 6 plus a schema-only 11 published 5 hidden ones). Refuse
+  // that rather than publish it. See faq-render-mode.js.
+  if (mode === 'schema-only' && INSPECTABLE_ACTION_TYPES.includes(draft.action_type) && faqSchemaRequiresVisible()) {
+    const visibility = await checkSchemaOnlyFaqMatchesVisible(page, draft.content?.items);
+    if (!visibility.ok) return { ok: false, reason: visibility.code, error: visibility.error };
+  }
+
   // Checked only when this action type has SOME real design claim to verify
   // — a configured site-level componentTemplates entry, a previously
   // page-captured one, or a usable design profile buildMergeValues would
@@ -1609,6 +1658,7 @@ export async function apply(site, draft, opts = {}) {
   if (draft.action_type === 'sitemap-frontmatter-exclude') return pushSitemapExcludeBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'alt-text') return pushAltTextBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'blog-image') return pushBlogImageBranch(site, draft, batchInfo, beforeRef);
+  if (isTemplateBreadcrumbs(draft)) return pushTemplateBreadcrumbsBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'html-lang') return pushHtmlLangBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'viewport') return pushViewportBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'blog-pagination') return pushBlogPaginationBranch(site, draft, batchInfo, beforeRef);
@@ -1673,6 +1723,7 @@ export async function preview(site, draft, opts = {}) {
     if (draft.action_type === 'sitemap-frontmatter-exclude') return previewLiveSitemapExclude(site, draft);
     if (draft.action_type === 'alt-text') return previewLiveAltText(site, draft);
     if (draft.action_type === 'blog-image') return previewLiveBlogImage(site, draft);
+    if (isTemplateBreadcrumbs(draft)) return previewLiveTemplateBreadcrumbs(site, draft);
     if (draft.action_type === 'html-lang') return previewLiveHtmlLang(site, draft);
     if (draft.action_type === 'viewport') return previewLiveViewport(site, draft);
     if (draft.action_type === 'blog-pagination') return previewLiveBlogPagination(site, draft);
@@ -1718,6 +1769,7 @@ export async function preview(site, draft, opts = {}) {
   if (draft.action_type === 'sitemap-frontmatter-exclude') return computeSitemapExcludeMerge(site, draft, beforeRef);
   if (draft.action_type === 'alt-text') return computeAltTextMerge(site, draft, beforeRef);
   if (draft.action_type === 'blog-image') return computeBlogImageMerge(site, draft, beforeRef);
+  if (isTemplateBreadcrumbs(draft)) return computeTemplateBreadcrumbsMerge(site, draft, beforeRef);
   if (draft.action_type === 'html-lang') return computeHtmlLangMerge(site, draft, beforeRef);
   if (draft.action_type === 'viewport') return computeViewportMerge(site, draft, beforeRef);
   if (draft.action_type === 'blog-pagination') return computeBlogPaginationMerge(site, draft, beforeRef);

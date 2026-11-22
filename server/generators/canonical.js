@@ -169,7 +169,10 @@ export async function verifyCurrentState(rec, { site } = {}) {
   const fetched = await analyzePageUrl(page);
   if (!fetched.ok) return { decision: 'still_valid', reason: 'unreachable', evidence: { page, error: fetched.error } };
 
-  const { hasCanonical, canonicalUrl } = fetched.analysis;
+  const { hasCanonical, canonicalUrl, isNoindex } = fetched.analysis;
+  if (!hasCanonical && isNoindex && !canonicalTarget) {
+    return { decision: 'already_resolved', reason: 'page-is-noindex-no-canonical-needed', evidence: { page, noindex: true } };
+  }
   if (hasCanonical) {
     const intendedTarget = canonicalTarget || page;
     if (canonicalUrl && stripSlash(canonicalUrl) === stripSlash(intendedTarget)) {

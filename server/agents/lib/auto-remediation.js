@@ -1,3 +1,4 @@
+import { makePageSourceResolver } from '../../implementers/lib/page-source-resolver.js';
 import { listOpenRecommendations, closeRecommendation, blockRecommendation } from '../../store/recommendations.js';
 import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, markDraftAbandoned, recordMergeFailure, requeueUnpushedBatchDraft } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
@@ -16,7 +17,7 @@ import { listActionableAnalystEvidence } from '../../store/analyst-evidence.js';
 import { buildPageMetrics } from './growth-scoring.js';
 import { loadIndustryMap } from '../../lib/industry-intelligence.js';
 import { loadGrowthStage } from '../../lib/growth-stage.js';
-import { classifyShipFailure, failureFamilyKey, FAILURE_KIND, SYSTEMIC_FAILURE_LIMIT, FAMILY_FAILURE_LIMIT } from './failure-policy.js';
+import { classifyShipFailure, failureFamilyKey, FAILURE_KIND, SYSTEMIC_FAILURE_LIMIT, FAMILY_FAILURE_LIMIT, REFUSAL_FAMILY_LIMIT, REFUSAL_KIND, classifyRefusal, countsAgainstGenerator, refusalReasonOf, refusalFamilyKey } from './failure-policy.js';
 import { getQueryPageMetrics } from '../../store/read.js';
 import { draftShipState, SHIP_STATE } from '../../lib/draft-ship-state.js';
 import { classifyAbandonReason, RETRY_POLICY, structuredApplyFailure } from '../../lib/attempt-classification.js';
@@ -53,20 +54,8 @@ const SOURCE = 'auto-remediation';
 //     priority could halt a 60-item day at item five with ~55 shippable
 //     items untouched. See failure-policy.js for the reasoning in full.
 
-// The refusal counterpart, and deliberately much looser.
-//
-// A refusal is the no-fabrication policy working, so refusing is never wrong
-// and must never trip the failure breaker. But a long unbroken run of them
-// still means this site has nothing it can honestly ship right now, and
-// grinding through the rest of a 30-item budget to refuse each one costs a
-// generation call apiece and buries the signal. Stopping at 8 keeps the run
-// cheap while staying far enough above the "a few unlucky items in a row"
-// range that a genuinely productive day is never cut short.
-//
-// Reported as its own stoppedReason, never as 'circuit-breaker': to an
-// operator those mean opposite things. One says the system is broken; this
-// one says the system is working and correctly has nothing to say.
-const CONSECUTIVE_REFUSAL_LIMIT = 8;
+// Refusals are NOT counted toward a run-ending streak any more (it starved whole sites; see the loop). A refusal quarantines the
+// one generator it came from, by reason (failure-policy.js REFUSAL_FAMILY_LIMIT), and never touches the systemic breaker.
 
 // The credential-resolution failures worth one automatic in-run retry before
 // they become a real outcome — see shipDraftForRecommendation's own comment
@@ -543,6 +532,8 @@ export async function autoRemediateSafeRecommendations(siteId, {
 
   // Review-first site: drafts are made and left for the client (see shipDraftForRecommendation); none are shipped.
   const reviewFirst = isReviewFirst(site);
+  // Verifies, from the real repo tree, where each page's content lives before anything is drafted (null when the site has no repo).
+  const pageSourceResolver = makePageSourceResolver(site);
   let draftedForReview = 0;
   let shipped = 0;
   let failed = 0;
@@ -562,7 +553,6 @@ export async function autoRemediateSafeRecommendations(siteId, {
   let conflicted = 0;
   let designPending = 0; // items skipped because their page's current design could not be confirmed (neither refused nor failed)
   let consecutiveSystemicFailures = 0;
-  let consecutiveRefusals = 0;
   let stoppedReason = null;
   let attempted = 0;
 
@@ -590,6 +580,9 @@ export async function autoRemediateSafeRecommendations(siteId, {
   const familyFailureCounts = new Map(); // familyKey -> count, this run only
   const quarantinedGenerators = new Map(); // generatorId -> reason, this run only
   const quarantineNotes = [];
+  const refusalFamilyCounts = new Map(); // generator+reason -> refusals this run
+  const refusalReasons = []; // every refusal this run with its classified kind, for the run summary
+  let needsInput = 0; // items parked because a person must supply something (not refusals of the generator)
 
   // Batch the git push the same way routes/action-center.js's
   // executeSafeFixes does: every item below ships with deferPr, so its
@@ -676,7 +669,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // existed. Same "skip without spending an attempt, backfill the freed
     // slot" shape as the quarantine check just above, since nothing was
     // actually attempted here either.
-    const preflight = await verifyRecommendation(rec, { site });
+    const preflight = await verifyRecommendation(rec, { site, resolveSource: pageSourceResolver || undefined });
     if (preflight.decision === VERIFICATION_DECISION.ALREADY_RESOLVED) {
       await closeRecommendation(rec.id).catch(() => {});
       resolved++;
@@ -703,6 +696,21 @@ export async function autoRemediateSafeRecommendations(siteId, {
       ).catch(() => {});
       conflicted++;
       console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) blocked before drafting — conflict (${preflight.reason})`);
+      if (attempted < remaining) {
+        const backfill = nextBackfillCandidate();
+        if (backfill) workQueue.push(backfill);
+      }
+      continue;
+    }
+
+    // The generator's own re-check says this cannot be fixed at page level (e.g. a duplicate schema block that comes from a shared
+    // layout). Park it ONCE with the generator's own explanation, so it is not re-drafted, re-refused and re-counted every day.
+    // The wording matters: classifyBlockedKind reads "shared template/layout" as a site fact, not a setup gap.
+    if (preflight.decision === VERIFICATION_DECISION.NEEDS_HUMAN || preflight.decision === VERIFICATION_DECISION.OBSOLETE) {
+      const why = preflight.evidence?.message || `Needs a person: ${preflight.reason}.`;
+      await blockRecommendation(rec.id, String(why).slice(0, 400)).catch(() => {});
+      needsInput++;
+      console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) parked before drafting — needs a person (${preflight.reason})`);
       if (attempted < remaining) {
         const backfill = nextBackfillCandidate();
         if (backfill) workQueue.push(backfill);
@@ -752,11 +760,11 @@ export async function autoRemediateSafeRecommendations(siteId, {
       console.error(`[auto-remediation] ${clientLabel}: ${SYSTEMIC_FAILURE_LIMIT} consecutive SYSTEMIC failures (infrastructure, not individual items) — stopping this site's run. ${workQueue.length - cursor} candidate(s) left untouched and still open.`);
       break;
     }
-    if (consecutiveRefusals >= CONSECUTIVE_REFUSAL_LIMIT) {
-      stoppedReason = 'refusal-streak';
-      console.log(`[auto-remediation] ${clientLabel}: ${CONSECUTIVE_REFUSAL_LIMIT} consecutive honest refusals — nothing here can be drafted without fabricating, so stopping rather than spending the rest of the budget proving it. ${workQueue.length - cursor} candidate(s) left untouched and still open. This is not a fault.`);
-      break;
-    }
+    // There is deliberately NO "N refusals in a row, stop the site" rule here any more. It stopped Admizz four days running with
+    // 131 safe fixes untouched, because eight refusals from one or two generators (a shared-layout schema repair, a missing
+    // input) ended the run before any other generator was tried. A refusal now quarantines the GENERATOR it came from (same
+    // reason twice, see below) and the loop carries on with everything else. The run still ends when nothing eligible is left,
+    // when the budget is spent, or on a real systemic fault.
     // Stop STARTING new items once GitHub's remaining budget is under the
     // reserve. Deliberately a pre-check rather than only reacting to the
     // first 403: an item that begins near the floor burns a generation call
@@ -811,7 +819,6 @@ export async function autoRemediateSafeRecommendations(siteId, {
       if (approved.awaitingReview) {
         draftedForReview++;
         consecutiveSystemicFailures = 0;
-        consecutiveRefusals = 0;
         continue;
       }
 
@@ -836,7 +843,6 @@ export async function autoRemediateSafeRecommendations(siteId, {
         shipped++;
         recordOutcome(siteId, rec.recommendation_type, 'shipped', { recommendationId: rec.id, draftId: approved.id }).catch(() => {});
         consecutiveSystemicFailures = 0;
-        consecutiveRefusals = 0;
         continue;
       }
       pending.push({ rec, draft: approved });
@@ -851,7 +857,6 @@ export async function autoRemediateSafeRecommendations(siteId, {
       // against "this site has nothing it can honestly ship", so neither
       // counter should carry across it.
       consecutiveSystemicFailures = 0;
-      consecutiveRefusals = 0;
     } catch (err) {
       // DESIGN VALIDATION PENDING (design-agent/lib/design-validation-stage.js): this page's
       // current design could not be confirmed against the live site right now — the site or
@@ -925,40 +930,41 @@ export async function autoRemediateSafeRecommendations(siteId, {
       if (isRefusal) {
         refused++;
         consecutiveSystemicFailures = 0;
-        consecutiveRefusals++;
-        // 'refused' is logged too, but scored as neither success nor
-        // failure — see generator-learning.js's POSITIVE/NEGATIVE sets. It
-        // still exists in the log so a reader can see the full picture, a
-        // refusal just never moves the learned score either direction.
-        //
-        // detail carries err.reason (a short, stable code like
-        // 'invalid-edit' — see implementers' {ok:false, reason, error}
-        // contract) rather than the full message: this is what lets
-        // code-self-repair.js's escalation sweep group repeats of the SAME
-        // underlying problem across days/sites, the same way the 'failed'
-        // branch below already does with err.message. Previously this was
-        // the one gap — a refusal's reason was never persisted at all.
-        recordOutcome(siteId, rec.recommendation_type, 'refused', { recommendationId: rec.id, detail: err?.reason || null }).catch(() => {});
-        maybeEscalateToCodeRepair({ generatorId: rec.recommendation_type, reason: err?.reason || null, errorMessage: err.message, siteId }).catch((escErr) => {
-          console.error(`[auto-remediation] code self-repair escalation check failed for ${rec.recommendation_type}:`, escErr.message);
-        });
-        // err.stale === true means the generator itself found live evidence
-        // the recommendation's premise is no longer true (e.g. schema.js
-        // discovering the page already has real schema of the recommended
-        // type) — not "can't fix this", but "there's nothing left to fix".
-        // Left merely 'refused', the row stays open and gets re-attempted
-        // (and re-refused) by every future run forever — confirmed live on
-        // site 1, where the same handful of schema recommendations have
-        // refused on repeat since Aug 14, eating into the refusal-streak
-        // breaker every day without ever converging. Close it the same way
-        // closeStaleRecommendations does (status='superseded'), since this is
-        // exactly what that sweep would eventually conclude too, just
-        // discovered here first and directly instead of on its next pass.
-        if (err?.stale === true) {
+        // WHY it refused decides what happens next (failure-policy.js classifyRefusal). A refusal that is really "waiting for the
+        // client", "already resolved", "design not confirmed yet" or "a service was down" says nothing about the generator, so
+        // it never counts toward quarantining it and is never recorded as the generator's refusal to learn from.
+        const refusalKind = classifyRefusal(err);
+        const refusalReason = refusalReasonOf(err);
+        refusalReasons.push({ recommendationId: rec.id, generatorId: rec.recommendation_type, kind: refusalKind, reason: refusalReason });
+        // 'refused' is logged too, but scored as neither success nor failure (generator-learning.js). detail carries the
+        // reason, or an explicit 'unspecified-refusal' label so a reasonless refusal is never silently blank.
+        recordOutcome(siteId, rec.recommendation_type, 'refused', { recommendationId: rec.id, detail: refusalReason }).catch(() => {});
+        if (refusalKind === REFUSAL_KIND.NEEDS_INPUT) {
+          // Waiting on a person. Park it with the exact thing needed, so it neither retries daily nor looks like a defect.
+          await blockRecommendation(rec.id, String(err.message || '').slice(0, 400)).catch(() => {});
+          needsInput++;
+        }
+        if (countsAgainstGenerator(refusalKind)) {
+          maybeEscalateToCodeRepair({ generatorId: rec.recommendation_type, reason: err?.reason || null, errorMessage: err.message, siteId }).catch((escErr) => {
+            console.error(`[auto-remediation] code self-repair escalation check failed for ${rec.recommendation_type}:`, escErr.message);
+          });
+          // Same generator refusing for the same reason twice: stop spending generation calls on it for the rest of THIS run,
+          // free its slots for other generators, and retry next run. Other generators and other projects are unaffected.
+          const rKey = refusalFamilyKey(rec.recommendation_type, err);
+          const rCount = (refusalFamilyCounts.get(rKey) || 0) + 1;
+          refusalFamilyCounts.set(rKey, rCount);
+          if (rCount >= REFUSAL_FAMILY_LIMIT && !quarantinedGenerators.has(rec.recommendation_type)) {
+            quarantinedGenerators.set(rec.recommendation_type, rKey);
+            const note = `${rec.recommendation_type}: quarantined for the rest of this run after ${rCount} refusals for the same reason ("${refusalReason}") — other generators keep using the remaining budget; retried next run.`;
+            quarantineNotes.push(note);
+            console.warn(`[auto-remediation] ${clientLabel}: ${note}`);
+          }
+        }
+        // err.stale / alreadyResolved: the premise is gone, so close it the way closeStaleRecommendations would.
+        if (err?.stale === true || err?.alreadyResolved === true) {
           closeRecommendation(rec.id).catch(() => {});
         }
       } else {
-        consecutiveRefusals = 0;
         // detail is err.message, which every generator on this path is
         // already required to keep customer-safe (UserFacingError/
         // safeMessage) — no raw provider text reaches this log.
@@ -1276,6 +1282,8 @@ export async function autoRemediateSafeRecommendations(siteId, {
       },
       quarantinedGenerators: Object.fromEntries(quarantinedGenerators),
       quarantineNotes,
+      refusalReasons: refusalReasons.slice(0, 50),
+      needsInput,
       // Review-first site: how many drafts were prepared and left for the client (none of them are in `shipped`).
       ...((reviewFirst || draftedForReview > 0) ? { draftedForReview } : {}),
     },

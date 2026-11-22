@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { isValidTimezone } from './util/timezone.js';
 import 'dotenv/config';
+import { scopeOf } from './agents/lib/site-scope.js';
 import { findSiteIdentityConflict, siteIdentityConflictMessage } from './lib/site-identity.js';
 
 // Neon serverless Postgres: DATABASE_URL must be the POOLED (PgBouncer,
@@ -131,14 +132,15 @@ export async function getOrCreateSite() {
 // workspaceId (optional): the workspace this site is a project of. Omitted for
 // a brand-new client, whose workspace is created together with its first login
 // (store/workspaces.js attachNewClientWorkspace).
-export async function createClientSite({ name, websiteDomain, timezone, propertyType, workspaceId }) {
+export async function createClientSite({ name, websiteDomain, timezone, propertyType, workspaceId, scopeIncludePaths = [], scopeExcludePaths = [] }) {
+  const scope = scopeOf({ scope_include_paths: scopeIncludePaths, scope_exclude_paths: scopeExcludePaths });
   const inserted = await query(
     // surge_mode_until: First-30-Day Surge Mode (lib/surge-mode.js, migration 242). Every NEW project, whether the platform
     // admin onboarded it or the client created it (both come through here), starts with 30 days of raised daily capacity;
     // it lapses by itself. Projects that already exist are never touched: their column stays NULL.
-    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain, client_number, property_type, workspace_id, surge_mode_until)
-     VALUES ($1, NULL, NULL, $2, $3, nextval('sites_client_number_seq'), $4, $5, now() + interval '30 days') RETURNING *`,
-    [name, isValidTimezone(timezone) ? timezone : 'Asia/Kolkata', websiteDomain || null, propertyType === 'product' ? 'product' : 'website', workspaceId ?? null]
+    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain, client_number, property_type, workspace_id, surge_mode_until, scope_include_paths, scope_exclude_paths)
+     VALUES ($1, NULL, NULL, $2, $3, nextval('sites_client_number_seq'), $4, $5, now() + interval '30 days', $6, $7) RETURNING *`,
+    [name, isValidTimezone(timezone) ? timezone : 'Asia/Kolkata', websiteDomain || null, propertyType === 'product' ? 'product' : 'website', workspaceId ?? null, scope.include, scope.exclude]
   );
   // The Agent Factory (lib/agent-factory.js) records that this project's Growth Agent instance has been requested. No network and no
   // side effects; written here, the one place every project is created, and never allowed to fail the creation (the table only
@@ -467,6 +469,17 @@ export async function updateSiteAnalyticsIds({ siteId, ga4MeasurementId, faceboo
   const { rows } = await query(
     `UPDATE sites SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`,
     values
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
+// Path scope (migration 261). Both lists are written together so the trigger-maintained scope_key (262) never sees half a change.
+// A unique violation (another project on the same domain/GA4/GSC already has this exact scope) surfaces as err.code '23505'.
+export async function updateSiteScope({ siteId, include, exclude }) {
+  const { rows } = await query(
+    'UPDATE sites SET scope_include_paths = $1, scope_exclude_paths = $2 WHERE id = $3 RETURNING *',
+    [include, exclude, siteId]
   );
   if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
   return rows[0];

@@ -1,6 +1,7 @@
 import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
 import { ownDomains, filterOwnDomainPages, hostnameOf } from '../agents/lib/site-domain.js';
+import { filterByScope, crossSiteLinkTargets, linkTargetAllowed } from '../agents/lib/site-scope.js';
 import { callLLMForJson } from '../llm.js';
 import { findLinkSuggestionIssues } from './lib/output-guard.js';
 import { llmFailure } from './lib/llm-error.js';
@@ -49,12 +50,15 @@ export async function generate({ siteId, params }) {
     if (domain && !domain.includes(hostnameOf(mustLinkTo))) {
       throw Object.assign(new Error(`"${mustLinkTo}" is not on this site's own domain (${domain.join(', ')}) — refusing to link to a page we can't confirm is real.`), { status: 400 });
     }
+    if (!linkTargetAllowed(site, mustLinkTo)) {
+      throw Object.assign(new Error(`"${mustLinkTo}" is outside this site's path scope and is not a configured cross-site link, so it will not be linked to.`), { status: 400 });
+    }
     candidates = [mustLinkTo];
   } else {
     // Real candidate targets only — excludes the source page itself.
-    candidates = filterOwnDomainPages(otherPagesRaw, domain)
-      .map((p) => p.dim_value)
-      .filter((url) => url !== page);
+    candidates = [...filterByScope(filterOwnDomainPages(otherPagesRaw, domain), site)
+      .map((p) => p.dim_value), ...crossSiteLinkTargets(site)]
+      .filter((url, i, all) => url !== page && all.indexOf(url) === i);
   }
   const candidateSet = new Set(candidates);
 
@@ -103,4 +107,20 @@ export async function generate({ siteId, params }) {
 
   const content = { page, suggestions: clean, droppedHallucinated: dropped };
   return { content, summary: `${clean.length} internal link suggestion(s)` + (dropped ? ` (${dropped} dropped — not a real candidate URL)` : '') };
+}
+
+// Only the "this page links nowhere" premise (the technical-seo dead-end finding) can be re-checked from the page alone. The other
+// premises behind this generator (a below-average link count, "link to the page that should own this keyword") need a human-level
+// judgement, so they are left exactly as before. The live page is read following redirects: a page that has moved is not judged here
+// (verifyRecommendation reports that as page-moved before this runs).
+export async function verifyCurrentState(rec) {
+  const page = rec.params?.page || rec.page;
+  const deadEndPremise = (rec.finding_ids || []).some((f) => String(f).startsWith('technical-seo:no-outgoing-links:')) && !rec.params?.mustLinkTo;
+  if (!page || !deadEndPremise) return { decision: 'still_valid', reason: 'premise-not-rechecked', evidence: null };
+  const fetched = await analyzePageUrl(page);
+  if (!fetched.ok) return { decision: 'still_valid', reason: 'unreachable', evidence: { page, error: fetched.error } };
+  const self = String(page).replace(/\/+$/, '').toLowerCase();
+  const out = new Set((fetched.analysis.internalLinks || []).map((l) => (typeof l === 'string' ? l : l?.href || '')).filter((h) => h && !h.startsWith('#') && h.replace(/\/+$/, '').toLowerCase() !== self));
+  if (out.size > 0) return { decision: 'already_resolved', reason: 'page-has-outgoing-internal-links', evidence: { page, outgoingInternalLinks: out.size, wasRedirected: !!fetched.analysis.wasRedirected } };
+  return { decision: 'still_valid', reason: 'page-still-a-dead-end', evidence: { page } };
 }

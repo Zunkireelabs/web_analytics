@@ -32,6 +32,8 @@ import { buildRecommendations } from './agents/lib/recommendations.js';
 import { repairSiteTemplates } from './agents/lib/template-repair.js';
 import { syncFromGrounded, refreshBlockedRecommendations } from './agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.js';
+import { recordAutoRemediationRun } from './store/auto-remediation-runs.js';
+import { sanitizeForCustomer } from './lib/errors.js';
 import { buildApprovedForToday } from './agents/lib/pick-runner.js';
 import { runWorkArbiter } from './agents/lib/work-arbiter.js';
 import { withJobLock, jobKeyFor } from './lib/job-lock.js';
@@ -57,6 +59,7 @@ import { syncWatchlist } from './agents/lib/watchlist.js';
 import { discoverFromSitemaps, crawlSite, MAX_CRAWL_PAGES } from './agents/lib/site-discovery.js';
 import { getSearchPerformanceRange } from './store/read.js';
 import { ownDomains, filterOwnDomainPages } from './agents/lib/site-domain.js';
+import { filterByScope } from './agents/lib/site-scope.js';
 import { isForeignPlatformSpamUrl } from './agents/lib/index-bloat.js';
 import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages, pruneStaleInventory } from './store/page-inventory.js';
 import { syncSitemapIntoInventory } from './discovery/sitemap-sync.js';
@@ -825,7 +828,7 @@ export async function runSiteDiscoveryIfDue(site, {
   // spam-URL check (index-bloat.js) that technical-seo.js's own
   // legacy-index-spam finding already uses, applied here so those URLs
   // never enter page_inventory as 'gsc' pages in the first place.
-  const gscPages = filterOwnDomainPages(gscPagesRaw, domain).filter((p) => !isForeignPlatformSpamUrl(p.dim_value));
+  const gscPages = filterByScope(filterOwnDomainPages(gscPagesRaw, domain), site).filter((p) => !isForeignPlatformSpamUrl(p.dim_value));
 
   await upsertPageInventoryBatchFn(site.id, sitemapUrls, 'sitemap');
   await upsertPageInventoryBatchFn(site.id, crawledUrls, 'crawl');
@@ -1691,6 +1694,26 @@ async function alertIfShipStalled(site, shipped) {
   }
 }
 
+// EVERY scheduled shipping attempt leaves a row, including the ones that never started. A site skipped because another site held
+// its GitHub credential, because the morning window had closed, or because the platform ceiling was reached used to leave nothing
+// at all, so "why did this project not run today?" (Zunkiree, 2026-11-21) could not be answered from the database. Same table as a
+// real run (auto_remediation_runs): attempted 0, stopped_reason = the reason code, selection.runSkipped = true. Best effort and
+// never throws: recording must not be able to break shipping.
+export const SKIP_REASON = Object.freeze({
+  CREDENTIAL_LOCKED: 'credential-locked', SITE_LOCKED: 'site-locked', WINDOW_CLOSED: 'window-closed',
+  CEILING_REACHED: 'global-ceiling-reached', TIMED_OUT: 'timed-out', RUN_ERROR: 'run-error',
+});
+export async function recordSkippedShipRun(site, reason, detail = null, { drainOnly = false, record = recordAutoRemediationRun } = {}) {
+  try {
+    const at = new Date();
+    await record(site.id, {
+      startedAt: at, finishedAt: at, attempted: 0, shipped: 0, failed: 0, refused: 0, skipped: 0,
+      dailyLimit: site.auto_remediation_daily_limit ?? null, stoppedReason: reason,
+      selection: { runSkipped: true, reason, detail: detail ? sanitizeForCustomer(String(detail).slice(0, 300), 'The run failed before it started; see the server log.') : null, scheduledAt: at.toISOString(), lane: drainOnly ? 'drain-only' : 'full' },
+    });
+  } catch { /* observability must never break the run */ }
+}
+
 // drainOnly: ship only what the shared queues already hold (repairs, learned repairs); generate nothing new inline. Used by the
 // pipeline's 11:00 run, where new fixes come only from the PREPARE stage.
 export async function runAutoRemediationForAllSites({ windowEndsAt = null, drainOnly = false } = {}) {
@@ -1699,14 +1722,16 @@ export async function runAutoRemediationForAllSites({ windowEndsAt = null, drain
   const results = [];
   let globalRemaining = await globalRemainingSeed();
   const unreachable = [];
-  for (const site of sites) {
+  for (const [index, site] of sites.entries()) {
     if (windowClosed(windowEndsAt)) {
       const left = sites.length - results.length - unreachable.length;
       console.log(`[job] auto-remediation: the morning window is closed — ${left} site(s) not started this run; the hourly catch-up picks them up and they go earlier tomorrow.`);
+      for (const notStarted of sites.slice(index)) await recordSkippedShipRun(notStarted, SKIP_REASON.WINDOW_CLOSED, 'The morning shipping window closed before this project was reached.', { drainOnly });
       break;
     }
     if (globalRemaining <= 0) {
       console.log(`[job] auto-remediation: platform-wide daily ceiling reached — skipping remaining ${sites.length - results.length} site(s) this run.`);
+      for (const notStarted of sites.slice(index)) await recordSkippedShipRun(notStarted, SKIP_REASON.CEILING_REACHED, 'The platform-wide daily ceiling was already reached.', { drainOnly });
       break;
     }
     try {
@@ -1722,10 +1747,12 @@ export async function runAutoRemediationForAllSites({ windowEndsAt = null, drain
       // still cannot ship the same site, or spend the same credential's
       // budget, at the same time.
       const outcome = await shipWithDeadline(site, globalRemaining, { drainOnly });
-      if (outcome.timedOut) { results.push({ siteId: site.id, error: 'timed-out' }); globalRemaining = await globalRemainingSeed(); continue; }
+      if (outcome.timedOut) { await recordSkippedShipRun(site, SKIP_REASON.TIMED_OUT, 'The project\'s shipping run exceeded its time limit and was left behind.', { drainOnly }); results.push({ siteId: site.id, error: 'timed-out' }); globalRemaining = await globalRemainingSeed(); continue; }
       const { ran, reason, result } = outcome;
       if (!ran) {
         console.log(`[job] auto-remediation site ${site.id} "${site.name}" skipped — ${reason === 'credential-locked' ? 'another site sharing its GitHub credential is shipping right now' : "another process holds this site's shipping lock"}`);
+        await recordSkippedShipRun(site, reason === 'credential-locked' ? SKIP_REASON.CREDENTIAL_LOCKED : SKIP_REASON.SITE_LOCKED,
+          reason === 'credential-locked' ? 'Another project sharing this project\'s GitHub credential was shipping at the time.' : 'Another process held this project\'s shipping lock.', { drainOnly });
         results.push({ siteId: site.id, skipped: reason === 'credential-locked' ? 'credential-locked' : 'locked' });
         continue;
       }
@@ -1743,6 +1770,7 @@ export async function runAutoRemediationForAllSites({ windowEndsAt = null, drain
       results.push({ siteId: site.id, ...result });
     } catch (err) {
       console.error(`[job] auto-remediation failed for site ${site.id} "${site.name}":`, err.message);
+      await recordSkippedShipRun(site, SKIP_REASON.RUN_ERROR, err.message, { drainOnly });
       results.push({ siteId: site.id, error: err.message });
     }
   }
@@ -2266,7 +2294,7 @@ const COMPETITOR_GROWTH_INTERVAL_DAYS = Number(process.env.COMPETITOR_GROWTH_INT
 export async function listCompetitorGrowthSites({ runQuery = query } = {}) {
   const { rows } = await runQuery(
     `SELECT id, name, timezone, country_code, language_code, target_scope, target_markets,
-            website_domain, additional_own_domains, gsc_property, property_type, url_file_map,
+            website_domain, additional_own_domains, scope_include_paths, scope_exclude_paths, gsc_property, property_type, url_file_map,
             competitor_growth_last_done
        FROM sites
       WHERE competitor_growth_enabled = true
@@ -2362,7 +2390,7 @@ const RANK_TRACKING_INTERVAL_DAYS = Number(process.env.RANK_TRACKING_INTERVAL_DA
 
 export async function listRankTrackingSites({ runQuery = query } = {}) {
   const { rows } = await runQuery(
-    `SELECT id, name, timezone, website_domain, additional_own_domains, gsc_property,
+    `SELECT id, name, timezone, website_domain, additional_own_domains, scope_include_paths, scope_exclude_paths, gsc_property,
             rank_tracking_max_keywords, rank_tracking_last_done
        FROM sites
       WHERE rank_tracking_enabled = true

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildComplianceDesignDriftFindings, linkMatchesCheck, PAGE_CHECKS } from './trust-compliance.js';
+import { buildComplianceDesignDriftFindings, linkMatchesCheck, PAGE_CHECKS, trackerCheckApplies } from './trust-compliance.js';
 
 const TRACKER_FACTS = { siteName: 'Acme', domain: 'acme.example', cookiesObserved: [], trackersDetected: [] };
 const RESOLVED_PAGES = [
@@ -78,5 +78,20 @@ describe('linkMatchesCheck — path segment or text, not any URL containing the 
   test('visible link text naming the policy matches regardless of path', () => {
     assert.equal(m(cookie, '/legal-3', 'Cookie Policy'), true);
     assert.equal(m(terms, '/p/42', 'Terms & Conditions'), true);
+  });
+});
+
+describe('trackerCheckApplies — GA4 is required, Facebook Pixel is optional', () => {
+  test('GA4 always applies, whatever the Pixel settings say', () => {
+    assert.equal(trackerCheckApplies('ga4', {}), true);
+    assert.equal(trackerCheckApplies('ga4', { facebook_pixel_not_applicable: true }), true);
+  });
+  test('a project with no Pixel ID is never told to install a Pixel', () => {
+    assert.equal(trackerCheckApplies('facebook-pixel', { facebook_pixel_id: null }), false);
+    assert.equal(trackerCheckApplies('facebook-pixel', {}), false);
+  });
+  test('a project that opted in with a Pixel ID still gets it, unless it says it is not applicable', () => {
+    assert.equal(trackerCheckApplies('facebook-pixel', { facebook_pixel_id: '123456789012345' }), true);
+    assert.equal(trackerCheckApplies('facebook-pixel', { facebook_pixel_id: '123456789012345', facebook_pixel_not_applicable: true }), false);
   });
 });

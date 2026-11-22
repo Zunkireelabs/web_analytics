@@ -154,9 +154,12 @@ describe('validatePageDesign', () => {
     const down = await V(s, O + '/blog/b', { ...baseWeb(), '/blog/b': new Error('socket hang up') });
     assert.deepEqual([down.reason, down.transient], ['page-unreachable', true], 'a network error is transient');
 
-    const w = baseWeb(); delete w['/blog/a'];
+    const w = baseWeb(); w['/blog/a'] = Object.assign(new Error('HTTP 503'), { httpStatus: 503 });
     const noSample = await V(s, O + '/blog/b', w);
-    assert.deepEqual([noSample.reason, noSample.transient, noSample.context], ['group-sample-unreachable', true, null]);
+    assert.deepEqual([noSample.reason, noSample.transient, noSample.context, noSample.httpStatus], ['group-sample-unreachable', true, null, 503], 'a 5xx sample is an outage: transient, status preserved');
+
+    const w1 = baseWeb(); w1['/blog/a'] = new Error('socket hang up');
+    assert.deepEqual([(await V(s, O + '/blog/b', w1)).reason, (await V(s, O + '/blog/b', w1)).transient], ['group-sample-unreachable', true], 'a network failure is an outage, never "gone"');
 
     const w2 = baseWeb(); w2['/blog/redesigned'] = page(BRAND_NEW);
     const failing = await V(s, O + '/blog/redesigned', w2, { captureFn: async () => { throw new Error('browser crashed'); } });
@@ -314,4 +317,50 @@ test('REGRESSION: a simple static page with a few classed sections is READABLE; 
   const { isUnreadableFingerprint } = await import('./live-design-validation.js');
   assert.equal(isUnreadableFingerprint(computeLayoutFingerprint('<main><section class="a"></section><section class="b"></section><section class="c"></section></main>')), false);
   assert.equal(isUnreadableFingerprint(computeLayoutFingerprint('<html><body><div id="root"></div></body></html>')), true);
+});
+
+describe('a deleted group sample (404/410) does not hold the rest of the group', () => {
+  // /blog/a is the group's recorded sample and has been deleted; /blog/b and /blog/redesigned are live members of the same layout.
+  const goneWeb = (status = 404) => { const w = baseWeb(); delete w['/blog/a']; if (status !== 404) w['/blog/a'] = Object.assign(new Error(`HTTP ${status}`), { httpStatus: status }); return w; };
+
+  for (const status of [404, 410]) {
+    test(`HTTP ${status} sample: the page is captured as the replacement, confirmed against another live member of the SAME group`, async () => {
+      const cap = mkCapture();
+      const r = await V(siteWith(), O + '/blog/b', goneWeb(status), { captureFn: cap.fn });
+      assert.equal(r.status, 'provisional', 'not blocked');
+      assert.equal(r.proposal.kind, 'replace-sample');
+      assert.equal(r.proposal.groupId, 'g1');
+      assert.equal(r.sampleGone, true);
+      assert.equal(r.signals.sampleGone.httpStatus, status);
+      assert.equal(r.signals.sampleGone.confirmedAgainst, O + '/blog/redesigned', 'confirmed by layout against a different live member');
+      assert.deepEqual(cap.calls, [O + '/blog/b'], 'one fresh capture of the page being edited');
+    });
+  }
+
+  test('the replacement is never a page from another group', async () => {
+    const w = goneWeb(); // members of g2 (services) are live but must never be used for a blog group
+    const r = await V(siteWith(), O + '/blog/b', { ...w, '/blog/redesigned': Object.assign(new Error('HTTP 404'), { httpStatus: 404 }) });
+    assert.equal(r.status, 'provisional');
+    assert.equal(r.signals.sampleGone.confirmedAgainst, null, 'no other live member of THIS group, so the page itself is the replacement');
+    assert.equal(String(r.signals.sampleGone.replacement), O + '/blog/b');
+  });
+
+  test('a page that does not look like its group\'s remaining members is not treated as the same group', async () => {
+    const w = goneWeb(); w['/blog/b'] = page(BRAND_NEW);
+    const r = await V(siteWith(), O + '/blog/b', w);
+    assert.equal(r.status, 'provisional');
+    assert.equal(r.proposal.kind, 'new-group', 'ordinary matching decides, not a replace-sample proposal');
+  });
+
+  test('a deleted sample with a capture that fails still blocks transiently with the capture reason, not "unreachable"', async () => {
+    const r = await V(siteWith(), O + '/blog/b', goneWeb(), { captureFn: async () => { throw new Error('browser crashed'); } });
+    assert.equal(r.reason, 'capture-failed');
+  });
+
+  test('a temporary failure on the sample is NOT treated as deleted', async () => {
+    const w = baseWeb(); w['/blog/a'] = Object.assign(new Error('HTTP 502'), { httpStatus: 502 });
+    const r = await V(siteWith(), O + '/blog/b', w);
+    assert.equal(r.status, 'blocked');
+    assert.equal(r.httpStatus, 502);
+  });
 });

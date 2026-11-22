@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from './login.js';
 import { isValidTimezone } from '../util/timezone.js';
 import { normalizeDomain } from '../util/domain.js';
+import { scopeOf } from '../agents/lib/site-scope.js';
 import { getUserById, getUserByEmail } from '../store/users.js';
 import { createInvitation } from '../store/user-invitations.js';
 import { sendInvitationEmail } from '../report/email.js';
@@ -268,7 +269,7 @@ router.get('/workspaces/:id/members', requireAuth, requireWorkspaceRole('member'
 // already have access to it, so no new login is created.
 router.post('/workspaces/:id/projects', requireAuth, requireWorkspaceRole('admin'), async (req, res, next) => {
   try {
-    const { name, websiteDomain, timezone, goal } = req.body || {};
+    const { name, websiteDomain, timezone, goal, scopeIncludePaths, scopeExcludePaths } = req.body || {};
     const cleanName = String(name || '').trim();
     if (!cleanName) return res.status(400).json({ error: 'name is required.' });
     if (cleanName.length > 120) return res.status(400).json({ error: 'name is too long.' });
@@ -278,12 +279,20 @@ router.post('/workspaces/:id/projects', requireAuth, requireWorkspaceRole('admin
     const goalCheck = goal ? validateGoal(goal) : null;
     if (goalCheck && !goalCheck.ok) return res.status(400).json({ error: goalCheck.reason });
 
-    if (await workspaceHasDomain(req.workspaceId, domain.domain)) {
+    // Optional path scope: lets a second project share this domain by owning different paths (migration 262).
+    const pathList = (v) => (v == null ? [] : v);
+    for (const v of [scopeIncludePaths, scopeExcludePaths]) {
+      if (!Array.isArray(pathList(v)) || pathList(v).length > 10 || pathList(v).some((p) => typeof p !== 'string' || p.length > 200)) {
+        return res.status(400).json({ error: 'Path scopes must be a list of at most 10 paths such as /business.' });
+      }
+    }
+    const scope = scopeOf({ scope_include_paths: pathList(scopeIncludePaths), scope_exclude_paths: pathList(scopeExcludePaths) });
+    if (await workspaceHasDomain(req.workspaceId, domain.domain, scope)) {
       return res.status(409).json({ error: 'This website is already a project in this workspace.', code: 'DOMAIN_EXISTS' });
     }
     let site;
     try {
-      site = await createProject({ workspaceId: req.workspaceId, name: cleanName, websiteDomain: domain.domain, timezone });
+      site = await createProject({ workspaceId: req.workspaceId, name: cleanName, websiteDomain: domain.domain, timezone, scopeIncludePaths: scope.include, scopeExcludePaths: scope.exclude });
     } catch (err) {
       // The unique index (migration 210): this website is already a project here.
       if (err?.code === '23505' && err?.constraint === 'sites_workspace_domain_unique') {

@@ -254,6 +254,13 @@ export function hasLooseVisibleFaq($, _headingText, hasFaqMarkup) {
   return $('p > strong, p > b').toArray().some((el) => isQuestion(questionTextOf($, el)));
 }
 
+/** Pure. entry = { ids: Map<@id, occurrences>, anonymous: number } for one @type on one page. */
+export function isDuplicateSchemaType(entry) {
+  if (!entry) return true; // no identity information at all: keep the conservative, original behaviour
+  const repeatedId = [...entry.ids.values()].some((n) => n > 1);
+  return repeatedId || entry.anonymous >= 2 || (entry.anonymous >= 1 && entry.ids.size >= 1);
+}
+
 export function analyzePage(html, pageUrl) {
   const $ = cheerio.load(html);
   const title = $('title').first().text().trim();
@@ -288,6 +295,9 @@ export function analyzePage(html, pageUrl) {
   // occurrence count is needed to notice a real page shipping the same
   // @type twice.
   const schemaTypeCounts = new Map();
+  // Per @type, WHICH entities carry it: by @id when they have one. Two nodes of one type with different @ids are two different real-world
+  // entities (a head office and a branch office are both LocalBusiness), not a duplicate. See isDuplicateSchemaType below.
+  const schemaTypeIds = new Map(); // type -> { ids: Map<id, count>, anonymous: number }
   let malformedJsonLdBlocks = 0;
   // Raw script inner text of each block that fails to parse — kept
   // alongside the count above (which existing callers already read) so a
@@ -329,7 +339,13 @@ export function analyzePage(html, pageUrl) {
       const tagTypes = [];
       for (const block of blocks) {
         const types = [].concat(block['@type'] || []).flat();
-        types.forEach((t) => { if (t) { schemaTypes.add(t); schemaTypeCounts.set(t, (schemaTypeCounts.get(t) || 0) + 1); tagTypes.push(t); } });
+        types.forEach((t) => {
+          if (!t) return;
+          schemaTypes.add(t); schemaTypeCounts.set(t, (schemaTypeCounts.get(t) || 0) + 1); tagTypes.push(t);
+          const entry = schemaTypeIds.get(t) || schemaTypeIds.set(t, { ids: new Map(), anonymous: 0 }).get(t);
+          const id = typeof block['@id'] === 'string' ? block['@id'].trim() : '';
+          if (id) entry.ids.set(id, (entry.ids.get(id) || 0) + 1); else entry.anonymous++;
+        });
         if (types.includes('FAQPage')) {
           hasFaqSchema = true;
           const entities = [].concat(block.mainEntity || []).flat();
@@ -351,7 +367,11 @@ export function analyzePage(html, pageUrl) {
       schemaScriptBlocks.push({ raw, types: tagTypes });
     } catch { malformedJsonLdBlocks++; malformedSchemaBlocks.push(raw); }
   });
-  const duplicateSchemaTypes = [...schemaTypeCounts.entries()].filter(([, count]) => count > 1).map(([t]) => t);
+  // A type is a DUPLICATE only when the same entity is described twice: the same @id twice, two nodes with no @id at all (nothing says
+  // they differ), or an unlabelled node next to a labelled one (cannot be told apart). Nodes that each carry their OWN distinct @id are
+  // distinct entities and are never reported: that is how a business with several offices (or several Products, Persons, Events)
+  // is correctly marked up.
+  const duplicateSchemaTypes = [...schemaTypeCounts.entries()].filter(([t, count]) => count > 1 && isDuplicateSchemaType(schemaTypeIds.get(t))).map(([t]) => t);
   const hasAnySchema = schemaTypes.size > 0;
   // Heading text alone misses real FAQ sections that don't literally say "FAQ"
   // (e.g. a "Get to know Us" accordion) — so also check for FAQ-labeled markup
@@ -964,6 +984,9 @@ export function analyzePage(html, pageUrl) {
     imagesWithoutAlt,
     imagesMissingAlt, // transient, like bodyText/internalLinks — real {src, nearbyText} pairs for alt-text.js, not meant for persisted facts
     hasCanonical: $('link[rel="canonical"]').length > 0,
+    // A page that tells search engines not to index it (robots meta noindex) has no use for a canonical tag: flagging it would be a false
+    // recommendation (found on a login-only dashboard page). Exposed so detectors and the canonical re-check can skip it.
+    isNoindex: /(^|[\s,])noindex([\s,]|$)/i.test($('meta[name="robots"]').attr('content') || ''),
     canonicalUrl, // real resolved target, null if absent or unparseable — see contentGapChecks' cross-domain check
     pageHost: host, // this page's own hostname, already resolved above for internalLinks — exposed so callers can compare canonicalUrl's host without re-parsing pageUrl
     pagePath, // this page's own URL path — see isArticleLikePage/isLegalPath gates in contentGapChecks
@@ -1534,7 +1557,9 @@ function contentGapChecks(analysis, queryTexts = []) {
   if (analysis.imagesTotal > 0 && analysis.imagesWithoutAlt > 0) {
     gaps.push({ type: 'Missing alt text', detail: `${analysis.imagesWithoutAlt}/${analysis.imagesTotal} images have no alt text.` });
   }
-  if (!analysis.hasCanonical) {
+  if (!analysis.hasCanonical && analysis.isNoindex) {
+    // noindex page: no canonical needed, no gap.
+  } else if (!analysis.hasCanonical) {
     gaps.push({ type: 'Missing canonical tag', detail: 'No rel="canonical" link found.' });
   } else if (analysis.canonicalUrl && analysis.pageHost) {
     // A canonical present but resolving to a different domain is almost

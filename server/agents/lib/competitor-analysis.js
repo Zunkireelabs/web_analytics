@@ -4,6 +4,7 @@ import { getSearchPerformanceRange, getSiteById } from '../../store/read.js';
 import { getCompetitorProvider, competitorProviderConfigured } from '../../ingest/competitor-providers/index.js';
 import { callLLM } from '../../llm.js';
 import { resolveOwnDomain, knownDomain, filterOwnDomainPages } from './site-domain.js';
+import { filterByScope } from './site-scope.js';
 import { resolveSiteLocations } from './site-locations.js';
 import { splitByDomainKind, validateCompetitorCandidate } from './competitor-category.js';
 
@@ -293,7 +294,7 @@ export async function runCompetitorDiscovery(siteId, start, end, { forceDomain }
   const ownDomain = await resolveOwnDomain(site, siteId, start, end);
   // knownDomain (primary domain only), not ownDomains — see candidate-pages.js's
   // own comment on this same 2026-08-24 fix.
-  const topPageUrls = filterOwnDomainPages(topPagesRaw, knownDomain(site)).map((p) => p.dim_value);
+  const topPageUrls = filterByScope(filterOwnDomainPages(topPagesRaw, knownDomain(site)), site).map((p) => p.dim_value);
   if (!topPageUrls.length) return { ownDomain, competitors: [] };
 
   const ownPageFetch = await analyzePageUrl(topPageUrls[0]);

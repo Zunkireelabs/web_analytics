@@ -4,6 +4,7 @@ import { getCheckedAtForPages as getCheckedAtForPagesDefault, markPagesChecked }
 import { getOpenRecommendationPages as getOpenRecommendationPagesDefault } from '../../store/recommendations.js';
 import { sortByRotation } from './rotation.js';
 import { knownDomain, filterOwnDomainPages } from './site-domain.js';
+import { filterByScope } from './site-scope.js';
 import { isForeignPlatformSpamUrl } from './index-bloat.js';
 // Already exported and already proven against this exact failure — see the
 // SOFT-404 block below for why it was never applied here until now.
@@ -281,8 +282,8 @@ export async function selectCandidatePages(siteId, agentId, {
   // in job.js — this is the one pool every page-level agent's batch comes
   // from, so filtering here keeps those URLs out regardless of how they got
   // into either source.
-  const gscPages = filterOwnDomainPages(gscPagesRaw, domain).filter((p) => !isForeignPlatformSpamUrl(p.dim_value));
-  const inventory = filterOwnDomainPages(inventoryRaw, domain, (r) => r.page).filter((r) => !isForeignPlatformSpamUrl(r.page));
+  const gscPages = filterByScope(filterOwnDomainPages(gscPagesRaw, domain), site).filter((p) => !isForeignPlatformSpamUrl(p.dim_value));
+  const inventory = filterByScope(filterOwnDomainPages(inventoryRaw, domain, (r) => r.page), site, (r) => r.page).filter((r) => !isForeignPlatformSpamUrl(r.page));
 
   const impressionsByPage = new Map(gscPages.map((p) => [p.dim_value, Number(p.impressions)]));
   const gscUrls = dedupeQueryVariants(gscPages.map((p) => p.dim_value), impressionsByPage);

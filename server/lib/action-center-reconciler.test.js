@@ -228,7 +228,7 @@ mock.module(resolve('./batch-pr-recovery.js'), {
 let siteFixture;
 let mergeImpl;
 mock.module(resolve('../store/read.js'), {
-  namedExports: { getSiteById: async () => siteFixture },
+  namedExports: { getSiteById: async () => siteFixture, getSearchPerformanceRange: async () => [] },
 });
 mock.module(resolve('../implementers/backend.js'), {
   namedExports: { computeBrokenLinkFixMerge: async (site, draft, ref) => mergeImpl(site, draft, ref) },

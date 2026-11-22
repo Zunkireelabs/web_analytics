@@ -96,6 +96,9 @@ export const VERIFICATION_METHOD = {
   PAGE_ABSENCE: 'page-absence',     // something that had to go is really gone
   REDIRECT: 'redirect',             // the old URL now lands somewhere else
   PAGE_CONTENT: 'page-content',     // the shipped copy is present on the page
+  LINKS_PRESENT: 'links-present',   // a link to the suggested target, with the suggested anchor, exists (internal-links)
+  SCHEMA_STATE: 'schema-state',     // the structured data is in the repaired state (schema-repair)
+  META_TAGS: 'meta-tags',           // the chosen <title> and meta description are in place (meta-title)
   REPO_FILE: 'repo-file',           // the shipped copy is in the merged branch
   UNVERIFIABLE: 'unverifiable',     // nothing checkable — recorded with a reason
 };
@@ -238,6 +241,31 @@ export function verificationMethodFor(draft, { siteOrigin = null } = {}) {
       return { method: VERIFICATION_METHOD.UNVERIFIABLE, reason: 'No source URL was recorded for this redirect, so it cannot be re-requested.' };
     }
     return { method: VERIFICATION_METHOD.REDIRECT, target: from, expected: { to: draft?.input?.to ?? draft?.content?.to ?? null } };
+  }
+
+  // Generators whose shipped artifact is NOT prose, so the generic "longest sentence" needle below would pick the wrong thing:
+  // internal-links' longest string is the model's RATIONALE (never written to the page), schema-repair's is a slice of
+  // serialised JSON (re-serialised by the site), and meta-title's is only the description. Each is verified on what it really ships.
+  if (type === 'internal-links') {
+    const links = (draft?.content?.suggestions || []).filter((x) => x?.targetUrl && x?.anchorText).map((x) => ({ href: x.targetUrl, anchor: x.anchorText }));
+    if (!links.length) return { method: VERIFICATION_METHOD.UNVERIFIABLE, reason: 'This draft contained no link suggestions, so there is no link to look for.' };
+    if (!page) return { method: VERIFICATION_METHOD.UNVERIFIABLE, reason: 'No page URL was recorded for this change, so its links cannot be re-checked.' };
+    return { method: VERIFICATION_METHOD.LINKS_PRESENT, target: page, expected: { links, origin: siteOrigin } };
+  }
+  if (type === 'schema-repair') {
+    const c = draft?.content || {};
+    if (!page) return { method: VERIFICATION_METHOD.UNVERIFIABLE, reason: 'No page URL was recorded for this change, so its structured data cannot be re-checked.' };
+    if (c.fixType === 'remove-duplicate') return { method: VERIFICATION_METHOD.SCHEMA_STATE, target: page, expected: { fixType: 'remove-duplicate', duplicateType: c.duplicateType, originalRaw: c.originalRaw } };
+    if (c.fixType === 'repair-malformed') return { method: VERIFICATION_METHOD.SCHEMA_STATE, target: page, expected: { fixType: 'repair-malformed', jsonLd: c.jsonLd } };
+    return { method: VERIFICATION_METHOD.UNVERIFIABLE, reason: 'This schema draft did not record which kind of repair it made.' };
+  }
+  if (type === 'meta-title') {
+    const c = draft?.content || {};
+    const title = c.selectedTitle || (Array.isArray(c.titles) ? c.titles[0] : null) || null;
+    const description = c.metaDescription || null;
+    if (!title && !description) return { method: VERIFICATION_METHOD.UNVERIFIABLE, reason: 'This draft recorded neither a title nor a meta description.' };
+    if (!page) return { method: VERIFICATION_METHOD.UNVERIFIABLE, reason: 'No page URL was recorded for this change, so its title and description cannot be re-checked.' };
+    return { method: VERIFICATION_METHOD.META_TAGS, target: page, expected: { title, description } };
   }
 
   // Everything else ships copy. If we know where it should be visible, check

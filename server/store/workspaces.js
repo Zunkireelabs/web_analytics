@@ -1,5 +1,6 @@
 import { query, pool, createClientSite } from '../db.js';
 import { effectiveState } from './access.js';
+import { scopeKey } from '../agents/lib/site-scope.js';
 
 // Workspace layer (migrations 191, 192). A workspace owns projects (sites) and
 // has members. sites.id stays the unit every route scopes by; this module
@@ -296,8 +297,8 @@ export async function inviteHomeSiteId(workspaceId, preferredSiteId) {
 
 // A new project (site) inside an existing workspace. Its members already have
 // access through the workspace, so no login is created.
-export async function createProject({ workspaceId, name, websiteDomain, timezone }) {
-  return createClientSite({ name, websiteDomain, timezone, propertyType: 'website', workspaceId });
+export async function createProject({ workspaceId, name, websiteDomain, timezone, scopeIncludePaths, scopeExcludePaths }) {
+  return createClientSite({ name, websiteDomain, timezone, propertyType: 'website', workspaceId, scopeIncludePaths, scopeExcludePaths });
 }
 
 // A brand-new client (a site that has just been created together with its
@@ -344,11 +345,13 @@ export async function discardNewWorkspace({ workspaceId, siteId = null }) {
 
 // Is this website already a (live) project of this workspace? The unique index (migration 210) is the
 // real guard, but it can be absent where old data had duplicates, so the route asks first as well.
-export async function workspaceHasDomain(workspaceId, domain) {
+// A second project on the same domain is allowed when it owns different paths (migration 262), so the check includes the scope.
+export async function workspaceHasDomain(workspaceId, domain, scope = {}) {
   if (!domain) return false;
+  const key = scopeKey({ scope_include_paths: scope.include, scope_exclude_paths: scope.exclude });
   const { rows } = await query(
-    `SELECT 1 FROM sites WHERE workspace_id = $1 AND lower(website_domain) = lower($2) AND status IS DISTINCT FROM 'soft_deleted' LIMIT 1`,
-    [workspaceId, domain]);
+    `SELECT 1 FROM sites WHERE workspace_id = $1 AND lower(website_domain) = lower($2) AND scope_key = $3 AND status IS DISTINCT FROM 'soft_deleted' LIMIT 1`,
+    [workspaceId, domain, key]);
   return rows.length > 0;
 }
 

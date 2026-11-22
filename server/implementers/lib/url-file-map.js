@@ -5,6 +5,7 @@
 // failure (reason: 'no-file-mapping'), not attempt a fallback guess.
 
 import { knownDomain, hostnameOf } from '../../agents/lib/site-domain.js';
+import { urlInScope } from '../../agents/lib/site-scope.js';
 
 // `pages`/`patterns` at the TOP of url_file_map are host-agnostic by
 // original design — every site used to have exactly one hostname, so a bare
@@ -52,17 +53,75 @@ export function resolveHostScope(site, pageUrl) {
   return { pages: hostMap?.pages || {}, patterns: hostMap?.patterns || [], scope: 'host', host };
 }
 
+
+// ONE SITE, SEVERAL APPS (real case: zennly.io is a Next.js marketplace at "/", "/search", "/providers/*", "/account/*" AND a separate
+// Eleventy marketing site, web-zenly, served under "/businesses/*"). Two optional, explicit url_file_map settings describe it, so the agent
+// never has to guess which repo a URL belongs to:
+//
+//   mounts:    [{ prefix: "/businesses" }]
+//       The connected repo's pages are served under this public prefix. "/businesses/faq" is the repo's "/faq". Without this, every
+//       lookup for a /businesses/... URL missed the map (the map still described the pre-move paths) and the agent reported "not mapped".
+//
+//   otherApps: [{ name: "zennly-marketplace", repo: "Zunkireelabs/zennly-marketplace", paths: ["/"], prefixes: ["/search", "/providers"] }]
+//       URLs served by an app that is NOT the connected repo. Nothing may be drafted, applied or retried for them against this repo: a
+//       change written to the wrong repo can only fail at apply time (or worse, land somewhere unrelated). resolveOwnership() reports it.
+//
+// Both are absent for every existing site, and then everything below behaves exactly as before.
+function pathOf(pageUrl) {
+  try { return new URL(pageUrl).pathname; } catch { return String(pageUrl || ''); }
+}
+const trimSlash = (p) => (p.length > 1 ? p.replace(/\/+$/, '') : p);
+
+/** The path a page has INSIDE the connected repo: the public path with a configured mount prefix removed (or unchanged). */
+export function mapPathOf(site, pageUrl) {
+  const path = pathOf(pageUrl);
+  for (const m of site?.url_file_map?.mounts || []) {
+    const prefix = trimSlash(String(m?.prefix || ''));
+    if (!prefix || prefix === '/') continue;
+    const norm = trimSlash(path);
+    if (norm === prefix) return '/';
+    if (norm.startsWith(`${prefix}/`)) return path.slice(prefix.length) || '/';
+  }
+  return path;
+}
+
+/**
+ * Who serves this URL? { owner: 'connected' } for the connected repo (the default), or
+ * { owner: 'other', app, repo, message } when it is declared as another app's. Mount prefixes win: a URL under a mounted prefix is the
+ * connected repo's, even if a broader otherApps entry would also match it.
+ */
+export function resolveOwnership(site, pageUrl) {
+  const apps = site?.url_file_map?.otherApps;
+  if (!Array.isArray(apps) || !apps.length || !pageUrl) return { owner: 'connected' };
+  const path = trimSlash(pathOf(pageUrl));
+  const mounted = mapPathOf(site, pageUrl) !== pathOf(pageUrl);
+  if (mounted) return { owner: 'connected' };
+  for (const app of apps) {
+    const exact = (app.paths || []).some((p) => trimSlash(String(p)) === path);
+    const prefixed = (app.prefixes || []).some((p) => { const q = trimSlash(String(p)); return path === q || path.startsWith(`${q}/`); });
+    if (exact || prefixed) {
+      return {
+        owner: 'other', app: app.name || app.repo || 'another app', repo: app.repo || null,
+        message: `This page is served by ${app.name || 'another app'}${app.repo ? ` (repo ${app.repo})` : ''}, not by the repository connected to this site, so SuperRank cannot change it from here. Connect that repository to this site, or make the change there by hand.`,
+      };
+    }
+  }
+  return { owner: 'connected' };
+}
+
 // Shared by every resolver below — normalizes a page URL to its pathname
 // (with/without a trailing slash) and looks up the matching `pages` entry
 // from the correct hostname scope (see resolveHostScope above), so both
 // path-normalization AND host-scoping logic exist exactly once.
 function getPageEntry(site, pageUrl) {
   if (!pageUrl) return null;
+  if (resolveOwnership(site, pageUrl).owner === 'other') return null;
+  if (!urlInScope(site, pageUrl)) return null; // path scope (migration 261): another site's page is never mapped to a file here
   const { pages } = resolveHostScope(site, pageUrl);
-  let path;
-  try { path = new URL(pageUrl).pathname; } catch { path = String(pageUrl); }
+  const path = mapPathOf(site, pageUrl);
   const normalized = path.length > 1 ? path.replace(/\/+$/, '') : path;
-  return pages?.[path] || pages?.[normalized] || null;
+  // Map keys are written both ways ("/privacy-policy/" and "/faq"); a public URL may use either, so try the slashed form as well.
+  return pages?.[path] || pages?.[normalized] || pages?.[`${normalized}/`] || null;
 }
 
 // The first `patterns[]` entry whose regex matches this URL, from the
@@ -71,9 +130,10 @@ function getPageEntry(site, pageUrl) {
 // below) can reuse it instead of a second regex-matching implementation.
 function getMatchingPattern(site, pageUrl) {
   if (!pageUrl) return null;
+  if (resolveOwnership(site, pageUrl).owner === 'other') return null;
+  if (!urlInScope(site, pageUrl)) return null;
   const { patterns } = resolveHostScope(site, pageUrl);
-  let path;
-  try { path = new URL(pageUrl).pathname; } catch { path = String(pageUrl); }
+  const path = mapPathOf(site, pageUrl);
   const normalized = path.length > 1 ? path.replace(/\/+$/, '') : path;
   for (const p of patterns || []) {
     if (!p.match) continue;
@@ -94,12 +154,23 @@ export function resolveFile(site, pageUrl) {
   const pattern = getMatchingPattern(site, pageUrl);
   if (!pattern?.file) return null;
 
-  let path;
-  try { path = new URL(pageUrl).pathname; } catch { path = String(pageUrl); }
+  const path = mapPathOf(site, pageUrl);
   const normalized = path.length > 1 ? path.replace(/\/+$/, '') : path;
   const re = new RegExp(pattern.match);
   const m = normalized.match(re) || path.match(re);
   return m ? pattern.file.replace(/\$(\d+)/g, (_, n) => m[Number(n)] ?? '') : null;
+}
+
+/**
+ * True when this page's file is a SHARED template: no page-specific entry, and the matching pattern points every URL at one fixed file
+ * (no $1-style capture). A static, page-specific edit written into such a file would show on EVERY page that uses it (one category's
+ * breadcrumb trail on all categories). Callers that write page-specific content must not do that; the fix there is code that builds the
+ * value from the page's own data. A per-page entry, or a pattern whose file name carries the capture (one file per URL), is not shared.
+ */
+export function isSharedTemplateFile(site, pageUrl) {
+  if (getPageEntry(site, pageUrl)?.file) return false;
+  const pattern = getMatchingPattern(site, pageUrl);
+  return Boolean(pattern?.file) && !/\$\d+/.test(pattern.file);
 }
 
 // Whether a (page, actionType) recommendation could ever actually apply —
@@ -297,6 +368,7 @@ export function resolvePlacement(site, pageUrl, actionType) {
 // there, and the title, which lives in the page's front matter, stays on the page file. `$1`-style groups in a pattern-level file are
 // filled from that pattern's own match, so one entry covers a family of pages. No configured file: exactly resolveFile.
 export function resolveActionFile(site, pageUrl, actionType) {
+  if (!urlInScope(site, pageUrl)) return null;
   const placement = resolvePlacementFile(site, pageUrl, actionType);
   return placement || resolveFile(site, pageUrl);
 }
@@ -438,6 +510,8 @@ export function resolveAltTextDataSources(site, pageUrl) {
 export function resolveNewContentTarget(site, actionType, title) {
   const target = site.url_file_map?.newContentTargets?.[actionType];
   if (!target?.dir || !target?.extension) return null;
+  // A new page whose public URL falls outside this site's path scope would be written into another site's section.
+  if (target.urlPattern?.includes('{slug}') && !urlInScope(site, target.urlPattern.replace('{slug}', slugifyTitle(title)))) return null;
   if (target.filename) return `${target.dir}/${slugifyTitle(title)}/${target.filename}`;
   return `${target.dir}/${slugifyTitle(title)}${target.extension}`;
 }

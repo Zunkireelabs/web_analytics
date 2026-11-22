@@ -8,7 +8,7 @@ import {
 // The five concepts kept apart on the page, and the fields that belong to each (lib/business-profile.js explains why they are separate).
 export const GROUPS = Object.freeze([
   { key: 'company', label: 'The company', hint: 'What it is, and the industry it operates in itself.', fields: ['description', 'ownIndustry', 'subIndustry'] },
-  { key: 'offering', label: 'What it sells', hint: 'Products and services, and how it earns.', fields: ['productsServices', 'businessModel'] },
+  { key: 'offering', label: 'What it sells', hint: 'Products and services, how it earns, and for a marketplace who is on each side and what is listed.', fields: ['productsServices', 'businessModel', 'marketplace'] },
   { key: 'customers', label: 'Who buys it', hint: 'Its customers, their industries, and the problems it solves for them. These are not the company’s own industry.', fields: ['targetCustomers', 'targetCustomerIndustries', 'customerProblems'] },
   { key: 'market', label: 'Market', hint: 'Where it operates and who it competes with.', fields: ['geographicMarkets', 'competitorCategories'] },
   { key: 'topics', label: 'Subjects', hint: 'What it is an authority on.', fields: ['coreTopics'] },
@@ -17,7 +17,7 @@ export const GROUPS = Object.freeze([
 export const FIELD_LABELS = Object.freeze({
   description: 'Description', ownIndustry: 'Own industry', subIndustry: 'Sub-industry', businessModel: 'Business model',
   productsServices: 'Products and services', targetCustomerIndustries: 'Customer industries', targetCustomers: 'Target customers',
-  customerProblems: 'Customer problems', geographicMarkets: 'Geographic markets', competitorCategories: 'Competitor categories', coreTopics: 'Core topics',
+  customerProblems: 'Customer problems', geographicMarkets: 'Geographic markets', competitorCategories: 'Competitor categories', coreTopics: 'Core topics', marketplace: 'Marketplace',
 });
 
 export function buildView(current, { now = new Date() } = {}) {
