@@ -25,7 +25,7 @@ export default function AgentBubble({ count, pulse, onOpen, message }) {
         </div>
       )}
       <button type="button" onClick={onOpen} aria-label={count > 0 ? `The agent has ${count} ${count === 1 ? 'thing' : 'things'} waiting for you` : 'Chat with the agent'}
-        className={`fixed bottom-5 right-5 z-40 w-[52px] h-[52px] rounded-[16px] bg-primary text-white grid place-items-center ${pulse ? 'agent-pulse' : ''}`}
+        data-agent-bubble className={`fixed bottom-5 right-5 z-40 w-[52px] h-[52px] rounded-[16px] bg-primary text-white grid place-items-center ${pulse ? 'agent-pulse' : ''}`}
         style={{ boxShadow: '0 12px 30px -8px rgba(213,78,0,.55), 0 0 0 1px rgba(0,0,0,.05)' }}>
         <Sparkles size={22} />
         {count > 0 && (

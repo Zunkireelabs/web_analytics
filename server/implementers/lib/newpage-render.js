@@ -190,6 +190,10 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
 // e.g. Admizz's src/app/blogs/page.tsx, which merges these with its Sanity
 // posts.
 export function renderBlogOutlineBodyTsx(content, site, { canonicalUrl = null } = {}) {
+  // A Next.js page file may only export the names Next knows (default, metadata, generateStaticParams, ...). Exporting `post` as well makes
+  // `next build` fail its type check on Next 15/16 — found by running Admizz's real build on a generated post. So it is a plain const unless
+  // the site's own listing really imports it (newContentTargets['blog-outline'].exportPost === true).
+  const exportPost = site?.url_file_map?.newContentTargets?.['blog-outline']?.exportPost === true;
   const title = content.title || content.topic || 'Untitled';
   const props = {
     title,
@@ -206,15 +210,24 @@ export function renderBlogOutlineBodyTsx(content, site, { canonicalUrl = null } 
       ? { url: content.featuredImage.url, alt: content.featuredImage.alt || null }
       : null,
     categories: Array.isArray(content.categories) ? content.categories : [],
-    publishedAt: new Date().toISOString(),
+    publishedAt: content.publishedAt || new Date().toISOString(),
   };
+  // Optional, real fields only — never invented. A client whose build requires them (see frontend.js's postContract check) refuses a
+  // draft that lacks them instead of shipping a post its own build rejects.
+  if (typeof content.quickAnswer === 'string' && content.quickAnswer.trim()) props.quickAnswer = content.quickAnswer.trim();
+  if (Array.isArray(content.faqItems) && content.faqItems.length) {
+    props.faqItems = content.faqItems.filter((x) => x?.question && x?.answer).map((x) => ({ question: x.question, answer: x.answer }));
+  }
+  if (Array.isArray(content.sources) && content.sources.length) {
+    props.sections = [...props.sections, { heading: 'Sources', body: content.sources.filter((x) => x?.label && /^https:\/\//.test(x.url || '')).map((x) => `- [${x.label}](${x.url})`).join('\n') }];
+  }
   const metaTitle = content.title || content.topic || 'Untitled';
   const metaDescription = content.metaDescription || '';
   const lines = [
     'import type { Metadata } from "next";',
     'import GeneratedBlogPost from "@/components/GeneratedBlogPost";',
     '',
-    `export const post = ${JSON.stringify(props, null, 2)};`,
+    `${exportPost ? 'export ' : ''}const post = ${JSON.stringify(props, null, 2)};`,
     '',
     'export const metadata: Metadata = {',
     `  title: ${JSON.stringify(metaTitle)},`,

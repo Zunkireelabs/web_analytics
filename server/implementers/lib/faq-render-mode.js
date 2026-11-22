@@ -162,6 +162,12 @@ export async function decideFaqRenderModeForDataDrivenPage(site, page, { readLiv
 // backend.js would see if it ended up handling this draft directly.
 export async function resolveFaqRenderMode(site, draft, { fetchFile = getFileContent, beforeRef = baseBranch(site) } = {}) {
   const page = draft.content?.page || draft.input?.page;
+  // A ts-named-export-content page writes into a data export (post-faqs.ts / page-faqs.ts) rendered by a SHARED component. Decide
+  // from the entry-specific evidence only — before looking at resolveFile's template, which for these pages is that shared template
+  // (e.g. src/app/[slug]/page.tsx) and says nothing about whether THIS page already shows a FAQ.
+  if (resolveAdapter(site, page, 'faq')?.id === 'ts-named-export-content') {
+    return decideFaqRenderModeForDataDrivenPage(site, page);
+  }
   const filePath = resolveFile(site, page);
   if (!filePath) {
     // A pagination/data-array route (e.g. /compare/*) has no per-page file —

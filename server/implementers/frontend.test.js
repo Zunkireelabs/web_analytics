@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { apply, preview, resolveTargetAndBody, FRONTEND_ACTION_TYPES, COMPLIANCE_ACTION_TYPES, computeGeneratedPostsManifestUpdate } from './frontend.js';
+import { apply, preview, resolveTargetAndBody, FRONTEND_ACTION_TYPES, COMPLIANCE_ACTION_TYPES, computeGeneratedPostsManifestUpdate, checkPostContract } from './frontend.js';
 
 describe('resolveTargetAndBody — generation-time-prepared fast path', () => {
   test('a draft with rendered_body/target_file_path already set is returned verbatim, no recomputation', async () => {
@@ -150,6 +150,20 @@ describe('resolveTargetAndBody — layout comes from the repo, not from config',
   });
 });
 
+describe("checkPostContract — the client build's required post content", () => {
+  const site = { url_file_map: { newContentTargets: { 'blog-outline': { postContract: { requiredContent: ['quickAnswer', 'faqItems', 'sources'] } } } } };
+  test('missing items are named and the draft is refused', () => {
+    const r = checkPostContract(site, { quickAnswer: 'too short' });
+    assert.equal(r.ok, false); assert.equal(r.reason, 'draft-not-ready'); assert.match(r.error, /quickAnswer, faqItems, sources/);
+  });
+  test('complete content passes; sources must be https links; no contract configured -> ok', () => {
+    const full = { quickAnswer: 'A real answer-first summary sentence.', faqItems: [{ question: 'Q?', answer: 'A.' }], sources: [{ label: 'GOV.UK', url: 'https://www.gov.uk/x' }] };
+    assert.equal(checkPostContract(site, full).ok, true);
+    assert.equal(checkPostContract(site, { ...full, sources: [{ label: 'x', url: 'http://insecure' }] }).ok, false);
+    assert.equal(checkPostContract({ url_file_map: {} }, {}).ok, true);
+  });
+});
+
 describe('computeGeneratedPostsManifestUpdate — blog-outline generated-posts manifest', () => {
   const site = { url_file_map: { newContentTargets: { 'blog-outline': { manifestFile: 'src/data/generated-posts.json' } } } };
   const entry = { slug: 'my-new-post', title: 'My New Post', excerpt: 'x', imageUrl: null, imageAlt: null, publishedAt: '2026-09-15T00:00:00.000Z', href: '/blogs/my-new-post' };
@@ -159,8 +173,15 @@ describe('computeGeneratedPostsManifestUpdate — blog-outline generated-posts m
     assert.equal(result, null);
   });
 
-  test('manifest file does not exist yet -> creates it with just this entry', async () => {
+  test('manifest file missing -> REFUSED (never silently re-created as a one-entry file that drops every other post)', async () => {
     const result = await computeGeneratedPostsManifestUpdate(site, entry, async () => null, 'main');
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'invalid-edit');
+  });
+
+  test('manifest file missing + manifestMayBeCreated opt-in -> creates it with just this entry', async () => {
+    const optIn = { url_file_map: { newContentTargets: { 'blog-outline': { manifestFile: 'src/data/generated-posts.json', manifestMayBeCreated: true } } } };
+    const result = await computeGeneratedPostsManifestUpdate(optIn, entry, async () => null, 'main');
     assert.equal(result.ok, true);
     assert.equal(result.filePath, 'src/data/generated-posts.json');
     const parsed = JSON.parse(result.newContent);
@@ -198,8 +219,40 @@ describe('computeGeneratedPostsManifestUpdate — blog-outline generated-posts m
     assert.equal(result.reason, 'invalid-edit');
   });
 
+  test('slug equal to a HAND-AUTHORED manifest entry -> slug-conflict, nothing written', async () => {
+    const existing = JSON.stringify([{ slug: 'my-new-post', title: 'Human wrote this' }]);
+    const r = await computeGeneratedPostsManifestUpdate(site, entry, async () => ({ content: existing }), 'main');
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'slug-conflict');
+  });
+
+  test('collisionChecks: an existing dedicated route or JSON post at the same slug -> slug-conflict; own file is exempt', async () => {
+    const cfg = { url_file_map: { newContentTargets: { 'blog-outline': { manifestFile: 'm.json', collisionChecks: ['src/app/{slug}/page.tsx', 'src/content/blog/posts/{slug}.json'] } } } };
+    const fetchWith = (present) => async (_s, path) => (present.includes(path) ? { content: '[]' } : null);
+    const a = await computeGeneratedPostsManifestUpdate(cfg, entry, fetchWith(['m.json', 'src/app/my-new-post/page.tsx']), 'main');
+    assert.equal(a.reason, 'slug-conflict');
+    const b = await computeGeneratedPostsManifestUpdate(cfg, entry, fetchWith(['m.json', 'src/content/blog/posts/my-new-post.json']), 'main');
+    assert.equal(b.reason, 'slug-conflict');
+    const own = await computeGeneratedPostsManifestUpdate(cfg, entry, fetchWith(['m.json', 'src/app/my-new-post/page.tsx']), 'main', { ownFilePath: 'src/app/my-new-post/page.tsx' });
+    assert.equal(own.ok, true);
+  });
+
+  test('manifestRequired: missing image/category/href is refused before any write; a failed category lookup is named', async () => {
+    const cfg = { url_file_map: { newContentTargets: { 'blog-outline': { manifestFile: 'm.json', manifestRequired: ['imageUrl', 'categories', 'href'] } } } };
+    const f = async () => ({ content: '[]' });
+    const noImg = await computeGeneratedPostsManifestUpdate(cfg, { ...entry, categories: [{ slug: 'a', title: 'A' }] }, f, 'main');
+    assert.equal(noImg.reason, 'draft-not-ready');
+    assert.match(noImg.error, /imageUrl/);
+    const noCat = await computeGeneratedPostsManifestUpdate(cfg, { ...entry, imageUrl: '/x.webp', categories: [] }, f, 'main', { categoriesLookupFailed: true });
+    assert.equal(noCat.reason, 'draft-not-ready');
+    assert.match(noCat.error, /category source could not be read/);
+    const ok = await computeGeneratedPostsManifestUpdate(cfg, { ...entry, imageUrl: '/x.webp', categories: [{ slug: 'a', title: 'A' }] }, f, 'main');
+    assert.equal(ok.ok, true);
+  });
+
   test('a fresh parse of the written content succeeds — the write is valid JSON', async () => {
-    const first = await computeGeneratedPostsManifestUpdate(site, entry, async () => null, 'main');
+    const optIn = { url_file_map: { newContentTargets: { 'blog-outline': { manifestFile: 'src/data/generated-posts.json', manifestMayBeCreated: true } } } };
+    const first = await computeGeneratedPostsManifestUpdate(optIn, entry, async () => null, 'main');
     const second = await computeGeneratedPostsManifestUpdate(
       site, { ...entry, slug: 'second-post', title: 'Second Post' },
       async () => ({ content: first.newContent }), 'main',

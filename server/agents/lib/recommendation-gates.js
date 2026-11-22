@@ -1,3 +1,4 @@
+import { sharedTemplateTargetBlock, templateDrivenBodyBlock } from '../../implementers/lib/action-scope.js';
 import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget } from '../../implementers/lib/url-file-map.js';
 import { hasExistingFaqSchema, INSPECTABLE_ACTION_TYPES } from '../../implementers/lib/render-inspector.js';
 import { templateRendersItemsField } from '../../implementers/lib/faq-render-mode.js';
@@ -5,6 +6,7 @@ import { componentTemplateVerification, componentTemplateActionTypeFor, getDesig
 import { projectComponentTemplate } from '../../design-agent/lib/design-profile.js';
 import { getDesignAgentStatus } from '../../implementers/lib/design-agent-status.js';
 import { isDataReady } from '../../implementers/adapters/data-array-content.js';
+import { isDataReady as isTsNamedExportReady } from '../../implementers/adapters/ts-named-export-content.js';
 import { fetchSoftNotFoundFingerprint, isSoftNotFound } from './technical-seo-analysis.js';
 import { FRONTEND_ACTION_TYPES } from '../../implementers/frontend.js';
 import { getFileContent, getRepoTree } from '../../github/client.js';
@@ -537,6 +539,8 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
         // same dead end at apply time — see store/drafts.js's redraft-churn
         // comment (24 attempts across 6 findings historically for exactly
         // this failure).
+        const templateDriven = file ? templateDrivenBodyBlock(file.content, generatorId, filePath) : null;
+        if (templateDriven && !resolveAdapter(site, page, generatorId)) return { drop: null, blockedReason: templateDriven };
         if (file && INSPECTABLE_ACTION_TYPES.includes(generatorId) && hasExistingFaqSchema(file.content)) {
           return { drop: 'faq-schema-already-present', blockedReason: null };
         }
@@ -552,6 +556,17 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     // stops resurfacing every refresh.
     if (pageGated) {
       const adapterConfig = resolveAdapter(site, page, generatorId);
+      // Shared-template targets are stopped here, before any draft exists (see sharedTemplateTargetBlock).
+      if (!FRONTEND_ACTION_TYPES.has(generatorId)) {
+        const sharedReason = sharedTemplateTargetBlock(site, page, generatorId, { file: resolveFile(site, page), adapterConfig });
+        if (sharedReason) return { drop: null, blockedReason: sharedReason };
+      }
+      // ts-named-export-content (a named TS data export, e.g. post-faqs.ts): same "route exists but is the DATA identified" question,
+      // answered by the adapter's own identifyTarget — one definition. Not identified -> dropped, never routed to a shared template.
+      if (adapterConfig?.id === 'ts-named-export-content'
+        && !(await isTsNamedExportReady(site, page, adapterConfig, cachedFetchFile, baseBranch(site)))) {
+        return { drop: 'adapter-data-not-ready', blockedReason: null };
+      }
       if (adapterConfig?.id === 'data-array-content'
         && !(await isDataReady(site, page, adapterConfig, cachedFetchFile, baseBranch(site)))) {
         // Nested (location×service) gaps get one more, real chance before

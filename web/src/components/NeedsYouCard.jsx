@@ -6,7 +6,7 @@ import Button from './Button.jsx';
 // The assistant's opening message when something is waiting on the person: what it is, how long it has waited, and the
 // buttons to deal with it. Built from the server's real list (get_needs_you), no model call. "Approve all" uses the same
 // bulk-approve the Action Center has and asks once first; every other button goes to the page where the item lives.
-export default function NeedsYouCard({ items, onClose, onDone }) {
+export default function NeedsYouCard({ items, onClose, onDone, siteId }) {
   const navigate = useNavigate();
   const [confirming, setConfirming] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -22,7 +22,7 @@ export default function NeedsYouCard({ items, onClose, onDone }) {
   const approveAll = async () => {
     setBusy(true); setResult(null);
     try {
-      const r = await api.actionCenter.bulkApproveDrafts();
+      const r = await api.actionCenter.bulkApproveDrafts(undefined, siteId);
       setResult(`Approved ${r?.approved ?? r?.shipped ?? 'the'} draft${(r?.approved ?? r?.shipped) === 1 ? '' : 's'}. I will tell you when they are on stage.`);
       onDone?.();
     } catch (e) {

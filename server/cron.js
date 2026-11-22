@@ -900,6 +900,27 @@ export function startCron() {
     console.log(`[cron] stage promotion scheduled "${stagePromotionSchedule}" (${tz})`);
   }
 
+  // Reminder about approvals and pull requests left waiting for a person for days (blog posts, content, stage and main PRs — Mobilise's
+  // included). Weekdays 10:00 site time, an hour before the 11:00 shipping run, so the day's queue is cleared first. Read-only; the alert
+  // gate limits it to one reminder per site every two days. APPROVAL_REMINDER_CRON_SCHEDULE moves it; 'off' removes it.
+  const approvalReminderSchedule = process.env.APPROVAL_REMINDER_CRON_SCHEDULE || '0 10 * * 1-5';
+  if (approvalReminderSchedule === 'off') {
+    console.log('[cron] approval reminders: off');
+  } else if (!cron.validate(approvalReminderSchedule)) {
+    console.error(`[cron] invalid APPROVAL_REMINDER_CRON_SCHEDULE "${approvalReminderSchedule}" — approval reminders NOT scheduled.`);
+  } else {
+    cron.schedule(approvalReminderSchedule, () => locked('approval-reminders', async () => {
+      try {
+        const { runApprovalRemindersForAllSites } = await import('./lib/approval-reminders.js');
+        const t = await runApprovalRemindersForAllSites();
+        if (t.reminded || t.failed) console.log(`[cron] approval reminders — ${t.reminded} site(s) reminded, ${t.failed} failed, of ${t.sites}`);
+      } catch (err) {
+        console.error('[cron] approval reminders error:', err.message);
+      }
+    }), { timezone: tz });
+    console.log(`[cron] approval reminders scheduled "${approvalReminderSchedule}" (${tz})`);
+  }
+
   // Industry re-check: a project whose industry is not confirmed yet (two signals did not agree, or there was too little search
   // data at baseline) is looked at again once a week. Cheap, and it never overrides a person's choice.
   const industrySchedule = process.env.INDUSTRY_RECHECK_CRON_SCHEDULE || '10 4 * * 1';

@@ -154,6 +154,19 @@ async function processPrClosed(repository, pr) {
   }
 }
 
+async function processApproval(repository, number, signal) {
+  const site = await getSiteByRepo(repository.owner?.login, repository.name);
+  if (!site) return;
+  const { handleApprovalSignal } = await import('../lib/approval-merge.js');
+  const { promoteMergedStageBatches } = await import('../lib/stage-promotion.js');
+  await handleApprovalSignal(site, number, signal, {
+    // Only PRs that carry the agent's own drafts may be merged by an approval message.
+    isAgentPr: async (s, n) => (await listDraftsAwaitingPrCheck(s.id, n)).length > 0,
+    syncDrafts: async (siteId, n) => { for (const d of await listDraftsAwaitingPrCheck(siteId, n)) await checkDraftPrStatus(siteId, d.id).catch(() => {}); },
+    promote: (siteId) => promoteMergedStageBatches(siteId),
+  });
+}
+
 // Replaces the manual "Check PR Status" click: when a batch branch's PR
 // merges (or gets closed without merging) on GitHub, this fires instead of
 // a human having to notice and go click it per draft. Reuses
@@ -169,7 +182,21 @@ router.post('/webhooks/github', (req, res) => {
   // "closed", or a repo we don't track) with 2xx — GitHub retries and
   // eventually disables a webhook that keeps returning non-2xx, and none of
   // these are actually errors on our end.
-  if (req.headers['x-github-event'] !== 'pull_request') return res.status(204).end();
+  const evt = req.headers['x-github-event'];
+  // An approver's reply on a PR (a comment, or an approving review) -> guarded merge into stage. See lib/approval-merge.js.
+  if (evt === 'issue_comment' || evt === 'pull_request_review') {
+    const b = req.body || {};
+    const isReview = evt === 'pull_request_review';
+    const number = isReview ? b.pull_request?.number : (b.issue?.pull_request ? b.issue.number : null);
+    const okAction = isReview ? b.action === 'submitted' : b.action === 'created';
+    const actor = isReview ? b.review?.user?.login : b.comment?.user?.login;
+    if (!okAction || !number || !actor || !b.repository || (isReview ? b.review?.user?.type : b.comment?.user?.type) === 'Bot') return res.status(204).end();
+    res.status(202).json({ ok: true, accepted: true });
+    processApproval(b.repository, number, { actor, via: 'github', text: isReview ? null : b.comment?.body, reviewState: isReview ? b.review?.state : null })
+      .catch((err) => console.error(`[webhooks] approval for PR #${number} failed:`, err.message));
+    return undefined;
+  }
+  if (evt !== 'pull_request') return res.status(204).end();
 
   const { action, pull_request: pr, repository } = req.body || {};
   if (action !== 'closed' || !pr || !repository) return res.status(204).end();

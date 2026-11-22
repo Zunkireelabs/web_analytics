@@ -26,6 +26,31 @@ const GLOBAL_BY_DESIGN = new Set([
   'analytics-install', 'security-headers', 'html-lang', 'llms-txt', 'robots-fix', 'robots-bootstrap', 'sitemap',
 ]);
 
+// Pre-draft counterpart to the apply-time shared-template backstop (checkSharedTemplateWrite). A page-specific action whose page resolves
+// to a framework DYNAMIC-ROUTE template (a path segment like [slug] / [course], rendered for many pages) with no adapter and no explicit
+// family opt-in can never be applied safely, so it must be reported as blocked BEFORE a draft is generated — otherwise every refresh
+// generates a draft, fails at apply, and is retried (the "failed / retry / blocked" churn). Returns the human-readable reason, or null.
+export function sharedTemplateTargetBlock(site, pageUrl, generatorId, { file, adapterConfig = null } = {}) {
+  if (!file || adapterConfig) return null;
+  if (actionScopeFor(generatorId) !== 'page-specific') return null;
+  if (!/(^|\/)\[[^\]/]+\](\/|\.|$)/.test(file)) return null;
+  if (familyWriteAllowed(site, pageUrl, generatorId)) return null;
+  return `This page resolves to ${file}, a shared template that renders many pages, so a "${generatorId}" change written there would apply to all of them. The page's own content lives elsewhere — correct this page's url_file_map entry (or configure an adapter for it) and this clears automatically.`;
+}
+
+// Body-markup edits (anchor/replace on rendered HTML) need real markup in the SOURCE file. A page whose file only hands a data object to a
+// shared component (`<CountryPageTemplate data={d} />`, `<GeneratedBlogPost {...post} />`) has none: the anchors a generator copies from
+// the live HTML do not exist in the file, so every attempt dies with "the page changed after this fix was written". Detect that shape
+// up front and say so, instead of generating, failing and retrying.
+export const BODY_MARKUP_ACTION_TYPES = new Set(['content-integrity-repair', 'duplicate-id-fix', 'internal-links', 'expand-content', 'qa-content', 'refresh-content']);
+export function templateDrivenBodyBlock(fileContent, generatorId, file) {
+  if (!BODY_MARKUP_ACTION_TYPES.has(generatorId) || typeof fileContent !== 'string') return null;
+  const handsDataToComponent = /<[A-Z][\w.]*\s[^>]*(\bdata=\{\w+\}|\{\.\.\.\w+\})/.test(fileContent);
+  const ownMarkup = /<(h[1-6]|p|section|article|ul|ol|table|div)[\s>]/.test(fileContent);
+  if (!handsDataToComponent || ownMarkup) return null;
+  return `${file} contains no page markup of its own — it hands a data object to a shared component, so "${generatorId}" edits (which match HTML in the file) cannot be located. The content lives in that data object or in a content file; this needs a writer for that data, not a markup edit.`;
+}
+
 export function actionScopeFor(generatorId) {
   return GLOBAL_BY_DESIGN.has(generatorId) ? 'global-by-design' : 'page-specific';
 }

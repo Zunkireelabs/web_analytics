@@ -50,6 +50,8 @@ export const COOLDOWN_DAYS = {
   // One per blocked-design episode (see design-blocked.js, which also holds
   // its own cooldown so this works with the gate off).
   'design-blocked': 7,
+  // One reminder per site about approvals/PRs left waiting for days: at most every 2 days (lib/approval-reminders.js).
+  'approval-reminder': 2,
 };
 
 // Operational alarms: these report that the SYSTEM is failing, not that the

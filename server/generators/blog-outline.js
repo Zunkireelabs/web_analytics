@@ -15,6 +15,8 @@ import { tenantContextTextFor, loadBusinessContext, businessContextPrompt } from
 import { contentFocusLine } from '../lib/business-profile.js';
 import { attributionNote, globalGrowthNote, agencyCreditLine } from '../agents/lib/zunkireelabs-growth-policy.js';
 import { llmFailure } from './lib/llm-error.js';
+import { getFileContent } from '../github/client.js';
+import { baseBranch } from '../implementers/lib/github-ops.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
 // changed 2026-08-07 because that shape was shipping straight into a real PR
@@ -73,21 +75,46 @@ const SANITY_DEFAULT_API_VERSION = '2026-02-10';
 // unconfigured lookup means no categories are offered, never a hard failure
 // for the whole post — matches this file's existing posture for the
 // homepage-grounding fetch and image search above.
+// Repo-file source (preferred; no CMS dependency): categoriesSource = { file, slugPath?, titlePath? } names a JSON array in the CLIENT'S OWN
+// repo (e.g. src/content/blog/categories.json). slugPath / titlePath are dot paths into each item (default "slug" / "title"; Sanity-shaped
+// exports use "slug.current"). The website's own file is the source of truth — a category that is not in it is never offered.
+const getPath = (o, path) => String(path).split('.').reduce((v, k) => (v == null ? v : v[k]), o);
+export async function fetchRepoCategories(site, source, fetchFile = getFileContent) {
+  let file;
+  try { file = await fetchFile(site, source.file, baseBranch(site)); } catch { return lookupFailed(); }
+  if (!file) return lookupFailed();
+  let items;
+  try { items = JSON.parse(file.content); } catch { return lookupFailed(); }
+  if (!Array.isArray(items)) return lookupFailed();
+  return items
+    .map((c) => ({ title: getPath(c, source.titlePath || 'title'), slug: getPath(c, source.slugPath || 'slug') }))
+    .filter((c) => typeof c.title === 'string' && c.title && typeof c.slug === 'string' && c.slug);
+}
+
 async function fetchRealCategories(site) {
   const source = site?.url_file_map?.newContentTargets?.['blog-outline']?.categoriesSource;
+  if (source?.file) return fetchRepoCategories(site, source);
   if (!source?.projectId || !source?.dataset) return [];
   try {
     const query = '*[_type=="category"]{title,"slug":slug.current}';
     const url = `https://${source.projectId}.${SANITY_CDN_HOST}/v${source.apiVersion || SANITY_DEFAULT_API_VERSION}/data/query/${source.dataset}` +
       `?query=${encodeURIComponent(query)}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (!res.ok) return [];
+    if (!res.ok) return lookupFailed();
     const json = await res.json();
     return (Array.isArray(json?.result) ? json.result : [])
       .filter((c) => c && typeof c.title === 'string' && typeof c.slug === 'string');
   } catch {
-    return [];
+    return lookupFailed();
   }
+}
+// A configured source that could not be read is NOT the same as "no categories exist": the result is an empty list tagged so the
+// draft can say so (content.categoriesLookupFailed) and a site that requires a category refuses to apply it, instead of publishing
+// an uncategorised post that its own build then rejects.
+function lookupFailed() {
+  const empty = [];
+  empty.lookupFailed = true;
+  return empty;
 }
 
 // Strips any inline Markdown link [text](url) whose url is NOT in the real
@@ -350,6 +377,9 @@ export async function generate({ siteId, params }) {
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
     categories,
+    ...(realCategories.lookupFailed ? { categoriesLookupFailed: true } : {}),
+    // Stamped ONCE here so the page and the manifest entry agree on the publish time (they were each calling new Date()).
+    publishedAt: new Date().toISOString(),
     ...(category ? { category } : {}),
     ...(featuredImage ? { featuredImage } : {}),
     // The real supporting text this draft was grounded in — same

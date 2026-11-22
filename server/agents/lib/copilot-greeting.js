@@ -1,6 +1,7 @@
 import { getUserById } from '../../store/users.js';
 import { getSiteById } from '../../store/read.js';
 import { getRecommendations } from './recommendation-coordinator.js';
+import { collectNeedsYou } from '../../assistant/needs-you.js';
 
 // The Copilot's opening line, and the reason it differs by who is reading it.
 //
@@ -102,7 +103,12 @@ export async function buildGreeting({ siteId, userId }) {
     state = "I've found some improvements, but they're waiting on a design check before I can prepare them.";
   }
 
-  const message = `${opener} ${state}`;
+  // Approvals and pull requests that have sat waiting for a person for days: said up front, in plain words, every time they are still there.
+  const waiting = (await collectNeedsYou(siteId).catch(() => [])).filter((i) => i.overdue);
+  const nudge = waiting.length
+    ? ` ${waiting.length === 1 ? 'One thing has' : `${waiting.length} things have`} been waiting on you for days: ${waiting.slice(0, 3).map((i) => i.title.replace(/ — waiting.*$/, '')).join('; ')}. Want to go through ${waiting.length === 1 ? 'it' : 'them'}?`
+    : '';
+  const message = `${opener} ${state}${nudge}`;
 
   return {
     message,

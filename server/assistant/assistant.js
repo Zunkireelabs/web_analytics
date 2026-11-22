@@ -1,5 +1,6 @@
 import { staticAnswer } from './questions.js';
 import { invokeCapability, capabilitiesFor } from './capabilities.js';
+import { classifyApproval, pickPullRequests } from './approval-chat.js';
 import { deriveOnboardingState, recommendForFinding, explainFailure, ASSISTANT_STATE } from './onboarding-state.js';
 
 // The Assistant's reasoning loop (Phase 3, §2/§6/§16/§21).
@@ -127,6 +128,15 @@ function resolveReference(message, unresolved) {
 // result the message was composed from, so a UI can render richly and a
 // reviewer can check that the words match the system's actual state.
 export async function handleMessage({ ctx, message, deps = {}, conversationId = null } = {}) {
+  // The agent has told the person a pull request is ready; they answer in their own words. Checked first, but only when something really
+  // is waiting, so an ordinary "ok" or "go ahead" with nothing pending still means what it always meant.
+  const approval = classifyApproval(message);
+  if (approval !== 'none') {
+    const needs = await invokeCapability('get_needs_you', ctx, {}, deps);
+    const pending = (needs.ok ? needs.data.items : []).filter((i) => i.prNumber);
+    if (pending.length) return handleApprovalReply({ ctx, message, approval, pending, deps });
+  }
+
   // A plain-English question ("what is AEO?", "what happens when I approve?") has one fixed answer for every client and
   // needs no site data, so it is answered before anything is read.
   const fixed = staticAnswer(message);
@@ -279,6 +289,32 @@ export async function handleMessage({ ctx, message, deps = {}, conversationId = 
   }
 }
 
+async function handleApprovalReply({ ctx, message, approval, pending, deps }) {
+  const list = pending.map((p) => `#${p.prNumber}`).join(', ');
+  if (approval === 'decline') {
+    return { state: ASSISTANT_STATE.READY, message: `Okay, I'll leave ${pending.length === 1 ? `pull request ${list}` : `those (${list})`} open and merge nothing. Tell me when you want it merged, or what you'd like changed.`, data: { pending: list }, actions: [] };
+  }
+  const { prs, ambiguous } = pickPullRequests(message, pending);
+  if (approval === 'unclear' || (approval === 'approve' && !prs.length)) {
+    const what = pending.map((p) => `#${p.prNumber}: ${p.detail.split('. Tell me')[0]}`).join('\n');
+    return {
+      state: ASSISTANT_STATE.NEEDS_INPUT,
+      message: ambiguous && approval === 'approve'
+        ? `${pending.length} pull requests are waiting (${list}). Which one should I merge into stage? You can name it, or say "all".\n${what}`
+        : `I haven't merged anything yet. Do you want me to merge ${pending.length === 1 ? `pull request ${list}` : `one of these (${list})`} into stage? Say "go ahead" to merge it, or tell me what you'd like changed. (If you meant something else, just ask.)\n${what}`,
+      data: { pending: list }, actions: pending.map((p) => ({ id: 'merge_stage_pr', label: `Go ahead with #${p.prNumber}`, pr: p.prNumber })),
+    };
+  }
+  const lines = []; let merged = 0;
+  for (const n of prs) {
+    const r = await invokeCapability('merge_stage_pr', ctx, { prNumber: n }, deps);
+    const out = r.ok ? r.data : r;
+    if (r.ok && out.ok) { merged += 1; lines.push(`Merged #${n} into ${out.base}${out.siteName ? ` on ${out.siteName}` : ''}.${out.promotion?.opened ? ` I opened the pull request to main (#${out.promotion.opened.number}) — that one you merge yourself.` : ' I will open the pull request to main as soon as stage is ready — you merge that one yourself.'}`); }
+    else lines.push(`I did not merge #${n}: ${out.message || r.remedy || out.reason || 'it was refused'}. It stays open.`);
+  }
+  return { state: merged ? ASSISTANT_STATE.READY : ASSISTANT_STATE.BLOCKED, message: lines.join('\n'), data: { prs, merged }, actions: [] };
+}
+
 // ---- composition ------------------------------------------------------
 // Plain functions over structured results. No model call: the words are
 // derived from the same data returned in `data`, so they cannot drift from it.
@@ -388,6 +424,8 @@ const NEEDS_YOU_GROUPS = [['approval', 'Waiting for your approval'], ['issue', '
 export function composeNeedsYou(items) {
   if (!items?.length) return 'Nothing is waiting on you right now. No approvals, no issues and no open decisions.';
   const lines = [`${items.length} ${items.length === 1 ? 'thing is' : 'things are'} waiting on you:`];
+  const overdue = items.filter((i) => i.overdue);
+  if (overdue.length) lines.push(`${overdue.length === items.length ? 'All of them have' : `${overdue.length} of them have`} been waiting two days or more — I'd start there.`);
   for (const [kind, heading] of NEEDS_YOU_GROUPS) {
     const group = items.filter((i) => i.kind === kind);
     if (!group.length) continue;

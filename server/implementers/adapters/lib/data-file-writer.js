@@ -35,7 +35,11 @@ export async function rollbackFromSnapshot(site, draft, filePath, format = 'js-e
   if (!snapshot?.content || snapshot.filePath !== filePath) {
     return { ok: false, reason: 'no-rollback-snapshot', error: 'No rollback snapshot available for this draft.' };
   }
-  const check = assertValidContent(snapshot.content, format);
+  // A TypeScript data file cannot be executed to validate it (assertValidContent would always reject it). The snapshot is the verbatim
+  // file that was live on the default branch right before the merge, so for 'ts-named-export' only require that it is non-empty text.
+  const check = format === 'ts-named-export'
+    ? (typeof snapshot.content === 'string' && snapshot.content.trim() ? { ok: true } : { ok: false, error: 'empty snapshot' })
+    : assertValidContent(snapshot.content, format);
   if (!check.ok) {
     return { ok: false, reason: 'invalid-edit', error: `Stored rollback snapshot is not valid content (${check.error}) — refusing to restore it.` };
   }

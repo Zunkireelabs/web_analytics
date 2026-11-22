@@ -103,3 +103,37 @@ describe('checkSharedTemplateWrite — the actual backstop decision', () => {
     assert.equal(refusal, null);
   });
 });
+
+import { sharedTemplateTargetBlock } from './action-scope.js';
+describe('sharedTemplateTargetBlock — pre-draft shared-template stop', () => {
+  const site = { url_file_map: { patterns: [{ match: '^/glossary/([^/]+)$', familyWrites: ['expand-content'] }] } };
+  test('dynamic-route template, page-specific action, no adapter -> blocked with a reason naming the file', () => {
+    const r = sharedTemplateTargetBlock(site, 'https://x.com/a-post', 'internal-links', { file: 'src/app/[slug]/page.tsx' });
+    assert.match(r, /src\/app\/\[slug\]\/page\.tsx/);
+  });
+  test('dedicated page file, an adapter, a global-by-design action, or a family opt-in -> not blocked', () => {
+    assert.equal(sharedTemplateTargetBlock(site, 'https://x.com/a', 'internal-links', { file: 'src/app/a/page.tsx' }), null);
+    assert.equal(sharedTemplateTargetBlock(site, 'https://x.com/a', 'meta-title', { file: 'src/app/[slug]/page.tsx', adapterConfig: { id: 'nextjs-metadata-export' } }), null);
+    assert.equal(sharedTemplateTargetBlock(site, 'https://x.com/a', 'llms-txt', { file: 'src/app/[slug]/page.tsx' }), null);
+    assert.equal(sharedTemplateTargetBlock(site, 'https://x.com/glossary/rag', 'expand-content', { file: 'src/app/glossary/[term]/page.tsx' }), null);
+  });
+  test('no file resolved -> null (other gates own that case)', () => {
+    assert.equal(sharedTemplateTargetBlock(site, 'https://x.com/a', 'internal-links', { file: null }), null);
+  });
+});
+
+import { templateDrivenBodyBlock } from './action-scope.js';
+describe('templateDrivenBodyBlock — markup edits need markup in the file', () => {
+  const dataPage = 'import T from "@/T";\nconst d = { title: "x" };\nexport default function P() { return <CountryPageTemplate data={d} blogPosts={b} />; }\n';
+  const postPage = 'const post = {};\nexport default function P() { return <GeneratedBlogPost {...post} />; }\n';
+  const markupPage = 'export default function P() { return <main><h2>Hi</h2><p>x</p></main>; }\n';
+  test('data-object / spread-post pages block markup edits', () => {
+    assert.match(templateDrivenBodyBlock(dataPage, 'content-integrity-repair', 'src/app/a/page.tsx'), /no page markup of its own/);
+    assert.ok(templateDrivenBodyBlock(postPage, 'internal-links', 'p'));
+  });
+  test('real markup, non-markup action types, or non-string content -> null', () => {
+    assert.equal(templateDrivenBodyBlock(markupPage, 'content-integrity-repair', 'p'), null);
+    assert.equal(templateDrivenBodyBlock(dataPage, 'meta-title', 'p'), null);
+    assert.equal(templateDrivenBodyBlock(null, 'internal-links', 'p'), null);
+  });
+});

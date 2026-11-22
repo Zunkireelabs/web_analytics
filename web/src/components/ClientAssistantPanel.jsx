@@ -6,6 +6,7 @@ import AssistantEvidence from './AssistantEvidence.jsx';
 import NeedsYouCard from './NeedsYouCard.jsx';
 import ShippingCard from './ShippingCard.jsx';
 import { greeting } from '../lib/agent-greeting.js';
+import { itemsForPopup } from '../lib/popup-items.js';
 import Button from './Button.jsx';
 import { Sparkles, X, ArrowUp, AlertTriangle, List, Maximize2, Minimize2 } from 'lucide-react';
 
@@ -69,8 +70,8 @@ export default function ClientAssistantPanel({ open, onClose, raise = [], onRais
 
   useEffect(() => {
     if (!open || questions) return;
-    api.assistant.invoke('get_suggested_questions').then((res) => { if (res.ok) setQuestions(res.data); }).catch(() => {});
-  }, [open, questions]);
+    api.assistant.invoke('get_suggested_questions', {}, siteId).then((res) => { if (res.ok) setQuestions(res.data); }).catch(() => {});
+  }, [open, questions, siteId]);
 
   // Which site this is, so the greeting says "Hi, Zunkiree Labs" rather than
   // a generic line — the same get_onboarding_status capability the deterministic
@@ -79,16 +80,19 @@ export default function ClientAssistantPanel({ open, onClose, raise = [], onRais
   // real site this tenant session belongs to.
   useEffect(() => {
     if (!open || siteName) return;
-    api.assistant.invoke('get_onboarding_status').then((res) => {
+    api.assistant.invoke('get_onboarding_status', {}, siteId).then((res) => {
       if (res.ok) setSiteName(res.data.site.name);
     }).catch(() => {});
-  }, [open, siteName]);
+  }, [open, siteName, siteId]);
 
   // Shown once when the panel is open: record it so the same items are not raised again straight away.
   // The panel keeps its own copy, because `raise` empties once they are recorded as shown.
   const [shown, setShown] = useState([]);
   const hello = greeting(shown, ship) || (siteName ? `Hi, nothing is waiting for you on ${siteName}. Ask me anything about your site.` : 'Hi, nothing is waiting for you. Ask me anything about your site.'); // the short line at the top
   const shownRef = useRef(null);
+
+  // A platform admin can switch project while the panel exists: everything that belongs to the previous project is dropped.
+  useEffect(() => { setSiteName(null); setQuestions(null); setMessages([]); setConversationId(null); setActions([]); setShown([]); shownRef.current = null; }, [siteId]);
   useEffect(() => {
     if (!open) { shownRef.current = null; setShown([]); return; }
     const sig = raise.map((i) => i.key).join('|');
@@ -113,10 +117,12 @@ export default function ClientAssistantPanel({ open, onClose, raise = [], onRais
     setMessages((m) => [...m, { role: 'user', content: text }]);
     setAsking(true);
     try {
-      const res = await api.assistant.message(text, conversationId);
+      const res = await api.assistant.message(text, conversationId, siteId);
       if (res.data?.conversationId) setConversationId(res.data.conversationId);
       setMessages((m) => [...m, { role: 'assistant', content: res.message, citedFindings: res.data?.citedFindings || [] }]);
       setActions(res.actions || []);
+      // The person answered in conversation and the agent merged something: the shipping question and the waiting list are stale now.
+      if (res.data?.merged) { ship?.reload?.(); onResolved?.(); }
     } catch (e) {
       setError(e.message || 'Something went wrong — try again.');
       setMessages((m) => m.slice(0, -1));
@@ -185,9 +191,9 @@ export default function ClientAssistantPanel({ open, onClose, raise = [], onRais
             </div>
           )}
 
-          {messages.length === 0 && shown.length > 0 && (
+          {messages.length === 0 && itemsForPopup(shown, ship).length > 0 && (
             <div className="pt-2">
-              <NeedsYouCard items={shown} onClose={onClose} onDone={onResolved} />
+              <NeedsYouCard items={itemsForPopup(shown, ship)} onClose={onClose} onDone={onResolved} siteId={siteId} />
             </div>
           )}
 

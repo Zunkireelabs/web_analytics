@@ -74,13 +74,18 @@ export async function hasRecentNotification(siteId, type, sinceDays) {
 // twice), so at most one notification email goes out per site per day
 // regardless of how many times the detection pipeline itself runs.
 // Same day-scoping idiom as store/drafts.js's countDraftsBySourceToday.
+// Bell-only nudges that must never count as "an email notification already went out today" — otherwise a 10:00 approval reminder in the
+// bell would silence the day's real alert email.
+export const IN_APP_ONLY_TYPES = ['approval-reminder'];
+
 export async function hasNotificationToday(siteId, timezone = 'UTC') {
   const { rows } = await query(
     `SELECT 1 FROM notifications
       WHERE site_id = $1
         AND (created_at AT TIME ZONE $2)::date = (now() AT TIME ZONE $2)::date
+        AND NOT (type = ANY($3))
       LIMIT 1`,
-    [siteId, timezone]
+    [siteId, timezone, IN_APP_ONLY_TYPES]
   );
   return rows.length > 0;
 }

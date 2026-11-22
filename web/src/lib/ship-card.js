@@ -16,7 +16,7 @@ export function cardFor(state, scope) {
         sub: state.hasStage ? 'After checks pass I will ask before merging.' : 'Nothing is merged. A person reviews and merges it on GitHub.',
         action: { id: 'open_pr', label: 'Yes, open the PR' }, later: 'Not yet' };
     case 'merge_stage':
-      return { title: `The PR to stage (#${state.prNumber}) is open. Merge it?`, sub: 'One commit · stage only · your live site is not touched.',
+      return { title: `The PR to stage (#${state.prNumber}) is open. Merge it?`, sub: 'Just tell me "go ahead" below, or ask me what it changes. One commit · stage only · your live site is not touched.',
         action: { id: 'merge_stage', label: 'Yes, merge to stage' }, later: 'Not yet', link: state.prUrl };
     case 'open_main':
       return { title: 'Merged to stage. Open the PR to main for review?', sub: 'I only open it. A teammate reviews and merges main on GitHub.',

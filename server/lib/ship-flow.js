@@ -50,9 +50,10 @@ const GOOD = new Set(['success', 'neutral', 'skipped']);
 //   not-open       the PR is closed or merged already
 //   not-stage      the PR does not target the stage branch (main is never merged from here)
 //   checks-pending / checks-failed   the repository's own checks have not all passed
+//   no-checks      (only when requireChecks is set) the repository ran no automated check at all
 //   conflicts      GitHub says it cannot merge cleanly
 // `deps` are injectable so this is tested with fakes and never touches GitHub.
-export async function mergeStagePr(site, prNumber, { userId } = {}, deps = {}) {
+export async function mergeStagePr(site, prNumber, { userId, requireChecks = false } = {}, deps = {}) {
   const { getPr = getPullRequest, getChecks = getCheckRunsForRef, merge = mergePullRequest } = deps;
   if (!userId) return refuse('no-person', 'A merge needs a signed-in person to ask for it.');
   const stage = stageBranchOf(site);
@@ -64,6 +65,9 @@ export async function mergeStagePr(site, prNumber, { userId } = {}, deps = {}) {
   if (pr.mergeable === false) return refuse('conflicts', 'GitHub says this cannot be merged cleanly yet.');
   let checks = [];
   try { checks = await getChecks(site, pr.headSha); } catch (e) { console.error('[ship-flow] could not read the checks:', e.message); return refuse('checks-pending', 'The checks could not be read yet, so nothing was merged. Try again in a minute.'); }
+  // requireChecks: an approval that arrives as a message (not a button press on the stage preview) is only honoured when the repository's own
+  // build/check actually ran. A repo with no checks at all is never merged automatically — a person looks at it.
+  if (requireChecks && checks.length === 0) return refuse('no-checks', 'No automated check ran on this change, so it was not merged automatically. A person merges it after looking at it.');
   if (checks.some((c) => c.status !== 'completed')) return refuse('checks-pending', 'The checks are still running.');
   if (checks.some((c) => !GOOD.has(c.conclusion))) return refuse('checks-failed', 'A check failed, so it was not merged.');
   const out = await merge(site, prNumber, { sha: pr.headSha });

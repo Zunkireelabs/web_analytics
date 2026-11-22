@@ -14,7 +14,7 @@ export default function useNeedsYou(siteId, { enabled = true } = {}) {
 
   const check = useCallback(() => {
     if (!siteId) return;
-    api.assistant.invoke('get_needs_you').then((res) => {
+    api.assistant.invoke('get_needs_you', {}, siteId).then((res) => {
       const list = res?.ok ? res.data.items : [];
       itemsRef.current = list;
       setItems(list);
