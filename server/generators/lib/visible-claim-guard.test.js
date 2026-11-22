@@ -62,3 +62,21 @@ describe('titleClaimBansFor / findBannedPhrases', () => {
     assert.deepEqual(findBannedPhrases('consultancyfoo', ['consultancy']), []);
   });
 });
+
+describe('article-page exemption (decided from the page, for every generator)', () => {
+  const on = { url_file_map: { siteRoot: { visibleClaimBans: ['consultancy'], visibleClaimBansExemptArticlePages: true } } };
+  const off = { url_file_map: { siteRoot: { visibleClaimBans: ['consultancy'] } } };
+  const body = { body: 'A study abroad consultancy guide.' };
+  test('an article page is exempt for ANY generator when the site opts in', () => {
+    for (const g of ['expand-content', 'faq', 'landing-page']) {
+      assert.deepEqual(findVisibleClaimIssues(body, g, on, { isArticlePage: true }).issues, []);
+    }
+  });
+  test('a non-article page is still checked', () => {
+    assert.equal(findVisibleClaimIssues(body, 'expand-content', on, { isArticlePage: false }).issues.length, 1);
+    assert.equal(findVisibleClaimIssues(body, 'expand-content', on).issues.length, 1);
+  });
+  test('a site that has not opted in is unaffected, even on an article page', () => {
+    assert.equal(findVisibleClaimIssues(body, 'expand-content', off, { isArticlePage: true }).issues.length, 1);
+  });
+});

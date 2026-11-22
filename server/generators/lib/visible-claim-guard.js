@@ -68,10 +68,13 @@ function visibleStrings(value, path = '') {
   return [];
 }
 
-export function findVisibleClaimIssues(content, generatorId, site) {
+export function findVisibleClaimIssues(content, generatorId, site, { isArticlePage = false } = {}) {
   const bans = visibleClaimBansFor(site);
   if (!bans.length || SEARCH_ONLY_GENERATOR_IDS.has(generatorId)) return { issues: [] };
   if (visibleClaimBansExemptGeneratorsFor(site).includes(generatorId)) return { issues: [] };
+  // The page being edited is itself a blog post / article: the ban is for the pages a visitor lands on first, not for blog copy. Decided
+  // from the page (quality-gate.js passes it), so it holds for EVERY generator, not just the blog generator.
+  if (isArticlePage && site?.url_file_map?.siteRoot?.visibleClaimBansExemptArticlePages === true) return { issues: [] };
   const res = bans.map((p) => [p, new RegExp(`(?<![\\w])${escapeRe(p).replace(/\s+/g, '\\s+')}(?![\\w])`, 'i')]);
   const issues = [];
   for (const [path, text] of visibleStrings(content)) {

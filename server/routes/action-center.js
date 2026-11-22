@@ -554,7 +554,7 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
       siteId,
       params: { ...(params || {}), ...(designCorrections ? { designCorrections } : {}) },
     })));
-    gateResult = await runQualityGate(content, generatorId, siteId, { site: effectiveSite, enforceDesignIntegrity });
+    gateResult = await runQualityGate(content, generatorId, siteId, { site: effectiveSite, enforceDesignIntegrity, page: params?.page || content?.page || null });
     if (attempt === 1 && !gateResult.clean) firstAttemptIssues = gateResult.issues;
     if (gateResult.clean) break;
 
@@ -988,7 +988,7 @@ async function runDesignRepairStage({ site, siteId, draft, resolved, renderMode 
       })).catch((err) => { console.error(`[action-center] design repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
       if (!repaired?.content) return null;
       // A repair the model writes is new content, not a human edit: it must clear the same Quality Gate generation does.
-      const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site });
+      const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site, page: draft.content?.page || draft.input?.page || null });
       if (!repairGate.clean) { console.warn(`[action-center] draft ${draft.id}'s design repair failed the Quality Gate, abandoning repair`); return null; }
       return repaired.content;
     },
@@ -1072,7 +1072,7 @@ export async function validateDraft(siteId, draftId, { renderMode, afterQualityG
   // never reach a real PR. No regeneration possible here (a human already
   // wrote this content) — just refuse approval with the specific issues so
   // they know what to fix.
-  const gateResult = await runQualityGate(draft.content, draft.action_type, siteId, { site });
+  const gateResult = await runQualityGate(draft.content, draft.action_type, siteId, { site, page: draft.content?.page || draft.input?.page || null });
   // Approval Gate (routes/lib/approval-gate.js): recorded whether it passes
   // or fails, so Action Center can show "quality gate: ok" as real evidence,
   // not just silence-means-fine — see that module's comment for the
@@ -1182,7 +1182,7 @@ export async function validateDraft(siteId, draftId, { renderMode, afterQualityG
         })).catch((err) => { console.error(`[action-center] seo/tech-validate repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
         if (!repaired?.content) break;
         // eslint-disable-next-line no-await-in-loop
-        const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site });
+        const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site, page: draft.content?.page || draft.input?.page || null });
         if (!repairGate.clean) { console.warn(`[action-center] draft ${draft.id}'s seo/tech-validate repair failed the Quality Gate, abandoning repair`); break; }
         activeContent = repaired.content;
         // eslint-disable-next-line no-await-in-loop
