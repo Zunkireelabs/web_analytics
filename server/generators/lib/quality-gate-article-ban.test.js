@@ -23,6 +23,10 @@ describe('runQualityGate — word ban follows the PAGE, not the generator', () =
     assert.equal(banned(await runQualityGate(content, 'faq', 1, { site: withPattern, page: 'https://x.test/blogs/not-live-yet' })), false);
     assert.equal(banned(await runQualityGate(content, 'faq', 1, { site: withPattern, page: 'https://x.test/not-a-post' })), true);
   });
+  test('no page but a declared blog pageType is exempt; another declared type is still checked', async () => {
+    assert.equal(banned(await runQualityGate(content, 'faq', 1, { site, pageType: 'blog' })), false);
+    assert.equal(banned(await runQualityGate(content, 'faq', 1, { site, pageType: 'landing-page' })), true);
+  });
   test('no page known: the ban applies', async () => {
     assert.equal(banned(await runQualityGate(content, 'expand-content', 1, { site })), true);
   });

@@ -13,8 +13,8 @@ import { findDesignIntegrityIssues } from './design-integrity-guard.js';
 import { findBlogImageIssues } from './blog-image-guard.js';
 import { findBareMarkupIssues, findBareNewPageMarkupIssues } from './rendered-markup-guard.js';
 import { findContentIssues } from './output-guard.js';
-import { findVisibleClaimIssues, visibleClaimBansFor } from './visible-claim-guard.js';
-import { isArticlePageUrl } from './article-page.js';
+import { findVisibleClaimIssues, findNeverSayIssues, neverSayPhrasesFor, visibleClaimBansFor } from './visible-claim-guard.js';
+import { resolveContentType, isArticleClassification } from './content-type.js';
 import { checkStructureConformance } from './structure-conformance.js';
 import { DESIGN_CONTEXT_GENERATOR_IDS, NO_MARKUP_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
 
@@ -106,9 +106,12 @@ const CLAIM_GROUNDED_GENERATOR_IDS = new Set(['landing-page', 'blog-outline', 'd
 // may have just composed that very template — pass it so the check sees the
 // same template the generator was actually given. A caller with no site
 // simply skips the check, exactly as before it existed.
-export async function runQualityGate(content, generatorId, siteId, { site = null, enforceDesignIntegrity, page = null } = {}) {
-  // Only looked up when this site has a visible-claim ban list AND a page is known: one cached page read, never for other sites.
-  const isArticlePage = (page && visibleClaimBansFor(site).length) ? await isArticlePageUrl(page, { site }) : false;
+export async function runQualityGate(content, generatorId, siteId, { site = null, enforceDesignIntegrity, page = null, pageType = null, pageClassification = null } = {}) {
+  // Only looked up when this site has a visible-claim ban list. A draft normally arrives with the classification generateDraft stored on it, so
+  // nothing is re-derived; a draft made before that existed (or a direct call) is resolved here by the same shared function.
+  const isArticlePage = (visibleClaimBansFor(site).length || neverSayPhrasesFor(site).length)
+    ? isArticleClassification(pageClassification || await resolveContentType({ site, generatorId, params: { page, pageType } }).catch(() => null))
+    : false;
   const isNonLlmContent = NON_LLM_GENERATOR_IDS.has(generatorId);
   const needsPositioningCheck = siteId != null && POSITIONING_CHECKED_GENERATOR_IDS.has(generatorId);
   const needsLegalFactCheck = LEGAL_FACT_CHECKED_GENERATOR_IDS.has(generatorId);
@@ -170,6 +173,7 @@ export async function runQualityGate(content, generatorId, siteId, { site = null
     // them by regenerating with that feedback rather than refusing the
     // draft — see design-repair-feedback.js.
     ...findVisibleClaimIssues(content, generatorId, site, { isArticlePage }).issues,
+    ...findNeverSayIssues(content, site, { isArticlePage, pageUrl: page || content?.page || null }).issues,
     ...(isNonLlmContent ? [] : findContentIssues(content)),
     ...(site ? checkStructureConformance(content, generatorId, site).issues : []),
     // Renders the draft through the same buildMergeValues() call apply-time

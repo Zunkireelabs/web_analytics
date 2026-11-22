@@ -40,6 +40,7 @@ let refuseOn; // (recommendationType) => boolean — simulates a generator's pri
 let staleOn; // (recommendationType) => boolean — simulates a refusal that also proves the recommendation's premise is gone (schema.js's `stale: true`)
 let rateLimitOn; // (recommendationType) => bool — simulates GitHub's rate limit striking mid-loop
 let applyFailureMessageOn; // (recommendationType) => string | null — simulates approveAndPublishDraftUnattended stopping short with no branch_name and this apply_error message
+let draftClassification; // the page-type classification the generateDraft mock stores on draft.input (what the real generateDraft does)
 let lastGeneratorId; // set by the generateDraft mock, read by the approveAndPublishDraftUnattended mock just below it — same single-item-at-a-time sequencing shipDraftForRecommendation itself relies on
 // (attemptNumber) => Error | null — full control over what generateDraft
 // throws, for the cases where the shape of the error is what's under test
@@ -56,6 +57,7 @@ let contentRepairPushOn; // (queueId) => boolean — simulates a specific conten
 let preflightImpl; // (rec, ctx) => verification result — simulates verifyRecommendation's pre-flight "already resolved?" check
 
 function reset() {
+  draftClassification = null;
   site = { id: 1, timezone: 'Asia/Kolkata', auto_remediation_enabled: true, auto_remediation_daily_limit: 30 };
   onboardingPending = false; // matches every existing test's assumption: analysis already done, repair may proceed
   recommendations = [];
@@ -274,7 +276,7 @@ mock.module(resolve('../../routes/action-center.js'), {
       }
       if (failOn(generatorId)) throw new Error(`simulated generate failure for ${generatorId}`);
       calls.generated.push(findingId);
-      return { id: `d-${findingId}`, status: 'draft', content: {} };
+      return { id: `d-${findingId}`, status: 'draft', content: {}, input: draftClassification ? { pageClassification: draftClassification } : {} };
     },
     approveAndPublishDraftUnattended: async (siteId, draftId) => {
       calls.approved.push(draftId);
@@ -1836,5 +1838,64 @@ describe('autoRemediateSafeRecommendations — drainOnly (pipeline 11:00 run)', 
     recommendations = [rec(1)];
     await autoRemediateSafeRecommendations(1);
     assert.equal(calls.generated.length, 1);
+  });
+});
+
+describe('page-type hold — an unidentified page type is left for a person, never shipped on a guess', () => {
+  beforeEach(reset);
+  const withBans = () => { site = { ...site, url_file_map: { siteRoot: { visibleClaimBans: ['consultancy'] } } }; };
+  const unclear = { status: 'unknown', pageType: null, group: null, confidence: null, evidence: [], tentativeType: null, resolvedAt: '2026-11-22T00:00:00.000Z' };
+  const conflict = { status: 'conflict', pageType: null, group: null, confidence: 'high', evidence: [{ source: 'generator', pageType: 'landing-page', strength: 'high' }, { source: 'site-blog-pattern', pageType: 'blog-post', strength: 'high' }], tentativeType: null, resolvedAt: '2026-11-22T00:00:00.000Z' };
+  const resolvedBlog = { status: 'resolved', pageType: 'blog', group: 'article', confidence: 'high', evidence: [{ source: 'generator', pageType: 'blog', strength: 'high' }], tentativeType: null, resolvedAt: '2026-11-22T00:00:00.000Z' };
+
+  test('unknown type on a site with a type-dependent ban: the draft is held for review, not shipped', async () => {
+    withBans(); draftClassification = unclear;
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 0);
+    assert.equal(result.selection.draftedForReview, 1);
+    assert.deepEqual(calls.approved, [], 'nothing is approved or published');
+  });
+  test('conflicting evidence is held the same way', async () => {
+    withBans(); draftClassification = conflict;
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 0); assert.equal(result.selection.draftedForReview, 1);
+  });
+  test('a resolved type ships as normal', async () => {
+    withBans(); draftClassification = resolvedBlog;
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 1);
+  });
+  test('a held draft does not use another daily slot: its finding is already spoken for, so the next run does not pick it again', async () => {
+    withBans(); draftClassification = unclear;
+    recommendations = [rec(1)];
+    const first = await autoRemediateSafeRecommendations(1);
+    assert.equal(first.selection.draftedForReview, 1);
+    draftedFindingIds = new Set(['f1']); // what getDraftedFindingIds returns once the held draft exists
+    calls.generated = [];
+    const second = await autoRemediateSafeRecommendations(1);
+    assert.equal(second.attempted, 0);
+    assert.deepEqual(calls.generated, [], 'no new draft is generated for the held item');
+  });
+  test('a learned-repair queue item whose draft is held is released as NOT retryable, and is not recorded as a failed repair', async () => {
+    withBans(); draftClassification = unclear;
+    recommendations = [];
+    learnedRepairQueueItems = [{ id: 501, generator_id: 'alt-text', finding_id: 'lr-1', params: { page: '/lr' }, memory_ref_id: 42 }];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 0);
+    assert.deepEqual(calls.approved, [], 'nothing is approved or published');
+    assert.equal(calls.queueReleased.length, 1);
+    assert.equal(calls.queueReleased[0].id, 501);
+    assert.equal(calls.queueReleased[0].retryable, false);
+    assert.deepEqual(calls.fixOutcomes, [], 'the borrowed repair is not blamed for a page-type question');
+    assert.deepEqual(calls.queueShipped, []);
+  });
+  test('an unclear type on a site with NO type-dependent restriction is not held (nothing depends on it)', async () => {
+    draftClassification = unclear;
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 1);
   });
 });

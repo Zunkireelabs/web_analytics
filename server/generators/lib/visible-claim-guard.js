@@ -47,9 +47,51 @@ export function titleClaimBansFor(site) {
   return Array.isArray(list) ? list.filter((p) => typeof p === 'string' && p.trim()).map((p) => p.trim()) : [];
 }
 
+// Spaces in a phrase also match a hyphen ("study abroad partner" catches "study-abroad partner").
+const phraseRe = (p) => new RegExp(`(?<![\\w])${escapeRe(p).replace(/\s+/g, '[\\s-]+')}(?![\\w])`, 'i');
+
 export function findBannedPhrases(text, bans) {
   const t = String(text ?? '');
-  return (bans || []).filter((p) => new RegExp(`(?<![\\w])${escapeRe(p).replace(/\s+/g, '\\s+')}(?![\\w])`, 'i').test(t));
+  return (bans || []).filter((p) => phraseRe(p).test(t));
+}
+
+// url_file_map.siteRoot.neverSayPhrases: exact phrases the client does not want on its general pages (e.g. "study abroad partner in Nepal":
+// "study abroad partner" and "Nepal" are each fine alone). It covers title tags, meta descriptions, structured data and page copy, but NOT:
+//   - blog posts / articles (decided from the page's classification, as for visibleClaimBans), and
+//   - pages whose URL contains one of siteRoot.neverSayExemptUrlContains (e.g. ["nepal"] for the pages that are about Nepal).
+// Unknown page type = strict (the ban stays on). A site with no list is unaffected.
+export function neverSayPhrasesFor(site, { isArticlePage = false, pageUrl = null } = {}) {
+  const root = site?.url_file_map?.siteRoot;
+  const list = Array.isArray(root?.neverSayPhrases) ? root.neverSayPhrases.filter((p) => typeof p === 'string' && p.trim()).map((p) => p.trim()) : [];
+  if (!list.length || isArticlePage) return [];
+  const ex = Array.isArray(root?.neverSayExemptUrlContains) ? root.neverSayExemptUrlContains.filter((x) => typeof x === 'string' && x.trim()) : [];
+  const u = String(pageUrl || '').toLowerCase();
+  if (u && ex.some((x) => u.includes(x.trim().toLowerCase()))) return [];
+  return list;
+}
+
+function allStrings(value, path = '') {
+  if (typeof value === 'string') return [[path, value]];
+  if (Array.isArray(value)) return value.flatMap((v, i) => allStrings(v, `${path}[${i}]`));
+  if (value && typeof value === 'object') return Object.entries(value).flatMap(([k, v]) => allStrings(v, path ? `${path}.${k}` : k));
+  return [];
+}
+
+export function findNeverSayIssues(content, site, ctx = {}) {
+  const bans = neverSayPhrasesFor(site, ctx);
+  if (!bans.length) return { issues: [] };
+  const issues = [];
+  // `previous` is what the page says today, kept on a draft so a change can be undone: not new copy, and it is exactly the text being replaced.
+  const fresh = content && typeof content === 'object' && !Array.isArray(content) ? Object.fromEntries(Object.entries(content).filter(([k]) => k !== 'previous')) : content;
+  for (const [path, text] of allStrings(fresh)) {
+    for (const phrase of findBannedPhrases(text, bans)) {
+      issues.push({
+        path, patternId: 'never-say-phrase', snippet: phrase,
+        correction: `Never write the exact phrase "${phrase}" on this page (body, headings, title, meta description, schema). Each word may appear on its own; only this combination is not allowed here. Rephrase, for example "study abroad partner" without the location.`,
+      });
+    }
+  }
+  return { issues };
 }
 
 export function searchClaimsFor(site) {
@@ -75,7 +117,7 @@ export function findVisibleClaimIssues(content, generatorId, site, { isArticlePa
   // The page being edited is itself a blog post / article: the ban is for the pages a visitor lands on first, not for blog copy. Decided
   // from the page (quality-gate.js passes it), so it holds for EVERY generator, not just the blog generator.
   if (isArticlePage && site?.url_file_map?.siteRoot?.visibleClaimBansExemptArticlePages === true) return { issues: [] };
-  const res = bans.map((p) => [p, new RegExp(`(?<![\\w])${escapeRe(p).replace(/\s+/g, '\\s+')}(?![\\w])`, 'i')]);
+  const res = bans.map((p) => [p, phraseRe(p)]);
   const issues = [];
   for (const [path, text] of visibleStrings(content)) {
     for (const [phrase, re] of res) {

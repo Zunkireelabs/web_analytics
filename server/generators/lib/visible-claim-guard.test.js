@@ -80,3 +80,27 @@ describe('article-page exemption (decided from the page, for every generator)', 
     assert.equal(findVisibleClaimIssues(body, 'expand-content', off, { isArticlePage: true }).issues.length, 1);
   });
 });
+
+import { findNeverSayIssues } from './visible-claim-guard.js';
+
+describe('neverSayPhrases (general pages only; blog and Nepal pages exempt)', () => {
+  const nsSite = { url_file_map: { siteRoot: { neverSayPhrases: ['study abroad partner in Nepal'], neverSayExemptUrlContains: ['nepal'] } } };
+  const bad = { body: 'Your study abroad partner in Nepal' };
+  test('flags the phrase (and the hyphen form) on a general page, incl. title fields', () => {
+    assert.equal(findNeverSayIssues(bad, nsSite, { pageUrl: 'https://x.com/' }).issues.length, 1);
+    assert.equal(findNeverSayIssues({ metaTitle: 'Study-abroad partner in Nepal | Admizz' }, nsSite, { pageUrl: 'https://x.com/' }).issues.length, 1);
+    assert.equal(findNeverSayIssues(bad, nsSite).issues.length, 1); // unknown page = strict
+  });
+  test('allows it on blog posts and Nepal URLs', () => {
+    assert.equal(findNeverSayIssues(bad, nsSite, { isArticlePage: true, pageUrl: 'https://x.com/ielts' }).issues.length, 0);
+    assert.equal(findNeverSayIssues(bad, nsSite, { pageUrl: 'https://x.com/study-abroad-from-nepal' }).issues.length, 0);
+  });
+  test('ignores `previous` (the page\'s current text being replaced)', () => {
+    assert.equal(findNeverSayIssues({ previous: { title: 'Admizz: Study Abroad Partner in Nepal' }, titles: ['Admizz Education: Study Abroad Partner'] }, nsSite, { pageUrl: 'https://x.com/' }).issues.length, 0);
+    assert.equal(findNeverSayIssues({ previous: { title: 'x' }, titles: ['Study Abroad Partner in Nepal'] }, nsSite, { pageUrl: 'https://x.com/' }).issues.length, 1);
+  });
+  test('allows each part alone, and sites without the list', () => {
+    assert.equal(findNeverSayIssues({ body: 'A trusted study abroad partner. Offices across Nepal.' }, nsSite, { pageUrl: 'https://x.com/' }).issues.length, 0);
+    assert.equal(findNeverSayIssues(bad, {}).issues.length, 0);
+  });
+});

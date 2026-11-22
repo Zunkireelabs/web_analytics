@@ -1,6 +1,6 @@
 import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { isArticlePageUrl, siteArticleUrlRegexes, matchesSiteArticleUrl, _resetArticlePageCacheForTest } from './article-page.js';
+import { isArticlePageUrl, siteArticleUrlRegexes, matchesSiteArticleUrl, isDeclaredArticleType, _resetArticlePageCacheForTest } from './article-page.js';
 
 beforeEach(() => _resetArticlePageCacheForTest());
 
@@ -44,5 +44,19 @@ describe("the site's own blog URL pattern (works before the post is published)",
     assert.equal(await isArticlePageUrl('https://a.test/blogs/not-live-yet', { analyze, site }), true);
     assert.equal(calls, 0);
     assert.equal(await isArticlePageUrl('https://a.test/study-in-the-uk', { analyze, site }), false);
+  });
+});
+
+describe('a declared pageType (the only signal when there is no page URL)', () => {
+  test('blog / article / blog-post count, anything else does not', () => {
+    for (const t of ['blog', 'Blog', ' article ', 'blog-post']) assert.equal(isDeclaredArticleType(t), true);
+    for (const t of ['landing-page', 'service', '', null, undefined]) assert.equal(isDeclaredArticleType(t), false);
+  });
+  test('works with no page at all, and never reads a page', async () => {
+    let calls = 0;
+    const analyze = async () => { calls += 1; return { ok: false }; };
+    assert.equal(await isArticlePageUrl(null, { analyze, pageType: 'blog' }), true);
+    assert.equal(await isArticlePageUrl(null, { analyze, pageType: 'landing-page' }), false);
+    assert.equal(calls, 0);
   });
 });

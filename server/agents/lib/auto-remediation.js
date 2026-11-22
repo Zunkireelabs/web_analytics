@@ -36,6 +36,7 @@ import { checkPreconditions, isPreconditionsEnforcing } from './preconditions.js
 import { splitProtectedQueueItems, splitProtectedFileEdits, protectedFilePaths } from './protected-pages.js';
 import { sanitizeForCustomer } from '../../lib/errors.js';
 import { verifyRecommendation, VERIFICATION_DECISION } from '../../generators/lib/verification-layer.js';
+import { needsTypeReview } from '../../generators/lib/content-type.js';
 
 const SOURCE = 'auto-remediation';
 
@@ -801,6 +802,8 @@ export async function autoRemediateSafeRecommendations(siteId, {
         // ghost on a prior day's (see lib/draft-ship-state.js).
         batchBranch: branchName,
         reviewFirst,
+        holdUnknownPageType: true,
+        site,
       });
 
       // A review-first site's draft is waiting for its client: it used one slot of today's budget (so the daily limit still means
@@ -1015,7 +1018,16 @@ export async function autoRemediateSafeRecommendations(siteId, {
         generatorId: item.generator_id, params: item.params, findingId: item.finding_id,
         source: SOURCE, findingOrigin: 'learned-repair', memoryRefId: item.memory_ref_id,
         waitForDesignAgent: true, deferPr: true, batchBranch: branchName,
+        holdUnknownPageType: true, site,
       });
+      // Page type could not be identified: the draft is left for a person. The queue item is released as not-retryable (it would
+      // only find the same draft and hold it again every run), and it is NOT recorded as a failure of the borrowed repair, which
+      // says nothing about whether that repair works.
+      if (approved.awaitingReview) {
+        draftedForReview++;
+        await releaseQueueItem(item.id, { retryable: false, error: 'Left for review: the page type could not be identified.' }).catch(() => {});
+        continue;
+      }
       if (approved.alreadyShipped) {
         // A prior run's commit for this same finding already reached
         // 'branch_pushed'/beyond — nothing new to ship, but the queue row
@@ -1242,7 +1254,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
   }
   console.log(
     `[auto-remediation] ${clientLabel}: run complete — attempted ${attempted}, shipped ${shipped}, failed ${failed}, `
-    + `refused ${refused}, quarantined ${quarantined}, resolved ${resolved}, conflicted ${conflicted}${designPending ? `, design-pending ${designPending}` : ''}${reviewFirst ? `, drafted for the client's review ${draftedForReview}` : ''}${stoppedReason ? `, stopped: ${stoppedReason}` : ''}.`
+    + `refused ${refused}, quarantined ${quarantined}, resolved ${resolved}, conflicted ${conflicted}${designPending ? `, design-pending ${designPending}` : ''}${(reviewFirst || draftedForReview > 0) ? `, drafted and left for review ${draftedForReview}` : ''}${stoppedReason ? `, stopped: ${stoppedReason}` : ''}.`
   );
 
   return finish({
@@ -1265,7 +1277,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
       quarantinedGenerators: Object.fromEntries(quarantinedGenerators),
       quarantineNotes,
       // Review-first site: how many drafts were prepared and left for the client (none of them are in `shipped`).
-      ...(reviewFirst ? { draftedForReview } : {}),
+      ...((reviewFirst || draftedForReview > 0) ? { draftedForReview } : {}),
     },
   });
 }
@@ -1291,7 +1303,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
 // Throws on any failure — callers decide what a failure means (auto-
 // remediation leaves the recommendation open; the learned-repair path also
 // records a failed reuse against the memory it borrowed).
-export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, findingOrigin = null, memoryRefId = null, waitForDesignAgent = false, deferPr = false, batchBranch = null, reviewFirst = false }) {
+export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, findingOrigin = null, memoryRefId = null, waitForDesignAgent = false, deferPr = false, batchBranch = null, reviewFirst = false, holdUnknownPageType = false, site = null }) {
   const draft = await generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId, waitForDesignAgent });
 
   const autoSelected = autoSelectMetaTitle(generatorId, draft.content);
@@ -1304,6 +1316,16 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
   // dashboard already lists as "waiting for your approval". Nothing is submitted, approved, committed or pushed; the client does
   // that in the dashboard (lib/ship-flow.js). `awaitingReview` tells the caller this is drafted, not shipped.
   if (reviewFirst) return { ...draft, awaitingReview: true };
+
+  // CONTROLLED FALLBACK for a draft whose page type the shared classifier could not settle (no confident evidence, or evidence that
+  // disagrees) on a site with a restriction that depends on the page type. The strict rules already apply to it, so nothing unsafe can
+  // ship; but strict rules on a blog post it could not recognise would keep failing, so it is left for a person exactly like a
+  // review-first draft ('draft' status, listed as waiting for approval) instead of being retried blindly or shipped on a guess.
+  if (holdUnknownPageType && needsTypeReview(draft.input?.pageClassification, site)) {
+    const c = draft.input?.pageClassification;
+    console.log(`[auto-remediation] draft #${draft.id} (${generatorId}) held for review: page type ${c?.status || 'unknown'} — ${(c?.evidence || []).map((e) => `${e.source}:${e.pageType ?? '?'}/${e.strength ?? '-'}`).join(', ') || 'no evidence'}`);
+    return { ...draft, awaitingReview: true, heldFor: 'page-type' };
+  }
 
   const submitted = await submitDraftForApproval(siteId, draft.id);
   if (!submitted) {

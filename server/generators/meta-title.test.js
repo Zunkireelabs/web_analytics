@@ -224,6 +224,35 @@ describe('meta-title generator — per-site titleClaimBans', () => {
     assert.match(jsonCalls[0], /Never use any of these words/);
   });
 
+  test('no page URL and no declared type: the ban stays on, and the summary says why', async () => {
+    siteRow = bannedSite;
+    const { summary } = await generate({ siteId: 1, params: { query: 'q' } });
+    assert.match(jsonCalls[0], /Never use any of these words/);
+    assert.match(summary, /page type could not be identified/);
+  });
+
+  test('no page URL but pageType "blog": exempt, no ban prompt, no caution note', async () => {
+    siteRow = bannedSite;
+    jsonResponse = { titles: ['consultancy ' + 'A'.repeat(44)], metaDescription: inRangeDescription };
+    const { content, summary } = await generate({ siteId: 1, params: { query: 'q', pageType: 'blog' } });
+    assert.match(content.titles[0], /consultancy/);
+    assert.doesNotMatch(jsonCalls[0], /Never use any of these words/);
+    assert.doesNotMatch(summary, /could not be identified/);
+  });
+
+  test('a declared "landing-page" with no URL is a RESOLVED type: still banned, and not called unknown', async () => {
+    siteRow = bannedSite;
+    const { summary } = await generate({ siteId: 1, params: { query: 'q', pageType: 'landing-page' } });
+    assert.match(jsonCalls[0], /Never use any of these words/);
+    assert.doesNotMatch(summary, /could not be identified/);
+  });
+
+  test('the caution note never goes into content, which the apply step reads', async () => {
+    siteRow = bannedSite;
+    const { content } = await generate({ siteId: 1, params: { query: 'q' } });
+    assert.deepEqual(Object.keys(content).sort(), ['metaDescription', 'page', 'query', 'titles']);
+  });
+
   test('a site with no titleClaimBans is unaffected', async () => {
     siteRow = { url_file_map: { siteRoot: {} } };
     jsonResponse = { titles: ['consultancy ' + 'A'.repeat(44)], metaDescription: inRangeDescription };

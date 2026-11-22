@@ -27,6 +27,12 @@ export function siteArticleUrlRegexes(site) {
   try { return [new RegExp(`^${body.replace(/\/+$/, '')}/?$`, 'i')]; } catch { return []; }
 }
 
+// The caller can state the kind of page outright (params.pageType). This is the only signal for a draft that has no page URL yet.
+const DECLARED_ARTICLE_TYPES = new Set(['blog', 'article', 'blog-post']);
+export function isDeclaredArticleType(pageType) {
+  return DECLARED_ARTICLE_TYPES.has(String(pageType ?? '').trim().toLowerCase());
+}
+
 export function matchesSiteArticleUrl(page, site) {
   if (!page || typeof page !== 'string') return false;
   let path;
@@ -34,18 +40,26 @@ export function matchesSiteArticleUrl(page, site) {
   return siteArticleUrlRegexes(site).some((re) => re.test(path));
 }
 
-export async function isArticlePageUrl(page, { analyze = null, now = Date.now(), site = null } = {}) {
-  if (!page || typeof page !== 'string') return false;
-  if (matchesSiteArticleUrl(page, site)) return true;
+// The live page's own declarations, read once and cached: { ok, isArticle }. ok=false means the page could not be read (not an
+// answer either way), so callers must not treat it as "not an article".
+export async function readPageDeclaration(page, { analyze = null, now = Date.now() } = {}) {
+  if (!page || typeof page !== 'string') return { ok: false, isArticle: false };
   const hit = cache.get(page);
   if (hit && now - hit.at < TTL_MS) return hit.value;
-  let value = false;
+  let value = { ok: false, isArticle: false };
   try {
     const fn = analyze || (await import('../../agents/lib/page-content.js')).analyzePageUrl;
     const res = await fn(page);
-    value = Boolean(res?.ok && res.analysis?.isArticlePage);
-  } catch { value = false; }
+    value = { ok: Boolean(res?.ok), isArticle: Boolean(res?.ok && res.analysis?.isArticlePage) };
+  } catch { value = { ok: false, isArticle: false }; }
   if (cache.size >= MAX_ENTRIES) cache.delete(cache.keys().next().value);
   cache.set(page, { value, at: now });
   return value;
+}
+
+export async function isArticlePageUrl(page, { analyze = null, now = Date.now(), site = null, pageType = null } = {}) {
+  if (isDeclaredArticleType(pageType)) return true;
+  if (!page || typeof page !== 'string') return false;
+  if (matchesSiteArticleUrl(page, site)) return true;
+  return (await readPageDeclaration(page, { analyze, now })).isArticle;
 }

@@ -1,9 +1,9 @@
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 import { callLLM, callLLMForJson } from '../llm.js';
 import { getSiteById } from '../store/read.js';
-import { searchClaimsFor, titleClaimBansFor, findBannedPhrases } from './lib/visible-claim-guard.js';
+import { searchClaimsFor, titleClaimBansFor, neverSayPhrasesFor, findBannedPhrases } from './lib/visible-claim-guard.js';
 import { llmFailure } from './lib/llm-error.js';
-import { matchesSiteArticleUrl } from './lib/article-page.js';
+import { resolveContentType, isArticleClassification } from './lib/content-type.js';
 
 export const meta = {
   id: 'meta-title',
@@ -55,7 +55,7 @@ export async function generate({ siteId, params }) {
 
   let pageContext = null;
   let previous = null;
-  let isArticlePage = false;
+  let pageAnalysisForType = null;
   if (page) {
     const fetched = await analyzePageUrl(page);
     // Same "thin extraction treated as failed fetch" rule as faq.js — falls
@@ -63,7 +63,7 @@ export async function generate({ siteId, params }) {
     // rather than grounding the title/description in leftover boilerplate.
     // What the page has now, kept on the draft so an automatic change on a protected page can be put back
     // (protected-title-trials.js). Recorded even when the page is too thin to ground a rewrite.
-    isArticlePage = Boolean(fetched.ok && fetched.analysis?.isArticlePage);
+    pageAnalysisForType = fetched.ok ? fetched.analysis : null;
     if (fetched.ok) previous = { title: fetched.analysis.title || null, description: fetched.analysis.metaDescription || null };
     if (fetched.ok && hasSufficientGroundingContent(fetched.analysis)) {
       pageContext = { currentTitle: fetched.analysis.title, bodyExcerpt: fetched.analysis.bodyText.slice(0, 1500) };
@@ -76,9 +76,16 @@ export async function generate({ siteId, params }) {
   // engines read it. A site with none configured is unchanged.
   const site = await getSiteById(siteId).catch(() => null);
   const searchClaims = searchClaimsFor(site);
+  // What kind of page this is comes from the one shared classifier (lib/content-type.js). generateDraft normally stored it on the params
+  // already; a direct call resolves it here, reusing the page read above. Nothing about page types is decided in this generator.
+  const classification = (params.pageClassification && params.pageClassification.status)
+    ? params.pageClassification
+    : await resolveContentType({ site, generatorId: meta.id, params, pageAnalysis: pageAnalysisForType });
   // Words this site never wants in a title or description (titleClaimBans), on every page except a blog post / article.
-  // A blog post that is drafted but not published yet cannot be read, so the site's own blog URL pattern ("/blogs/{slug}") counts too.
-  const titleBans = (isArticlePage || matchesSiteArticleUrl(page, site)) ? [] : titleClaimBansFor(site);
+  const titleBans = [...(isArticleClassification(classification) ? [] : titleClaimBansFor(site)), ...neverSayPhrasesFor(site, { isArticlePage: isArticleClassification(classification), pageUrl: page })];
+  // Type unclear: the ban stays on (the strict side) and the summary says why, so a person reading the draft knows. It goes in the
+  // summary, never in `content`, which the apply step reads.
+  const pageTypeUnknown = titleBans.length > 0 && classification.status !== 'resolved';
   const titleBanNote = titleBans.length
     ? ` Never use any of these words or phrases anywhere in a title or the meta description: ${titleBans.map((b) => `"${b}"`).join(', ')}. ` +
       'Describe the business in other plain, accurate words instead (for example "partner" or "advisors").'
@@ -129,5 +136,5 @@ export async function generate({ siteId, params }) {
   const { titles, metaDescription } = result;
 
   const content = { query, page: page || null, titles, metaDescription, ...(previous ? { previous } : {}) };
-  return { content, summary: `${content.titles.length} title option(s) + meta description for "${query}"` };
+  return { content, summary: `${content.titles.length} title option(s) + meta description for "${query}"${pageTypeUnknown ? ' — page type could not be identified, so words this site does not allow were avoided' : ''}` };
 }
