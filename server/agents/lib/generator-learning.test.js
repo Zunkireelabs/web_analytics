@@ -28,11 +28,12 @@ after(async () => {
 });
 
 // Phase 2: the technical and impact outcome families each keep their own window. Rows are inserted with explicit
-// timestamps so the ordering that used to crowd impact evidence out is exact, not a race.
+// timestamps so the ordering that used to crowd impact evidence out is exact, not a race. `daysAgo` may be fractional. Technical outcomes only
+// count inside TECHNICAL_EVIDENCE_DAYS (14), so every technical row below is aged to sit inside that horizon; impact rows have no horizon.
 async function insertOutcome(siteId, generatorId, outcome, daysAgo) {
   await query(
     `INSERT INTO generator_outcomes (site_id, generator_id, outcome, created_at)
-     VALUES ($1, $2, $3, now() - make_interval(days => $4))`,
+     VALUES ($1, $2, $3, now() - make_interval(secs => $4::float8 * 86400))`,
     [siteId, generatorId, outcome, daysAgo]
   );
 }
@@ -40,7 +41,7 @@ async function insertOutcome(siteId, generatorId, outcome, daysAgo) {
 describe('getLearnedConfidenceMap — separate windows per outcome family', () => {
   test('old impact evidence is not pushed out by a long run of newer technical outcomes', async () => {
     const siteId = await makeSite();
-    for (let i = 0; i < 40; i += 1) await insertOutcome(siteId, 'faq', 'shipped', 1 + (i % 20)); // 40 newer technical rows
+    for (let i = 0; i < 40; i += 1) await insertOutcome(siteId, 'faq', 'shipped', 1 + (i % 12)); // 40 newer technical rows, inside the 14-day horizon
     for (let i = 0; i < 4; i += 1) await insertOutcome(siteId, 'faq', 'impact-positive', 60 + i); // 4 impact rows, all older
 
     const entry = (await getLearnedConfidenceMap(siteId)).get('faq');
@@ -51,8 +52,8 @@ describe('getLearnedConfidenceMap — separate windows per outcome family', () =
 
   test('a long run of newer impact outcomes does not hide older technical failures either', async () => {
     const siteId = await makeSite();
-    for (let i = 0; i < 35; i += 1) await insertOutcome(siteId, 'schema', 'impact-neutral', 1 + (i % 20));
-    for (let i = 0; i < 4; i += 1) await insertOutcome(siteId, 'schema', 'failed', 40 + i); // item-defect failures, all older
+    for (let i = 0; i < 35; i += 1) await insertOutcome(siteId, 'schema', 'impact-neutral', 1 + (i % 8));
+    for (let i = 0; i < 4; i += 1) await insertOutcome(siteId, 'schema', 'failed', 10 + i); // item-defect failures, all older than the impact rows but inside the 14-day horizon
 
     const entry = (await getLearnedConfidenceMap(siteId)).get('schema');
     assert.equal(entry.failures, 4, 'technical failures must still be counted');
@@ -62,8 +63,8 @@ describe('getLearnedConfidenceMap — separate windows per outcome family', () =
 
   test('each family is capped at 30 independently', async () => {
     const siteId = await makeSite();
-    for (let i = 0; i < 45; i += 1) await insertOutcome(siteId, 'llms-txt', 'shipped', 1 + i);
-    for (let i = 0; i < 45; i += 1) await insertOutcome(siteId, 'llms-txt', 'impact-positive', 1 + i);
+    for (let i = 0; i < 45; i += 1) await insertOutcome(siteId, 'llms-txt', 'shipped', (1 + i) / 24);
+    for (let i = 0; i < 45; i += 1) await insertOutcome(siteId, 'llms-txt', 'impact-positive', (1 + i) / 24);
 
     const entry = (await getLearnedConfidenceMap(siteId)).get('llms-txt');
     assert.equal(entry.successes, 30);

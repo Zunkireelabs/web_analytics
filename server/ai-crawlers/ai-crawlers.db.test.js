@@ -308,7 +308,8 @@ describe('AI crawler analytics on a real database', { skip: skipReason || false 
       const r = await getRanges({ now: T0 + MAX_AGE_MS + 60e3, fetchImpl: down, useMemo: false });
       assert.equal(verifyVisit(botById('oai-searchbot'), '51.8.102.237', r), 'verified');
       const row = (await store.loadIpListCache()).find((x) => x.list_id === 'openai-searchbot');
-      assert.match(row.last_error, /HTTP 503/);
+      // lib/errors.js describeHttpFailure: a 5xx is stored as the plain "server error" (no raw status code in anything that can be shown).
+      assert.match(row.last_error, /server error/);
       assert.ok(row.cidrs.length > 0);
     });
     test('a list that has never loaded gives "unchecked", never "unverified"', async () => {

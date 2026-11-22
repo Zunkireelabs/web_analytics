@@ -461,7 +461,8 @@ describe('design-profile job — cheap-rescan persistence branching', () => {
     };
     await query(
       `UPDATE sites SET url_file_map = $2::jsonb WHERE id = $1`,
-      [siteId, JSON.stringify({ siteRoot: { designProfile: STORED_PROFILE } })]
+      // _rev: 0 is the revision of a freshly created site; migration 249's guard rejects any write that does not carry the current one.
+      [siteId, JSON.stringify({ _rev: 0, siteRoot: { designProfile: STORED_PROFILE } })]
     );
 
     const jobIdRef = { current: null };
