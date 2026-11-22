@@ -27,10 +27,27 @@ describe('findVisibleClaimIssues', () => {
   });
 });
 
-import { searchClaimsFor } from './visible-claim-guard.js';
+import { searchClaimsFor, visibleClaimBansExemptGeneratorsFor } from './visible-claim-guard.js';
 describe('searchClaimsFor', () => {
   test('reads the per-site list and tolerates a missing one', () => {
     assert.deepEqual(searchClaimsFor({ url_file_map: { siteRoot: { searchClaims: ['best consultancy', ' '] } } }), ['best consultancy']);
     assert.deepEqual(searchClaimsFor(null), []);
+  });
+});
+
+describe('per-site generator exemption (blog may use the word, landing pages may not)', () => {
+  const s2 = { url_file_map: { siteRoot: { visibleClaimBans: ['consultancy'], visibleClaimBansExemptGenerators: ['blog-outline'] } } };
+  test('a blog generator is exempt, every other generator is still checked', () => {
+    assert.deepEqual(findVisibleClaimIssues({ body: 'A study abroad consultancy guide.' }, 'blog-outline', s2).issues, []);
+    assert.equal(findVisibleClaimIssues({ body: 'A study abroad consultancy guide.' }, 'landing-page', s2).issues.length, 1);
+    assert.equal(findVisibleClaimIssues({ body: 'A study abroad consultancy guide.' }, 'expand-content', s2).issues.length, 1);
+  });
+  test('without the exemption list the blog generator is checked too', () => {
+    const s3 = { url_file_map: { siteRoot: { visibleClaimBans: ['consultancy'] } } };
+    assert.equal(findVisibleClaimIssues({ body: 'A consultancy guide.' }, 'blog-outline', s3).issues.length, 1);
+  });
+  test('reads the list and tolerates a missing one', () => {
+    assert.deepEqual(visibleClaimBansExemptGeneratorsFor(s2), ['blog-outline']);
+    assert.deepEqual(visibleClaimBansExemptGeneratorsFor(null), []);
   });
 });

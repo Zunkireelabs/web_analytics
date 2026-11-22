@@ -33,6 +33,13 @@ export function visibleClaimBansFor(site) {
   return Array.isArray(list) ? list.filter((p) => typeof p === 'string' && p.trim()).map((p) => p.trim()) : [];
 }
 
+// Generators a site's ban list does NOT apply to, e.g. ['blog-outline'] for a tenant that may use a phrase in blog posts but never on the
+// pages a visitor lands on first. Per site, never global: a site with no list is checked everywhere, exactly as before.
+export function visibleClaimBansExemptGeneratorsFor(site) {
+  const list = site?.url_file_map?.siteRoot?.visibleClaimBansExemptGenerators;
+  return Array.isArray(list) ? list.filter((g) => typeof g === 'string' && g.trim()).map((g) => g.trim()) : [];
+}
+
 export function searchClaimsFor(site) {
   const list = site?.url_file_map?.siteRoot?.searchClaims;
   return Array.isArray(list) ? list.filter((p) => typeof p === 'string' && p.trim()).map((p) => p.trim()) : [];
@@ -52,6 +59,7 @@ function visibleStrings(value, path = '') {
 export function findVisibleClaimIssues(content, generatorId, site) {
   const bans = visibleClaimBansFor(site);
   if (!bans.length || SEARCH_ONLY_GENERATOR_IDS.has(generatorId)) return { issues: [] };
+  if (visibleClaimBansExemptGeneratorsFor(site).includes(generatorId)) return { issues: [] };
   const res = bans.map((p) => [p, new RegExp(`(?<![\\w])${escapeRe(p).replace(/\s+/g, '\\s+')}(?![\\w])`, 'i')]);
   const issues = [];
   for (const [path, text] of visibleStrings(content)) {
