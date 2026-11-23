@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { actionScopeFor, familyWriteAllowed, checkSharedTemplateWrite } from './action-scope.js';
+import { actionScopeFor, familyWriteAllowed, checkSharedTemplateWrite, templateEmitsSchemaBlock, faqSchemaOnlyBlock, preDraftContentBlock } from './action-scope.js';
 import { matchPaginationRoute } from './pagination-routes.js';
 
 const GLOSSARY_ROUTE = {
@@ -135,5 +135,35 @@ describe('templateDrivenBodyBlock — markup edits need markup in the file', () 
     assert.equal(templateDrivenBodyBlock(markupPage, 'content-integrity-repair', 'p'), null);
     assert.equal(templateDrivenBodyBlock(dataPage, 'meta-title', 'p'), null);
     assert.equal(templateDrivenBodyBlock(null, 'internal-links', 'p'), null);
+  });
+});
+
+describe('templateEmitsSchemaBlock / faqSchemaOnlyBlock / preDraftContentBlock', () => {
+  const wrapper = 'export default function P() { return <CountryPageTemplate data={d} />; }';
+  const spread = 'export default function P() { return <GeneratedBlogPost {...post} />; }';
+  const realPage = 'export default function P() { return <section><h1>Hi</h1><p>Body text</p></section>; }';
+  const schemaOnly = 'const post = { "faqItems": [], "faqSchemaOnly": true };\nexport default function P() { return <GeneratedBlogPost {...post} />; }';
+
+  test('schema on a data-to-component wrapper is blocked (the template emits its own JSON-LD)', () => {
+    assert.match(templateEmitsSchemaBlock(wrapper, 'schema', 'a/page.tsx'), /already emits this page's structured data/);
+    assert.match(templateEmitsSchemaBlock(spread, 'schema', 'b/page.tsx'), /structured data/);
+  });
+  test('schema on a page with its own markup, or any other action type, is not touched', () => {
+    assert.equal(templateEmitsSchemaBlock(realPage, 'schema', 'c/page.tsx'), null);
+    for (const t of ['faq', 'meta-title', 'canonical', 'internal-links']) assert.equal(templateEmitsSchemaBlock(wrapper, t, 'a/page.tsx'), null, t);
+  });
+  test('faqSchemaOnly blocks visible-FAQ drafts (faq, qa-content) and nothing else', () => {
+    assert.match(faqSchemaOnlyBlock(schemaOnly, 'faq', 'a.tsx'), /faqSchemaOnly/);
+    assert.match(faqSchemaOnlyBlock(schemaOnly, 'qa-content', 'a.tsx'), /faqSchemaOnly/);
+    for (const t of ['schema', 'meta-title', 'internal-links']) assert.equal(faqSchemaOnlyBlock(schemaOnly, t, 'a.tsx'), null, t);
+    assert.equal(faqSchemaOnlyBlock('const post = { "faqSchemaOnly": false };', 'faq', 'a.tsx'), null);
+  });
+  test('preDraftContentBlock is the union: body markup, schema and faqSchemaOnly; nothing for an editable page', () => {
+    assert.ok(preDraftContentBlock(wrapper, 'internal-links', 'a'));
+    assert.ok(preDraftContentBlock(wrapper, 'schema', 'a'));
+    assert.ok(preDraftContentBlock(schemaOnly, 'faq', 'a'));
+    assert.equal(preDraftContentBlock(realPage, 'internal-links', 'a'), null);
+    assert.equal(preDraftContentBlock(realPage, 'schema', 'a'), null);
+    assert.equal(preDraftContentBlock(realPage, 'faq', 'a'), null);
   });
 });

@@ -2,10 +2,10 @@ import 'dotenv/config';
 import { pool, recordActionCenterConfigCheck } from '../db.js';
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { listConnectedSites } from '../job.js';
-import { resolveFile, resolveActionFile, resolveMarkers, resolveAdapter, resolveSiteRootFile, resolveAuthorAvatars } from '../implementers/lib/url-file-map.js';
+import { resolveFile, resolveActionFile, resolveMarkers, resolveAdapter, resolveNotApplicable, resolveSiteRootFile, resolveAuthorAvatars } from '../implementers/lib/url-file-map.js';
 import { parseSvgDimensions, classifyAvatarAspectGap } from '../implementers/lib/avatar-aspect-check.js';
 import { hasMarker, classifyMarkerGap, isHeadScopedField } from '../implementers/lib/marker-merge.js';
-import { templateDrivenBodyBlock } from '../implementers/lib/action-scope.js';
+import { preDraftContentBlock } from '../implementers/lib/action-scope.js';
 import { hasHashMarker, ensureHashMarker, locationsDroppingServerHeaders } from '../implementers/lib/hash-marker-merge.js';
 import { detectInsertionPoint, detectHeadRegion } from '../implementers/lib/structural-detect.js';
 import { resolveCapability, extensionOf } from '../implementers/lib/rendering-gate.js';
@@ -166,7 +166,7 @@ function partitionPreDraftBlocked(rows, fileContentFor) {
   const stillFatal = [];
   for (const row of rows) {
     const content = fileContentFor(row.filePath);
-    const reason = typeof content === 'string' ? templateDrivenBodyBlock(content, row.actionType, row.filePath) : null;
+    const reason = typeof content === 'string' ? preDraftContentBlock(content, row.actionType, row.filePath) : null;
     (reason ? blocked : stillFatal).push(reason ? { ...row, blockedReason: reason } : row);
   }
   return { blocked, stillFatal };
@@ -428,6 +428,7 @@ export async function auditSite(siteId, { record = true } = {}) {
   let noFileMapping = []; // { page, actionType }
   const noMarkers = Object.fromEntries(ACTION_TYPES.map((t) => [t, []])); // actionType -> [page]
   const adapterRouted = []; // { page, actionType, adapterId }
+  const notApplicable = []; // { page, actionType, reason } — declared in url_file_map.notApplicable
   const fileCache = new Map(); // filePath -> { content } | false | 'error'
   const markersToCheck = []; // { page, actionType, filePath, markerField, markerName }
 
@@ -440,6 +441,9 @@ export async function auditSite(siteId, { record = true } = {}) {
     const filesToRead = new Set(filePath ? [filePath] : []);
 
     for (const actionType of ACTION_TYPES) {
+      // The site's map declares (with a reason) that its own template already provides this action: not a gap, listed under its reason.
+      const declared = resolveNotApplicable(site, page, actionType);
+      if (declared) { notApplicable.push({ page, actionType, reason: declared.reason }); continue; }
       const adapterConfig = resolveAdapter(site, page, actionType);
       if (adapterConfig) {
         adapterRouted.push({ page, actionType, adapterId: adapterConfig.id });
@@ -534,6 +538,13 @@ export async function auditSite(siteId, { record = true } = {}) {
       if (results.get(e.page)?.ok) { unmappedLiveVerified.push(e); return false; }
       return true;
     });
+  }
+
+  const naByReason = new Map();
+  for (const r of notApplicable) { if (!naByReason.has(r.reason)) naByReason.set(r.reason, []); naByReason.get(r.reason).push(r); }
+  console.log(`\n-- DECLARED NOT APPLICABLE in url_file_map.notApplicable (${notApplicable.length} rows) -- (not gaps: the site's own template provides the action; each declaration carries its reason)`);
+  for (const [reason, rows] of naByReason) {
+    console.log(`  ${rows.length} row(s) on ${new Set(rows.map((r) => r.page)).size} page(s) [${[...new Set(rows.map((r) => r.actionType))].join(', ')}]: ${reason}`);
   }
 
   console.log(`\n-- NO FILE MAPPING (${noFileMapping.length}) --`);

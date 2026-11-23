@@ -2,8 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isPageMapped, resolveFile, resolveHostScope, resolveNewContentTarget, resolveNewContentUrl, resolveNewContentLayout,
-  resolveMarkers, resolveTranslationTarget, resolveActionFile, resolvePlacement, resolveLineKeys,
-} from './url-file-map.js';
+  resolveMarkers, resolveTranslationTarget, resolveActionFile, resolvePlacement, resolveLineKeys, resolveNotApplicable } from './url-file-map.js';
 
 describe('resolveTranslationTarget', () => {
   test('a normal file gets a language-code suffix sibling, same as any other framework', () => {
@@ -398,5 +397,35 @@ describe('one site, several apps: mounts and otherApps (zennly.io = marketplace 
     assert.equal(mapPathOf(plain, 'https://a.com/about'), '/about');
     assert.equal(resolveFile(plain, 'https://a.com/about'), 'about.njk');
     assert.equal(resolveOwnership(plain, 'https://a.com/').owner, 'connected');
+  });
+});
+
+describe('resolveNotApplicable (a site declares, with a reason, that its own template already provides an action)', () => {
+  const site = (rules) => ({ url_file_map: { notApplicable: rules } });
+  const rule = { match: '^/products/(orca|search)/?$', actions: ['schema', 'internal-links'], reason: 'FAQ and FAQPage schema are rendered from platformProducts.js' };
+
+  test('matches the page and the action, and returns the reason', () => {
+    const r = resolveNotApplicable(site([rule]), 'https://acme.com/products/orca/', 'schema');
+    assert.equal(r.reason, 'FAQ and FAQPage schema are rendered from platformProducts.js');
+  });
+  test('does not match another action type, another page, or a site with no declarations', () => {
+    assert.equal(resolveNotApplicable(site([rule]), 'https://acme.com/products/orca/', 'faq'), null);
+    assert.equal(resolveNotApplicable(site([rule]), 'https://acme.com/products/ai-crm/', 'schema'), null);
+    assert.equal(resolveNotApplicable({ url_file_map: {} }, 'https://acme.com/products/orca/', 'schema'), null);
+    assert.equal(resolveNotApplicable(null, 'https://acme.com/products/orca/', 'schema'), null);
+  });
+  test('"*" covers every action type', () => {
+    assert.ok(resolveNotApplicable(site([{ ...rule, actions: ['*'] }]), 'https://acme.com/products/search', 'qa-content'));
+  });
+  test('a declaration with no reason, no actions or a broken regex is ignored — it must say why', () => {
+    assert.equal(resolveNotApplicable(site([{ ...rule, reason: '  ' }]), 'https://acme.com/products/orca/', 'schema'), null);
+    assert.equal(resolveNotApplicable(site([{ ...rule, reason: undefined }]), 'https://acme.com/products/orca/', 'schema'), null);
+    assert.equal(resolveNotApplicable(site([{ ...rule, actions: [] }]), 'https://acme.com/products/orca/', 'schema'), null);
+    assert.equal(resolveNotApplicable(site([{ ...rule, match: '([' }]), 'https://acme.com/products/orca/', 'schema'), null);
+  });
+  test("one site's declaration is read only from that site's own map (multi-tenant isolation)", () => {
+    const a = site([rule]); const b = { url_file_map: { pages: {} } };
+    assert.ok(resolveNotApplicable(a, 'https://acme.com/products/orca/', 'schema'));
+    assert.equal(resolveNotApplicable(b, 'https://acme.com/products/orca/', 'schema'), null);
   });
 });

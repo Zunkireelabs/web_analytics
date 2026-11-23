@@ -811,3 +811,44 @@ describe('createRecommendationGates — a valid GA4 measurement ID fully unblock
   });
 });
 
+
+describe('createRecommendationGates — declared not applicable and template-supplied actions', () => {
+  const O = 'https://acme.com';
+  const mk = (url_file_map) => ({ id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', url_file_map });
+  const decl = { match: '^/products/(orca|search)/?$', actions: ['schema', 'internal-links'], reason: 'rendered from the data file' };
+
+  test('a declared action is dropped before anything is read or drafted', async () => {
+    let reads = 0;
+    const gates = createRecommendationGates(1, mk({ pages: { '/products/orca': { file: 'src/pages/products/orca.njk' } }, notApplicable: [decl] }), { ...neutralDeps(), fetchFile: async () => { reads++; return { content: '' }; } });
+    const r = await gates.evaluate('schema', { page: `${O}/products/orca/` });
+    assert.equal(r.drop, 'declared-not-applicable');
+    assert.equal(reads, 0);
+  });
+  test('the declaration covers only the listed actions and pages', async () => {
+    const site = mk({ pages: { '/products/orca': { file: 'src/pages/products/orca.njk' }, '/products/ai-crm': { file: 'src/pages/products/ai-crm.njk' } }, notApplicable: [decl] });
+    const gates = createRecommendationGates(1, site, { ...neutralDeps(), fetchFile: async () => ({ content: '<section><p>Body text for this page.</p></section>' }) });
+    assert.notEqual((await gates.evaluate('faq', { page: `${O}/products/orca/` })).drop, 'declared-not-applicable');
+    assert.notEqual((await gates.evaluate('schema', { page: `${O}/products/ai-crm/` })).drop, 'declared-not-applicable');
+  });
+  test('a declaration without a reason is ignored', async () => {
+    const site = mk({ pages: { '/products/orca': { file: 'src/pages/products/orca.njk' } }, notApplicable: [{ ...decl, reason: '' }] });
+    const gates = createRecommendationGates(1, site, { ...neutralDeps(), fetchFile: async () => ({ content: '<section><p>Body text for this page.</p></section>' }) });
+    assert.notEqual((await gates.evaluate('schema', { page: `${O}/products/orca/` })).drop, 'declared-not-applicable');
+  });
+  test('schema on a data-to-component page is blocked before any draft, with the reason', async () => {
+    const site = mk({ pages: { '/study-in-x': { file: 'src/app/study-in-x/page.tsx' } } });
+    const gates = createRecommendationGates(1, site, { ...neutralDeps(), fetchFile: async () => ({ content: 'export default function P() { return <CountryPageTemplate data={xData} />; }' }) });
+    const r = await gates.evaluate('schema', { page: `${O}/study-in-x` });
+    assert.equal(r.drop, null);
+    assert.match(r.blockedReason, /structured data/);
+  });
+  test('faq on a faqSchemaOnly page is dropped, but a configured adapter is left to decide for itself', async () => {
+    const content = 'const post = { "faqItems": [], "faqSchemaOnly": true };\nexport default function P() { return <GeneratedBlogPost {...post} />; }';
+    const noAdapter = mk({ pages: { '/post-a': { file: 'src/app/post-a/page.tsx' } } });
+    const withAdapter = mk({ pages: { '/post-a': { file: 'src/app/post-a/page.tsx', adapters: { faq: { id: 'page-data-object' } } } } });
+    const g1 = createRecommendationGates(1, noAdapter, { ...neutralDeps(), fetchFile: async () => ({ content }) });
+    assert.equal((await g1.evaluate('faq', { page: `${O}/post-a` })).drop, 'page-has-own-faq');
+    const g2 = createRecommendationGates(1, withAdapter, { ...neutralDeps(), fetchFile: async () => ({ content }) });
+    assert.notEqual((await g2.evaluate('faq', { page: `${O}/post-a` })).drop, 'page-has-own-faq');
+  });
+});

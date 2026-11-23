@@ -143,6 +143,29 @@ function getMatchingPattern(site, pageUrl) {
   return null;
 }
 
+// A site's explicit, reasoned statement that an action type does NOT apply to a page or a family of pages, because the site's own
+// template already provides it (a product page whose FAQ and FAQPage schema are rendered from its data file, a page whose front matter
+// renders its FAQ). Declared in url_file_map.notApplicable as
+//   [{ "match": "<regex on the path>", "actions": ["faq", "schema"], "reason": "why", "scope"?: "..." }]
+// An entry without a non-empty `reason`, a list of actions or a valid regex is ignored: a declaration must say why. Both the recommendation
+// gate (no draft is made) and the config audit (the row is listed under its reason, not counted as a gap) read this, so they cannot disagree.
+export function resolveNotApplicable(site, pageUrl, actionType) {
+  const rules = site?.url_file_map?.notApplicable;
+  if (!Array.isArray(rules) || !rules.length || !pageUrl || !actionType) return null;
+  if (resolveOwnership(site, pageUrl).owner === 'other') return null;
+  if (!urlInScope(site, pageUrl)) return null;
+  const path = mapPathOf(site, pageUrl);
+  const normalized = path.length > 1 ? path.replace(/\/+$/, '') : path;
+  for (const rule of rules) {
+    if (!rule || typeof rule.match !== 'string' || !rule.match) continue;
+    if (typeof rule.reason !== 'string' || !rule.reason.trim()) continue;
+    if (!Array.isArray(rule.actions) || !(rule.actions.includes(actionType) || rule.actions.includes('*'))) continue;
+    let re; try { re = new RegExp(rule.match); } catch { continue; }
+    if (re.test(normalized) || re.test(path)) return { reason: rule.reason.trim(), match: rule.match };
+  }
+  return null;
+}
+
 // Existing-page generators (schema, meta-title, faq, internal-links,
 // translation) resolve against `pages` (exact match) then `patterns` (regex
 // with $1-style capture-group substitution, for templated routes like
