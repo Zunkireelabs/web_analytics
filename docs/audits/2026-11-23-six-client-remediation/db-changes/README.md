@@ -50,5 +50,9 @@ Sites 8871, 8872 and 8874 were not changed.
 Prepared and dry-run, NOT applied (needs the engine in this PR deployed first, then approval): `admizz-8862-phase4-city-data-faq-map.json`, merged with
 `--base admizz-8862-phase3-faq-more-pages-map.json --engine-deployed` (FAQ adapter in `dataFile` mode on `/birgunj` and `/janakpur`).
 
+Prepared and dry-run (32 of 32 real-data dry-runs), NOT applied: `chayce-8864-phase2-city-actions-map.json`, merged with `--base chayce-8864-proposed-map.json --engine-deployed`
+(FAQ with `q`/`a` keys, a structured `relatedPosts` list for internal links, text fields for expanded content and Q&A on the 20 city pages; schema and
+the 5 front-matter pages declared not applicable with reasons). Apply only after the engine here is deployed AND the Chayce template PR is on `main`.
+
 Copies of the maps from before the writes (outside git, same reason as the others): `pre-apply-map-8864-rev29.json` and
 `pre-apply-map-8862-rev48-before-phase3.json`.

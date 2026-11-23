@@ -1000,3 +1000,101 @@ describe('data-array-content computeChange — idPrefix (permalink wraps the dat
     assert.equal(r.ok, false);
   });
 });
+
+// Chayce's city pages: one JSON array, one object per city, a hand-written FAQ at `localFaqs` as { q, a }, and (new) a related-posts list.
+const CITIES = JSON.stringify([
+  { slug: 'corby', name: 'Corby', localFaqs: [{ q: 'Do you cover Corby?', a: 'Yes.' }] },
+  { slug: 'kettering', name: 'Kettering', localFaqs: [{ q: 'Which council covers Kettering?', a: 'North Northamptonshire.' }] },
+], null, 2);
+const cityConfig = (extra = {}) => ({ id: 'data-array-content', format: 'json-array', idField: 'slug', idPrefix: 'elderly-removals-', dataFile: 'src/_data/localAreas.json', ...extra });
+const citySite = (adapters) => ({ id: 8864, url_file_map: { patterns: [{ match: '^/elderly-removals-(kettering|corby)/?$', adapters }] } });
+const KETTERING = 'https://chayceproperties.com/elderly-removals-kettering/';
+const fetchCities = async () => ({ content: CITIES });
+
+describe('data-array-content: FAQ items written with the data file\'s own key names (itemKeys)', () => {
+  const site = citySite({ faq: cityConfig({ itemsField: 'localFaqs', itemKeys: { question: 'q', answer: 'a' } }) });
+  const draft = { action_type: 'faq', content: { page: KETTERING, items: [{ question: 'Do you offer parking help in Kettering?', answer: 'Yes, we arrange it.' }] } };
+
+  test('appends { q, a } to the right city and leaves the other city and the hand-written item alone', async () => {
+    const r = await computeChange(site, draft, fetchCities);
+    assert.equal(r.ok, true, r.error);
+    const out = JSON.parse(r.newContent);
+    const k = out.find((c) => c.slug === 'kettering'); const c = out.find((x) => x.slug === 'corby');
+    assert.deepEqual(k.localFaqs[0], { q: 'Which council covers Kettering?', a: 'North Northamptonshire.' });
+    assert.equal(k.localFaqs.length, 2);
+    assert.equal(k.localFaqs[1].q, 'Do you offer parking help in Kettering?');
+    assert.equal(k.localFaqs[1].a, 'Yes, we arrange it.');
+    assert.equal('question' in k.localFaqs[1], false, 'never the default key names');
+    assert.deepEqual(c, JSON.parse(CITIES).find((x) => x.slug === 'corby'));
+  });
+  test('re-applying replaces only the AI-managed item and the diff reads q/a back', async () => {
+    const first = await computeChange(site, draft, fetchCities);
+    const again = await computeChange(site, { ...draft, content: { ...draft.content, items: [{ question: 'Do you offer parking help in Kettering?', answer: 'Yes, and we pay the permit fee.' }] } }, async () => ({ content: first.newContent }));
+    assert.equal(again.ok, true);
+    assert.equal(JSON.parse(again.newContent).find((c) => c.slug === 'kettering').localFaqs.length, 2);
+    assert.equal(again.faqDiff.modified.length, 1);
+  });
+  test('without itemKeys the original question/answer behaviour is unchanged', async () => {
+    const plain = citySite({ faq: cityConfig({ itemsField: 'localFaqs' }) });
+    const r = await computeChange(plain, draft, fetchCities);
+    assert.equal(JSON.parse(r.newContent).find((c) => c.slug === 'kettering').localFaqs[1].question, 'Do you offer parking help in Kettering?');
+  });
+  test('malformed itemKeys are refused before any file is read', async () => {
+    let reads = 0;
+    for (const bad of [{ question: 'q' }, { question: 'q', answer: 'q' }, { question: 'a b', answer: 'a' }, 'q']) {
+      const r = await computeChange(citySite({ faq: cityConfig({ itemsField: 'localFaqs', itemKeys: bad }) }), draft, async () => { reads++; return { content: CITIES }; });
+      assert.equal(r.ok, false, JSON.stringify(bad)); assert.equal(r.reason, 'invalid-config');
+    }
+    assert.equal(reads, 0);
+  });
+});
+
+describe('data-array-content: internal-links written as a STRUCTURED related-posts list, never HTML', () => {
+  const site = citySite({ 'internal-links': cityConfig({ itemsField: 'relatedPosts' }) });
+  const sug = (u, t, a = 'anchor') => ({ anchorText: a, targetUrl: u, targetTitle: t, rationale: 'r' });
+  const draft = (suggestions) => ({ action_type: 'internal-links', content: { page: KETTERING, suggestions } });
+
+  test('creates relatedPosts as { title, href } with the post\'s real title and a site-relative path', async () => {
+    const r = await computeChange(site, draft([sug('https://chayceproperties.com/blog/when-to-downsize-uk/', 'When Is the Right Time to Downsize?'), sug('https://chayceproperties.com/blog/downsizing-checklist-what-to-keep-uk/', 'Downsizing Checklist UK')]), fetchCities);
+    assert.equal(r.ok, true, r.error);
+    const k = JSON.parse(r.newContent).find((c) => c.slug === 'kettering');
+    assert.deepEqual(k.relatedPosts.map(({ title, href }) => ({ title, href })), [
+      { title: 'When Is the Right Time to Downsize?', href: '/blog/when-to-downsize-uk/' },
+      { title: 'Downsizing Checklist UK', href: '/blog/downsizing-checklist-what-to-keep-uk/' },
+    ]);
+    assert.ok(!/<a |<ul|<li/.test(r.newContent), 'no HTML is written');
+    assert.deepEqual(JSON.parse(r.newContent).find((c) => c.slug === 'corby'), JSON.parse(CITIES).find((x) => x.slug === 'corby'));
+  });
+  test('falls back to the anchor text when the target has no title, drops duplicates, and caps at 3 by default', async () => {
+    const many = ['a', 'b', 'c', 'd', 'e'].map((x) => sug(`/blog/${x}/`, '', `Anchor ${x}`));
+    const r = await computeChange(site, draft([sug('/blog/a/', '', 'Dup A'), ...many]), fetchCities);
+    const k = JSON.parse(r.newContent).find((c) => c.slug === 'kettering');
+    assert.equal(k.relatedPosts.length, 3);
+    assert.equal(k.relatedPosts[0].title, 'Dup A');
+    assert.deepEqual(new Set(k.relatedPosts.map((p) => p.href)).size, 3);
+  });
+  test('maxItems and itemKeys are honoured', async () => {
+    const s2 = citySite({ 'internal-links': cityConfig({ itemsField: 'related', maxItems: 2, itemKeys: { title: 'label', href: 'url' } }) });
+    const r = await computeChange(s2, draft([sug('/blog/a/', 'A'), sug('/blog/b/', 'B'), sug('/blog/c/', 'C')]), fetchCities);
+    const k = JSON.parse(r.newContent).find((c) => c.slug === 'kettering');
+    assert.deepEqual(k.related.map(({ label, url }) => ({ label, url })), [{ label: 'A', url: '/blog/a/' }, { label: 'B', url: '/blog/b/' }]);
+  });
+  test('re-applying replaces the AI-managed list instead of stacking', async () => {
+    const first = await computeChange(site, draft([sug('/blog/a/', 'A')]), fetchCities);
+    const again = await computeChange(site, draft([sug('/blog/b/', 'B')]), async () => ({ content: first.newContent }));
+    const k = JSON.parse(again.newContent).find((c) => c.slug === 'kettering');
+    assert.deepEqual(k.relatedPosts.map((p) => p.href), ['/blog/b/']);
+  });
+  test('a draft with no usable suggestion is refused, and unsupported shapes are refused before any read', async () => {
+    assert.equal((await computeChange(site, draft([{ anchorText: 'x' }, { targetUrl: '' }]), fetchCities)).reason, 'draft-not-ready');
+    let reads = 0; const spy = async () => { reads++; return { content: CITIES }; };
+    const flat = citySite({ 'internal-links': { id: 'data-array-content', format: 'json-array', dataFile: 'src/_data/localAreas.json', shape: 'flat-array', itemsField: 'relatedPosts' } });
+    assert.equal((await computeChange(flat, draft([sug('/blog/a/', 'A')]), spy)).reason, 'invalid-config');
+    assert.equal(reads, 0);
+  });
+  test('a text-field internal-links config (fields) still takes the original HTML path, unchanged', async () => {
+    const htmlSite = citySite({ 'internal-links': cityConfig({ fields: { links: 'internalLinksHtml' } }) });
+    const r = await computeChange(htmlSite, draft([sug('/blog/a/', 'A')]), fetchCities);
+    assert.ok(r.ok === false || /internalLinksHtml/.test(r.newContent || ''), 'takes the scalar-field path, not the list path');
+  });
+});

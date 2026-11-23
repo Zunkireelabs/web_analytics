@@ -1,0 +1,177 @@
+{
+  "site": 8864,
+  "baseRev": 30,
+  "cities": [
+    "kettering",
+    "corby",
+    "wellingborough",
+    "daventry",
+    "rushden",
+    "milton-keynes",
+    "market-harborough",
+    "leicester"
+  ],
+  "dryRuns": [
+    {
+      "city": "kettering",
+      "action": "faq",
+      "ok": true
+    },
+    {
+      "city": "kettering",
+      "action": "internal-links",
+      "ok": true
+    },
+    {
+      "city": "kettering",
+      "action": "expand-content",
+      "ok": true
+    },
+    {
+      "city": "kettering",
+      "action": "qa-content",
+      "ok": true
+    },
+    {
+      "city": "corby",
+      "action": "faq",
+      "ok": true
+    },
+    {
+      "city": "corby",
+      "action": "internal-links",
+      "ok": true
+    },
+    {
+      "city": "corby",
+      "action": "expand-content",
+      "ok": true
+    },
+    {
+      "city": "corby",
+      "action": "qa-content",
+      "ok": true
+    },
+    {
+      "city": "wellingborough",
+      "action": "faq",
+      "ok": true
+    },
+    {
+      "city": "wellingborough",
+      "action": "internal-links",
+      "ok": true
+    },
+    {
+      "city": "wellingborough",
+      "action": "expand-content",
+      "ok": true
+    },
+    {
+      "city": "wellingborough",
+      "action": "qa-content",
+      "ok": true
+    },
+    {
+      "city": "daventry",
+      "action": "faq",
+      "ok": true
+    },
+    {
+      "city": "daventry",
+      "action": "internal-links",
+      "ok": true
+    },
+    {
+      "city": "daventry",
+      "action": "expand-content",
+      "ok": true
+    },
+    {
+      "city": "daventry",
+      "action": "qa-content",
+      "ok": true
+    },
+    {
+      "city": "rushden",
+      "action": "faq",
+      "ok": true
+    },
+    {
+      "city": "rushden",
+      "action": "internal-links",
+      "ok": true
+    },
+    {
+      "city": "rushden",
+      "action": "expand-content",
+      "ok": true
+    },
+    {
+      "city": "rushden",
+      "action": "qa-content",
+      "ok": true
+    },
+    {
+      "city": "milton-keynes",
+      "action": "faq",
+      "ok": true
+    },
+    {
+      "city": "milton-keynes",
+      "action": "internal-links",
+      "ok": true
+    },
+    {
+      "city": "milton-keynes",
+      "action": "expand-content",
+      "ok": true
+    },
+    {
+      "city": "milton-keynes",
+      "action": "qa-content",
+      "ok": true
+    },
+    {
+      "city": "market-harborough",
+      "action": "faq",
+      "ok": true
+    },
+    {
+      "city": "market-harborough",
+      "action": "internal-links",
+      "ok": true
+    },
+    {
+      "city": "market-harborough",
+      "action": "expand-content",
+      "ok": true
+    },
+    {
+      "city": "market-harborough",
+      "action": "qa-content",
+      "ok": true
+    },
+    {
+      "city": "leicester",
+      "action": "faq",
+      "ok": true
+    },
+    {
+      "city": "leicester",
+      "action": "internal-links",
+      "ok": true
+    },
+    {
+      "city": "leicester",
+      "action": "expand-content",
+      "ok": true
+    },
+    {
+      "city": "leicester",
+      "action": "qa-content",
+      "ok": true
+    }
+  ],
+  "problems": []
+}

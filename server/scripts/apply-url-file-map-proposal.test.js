@@ -126,6 +126,31 @@ describe('planProposal — Admizz phase 4 (city data FAQ, on top of the applied 
   });
 });
 
+describe('planProposal — Chayce phase 2 (city actions, on top of the applied blog pattern)', () => {
+  const base = load('chayce-8864-proposed-map.json'); const proposed = load('chayce-8864-phase2-city-actions-map.json');
+  test('adds faq, internal-links, expand-content and qa-content adapters to the city pattern, and declares schema not applicable', () => {
+    const { conflicts, summary, merged } = planProposal(base, clone(base), proposed);
+    assert.deepEqual(conflicts, []);
+    assert.equal(summary.pagesAdded.length + summary.pagesRemoved.length + summary.pagesChanged.length, 0, 'no page entry changes');
+    const city = merged.patterns.find((p) => /elderly-removals-\(kettering/.test(p.match));
+    assert.deepEqual(Object.keys(city.adapters).sort(), ['expand-content', 'faq', 'internal-links', 'meta-title', 'qa-content']);
+    assert.deepEqual(city.adapters.faq.itemKeys, { question: 'q', answer: 'a' });
+    assert.equal(city.adapters['internal-links'].itemsField, 'relatedPosts');
+    assert.equal(merged.notApplicable.length, 2);
+    assert.ok(merged.notApplicable.every((r) => r.reason && r.actions.length));
+  });
+  test('the existing meta-title adapter and the blog pattern are untouched', () => {
+    const { merged } = planProposal(base, clone(base), proposed);
+    const city = merged.patterns.find((p) => /elderly-removals-\(kettering/.test(p.match));
+    assert.deepEqual(city.adapters['meta-title'], base.patterns.find((p) => /elderly-removals-\(kettering/.test(p.match)).adapters['meta-title']);
+    assert.ok(merged.patterns.some((p) => p.match === '^/blog/([^/]+)/?$'));
+  });
+  test('it refuses to run before the engine is deployed', () => {
+    assert.match(checkGuards({ site: 8864, proposalName: 'chayce-8864-phase2-city-actions-map.json', engineDeployed: false }), /engine change deployed/);
+    assert.equal(checkGuards({ site: 8864, proposalName: 'chayce-8864-phase2-city-actions-map.json', engineDeployed: true }), null);
+  });
+});
+
 describe('checkGuards', () => {
   test('only sites 1 and 8862 are allowed', () => {
     assert.deepEqual([...ALLOWED_SITES].sort((a, b) => a - b), [1, 8862, 8864]);
