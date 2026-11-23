@@ -1,5 +1,6 @@
 import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget, resolveMissingPageTarget, slugifyTitle } from './lib/url-file-map.js';
-import { deriveNewContentContract, deriveContractFromSourceFile } from './lib/newcontent-contract.js';
+import { deriveNewContentContract, deriveContractFromSourceFile, missingRequiredKeys } from './lib/newcontent-contract.js';
+import { deriveLegalTarget, isPlaceholderDir } from './lib/legal-target.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, resolveBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderBlogOutlineBodyTsx, renderTranslationBody, renderTranslationBodyTsx, renderDirectAnswerBody, renderDirectAnswerBodyTsx, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
@@ -44,6 +45,19 @@ export const FRONTEND_ACTION_TYPES = new Set(meta.handles);
 // be able to state what is in the directory. Without it the only coverage
 // possible was "no config -> no-file-mapping", which is precisely the branch
 // where the bug could not happen.
+// A new file whose front matter lacks a key EVERY sibling declares fails a schema-validated build (Astro content collections: "author: Required"). The
+// platform cannot invent an author or a cover, so such a file is refused with the exact keys and where to set them, instead of shipped broken.
+// `newContentTargets[type].frontMatterDefaults` ({ author: 'team', cover: { kind: 'agent' } }) is how a site states them once.
+function frontMatterDefaultsFor(site, actionType) {
+  const d = site?.url_file_map?.newContentTargets?.[actionType]?.frontMatterDefaults;
+  return d && typeof d === 'object' && !Array.isArray(d) ? d : null;
+}
+function incompleteFrontMatter(body, contract, actionType) {
+  const missing = missingRequiredKeys(body, contract);
+  if (!missing.length) return null;
+  return { ok: false, reason: 'front-matter-incomplete', error: `Every existing post in this directory declares ${missing.map((k) => `"${k}"`).join(', ')}, and the site's build rejects a post without ${missing.length === 1 ? 'it' : 'them'}. This new file would not build, so nothing was written. Set url_file_map.newContentTargets["${actionType}"].frontMatterDefaults for ${missing.join(', ')} (for example author, category, cover) and apply again.` };
+}
+
 export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
   // Generation-time-prepared fast path: generateDraft (action-center.js)
   // already computed and rendering-gate-validated this exact output before
@@ -89,7 +103,10 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
       ...resolveNewContentTargetConfig(site, 'landing-page'),
     }, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'landing-page') : contract.layout;
-    return { ok: true, filePath, body: renderLandingPageBody(content, site, { permalink, layout, fieldNames: contract.fieldNames }), contentFormat: 'markdown' };
+    const lpBody = renderLandingPageBody(content, site, { permalink, layout, fieldNames: contract.fieldNames, frontMatterDefaults: frontMatterDefaultsFor(site, 'landing-page') });
+    const lpIncomplete = incompleteFrontMatter(lpBody, contract, 'landing-page');
+    if (lpIncomplete) return lpIncomplete;
+    return { ok: true, filePath, body: lpBody, contentFormat: 'markdown' };
   }
 
   if (actionType === 'blog-outline') {
@@ -127,10 +144,13 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     // draft that already carries an image (an Insights post's Pexels photo under
     // `featuredImage: 'insights-only'`) keeps it: the cover is for posts without one.
     const cover = content.featuredImage ? null : buildGradientCover(site, { slug: filePath.split('/').pop().replace(/\.[^.]+$/, '') });
+    const boBody = renderBlogOutlineBody(cover ? { ...content, featuredImage: cover.featuredImage } : content, site, { permalink, layout, fieldNames: contract.fieldNames, frontMatterDefaults: frontMatterDefaultsFor(site, 'blog-outline') });
+    const boIncomplete = incompleteFrontMatter(boBody, contract, 'blog-outline');
+    if (boIncomplete) return boIncomplete;
     return {
       ok: true,
       filePath,
-      body: renderBlogOutlineBody(cover ? { ...content, featuredImage: cover.featuredImage } : content, site, { permalink, layout, fieldNames: contract.fieldNames }),
+      body: boBody,
       contentFormat: 'markdown',
       ...(cover ? { extraFiles: [cover.file] } : {}),
     };
@@ -198,7 +218,10 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
       ...directAnswerTargetConfig,
     }, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'direct-answer') : contract.layout;
-    return { ok: true, filePath, body: renderDirectAnswerBody(content, site, { permalink, layout, fieldNames: contract.fieldNames }), contentFormat: 'markdown' };
+    const daBody = renderDirectAnswerBody(content, site, { permalink, layout, fieldNames: contract.fieldNames, frontMatterDefaults: frontMatterDefaultsFor(site, 'direct-answer') });
+    const daIncomplete = incompleteFrontMatter(daBody, contract, 'direct-answer');
+    if (daIncomplete) return daIncomplete;
+    return { ok: true, filePath, body: daBody, contentFormat: 'markdown' };
   }
 
   // No permalink for a translation: its target is a language-suffixed sibling
@@ -248,7 +271,19 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     const page = content.page || draft.input?.page;
     const existingFile = page ? resolveFile(site, page) : null;
     const title = content.metaTitle || content.headline;
-    const filePath = existingFile || resolveNewContentTarget(site, actionType, title);
+    // A new legal page whose configured target is a placeholder folder (docs/, content-drafts/) would be a file nothing builds: a 404 on the site and a draft
+    // marked done. Learn the real location from the site's own privacy/terms pages instead (legal-target.js). No sibling to learn from keeps the config.
+    let derivedLegal = null;
+    if (!existingFile) {
+      const cfg = resolveNewContentTargetConfig(site, actionType) || {};
+      if (!cfg.dir || isPlaceholderDir(cfg.dir)) {
+        derivedLegal = await deriveLegalTarget(site, actionType, { readFile: repoDeps.getFileContent || getFileContent, ref: baseBranch(site) });
+        if (derivedLegal?.conflict) {
+          return { ok: false, reason: 'slug-conflict', error: `${derivedLegal.filePath} already exists in this site but is not listed in url_file_map.pages, so it was not overwritten. Map that page (or point this draft at it) and apply again.` };
+        }
+      }
+    }
+    const filePath = existingFile || derivedLegal?.filePath || resolveNewContentTarget(site, actionType, title);
     if (!filePath) {
       const pageHint = page ? ` (real target "${page}" isn't in url_file_map.pages either)` : '';
       return { ok: false, reason: 'no-file-mapping', error: `No url_file_map.newContentTargets["${actionType}"] configured${pageHint} — add one via \`npm run connect-repo\` before this can be applied.` };
@@ -261,7 +296,7 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     const preserved = extractPreservedFrontMatter(existing?.content);
     // Only for the genuinely-new-file case — an existing page's own preserved
     // permalink always wins inside the renderer.
-    const permalink = existingFile ? null : resolveNewContentUrl(site, actionType, title);
+    const permalink = existingFile ? null : (derivedLegal?.permalink || resolveNewContentUrl(site, actionType, title));
     // Only the genuinely-new-file case derives a contract. Overwriting a real
     // page is already answered by that page's own preserved front matter
     // (which wins inside the renderer regardless), so sampling its neighbours
@@ -269,12 +304,14 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     // For a NEW compliance page the directory's siblings are the authority,
     // same as every other net-new type — a `layout: base.njk` emitted into a
     // src/pages whose pages declare none overrides the directory's real one.
-    const contract = existingFile
+    const contract = existingFile || derivedLegal
       ? null
       : await deriveNewContentContract(site, { ...resolveNewContentTargetConfig(site, actionType) }, repoDeps);
-    const layout = contract && !contract.unknown
-      ? contract.layout
-      : resolveNewContentLayout(site, actionType);
+    const layout = derivedLegal
+      ? derivedLegal.layout
+      : contract && !contract.unknown
+        ? contract.layout
+        : resolveNewContentLayout(site, actionType);
     return { ok: true, filePath, body: renderCompliancePageBody(content, preserved, site, { permalink, layout }), contentFormat: 'markdown' };
   }
 

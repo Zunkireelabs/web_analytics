@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { generate, meta } from './blog-outline.js';
 import { query, pool } from '../db.js';
 
+// This file is about the expand-retry loop and stubs the global fetch for the model. The SERP lookup (lib/serp.js) is not part of that, and
+// must never run against a stubbed fetch or a developer's real search credentials.
+process.env.BLOG_SERP_BRIEF = 'off';
+
 // Regression coverage for a real, recurring report: a single bounded expand
 // pass reliably landed just under MIN_TOTAL_WORDS (a real run: 740/800) and
 // generation was rejected outright even though a second pass — targeting

@@ -40,7 +40,9 @@ describe('buildNeedsYou', () => {
   test('failed agents and unresolved decisions each appear', () => {
     const items = buildNeedsYou({ agentRuns: [{ agent_id: 'authority', status: 'error', created_at: day(0) }, { agent_id: 'x', status: 'ok' }], unresolved: [{ id: 7, subject: 'industry', category: 'c', created_at: day(3) }], now: NOW });
     assert.deepEqual(items.map((i) => i.kind).sort(), [KIND.DECISION, KIND.ISSUE]);
-    assert.equal(items.find((i) => i.kind === KIND.DECISION).findingId, 7);
+    const d = items.find((i) => i.kind === KIND.DECISION);
+    assert.deepEqual(d.ids, [7]);
+    assert.equal(d.decisions[0].id, 7);
   });
 });
 
@@ -87,5 +89,28 @@ describe('asking for the full list', () => {
     assert.match(text, /Waiting for your approval:/);
     assert.match(text, /Issues I found:/);
     assert.match(composeNeedsYou([]), /Nothing is waiting on you/);
+  });
+});
+
+describe('decisions are one item', () => {
+  test('several open questions become a single card, newest first, with the recommendation when the evidence has one', () => {
+    const unresolved = [
+      { id: 1, subject: 'src/_includes/partials/footer.njk', category: 'shared-infrastructure', created_at: day(74), evidence: [{ detail: 'Included by 42 templates' }] },
+      { id: 2, subject: 'src/_includes/partials/header.njk', category: 'shared-infrastructure', created_at: day(74) },
+      { id: 3, subject: 'src/blog/post.njk', category: 'template', created_at: day(2),
+        finding: { candidates: [{ id: 'blog', label: 'Blog post template', routeCount: 5 }, { id: 'page', label: 'Page', routeCount: 1 }] } },
+    ];
+    const items = buildNeedsYou({ unresolved, now: NOW });
+    assert.equal(items.length, 1);
+    const [d] = items;
+    assert.equal(d.count, 3);
+    assert.equal(d.key, 'decision:1,2,3');
+    assert.equal(d.title, '3 setup questions need your answer');
+    assert.deepEqual(d.decisions.map((x) => x.id), [3, 1, 2]);
+    assert.equal(d.decisions[0].recommendation, 'Blog post template');
+    assert.equal(d.decisions[0].chosen, 'blog');
+    assert.equal(d.decisions[1].recommendation, null);
+    assert.equal(d.decisions[1].detail, 'Included by 42 templates');
+    assert.equal(d.actions[0].id, 'answer_decisions');
   });
 });

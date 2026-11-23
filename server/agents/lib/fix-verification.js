@@ -204,15 +204,25 @@ function stripHtmlToText(html) {
     .trim();
 }
 
+// Whether a served well-known file is what it should be. Pure, so each structure can be tested without a network.
+export function judgeSiteAsset(structure, text, expected = {}) {
+  if (structure === 'llms-txt') {
+    const valid = llmsTxtHasValidStructure(text);
+    return { present: valid, evidence: { served: true, validStructure: valid } };
+  }
+  // The IndexNow key file: served, and containing exactly the key and nothing else (the protocol compares it to the key it was sent).
+  if (structure === 'indexnow-key') {
+    const valid = Boolean(expected.key) && String(text).trim() === expected.key;
+    return { present: valid, evidence: { served: true, matchesKey: valid } };
+  }
+  return { present: true, evidence: { served: true } };
+}
+
 async function checkSiteAsset(row) {
   const fetched = await fetchTextIfExists(row.page_url);
   if (!fetched.ok) return { present: false, evidence: { asset: row.page_url, served: false } };
-  const structure = row.expected?.structure;
-  if (structure === 'llms-txt') {
-    const valid = llmsTxtHasValidStructure(fetched.text);
-    return { present: valid, evidence: { asset: row.page_url, served: true, validStructure: valid } };
-  }
-  return { present: true, evidence: { asset: row.page_url, served: true } };
+  const judged = judgeSiteAsset(row.expected?.structure, fetched.text, row.expected);
+  return { present: judged.present, evidence: { asset: row.page_url, ...judged.evidence } };
 }
 
 async function checkResponseHeader(row) {
@@ -474,6 +484,12 @@ function withinStagePromotionWait(row, now = Date.now()) {
 
 const AWAIT_RECHECK_HOURS = Number(process.env.FIX_VERIFY_REDEPLOY_HOURS) || 3;
 
+// The first time a deployment is seen live, tell IndexNow which pages it changed. Fire and forget: the ping never throws and must never
+// hold up or fail the verification that triggered it (lib/indexnow-ping.js records its own outcome).
+function notifyIndexNow(siteId, deployment) {
+  import('../../lib/indexnow-ping.js').then((m) => m.pingIndexNowForDeployment(siteId, deployment)).catch(() => {});
+}
+
 async function verifyByMethod(row, site) {
   const { present, evidence } = await runMethodCheck(row, site);
 
@@ -487,7 +503,8 @@ async function verifyByMethod(row, site) {
     // The live site reflecting the shipped change IS the deploy signal — this
     // is the only thing that promotes a deployment out of 'pending'.
     if (deployment && row.method !== VERIFICATION_METHOD.REPO_FILE) {
-      await markDeploymentDetected(deployment.id, { via: row.method, verificationId: row.id, ...evidence });
+      const detected = await markDeploymentDetected(deployment.id, { via: row.method, verificationId: row.id, ...evidence });
+      if (detected) notifyIndexNow(row.site_id, detected);
     }
     await recordVerificationOutcome(row.id, 'verified-fixed', evidence);
     await learnFromOutcome(row, 'verified-fixed', []);
@@ -551,7 +568,10 @@ async function verifyOne(row, site) {
     }
   } else {
     const { deployment } = await resolveDeploymentState(row);
-    if (deployment) await markDeploymentDetected(deployment.id, { via: 'tag-recheck', verificationId: row.id });
+    if (deployment) {
+      const detected = await markDeploymentDetected(deployment.id, { via: 'tag-recheck', verificationId: row.id });
+      if (detected) notifyIndexNow(row.site_id, detected);
+    }
   }
 
   const outcome = stillFlagged ? 'still-present' : 'verified-fixed';

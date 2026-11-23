@@ -15,7 +15,7 @@ import { tenantContextTextForSiteId } from '../../lib/tenant-context.js';
 // Who is being answered, resolved server-side. Never throws — an unresolvable
 // user falls back to the client persona, which is the safe default because it
 // is the one that forbids internal vocabulary.
-async function resolvePersona(siteId, userId) {
+export async function resolvePersona(siteId, userId) {
   const [user, site] = await Promise.all([
     userId ? getUserById(userId).catch(() => null) : null,
     getSiteById(siteId).catch(() => null),
@@ -141,7 +141,10 @@ async function honestGapMessage(siteId, agentIds) {
 // priority, recommendedAction per finding), so this stays fast without
 // needing each agent's full raw `facts` blob the way a fresh run does.
 async function answerFromCache(siteId, agentIds, question, personaPrompt) {
-  const runs = await getLatestFindings(siteId, agentIds);
+  const [runs, tenantContext] = await Promise.all([
+    getLatestFindings(siteId, agentIds),
+    tenantContextTextForSiteId(siteId, { sections: ['business', 'goals', 'product'] }),
+  ]);
   const findings = runs
     .flatMap((r) => r.findings.map((f) => ({ ...f, agentId: r.agentId })))
     .sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
@@ -150,9 +153,33 @@ async function answerFromCache(siteId, agentIds, question, personaPrompt) {
   // itself failed) — answerQuestion's caller applies the honest-gap fallback
   // uniformly for both this path and the fresh-run path, so it isn't
   // duplicated here.
-  const tenantContext = await tenantContextTextForSiteId(siteId, { sections: ['business', 'goals', 'product'] });
   const narrative = await synthesizeFindings(findings, perAgent, question, personaPrompt, { tenantContext });
-  return { findings, narrative, ranAgentIds: agentIds, fromCache: true };
+  // Oldest run the answer drew on, so the reply can say how current it is
+  // instead of presenting yesterday's analysis as live.
+  const times = runs.map((r) => new Date(r.createdAt).getTime()).filter(Number.isFinite);
+  const dataAsOf = times.length ? new Date(Math.min(...times)).toISOString() : null;
+  return { findings, narrative, ranAgentIds: agentIds, fromCache: true, dataAsOf };
+}
+
+// Chat answers from the latest stored analysis by default — never runs agents
+// while the person waits. A live run (fetching pages, GSC reads, one LLM call
+// per agent, or the multi-turn agentic tool loop) took tens of seconds per
+// question, and "never run" counted as stale, so one missing agent made the
+// whole routed set run live. The daily pipeline keeps the stored analysis
+// fresh. COPILOT_LIVE_AGENT_RUNS=true restores the old behaviour for chat;
+// AGENTIC_ORCHESTRATION_ENABLED keeps driving Command Center / Action Center
+// unchanged either way.
+export function liveAgentRunsInChat(env = process.env) {
+  return env.COPILOT_LIVE_AGENT_RUNS === 'true';
+}
+
+// "Based on the analysis from 2 days ago" — only when the data is older than
+// a day; same-day data needs no caveat.
+export function freshnessNote(dataAsOf, now = Date.now()) {
+  if (!dataAsOf) return '';
+  const days = Math.floor((now - new Date(dataAsOf).getTime()) / (24 * 60 * 60 * 1000));
+  if (!Number.isFinite(days) || days < 1) return '';
+  return `\n\n(Based on the latest analysis, from ${days === 1 ? 'yesterday' : `${days} days ago`}.)`;
 }
 
 async function suggestFollowUps(question, answer) {
@@ -180,6 +207,14 @@ export async function answerQuestion({ siteId, conversationId, message, history,
   // an admin. Failing to resolve it degrades to the client persona (the more
   // conservative of the two: it exposes no internal vocabulary), rather than
   // to the admin one.
+  //
+  // buildRecommendations (only used at the end, for the "Generate draft"
+  // affordance on cited findings) is independent of the answer, so it starts
+  // now and runs alongside everything else instead of after it.
+  const groundedPromise = buildRecommendations(siteId).catch((err) => {
+    console.warn('[copilot] buildRecommendations failed, cited findings get no draft action:', err.message);
+    return { items: [] };
+  });
   const [routing, persona] = await Promise.all([
     classifyIntent(message, history),
     resolvePersona(siteId, userId),
@@ -200,6 +235,9 @@ export async function answerQuestion({ siteId, conversationId, message, history,
       narrative: execRun?.narrative || 'No analysis has run yet — check back after the first daily analysis completes.',
       ranAgentIds: ['executive-report'],
     };
+  } else if (!liveAgentRunsInChat()) {
+    // Default: answer from the stored analysis, no agent runs (see liveAgentRunsInChat).
+    result = await answerFromCache(siteId, routing.agentIds, message, personaPrompt);
   } else if (agenticOrchestrationEnabled()) {
     // classifyIntent's own agentIds guess is discarded here — the agentic
     // loop does its own fresh, iterative, tool-based selection instead of
@@ -229,11 +267,16 @@ export async function answerQuestion({ siteId, conversationId, message, history,
 
   // A bare null answer is never acceptable — if synthesis genuinely had
   // nothing to work with, say so plainly instead of returning nothing.
-  const answer = result.narrative || await honestGapMessage(siteId, result.ranAgentIds);
+  const answer = result.narrative
+    ? result.narrative + freshnessNote(result.dataAsOf)
+    : await honestGapMessage(siteId, result.ranAgentIds);
   const followUps = await suggestFollowUps(message, answer);
   const citedFindingIds = result.findings.slice(0, 5).map((f) => f.id);
 
-  await saveMessage(conversationId, 'assistant', answer, { citedFindingIds, followUps, agentIdsUsed: result.ranAgentIds });
+  const [, grounded] = await Promise.all([
+    saveMessage(conversationId, 'assistant', answer, { citedFindingIds, followUps, agentIdsUsed: result.ranAgentIds }),
+    groundedPromise,
+  ]);
 
   // Same real-actionability check Action Center's own Findings List uses
   // (buildRecommendations already excludes already-implemented findings and
@@ -241,7 +284,6 @@ export async function answerQuestion({ siteId, conversationId, message, history,
   // finding only gets a "Generate Draft" affordance in chat when it's a
   // finding that Action Center itself would let you generate a draft for,
   // never a guess at what might be actionable.
-  const grounded = await buildRecommendations(siteId);
   const groundedById = new Map(grounded.items.map((item) => [item.id, item]));
 
   return {

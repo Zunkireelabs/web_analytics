@@ -142,7 +142,7 @@ export async function runKeywordScheduleForSite(siteId, site, { now = new Date()
   const { createActionCenterRecommendationForGap } = await import('./analyst-seo-mapping.js');
   const create = deps.createRecommendation || createActionCenterRecommendationForGap;
   const phase = cyclePhase({ growthStartedAt: s.growth_started_at, lastCycleAt: s.keyword_cycle_last_at, now });
-  const out = { siteId, ...phase, queued: 0, carried: 0, deferred: 0, booked: 0 };
+  const out = { siteId, ...phase, queued: 0, carried: 0, deferred: 0, booked: 0, merged: 0 };
 
   const queueOne = async (g, cycle) => {
     try {
@@ -176,7 +176,24 @@ export async function runKeywordScheduleForSite(siteId, site, { now = new Date()
     out.carried = carry.length; out.deferred = later.length;
     if (!dryRun) {
       for (const g of later) await query(`UPDATE keyword_gaps SET schedule_batch = $3 WHERE site_id = $1 AND id = $2`, [siteId, g.id, cycle + 1]);
-      for (const g of toShip) await queueOne(g, cycle);
+      // Keywords Google treats as the SAME search (their top-10 results are almost the same pages) get ONE post, not one each: writing
+      // both would put two near-identical pages up against each other. Lazy import, like the rest of this file; never blocks the
+      // schedule (any failure queues everything exactly as before). See keyword-serp-merge.js for the rules, KEYWORD_SERP_MERGE=off to skip.
+      let queueList = toShip;
+      try {
+        const { planSerpMerges, serpMergeEnabled } = deps.serpMerge || await import('./keyword-serp-merge.js');
+        if (serpMergeEnabled() && toShip.length > 1) {
+          const plan = await planSerpMerges({ siteId, site: s, keywords: toShip, chosenSources: CHOSEN_SOURCES });
+          for (const m of plan.merges) {
+            await updateKeywordGapStatus(siteId, m.keywordId, 'rejected');
+            await query(`UPDATE keyword_gaps SET followup_note = $3 WHERE site_id = $1 AND id = $2`, [siteId, m.keywordId, m.note]);
+          }
+          const gone = new Set(plan.merges.map((m) => m.keywordId));
+          queueList = toShip.filter((g) => !gone.has(g.id));
+          out.merged = plan.merges.length;
+        }
+      } catch (err) { console.error(`[keyword-schedule] site ${siteId} SERP merge skipped:`, err.message); }
+      for (const g of queueList) await queueOne(g, cycle);
       await query(`UPDATE sites SET keyword_cycle_count = $2, keyword_cycle_last_at = $3 WHERE id = $1`, [siteId, cycle, now]);
     } else out.queued = toShip.length;
   }

@@ -29,7 +29,7 @@ import {
 } from '../integrations/google-connect.js';
 import { encryptSecret, secretBoxConfigured } from '../lib/secret-box.js';
 import { getProjectGoogleAuth, forgetProjectGoogleAuth } from '../auth/project-google.js';
-import { githubConnectConfigured, newGithubNonce, redirectUriFor as githubRedirectUriFor, buildAuthorizeUrl as buildGithubAuthorizeUrl, exchangeCode as exchangeGithubCode, listUserRepos, GithubConnectError, listRepoBranches, connectAppCredentials, CONNECT_KEY_ENV } from '../github/user-auth.js';
+import { githubConnectConfigured, newGithubNonce, redirectUriFor as githubRedirectUriFor, buildAuthorizeUrl as buildGithubAuthorizeUrl, exchangeCode as exchangeGithubCode, listUserRepos, GithubConnectError, listRepoBranches, connectAppCredentials, CONNECT_KEY_ENV, describeRepoReadFailure } from '../github/user-auth.js';
 import { buildBusinessConsentUrl, exchangeBusinessCode, listBusinessLocations } from '../integrations/gbp-locations.js';
 import { updateSiteConnection, updateSiteRepoConfig, updateSiteAutoRemediation, setSiteBusinessProfile, getSiteBusinessProfile } from '../db.js';
 
@@ -334,14 +334,20 @@ router.get('/github/callback', async (req, res) => {
 // client sees only what they allowed and staff see their own account, never another client's.
 router.get('/projects/:siteId/connect/github/mine', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
   try {
+    // A server with no GitHub App sign-in settings cannot connect anyone, whatever the person does. Say so, instead of looking like their sign-in failed.
+    if (!githubConnectConfigured()) {
+      return res.json({ signedIn: false, repos: [], configured: false, error: 'GitHub sign-in is not set up on this server (it needs the GitHub App client ID and secret), so "Connect with GitHub" cannot work here.' });
+    }
     const g = githubSessionFor(req);
-    if (!g) return res.json({ signedIn: false, repos: [] });
+    if (!g) return res.json({ signedIn: false, repos: [], configured: true });
     try {
       const { login, repos } = await listUserRepos(g.token);
-      res.json({ signedIn: true, login, repos, installUrl: process.env.GITHUB_APP_SLUG ? `https://github.com/apps/${process.env.GITHUB_APP_SLUG}/installations/new` : null });
+      res.json({ signedIn: true, configured: true, login, repos, installUrl: process.env.GITHUB_APP_SLUG ? `https://github.com/apps/${process.env.GITHUB_APP_SLUG}/installations/new` : null });
     } catch (err) {
-      delete req.session.githubUser; // an expired or revoked token: ask them to sign in again
-      res.json({ signedIn: false, repos: [], error: 'Your GitHub sign-in has expired. Connect again.' });
+      const why = describeRepoReadFailure(err);
+      console.warn(`[projects] GitHub repository list failed for site ${req.projectId}: ${err instanceof GithubConnectError ? `${err.code}${err.status ? ` (${err.status})` : ''}` : 'unexpected error'}; ${why.dropSession ? 'sign-in dropped' : 'sign-in kept'}.`);
+      if (why.dropSession) delete req.session.githubUser; // only an expired or revoked token: ask them to sign in again
+      res.json({ signedIn: false, repos: [], configured: true, error: why.message });
     }
   } catch (e) { next(e); }
 });

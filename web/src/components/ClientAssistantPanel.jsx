@@ -53,6 +53,9 @@ export default function ClientAssistantPanel({ open, onClose, raise = [], onRais
   const [error, setError] = useState(null);
   const [actions, setActions] = useState([]);
   const [generatingId, setGeneratingId] = useState(null);
+  // What it is looking up right now ("Checking your pull requests…"), shown until the first words arrive.
+  const [status, setStatus] = useState(null);
+  const abortRef = useRef(null);
   const [siteName, setSiteName] = useState(null);
   // The one-tap questions (top 15 in four groups, from get_suggested_questions). The fallback is the old short list.
   const [questions, setQuestions] = useState(null);
@@ -66,7 +69,12 @@ export default function ClientAssistantPanel({ open, onClose, raise = [], onRais
   // regardless, and ask_growth_copilot always starts a new
   // copilot_conversations row when no conversationId is passed, so there is
   // no stale-transcript risk in starting clean per open.
-  useEffect(() => { if (!open) { setMessages([]); setConversationId(null); setError(null); setActions([]); setMoreOpen(false); } }, [open]);
+  useEffect(() => {
+    if (!open) {
+      abortRef.current?.abort(); // closing the chat stops the answer being written
+      setMessages([]); setConversationId(null); setError(null); setActions([]); setMoreOpen(false); setStatus(null); setAsking(false);
+    }
+  }, [open]);
 
   useEffect(() => {
     if (!open || questions) return;
@@ -103,9 +111,10 @@ export default function ClientAssistantPanel({ open, onClose, raise = [], onRais
     }
   }, [open, raise]);
 
+  // Follows the words as they arrive; a smooth scroll on every piece would lag behind and jitter.
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages, asking]);
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: asking ? 'auto' : 'smooth' });
+  }, [messages, asking, status]);
 
   const ask = async (question) => {
     const text = (question ?? input).trim();
@@ -114,20 +123,61 @@ export default function ClientAssistantPanel({ open, onClose, raise = [], onRais
     setMoreOpen(false);
     setError(null);
     setActions([]);
+    setStatus(null);
     setMessages((m) => [...m, { role: 'user', content: text }]);
     setAsking(true);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    // The answer is one growing assistant message: the first piece creates it, later pieces extend it.
+    const extend = (piece) => setMessages((m) => {
+      const last = m[m.length - 1];
+      if (last?.role === 'assistant' && last.streaming) return [...m.slice(0, -1), { ...last, content: last.content + piece }];
+      return [...m, { role: 'assistant', content: piece, streaming: true, citedFindings: [] }];
+    });
+    const settle = (patch) => setMessages((m) => {
+      const last = m[m.length - 1];
+      if (last?.role === 'assistant' && last.streaming) return [...m.slice(0, -1), { ...last, ...patch, streaming: false }];
+      return patch.content != null ? [...m, { role: 'assistant', ...patch, streaming: false }] : m;
+    });
+    let shown = false;
     try {
-      const res = await api.assistant.message(text, conversationId, siteId);
-      if (res.data?.conversationId) setConversationId(res.data.conversationId);
-      setMessages((m) => [...m, { role: 'assistant', content: res.message, citedFindings: res.data?.citedFindings || [] }]);
-      setActions(res.actions || []);
+      const final = await api.assistant.stream(text, conversationId, {
+        signal: controller.signal,
+        onStatus: setStatus,
+        onDelta: (piece) => { shown = true; setStatus(null); extend(piece); },
+      });
+      if (final.data?.conversationId) setConversationId(final.data.conversationId);
+      // The final message is the authoritative whole answer; it replaces what was assembled from the pieces.
+      settle({ content: final.message, citedFindings: final.data?.citedFindings || [] });
+      setActions(final.actions || []);
       // The person answered in conversation and the agent merged something: the shipping question and the waiting list are stale now.
-      if (res.data?.merged) { ship?.reload?.(); onResolved?.(); }
+      if (final.data?.merged) { ship?.reload?.(); onResolved?.(); }
     } catch (e) {
-      setError(e.message || 'Something went wrong — try again.');
-      setMessages((m) => m.slice(0, -1));
+      if (e?.name === 'AbortError') return;
+      if (e?.noStream && !shown) {
+        // An older server without the streaming route: the same question through the original call.
+        try {
+          const res = await api.assistant.message(text, conversationId);
+          if (res.data?.conversationId) setConversationId(res.data.conversationId);
+          settle({ content: res.message, citedFindings: res.data?.citedFindings || [] });
+          setActions(res.actions || []);
+        } catch (e2) {
+          setError(e2.message || 'Something went wrong — try again.');
+          setMessages((m) => m.slice(0, -1));
+        }
+      } else if (e?.partial) {
+        // Some words were already shown: keep them, and say the rest did not arrive.
+        settle({});
+        setError(e.message || 'The answer was cut off — try again.');
+      } else {
+        setError(e.message || 'Something went wrong — try again.');
+        setMessages((m) => m.slice(0, -1));
+      }
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setAsking(false);
+      setStatus(null);
     }
   };
 
@@ -218,12 +268,15 @@ export default function ClientAssistantPanel({ open, onClose, raise = [], onRais
 
           {messages.map((m, i) => <Bubble key={i} msg={m} onGenerateDraft={generateFromChat} generatingId={generatingId} />)}
 
-          {asking && (
-            <div className="flex justify-start">
-              <div className="flex gap-1.5 items-center py-2">
-                <span className="w-1.5 h-1.5 rounded-full bg-faint-2 animate-bounce" style={{ animationDelay: '0ms' }} />
-                <span className="w-1.5 h-1.5 rounded-full bg-faint-2 animate-bounce" style={{ animationDelay: '120ms' }} />
-                <span className="w-1.5 h-1.5 rounded-full bg-faint-2 animate-bounce" style={{ animationDelay: '240ms' }} />
+          {asking && (status || !messages[messages.length - 1]?.streaming) && (
+            <div className="flex justify-start" role="status" aria-live="polite">
+              <div className="flex gap-2 items-center py-2">
+                <span className="flex gap-1.5 items-center">
+                  <span className="w-1.5 h-1.5 rounded-full bg-faint-2 animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="w-1.5 h-1.5 rounded-full bg-faint-2 animate-bounce" style={{ animationDelay: '120ms' }} />
+                  <span className="w-1.5 h-1.5 rounded-full bg-faint-2 animate-bounce" style={{ animationDelay: '240ms' }} />
+                </span>
+                {status && <span className="text-xs text-faint animate-fade-in">{status}</span>}
               </div>
             </div>
           )}

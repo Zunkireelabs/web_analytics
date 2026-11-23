@@ -1,6 +1,7 @@
-import { getQueryPageMetrics } from '../../store/read.js';
+import { getQueryPageMetrics, getSiteById } from '../../store/read.js';
 import { getKeywordGaps } from '../../store/data-analyst.js';
-import { ctrAtPosition, TARGET_POSITION, opportunityScore, estimatedTrafficGain, TRAFFIC_GAIN_NOTE } from './opportunity-scoring.js';
+import { TARGET_POSITION, opportunityScore, estimatedTrafficGain } from './opportunity-scoring.js';
+import { buildSiteCtrCurve, INDUSTRY_CTR_CURVE, curveLabel, trafficGainNote } from './site-ctr-curve.js';
 
 // Website-wide Growth Opportunities (Analyst page Phase 4) — the canonical
 // answer to "where can this site grow next?", built ENTIRELY from data this
@@ -69,11 +70,15 @@ function baseOpportunity(type, { query = null, cluster = null, page, avgPosition
   };
 }
 
-function quickWins(recent) {
+// `curve` is this site's own CTR-by-position (site-ctr-curve.js), so "under-
+// clicked" means under-clicked relative to what THIS site normally earns at
+// that rank; INDUSTRY_CTR_CURVE (the old fixed curve) when there's no data.
+export function quickWins(recent, curve = INDUSTRY_CTR_CURVE) {
   return recent
     .filter((r) => r.avgPosition != null && r.avgPosition <= QUICK_WIN_MAX_POSITION && r.impressions >= MIN_IMPRESSIONS)
     .map((r) => {
-      const expectedCtr = ctrAtPosition(r.avgPosition);
+      const expectedCtr = curve.at(r.avgPosition);
+      const ctrSource = curve.sourceAt(r.avgPosition);
       const underperforming = r.ctr < expectedCtr * QUICK_WIN_CTR_RATIO;
       if (!underperforming) return null;
       const gain = estimatedTrafficGain(r.impressions, r.ctr, expectedCtr);
@@ -81,7 +86,9 @@ function quickWins(recent) {
         ...baseOpportunity('quick-win', r),
         opportunityScore: gain,
         severity: gain >= 20 ? 'high' : gain >= 5 ? 'medium' : 'low',
-        reason: `Ranks #${r.avgPosition.toFixed(1)} with ${r.impressions} impressions, but its ${(r.ctr * 100).toFixed(1)}% click-through rate is well below the ~${(expectedCtr * 100).toFixed(1)}% typical for that position.`,
+        reason: `Ranks #${r.avgPosition.toFixed(1)} with ${r.impressions} impressions, but its ${(r.ctr * 100).toFixed(1)}% click-through rate is well below the ~${(expectedCtr * 100).toFixed(1)}% expected from ${curveLabel(ctrSource)}.`,
+        expectedCtr,
+        expectedCtrSource: ctrSource,
         recommendedAction: 'Improve the title and meta description to close the CTR gap.',
       };
     })
@@ -186,16 +193,22 @@ export async function buildGrowthOpportunities(siteId, { end } = {}) {
   const priorEnd = daysAgo(endDate, RECENT_WINDOW_DAYS + 1);
   const priorStart = daysAgo(endDate, RECENT_WINDOW_DAYS + PRIOR_WINDOW_DAYS);
 
-  const [recentRaw, priorRaw, gaps] = await Promise.all([
+  const [recentRaw, priorRaw, gaps, site] = await Promise.all([
     getQueryPageMetrics(siteId, recentStart, endDate, { minImpressions: MIN_IMPRESSIONS }),
     getQueryPageMetrics(siteId, priorStart, priorEnd, { minImpressions: 1 }),
     getKeywordGaps(siteId, 'pending_review').catch(() => []),
+    // Only the name is needed (branded-query exclusion in the CTR curve); a
+    // failed lookup just means branded queries aren't excluded.
+    getSiteById(siteId).catch(() => null),
   ]);
   const recent = bestPagePerQuery(recentRaw);
+  // Built from every (query, page) row in the recent window, not just the
+  // best page per query, so the curve reflects all of the site's real clicks.
+  const ctrCurve = buildSiteCtrCurve(recentRaw, { siteName: site?.name });
   const prior = bestPagePerQuery(priorRaw);
 
   const byType = {
-    'quick-win': quickWins(recent),
+    'quick-win': quickWins(recent, ctrCurve),
     'page1-opportunity': page1Opportunities(recent),
     declining: decliningOpportunities(recent, prior),
     'content-expansion': contentExpansionOpportunities(recent),
@@ -222,7 +235,7 @@ export async function buildGrowthOpportunities(siteId, { end } = {}) {
     // top-to-bottom without having to know that opportunityScore is on a
     // different scale per type (see rankOpportunitiesUnified's own comment).
     rankedQueue: rankOpportunitiesUnified(all),
-    assumptions: { trafficGainNote: TRAFFIC_GAIN_NOTE, targetPosition: TARGET_POSITION },
+    assumptions: { trafficGainNote: trafficGainNote(ctrCurve), targetPosition: TARGET_POSITION, ctrCurve: ctrCurve.summary },
     notes: {
       'ai-visibility': 'Not produced — AI Recommendation Rate has no per-query/per-page data to attribute an opportunity to.',
     },

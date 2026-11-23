@@ -61,6 +61,8 @@ const CLASSIFIED = {
   metrics_catalog: { cls: 'B' }, metric_dimension_support: { cls: 'B', via: 'metrics_catalog' },
   // AI crawler vendors' published IP lists (migration 250): public vendor data, one copy for every project, no project data.
   ai_crawler_ip_lists: { cls: 'B' },
+  // Google result pages cached by keyword and market (migration 265): public search results, one copy for every project, no project data.
+  serp_cache: { cls: 'B' },
   // Roots
   workspaces: { cls: 'ROOT', via: 'sites' }, clients: { cls: 'ROOT' },
   // NEEDS A DECISION (docs/architecture/p1-isolation-audit.md section 1.4): listed so a change in their status is noticed.

@@ -16,6 +16,19 @@ export function stageBranchOf(site) {
   return stage && stage !== defaultBranchName(site) ? stage : null;
 }
 
+// What GitHub says about the PR's own checks, from the mergeable state the platform stores on each draft (drafts.pr_mergeable_state). A PR whose
+// checks fail must never be presented as "please merge": superrank-web PR #15 sat as ready while its build was red ("duplicated mapping key").
+//   failing   GitHub reports unstable (a check failed), blocked, or dirty (conflicts): merging would break or stall the site
+//   unchecked no state recorded yet, or GitHub has not computed it: the result is not known, and unknown is not green
+//   passing   clean (or has_hooks): every check passed
+// `behind` is a branch out of date with its base, not a failed check; it reads as passing here and GitHub itself says what to do.
+export function buildStateOf(drafts = []) {
+  const states = drafts.map((d) => String(d.pr_mergeable_state || '').toLowerCase());
+  if (states.some((x) => ['unstable', 'blocked', 'dirty'].includes(x))) return 'failing';
+  if (!states.length || states.some((x) => !x || x === 'unknown')) return 'unchecked';
+  return 'passing';
+}
+
 export function shipStep({ drafts = [], site, promotions = [] } = {}) {
   const stage = stageBranchOf(site);
   const by = (fn) => drafts.filter(fn);
@@ -35,7 +48,7 @@ export function shipStep({ drafts = [], site, promotions = [] } = {}) {
   if (toStage.length) return { step: 'merge_stage', count: toStage.length, prNumber: toStage[0].pr_number, prUrl: toStage[0].pr_url || null, hasStage: true };
   if (onStage.length && !promo) return { step: 'open_main', count: onStage.length, hasStage: true };
   if (promo) return { step: 'waiting', count: onStage.length || 1, prNumber: promo.promotion_pr_number, prUrl: promo.promotion_pr_url || null, hasStage: true };
-  if (toMain.length) return { step: 'waiting', count: toMain.length, prNumber: toMain[0].pr_number, prUrl: toMain[0].pr_url || null, hasStage: Boolean(stage) };
+  if (toMain.length) return { step: 'waiting', count: toMain.length, prNumber: toMain[0].pr_number, prUrl: toMain[0].pr_url || null, hasStage: Boolean(stage), build: buildStateOf(toMain) };
   return { step: null, count: 0, hasStage: Boolean(stage) };
 }
 

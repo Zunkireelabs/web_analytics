@@ -4,6 +4,7 @@ import { pickCannibalizationWinner } from './lib/cannibalization-decision.js';
 import { priorPeriod } from '../util/dates.js';
 import { callLLM } from '../llm.js';
 import { assessWindows, clipWindowToLag, GSC_LAG_DAYS } from './lib/window-coverage.js';
+import { isBrandedQuery } from './lib/branded-query.js';
 
 export const meta = {
   id: 'query-intelligence',
@@ -14,29 +15,9 @@ export const meta = {
   requiresCapabilities: ['gsc'],
 };
 
-// A branded query (the site's own name) legitimately shows many of the
-// site's own pages clustered at position ~1 — real Google sitelinks
-// behavior for a brand search, not cannibalization. Filtered out using the
-// site's own real `name`, never a guessed brand list.
-export function isBrandedQuery(query, siteName) {
-  if (!siteName) return false;
-  const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  const normalizedName = normalize(siteName);
-  if (!normalizedName) return false;
-  // Padded-space containment on the already-tokenized string, not a bare
-  // substring check — a bare .includes() false-negatives real cannibalization
-  // for a short/generic brand name (e.g. site "Go" would suppress every
-  // legitimate "golang" query as if it were a branded self-match).
-  if (` ${normalize(query)} `.includes(` ${normalizedName} `)) return true;
-  // Also a brand query when every token of the query is a token of the site
-  // name: a site called "Admizz Education" is searched as just "admizz", and
-  // that search legitimately shows several of its own pages as sitelinks.
-  // Subset (not overlap), so "education loan" does not count as branded just
-  // because it shares one generic word with the name.
-  const nameTokens = new Set(normalizedName.split(' '));
-  const queryTokens = normalize(query).split(' ').filter(Boolean);
-  return queryTokens.length > 0 && queryTokens.every((t) => nameTokens.has(t));
-}
+// isBrandedQuery now lives in lib/branded-query.js; re-exported so existing
+// callers/tests importing it from here still work.
+export { isBrandedQuery };
 
 // A losing page must hold at least this share of the query's clicks for the
 // pair to count as cannibalization: a page with 1 click out of 60 is not

@@ -15,6 +15,7 @@ import { buildDailyQueue } from './daily-queue.js';
 import { loadDeclines } from './decline-detection.js';
 import { listActionableAnalystEvidence } from '../../store/analyst-evidence.js';
 import { buildPageMetrics } from './growth-scoring.js';
+import { buildSiteCtrCurve } from './site-ctr-curve.js';
 import { loadIndustryMap } from '../../lib/industry-intelligence.js';
 import { loadGrowthStage } from '../../lib/growth-stage.js';
 import { classifyShipFailure, failureFamilyKey, FAILURE_KIND, SYSTEMIC_FAILURE_LIMIT, FAMILY_FAILURE_LIMIT, REFUSAL_FAMILY_LIMIT, REFUSAL_KIND, classifyRefusal, countsAgainstGenerator, refusalReasonOf, refusalFamilyKey } from './failure-policy.js';
@@ -460,19 +461,22 @@ export async function selectRemediationCandidates(site, siteId, { globalRemainin
   const metricsEnd = new Date();
   const metricsStart = new Date(metricsEnd.getTime() - 28 * 24 * 60 * 60 * 1000);
   const iso = (d) => d.toISOString().slice(0, 10);
-  const pageMetrics = await getQueryPageMetrics(siteId, iso(metricsStart), iso(metricsEnd), { minImpressions: 1 })
-    .then(buildPageMetrics)
+  const metricRows = await getQueryPageMetrics(siteId, iso(metricsStart), iso(metricsEnd), { minImpressions: 1 })
     .catch((err) => {
       console.warn(`[auto-remediation] ${clientLabel}: GSC metrics unavailable for scoring (${err.message}) — ranking on severity/breadth/confidence only.`);
-      return new Map();
+      return [];
     });
+  const pageMetrics = buildPageMetrics(metricRows);
+  // The ctr-gap bonus compares a page to this site's own CTR at its rank (site-ctr-curve.js), from the same rows; with no rows
+  // it is exactly the fixed industry curve, so a metrics failure changes nothing.
+  const ctrCurve = buildSiteCtrCurve(metricRows, { siteName: site?.name });
 
   // Industry knowledge (Phase 4): empty unless INDUSTRY_INTELLIGENCE_RANKING=on, and only validated, project-agnostic patterns
   // are ever scored (see growth-scoring.js industryScore). A load failure leaves ranking unchanged.
   const industryMap = await loadIndustryMap(siteId);
   // Where this project is in its 30 / 30 / ongoing growth programme; null (unchanged ranking) if the clock cannot be read.
   const growth = await loadGrowthStage(siteId);
-  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap, industryMap, growth, declines, analystBudget, analystFindingIds, baselineBudget: Math.max(0, analyticsBudget - spentToday) });
+  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, ctrCurve, learnedMap, industryMap, growth, declines, analystBudget, analystFindingIds, baselineBudget: Math.max(0, analyticsBudget - spentToday) });
   const budgeted = queue.map((item) => item.rec);
   const scoreById = new Map(queue.map((item) => [item.rec.id, item]));
   for (const note of selection.groupNotes) console.log(`[auto-remediation] ${clientLabel}: ${note}`);
@@ -1524,6 +1528,11 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
       // refusal, not a systemic fault — it must not trip the breaker.
       err.refusal = true;
       err.reason = 'page-design-integrity-failed';
+    } else if (/would not look like the rest of the page/.test(message)) {
+      // style-fidelity-gate.js (via backend.js): rendered into the real page, THIS block carries none of the page's typography. A per-item refusal,
+      // never a systemic fault, so it must not trip the breaker or quarantine the generator.
+      err.refusal = true;
+      err.reason = 'style-fidelity-failed';
     } else if (/uses classes this site only ever uses for its/.test(message)) {
       // design-drift.js's checkDesignIntegrityGate: THIS recommendation's
       // styled markup failed automated role verification (a confirmed

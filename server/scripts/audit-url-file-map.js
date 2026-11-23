@@ -2,16 +2,18 @@ import 'dotenv/config';
 import { pool, recordActionCenterConfigCheck } from '../db.js';
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { listConnectedSites } from '../job.js';
-import { resolveFile, resolveMarkers, resolveAdapter, resolveSiteRootFile, resolveAuthorAvatars } from '../implementers/lib/url-file-map.js';
+import { resolveFile, resolveActionFile, resolveMarkers, resolveAdapter, resolveSiteRootFile, resolveAuthorAvatars } from '../implementers/lib/url-file-map.js';
 import { parseSvgDimensions, classifyAvatarAspectGap } from '../implementers/lib/avatar-aspect-check.js';
 import { hasMarker, classifyMarkerGap, isHeadScopedField } from '../implementers/lib/marker-merge.js';
-import { hasHashMarker } from '../implementers/lib/hash-marker-merge.js';
+import { templateDrivenBodyBlock } from '../implementers/lib/action-scope.js';
+import { hasHashMarker, ensureHashMarker, locationsDroppingServerHeaders } from '../implementers/lib/hash-marker-merge.js';
 import { detectInsertionPoint, detectHeadRegion } from '../implementers/lib/structural-detect.js';
 import { resolveCapability, extensionOf } from '../implementers/lib/rendering-gate.js';
 import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
-import { getFileContent, getDefaultBranchSha } from '../github/client.js';
+import { getFileContent, getDefaultBranchSha, defaultBranchName, prTargetBranchName } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { findRelevantMemory } from '../agent-memory.js';
+import { scanRepoForTracking } from '../lib/repo-tracking-scan.js';
 import { fetchHtml } from '../agents/lib/page-content.js';
 import { probeMany } from '../agents/lib/live-probe.js';
 
@@ -55,7 +57,8 @@ const DETECTORS = { detectBody: detectInsertionPoint, detectHead: detectHeadRegi
 // `server {}` block it belongs, so it's the one marker this audit must
 // name explicitly rather than fold into a generic per-page count.
 //
-//   node server/scripts/audit-url-file-map.js --site-id <id>
+//   node server/scripts/audit-url-file-map.js --site-id <id> [--no-record]
+//   --no-record: read-only — do not write action_center_config_checked_at / gap_count.
 //
 // --all is accepted but not yet wired to real multi-site iteration — see
 // the note above main(). Structured now (auditSite() takes one siteId,
@@ -99,6 +102,75 @@ const NEW_CONTENT_ACTION_TYPES = [
 // loop, where it would incorrectly report "no file mapping" once per page.
 const DEFAULT_WINDOW_DAYS = 90;
 const PAGE_LIMIT = 300;
+
+// The file an action type will really read/write for a page: the mapping may route one action type to
+// a different file than the page file (a per-page <head> partial). Falls back to the page file.
+function fileForAction(site, pageUrl, actionType, pageFile) {
+  return resolveActionFile(site, pageUrl, actionType) || pageFile;
+}
+
+// Whether the site's own repository already loads Google tracking (GA4 ID, gtag loader, GTM container,
+// consent-gated or dynamic loaders like analytics.js — scanRepoForTracking reads the whole archive, not
+// just the layout). When it does, an analytics-install draft can only DUPLICATE it (double-counting, and
+// for a consent-gated site loading a tag before consent), so "install marker missing" is not a config gap
+// and the generator's own duplicate guard (analytics-install.js verifyCurrentState) dismisses it. A scan
+// that could not run says nothing either way — the caller keeps the normal marker check.
+function summarizeExistingTracking(scan) {
+  if (!scan?.ok) return null;
+  const hits = scan.refs.flatMap((r) => r.hits.map((h) => ({ ...h, ref: r.ref })));
+  if (!hits.length) return null;
+  return {
+    files: [...new Set(hits.map((h) => `${h.ref}:${h.path}`))].slice(0, 6),
+    ga4: [...new Set(hits.flatMap((h) => h.ga4))].slice(0, 4),
+    gtm: [...new Set(hits.flatMap((h) => h.gtm))].slice(0, 4),
+  };
+}
+
+// What the security-headers path would really do with this nginx file, using the SAME primitives the
+// implementer uses (backend.js computeSecurityHeadersMerge). The marker is NOT always hand-placed: the
+// engine auto-inserts it into the serving server block. It only refuses when nginx would not apply a
+// server-level header inside a location that sets its own add_header (`headers-not-inherited`) or when
+// there is no serving server block to place it in. Statuses:
+//   present       marker already there
+//   self-heals    auto-inserted at apply time and inherited everywhere — nothing to do
+//   blocked       the implementer REFUSES (headers-not-inherited): a genuine safety warning, not a config gap
+//   fatal         no serving server block to place a marker in (needs a human)
+function classifyNginxMarker(content) {
+  if (hasHashMarker(content, 'SECURITY-HEADERS')) return { status: 'present' };
+  const placed = ensureHashMarker(content, 'SECURITY-HEADERS');
+  if (!placed.ok) return { status: 'fatal', reason: placed.reason };
+  const dropped = locationsDroppingServerHeaders(content);
+  if (dropped.length) return { status: 'blocked', reason: 'headers-not-inherited', locations: dropped };
+  return { status: 'self-heals' };
+}
+
+// Net-new types whose renderer emits CODE (a TSX/JSX component) instead of Markdown when the target names a
+// `filename` (App Router directory-per-page). frontend.js returns contentFormat 'jsx' for these (blog-outline,
+// direct-answer, translation), and rendering-gate.js only checks Markdown capability for contentFormat
+// 'markdown' — so the gate never runs for them and a ".tsx recorded-not-markdown-safe" finding is a false
+// positive (Admizz). landing-page and the compliance pages have no code branch: they always render Markdown
+// + front matter, so their .tsx findings are real and must stay.
+const CODE_RENDERER_TYPES = new Set(['blog-outline', 'direct-answer', 'translation']);
+function targetRendersCode(actionType, target) {
+  return CODE_RENDERER_TYPES.has(actionType) && !!target?.filename && /^\.(tsx|jsx)$/i.test(String(target.extension || ''));
+}
+
+// A "fatal" marker gap on an action the recommendation pipeline ALREADY refuses before any draft exists is
+// not a gap a person must close: recommendation-gates.js drops/blocks it with templateDrivenBodyBlock (a page
+// that only hands a data object to a shared component has no markup an HTML edit can be located in). The audit
+// used to count these as fatal and sent people to hand-place markers that would never be used (Admizz: 123 of
+// the 196 rows). Same function, same inputs as the gate, so the two cannot drift. Adapter-routed rows never
+// reach this list. Anything the gate does NOT block stays fatal.
+function partitionPreDraftBlocked(rows, fileContentFor) {
+  const blocked = [];
+  const stillFatal = [];
+  for (const row of rows) {
+    const content = fileContentFor(row.filePath);
+    const reason = typeof content === 'string' ? templateDrivenBodyBlock(content, row.actionType, row.filePath) : null;
+    (reason ? blocked : stillFatal).push(reason ? { ...row, blockedReason: reason } : row);
+  }
+  return { blocked, stillFatal };
+}
 
 function parseArgs(argv) {
   const flags = {};
@@ -147,12 +219,38 @@ const OG_LIVE_CHECK_CONCURRENCY = 4;
 // rewrite the title/description of every page in the series.
 const PAGINATION_PATH_RE = /\/page\/\d+\/?$/;
 
+// Quote-aware: an attribute value in "..." may contain an apostrophe (and in '...' a double
+// quote) without ending the value — `content="Let's talk"` must read as "Let's talk", not "Let".
+// The tag matcher is quote-aware too, so a `>` inside a value cannot cut the tag short. Attribute
+// order is irrelevant (content may precede property).
+const META_TAG_RE = /<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi;
+const ATTR_RE = /([^\s"'<>\/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
+
+function parseTagAttrs(tag) {
+  const attrs = {};
+  ATTR_RE.lastIndex = 0;
+  let m;
+  while ((m = ATTR_RE.exec(tag))) attrs[m[1].toLowerCase()] = m[2] ?? m[3] ?? m[4] ?? '';
+  return attrs;
+}
+
+function decodeBasicEntities(v) {
+  return v
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
 function extractMetaContent(html, property) {
-  const re = new RegExp(`<meta[^>]+property=["']${property}["'][^>]*>`, 'i');
-  const tag = re.exec(html)?.[0];
-  if (!tag) return null;
-  const content = /content=["']([^"']*)["']/i.exec(tag)?.[1];
-  return content && content.trim() ? content.trim() : null;
+  const want = String(property).toLowerCase();
+  for (const tag of String(html || '').match(META_TAG_RE) || []) {
+    const a = parseTagAttrs(tag);
+    if ((a.property || '').toLowerCase() !== want) continue;
+    const content = decodeBasicEntities(a.content ?? '').trim();
+    return content || null;
+  }
+  return null;
 }
 
 // Presence alone is a weak signal — a tag can exist and be non-empty while
@@ -253,7 +351,7 @@ function findHeadCandidateFrontMatterFields(fileContent) {
 // after url_file_map is set, instead of relying on the operator to remember
 // a separate `npm run audit-url-file-map` step (the exact class of gap this
 // whole script exists to catch — see the module comment above).
-export async function auditSite(siteId) {
+export async function auditSite(siteId, { record = true } = {}) {
   const site = await getSiteById(siteId);
   if (!site) { console.log(`Site #${siteId}: not found — skipping.`); return; }
   if (!site.repo_owner || !site.repo_name) {
@@ -323,6 +421,11 @@ export async function auditSite(siteId) {
 
   for (const page of pageUrls) {
     const filePath = resolveFile(site, page);
+    // Files this page's actions will really read. resolveActionFile is what the implementer itself
+    // uses (backend.js): a mapping may name a DIFFERENT file for one action type — e.g. MOBILISE keeps
+    // each page's <head> tags in a heads/*.njk partial via placements[open-graph].file — and checking
+    // the page file instead reported a marker as missing from a file the implementer never writes to.
+    const filesToRead = new Set(filePath ? [filePath] : []);
 
     for (const actionType of ACTION_TYPES) {
       const adapterConfig = resolveAdapter(site, page, actionType);
@@ -339,8 +442,10 @@ export async function auditSite(siteId) {
       const markers = resolveMarkers(site, page, actionType);
       if (!markers) { noMarkers[actionType].push(page); continue; }
 
+      const actionFile = fileForAction(site, page, actionType, filePath);
+      filesToRead.add(actionFile);
       for (const [markerField, markerName] of Object.entries(markers)) {
-        markersToCheck.push({ page, actionType, filePath, markerField, markerName });
+        markersToCheck.push({ page, actionType, filePath: actionFile, markerField, markerName });
       }
     }
 
@@ -348,13 +453,14 @@ export async function auditSite(siteId) {
     // pages/action types) — confirms a configured path isn't stale/typo'd,
     // and its real content is what the marker-presence check below runs
     // against, without hammering the API once per (page, actionType) combo.
-    if (filePath && !fileCache.has(filePath)) {
+    for (const readPath of filesToRead) {
+      if (fileCache.has(readPath)) continue;
       try {
-        const file = await getFileContent(site, filePath, baseBranch(site));
-        fileCache.set(filePath, file ? { content: file.content } : false);
+        const file = await getFileContent(site, readPath, baseBranch(site));
+        fileCache.set(readPath, file ? { content: file.content } : false);
       } catch (err) {
-        fileCache.set(filePath, 'error');
-        console.warn(`  (could not check ${filePath}: ${err.message})`);
+        fileCache.set(readPath, 'error');
+        console.warn(`  (could not check ${readPath}: ${err.message})`);
       }
     }
   }
@@ -375,7 +481,11 @@ export async function auditSite(siteId) {
     ...m, gap: classifyMarkerGap(m.markerField, m.filePath, fileCache.get(m.filePath).content, DETECTORS),
   }));
   const markersSelfHealing = markersMissing.filter((m) => m.gap === 'self-heals');
-  let markersFatal = markersMissing.filter((m) => m.gap !== 'self-heals');
+  const fatalCandidates = markersMissing.filter((m) => m.gap !== 'self-heals');
+  const { blocked: markersPreDraftBlocked, stillFatal } = partitionPreDraftBlocked(
+    fatalCandidates, (path) => { const c = fileCache.get(path); return c && c !== 'error' ? c.content : null; },
+  );
+  let markersFatal = stillFatal;
 
   // See verifyLiveOpenGraph's own comment above for why this exists: a
   // `fatal-no-head-region` verdict on openGraph specifically can't be
@@ -438,6 +548,14 @@ export async function auditSite(siteId) {
     console.log(`  ${page} -> ${filePath}`);
   }
 
+  console.log(`\n-- MARKERS MISSING, BUT ALREADY BLOCKED BEFORE ANY DRAFT (${markersPreDraftBlocked.length} rows in ${new Set(markersPreDraftBlocked.map((m) => m.filePath)).size} file(s)) -- (unsupported by design: the page only hands a data object to a shared component, so recommendation-gates.js refuses these actions up front. Not a gap to hand-fix; a marker here would never be used)`);
+  const blockedByFile = new Map();
+  for (const m of markersPreDraftBlocked) {
+    if (!blockedByFile.has(m.filePath)) blockedByFile.set(m.filePath, new Set());
+    blockedByFile.get(m.filePath).add(m.actionType);
+  }
+  for (const [filePath, types] of blockedByFile) console.log(`  ${filePath} [${[...types].join(', ')}]`);
+
   console.log(`\n-- MARKERS MISSING, FATAL (need a one-time human-placed anchor before any draft for this field can apply) (${markersFatal.length}) --`);
   const headCandidateCache = new Map(); // filePath -> field names, computed once per file
   for (const { page, actionType, filePath, markerField, markerName, gap } of markersFatal) {
@@ -473,6 +591,7 @@ export async function auditSite(siteId) {
   const renderCapabilityGaps = []; // { actionType, extension, reason }
   for (const [actionType, target] of Object.entries(newContentTargets)) {
     if (!target?.extension) continue;
+    if (targetRendersCode(actionType, target)) continue; // code renderer: the Markdown gate never applies (see targetRendersCode)
     const syntheticPath = `${target.dir || ''}/example${target.extension}`;
     const { caps, capability } = resolveCapability(site, { path: syntheticPath, actionType });
     if (!caps) {
@@ -556,8 +675,17 @@ export async function auditSite(siteId) {
       // convention (see backend.js's applySecurityHeaders/hash-marker-merge.js)
       // — hasMarker() here always reports MISSING even when the real,
       // apply-path-relevant marker is present.
-      nginxMarkerOk = !!file && hasHashMarker(file.content, 'SECURITY-HEADERS');
-      console.log(`\n-- NGINX SECURITY-HEADERS MARKER (${nginxPath}) -- ${nginxMarkerOk ? 'present' : 'MISSING (fatal — must be hand-placed; see generators/security-headers.js)'}`);
+      const nginx = file ? classifyNginxMarker(file.content) : { status: 'fatal', reason: 'file-not-found' };
+      // Only a marker the engine genuinely cannot place counts as a gap. `self-heals` is created at apply
+      // time; `blocked` is an intentional safety refusal (reported loudly, but nothing to configure).
+      nginxMarkerOk = nginx.status === 'fatal' ? false : true;
+      const line = {
+        present: 'present',
+        'self-heals': 'marker missing but self-healing (the implementer inserts it into the serving server block at apply time)',
+        blocked: `marker missing; a security-headers draft would be REFUSED (${nginx.reason}): ${nginx.locations.slice(0, 4).join(', ')} set their own add_header, so nginx would not inherit server-level headers there. Not a config gap — restructure those locations first, or leave headers as they are if the required headers are already served`,
+        fatal: `MISSING (fatal: ${nginx.reason} — no serving server { } block to place it in)`,
+      }[nginx.status];
+      console.log(`\n-- NGINX SECURITY-HEADERS MARKER (${nginxPath}) -- ${line}`);
     } catch (err) {
       console.warn(`\n-- NGINX SECURITY-HEADERS MARKER (${nginxPath}) -- could not check: ${err.message}`);
     }
@@ -570,7 +698,13 @@ export async function auditSite(siteId) {
   // above for why this can't just be another entry in that loop.
   const layoutPath = resolveSiteRootFile(site, 'layoutTemplate');
   let analyticsInstallGap = null; // null = nothing to report
-  if (!layoutPath) {
+  let existingTracking = null;
+  try {
+    existingTracking = summarizeExistingTracking(await scanRepoForTracking(site, [defaultBranchName(site), prTargetBranchName(site)]));
+  } catch { existingTracking = null; } // an unreadable repo never counts as "already installed"
+  if (existingTracking) {
+    console.log(`\n-- ANALYTICS-INSTALL (sitewide) -- NOT APPLICABLE: the repository already loads Google tracking (${existingTracking.files.join(', ')}${existingTracking.ga4.length ? `; GA4 ${existingTracking.ga4.join(', ')}` : ''}${existingTracking.gtm.length ? `; GTM ${existingTracking.gtm.join(', ')}` : ''}). A second install would double-count and could bypass consent; an analytics-install recommendation is dismissed by the duplicate guard, so no install marker is needed.`);
+  } else if (!layoutPath) {
     analyticsInstallGap = 'no-file-mapping';
     console.log('\n-- ANALYTICS-INSTALL (sitewide) -- url_file_map.siteRoot.layoutTemplate not configured (fatal — needed before this can ever apply).');
   } else {
@@ -623,7 +757,10 @@ export async function auditSite(siteId) {
     + renderCapabilityGaps.length
     + avatarAspectFatal.length
     + ACTION_TYPES.reduce((sum, t) => sum + noMarkers[t].length, 0);
-  await recordActionCenterConfigCheck(siteId, gapCount);
+  // A read-only run (--no-record) must leave the stored gap count and checked-at untouched: a partial or
+  // credential-less run would otherwise overwrite the last real audit with a misleading number.
+  if (record) await recordActionCenterConfigCheck(siteId, gapCount);
+  else console.log('(--no-record: the stored action-center gap count and checked-at were NOT updated.)');
 }
 
 async function main() {
@@ -661,7 +798,7 @@ async function main() {
     }
   }
 
-  for (const id of siteIds) await auditSite(id);
+  for (const id of siteIds) await auditSite(id, { record: flags['no-record'] !== true });
 
   await pool.end();
 }
@@ -680,4 +817,4 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   });
 }
 
-export const __testables = { looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent };
+export const __testables = { partitionPreDraftBlocked, targetRendersCode, classifyNginxMarker, summarizeExistingTracking, fileForAction, looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent };

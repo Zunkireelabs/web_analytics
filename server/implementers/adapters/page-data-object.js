@@ -45,6 +45,15 @@ export const meta = {
 };
 
 const DATA_PROP_PATTERN = /<[A-Za-z][\w.]*\s+[^>]*\bdata=\{(\w+)\}/;
+// The same hand-off written as a props spread: `return <GeneratedBlogPost {...post} />` (Admizz's generated blog and
+// answer pages). `data={x}` is always tried first. A spread is only followed when the identifier resolves to a LOCAL
+// `const <var> = {...}` in this file that carries a `faqItems` array — anything else is refused below, so an unrelated
+// `<Foo {...props} />` can never be mistaken for a content object.
+const SPREAD_PROP_PATTERN = /<[A-Z][\w.]*\s+[^>]*\{\.\.\.(\w+)\}/;
+// GeneratedBlogPost renders its visible FAQ only when `faqSchemaOnly` is not true; with it set, faqItems feed the
+// JSON-LD alone and the visible FAQ is written by hand in the body. This adapter's draft is rendered as a VISIBLE
+// FAQ (renderMode 'visible'), so writing into such a page would publish schema with no matching on-page FAQ.
+const FAQ_SCHEMA_ONLY_PATTERN = /["']?faqSchemaOnly["']?\s*:\s*true\b/;
 
 // Finds the `data={<var>}` prop passed to whichever component this page
 // returns, then the byte range of that var's own `const <var> = {...}`
@@ -53,8 +62,8 @@ const DATA_PROP_PATTERN = /<[A-Za-z][\w.]*\s+[^>]*\bdata=\{(\w+)\}/;
 // for `export const metadata`, just starting from a JSX prop instead of an
 // export name.
 function findPageDataObjectRange(content) {
-  const propMatch = DATA_PROP_PATTERN.exec(content);
-  if (!propMatch) return { range: null, varName: null, error: 'No JSX element in this file passes a `data={...}` prop to a template component.' };
+  const propMatch = DATA_PROP_PATTERN.exec(content) || SPREAD_PROP_PATTERN.exec(content);
+  if (!propMatch) return { range: null, varName: null, error: 'No JSX element in this file passes a `data={...}` prop (or a `{...obj}` spread) to a template component.' };
   const varName = propMatch[1];
 
   const declPattern = new RegExp(`const\\s+${varName}\\s*(?::\\s*[\\w.<>[\\], ]+)?\\s*=\\s*\\{`);
@@ -89,6 +98,9 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
 
   const { range: objRange, error: objError } = findPageDataObjectRange(file.content);
   if (!objRange) return { ok: false, reason: 'no-insertion-marker', error: `${filePath}: ${objError}` };
+  if (FAQ_SCHEMA_ONLY_PATTERN.test(file.content.slice(objRange.start, objRange.end))) {
+    return { ok: false, reason: 'faq-schema-only', error: `${filePath}: this page sets "faqSchemaOnly": true — its visible FAQ is hand-written in the body and faqItems only feed the FAQPage schema, so a visible-FAQ draft cannot be applied here. Edit it by hand.` };
+  }
 
   const arrayRange = findArrayFieldRange(file.content, objRange, 'faqItems');
   if (!arrayRange) {

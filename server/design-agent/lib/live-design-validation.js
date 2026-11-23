@@ -604,7 +604,27 @@ const INLINE_STYLE_RISK = /(^|;)\s*(color|background(?:-color)?|font(?:-family|-
  * or adds <style>/<script>. Anything the page already used is allowed — the
  * edit preserves the existing design; it does not extend it.
  */
-export function checkEditDesignIntegrity({ before = '', after = '', context = null, profile = null, componentTemplates = null, extraVocabulary = null, allowScripts = false }) {
+// The opposite failure to an unknown class: an added content BLOCK (FAQ, Q&A, expanded content, links list) whose outermost element carries no class at all,
+// on a site whose design is classes. Such a block passes every "adds nothing new" check and renders as bare browser text (MOBILISE /inside/, 2026-11-23:
+// `<dl><dt class="sec-title">` with no section or container classes). Reads only the text the edit inserted. Returns the bare tag name, or null.
+const BLOCK_CONTAINER = /<(div|section|dl|ul|ol|details|article|aside|table|form)\b([^>]*)>/i;
+export function findBareAddedBlock(before = '', after = '') {
+  // What the edit inserted = the middle of `after` once the text it shares with `before` at the start and at the end is taken away (works when the edit
+  // lands on a line that already has other content, as a marker's START/END comments usually do).
+  const b = String(before); const a = String(after);
+  let pre = 0; const max = Math.min(b.length, a.length);
+  while (pre < max && b[pre] === a[pre]) pre++;
+  // Back up to a tag boundary so a shared `<` (e.g. `</main>` against an inserted `<dl>`) is not cut off the inserted text.
+  pre = Math.max(a.lastIndexOf('>', pre - 1), a.lastIndexOf('\n', pre - 1)) + 1;
+  let suf = 0;
+  while (suf < max - pre && b[b.length - 1 - suf] === a[a.length - 1 - suf]) suf++;
+  const added = a.slice(pre, a.length - suf);
+  const m = BLOCK_CONTAINER.exec(added);
+  if (!m) return null;
+  return /\sclass(?:Name)?\s*=\s*("[^"]*\S[^"]*"|'[^']*\S[^']*'|\{[^}]*\S[^}]*\})/.test(m[2]) ? null : m[1].toLowerCase();
+}
+
+export function checkEditDesignIntegrity({ before = '', after = '', context = null, profile = null, componentTemplates = null, extraVocabulary = null, allowScripts = false, blockEdit = false }) {
   const allowed = new Set([
     ...extractClassesFromHtml(before),
     ...(context?.vocabulary || []),
@@ -613,6 +633,10 @@ export function checkEditDesignIntegrity({ before = '', after = '', context = nu
     ...templateVocabulary(componentTemplates),
   ]);
   const issues = [];
+  if (blockEdit && (profile?.pages || []).length) {
+    const bare = findBareAddedBlock(before, after);
+    if (bare) issues.push({ type: 'unstyled-block', detail: `The block this edit adds starts with a bare <${bare}> that carries no class, so it would show as unstyled text; the site's own blocks are styled by classes.` });
+  }
   const added = [...extractClassesFromHtml(after)].filter((c) => !allowed.has(c));
   if (added.length) issues.push({ type: 'unknown-class', detail: `Edit introduces ${added.length} class(es) this page and site never use: ${added.slice(0, 8).join(', ')}`, classes: added });
 

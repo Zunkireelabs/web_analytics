@@ -11,6 +11,7 @@ let sitemapOk;
 let sitemapReason;
 let probeByUrl; // url -> probe result (default: live, self-canonical)
 let signalsByPage; // page -> index_status (or undefined = never checked)
+let packageJsonText; // the repo's package.json on the default branch (null = not readable)
 
 mock.module(resolve('../store/read.js'), {
   namedExports: { getSiteById: async () => site },
@@ -41,6 +42,12 @@ mock.module(resolve('../store/technical-seo-checks.js'), {
     ),
   },
 });
+mock.module(resolve('../github/client.js'), {
+  namedExports: {
+    getFileContent: async (_site, path) => (path === 'package.json' && packageJsonText != null ? { content: packageJsonText } : null),
+    defaultBranchName: () => 'main',
+  },
+});
 mock.module(resolve('../llm.js'), {
   namedExports: { callLLM: async () => 'narrative' },
 });
@@ -56,6 +63,7 @@ beforeEach(() => {
   sitemapEntries = [{ loc: 'https://example.com/' }];
   orphanedPages = [];
   signalsByPage = new Map();
+  packageJsonText = null;
 });
 
 describe('sitemap agent', () => {
@@ -134,5 +142,36 @@ describe('sitemap agent', () => {
     const result = await run({ siteId: 1 });
     assert.deepEqual(result.facts.missingUrls, []);
     assert.equal(result.facts.unverifiableCount, 1);
+  });
+});
+
+describe('sitemap agent: a sitemap the site\'s own build generates', () => {
+  test('a gap is reported as information with NO automatic fix, saying the build regenerates it', async () => {
+    site = { id: 1, url_file_map: { siteRoot: { sitemap: 'public/sitemap.xml' } } };
+    packageJsonText = JSON.stringify({ scripts: { prebuild: 'node scripts/generate-sitemap.mjs' } });
+    inventory = [{ page: 'https://example.com/new-page/' }];
+    const result = await run({ siteId: 1 });
+    assert.equal(result.status, 'ok');
+    assert.deepEqual(result.facts.missingUrls, ['https://example.com/new-page/']);
+    const [finding] = result.facts.findings;
+    assert.equal(finding.recommendedAction, null);
+    assert.match(finding.whyItMatters, /own build regenerates its sitemap/);
+    assert.match(finding.whyItMatters, /overwritten at the next build/);
+  });
+
+  test('a hand-maintained static sitemap keeps its automatic "Update sitemap" fix', async () => {
+    site = { id: 1, url_file_map: { siteRoot: { sitemap: 'public/sitemap.xml' } } };
+    packageJsonText = JSON.stringify({ scripts: { build: 'next build' } });
+    inventory = [{ page: 'https://example.com/new-page/' }];
+    const [finding] = (await run({ siteId: 1 })).facts.findings;
+    assert.equal(finding.recommendedAction?.generatorId, 'sitemap');
+  });
+
+  test('an unreadable package.json never blocks the existing behaviour', async () => {
+    site = { id: 1, url_file_map: { siteRoot: { sitemap: 'public/sitemap.xml' } } };
+    packageJsonText = null;
+    inventory = [{ page: 'https://example.com/new-page/' }];
+    const [finding] = (await run({ siteId: 1 })).facts.findings;
+    assert.equal(finding.recommendedAction?.generatorId, 'sitemap');
   });
 });

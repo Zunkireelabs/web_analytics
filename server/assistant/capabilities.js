@@ -38,6 +38,30 @@ import { suggestedQuestions } from './questions.js';
 // configuration or invoking agents requires an admin.
 const ROLE_RANK = { tenant_member: 1, tenant_admin: 2, platform_admin: 3 };
 
+// PR number from the row, or parsed from a GitHub .../pull/<n> URL (auto-remediation runs store only the URL).
+function prNumber(r) {
+  if (r.pr_number != null) return Number(r.pr_number);
+  const m = String(r.pr_url || '').match(/\/pull\/(\d+)/);
+  return m ? Number(m[1]) : null;
+}
+
+// One entry per PR: a deployment row and a draft row for the same merge must not count twice. Keyed by number when
+// known (a deployments row may carry the number but a draft the URL), else by URL.
+function dedupePrs(rows) {
+  const seen = new Map();
+  for (const r of rows) {
+    const key = prNumber(r) != null ? `#${prNumber(r)}` : r.pr_url;
+    if (key && !seen.has(key)) seen.set(key, r);
+  }
+  return [...seen.values()];
+}
+
+// sites.timezone is free text; an unknown zone name would make Postgres throw, so it is checked first.
+function validTimeZone(tz) {
+  if (!tz || typeof tz !== 'string') return false;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; }
+}
+
 export function roleAllows(actualRole, requiredRole) {
   return (ROLE_RANK[actualRole] || 0) >= (ROLE_RANK[requiredRole] || 0);
 }
@@ -45,6 +69,54 @@ export function roleAllows(actualRole, requiredRole) {
 // Each entry: { description, requiredRole, run(ctx, args) }.
 // `ctx` carries { siteId, userId, role } resolved server-side from the session.
 export const CAPABILITIES = {
+  // "Did a PR go out today?" answered from the records, no model call. Three facts, each from the table that owns it:
+  //   opened — a PR on a draft created in the window, or recorded by an auto-remediation run that started in it
+  //            (drafts carry no separate "PR opened at" time, so a manual PR on an older draft counts on its draft's day)
+  //   merged — deployments.merged_at (the merge the webhook observed), plus drafts implemented in the window
+  //   open   — every PR whose drafts are still pr_state 'open', whenever it was opened
+  // "today"/"yesterday" are the site's own calendar day (sites.timezone), not the server's.
+  get_pr_activity: {
+    description: "Pull requests on this site's repo for today, yesterday or the last 7 days: opened, merged, and still open.",
+    requiredRole: 'tenant_member',
+    run: async (ctx, { period = 'today' } = {}, deps = {}) => {
+      const db = deps.db || query;
+      const site = await (deps.getSite || getSiteById)(ctx.siteId).catch(() => null);
+      const tz = validTimeZone(site?.timezone) ? site.timezone : 'UTC';
+      const p = ['today', 'yesterday', 'week'].includes(period) ? period : 'today';
+      const { rows: [w] } = await db(
+        `SELECT CASE $2 WHEN 'yesterday' THEN (date_trunc('day', now() AT TIME ZONE $1) - interval '1 day') AT TIME ZONE $1
+                        WHEN 'week'      THEN now() - interval '7 days'
+                        ELSE date_trunc('day', now() AT TIME ZONE $1) AT TIME ZONE $1 END AS since,
+                CASE $2 WHEN 'yesterday' THEN date_trunc('day', now() AT TIME ZONE $1) AT TIME ZONE $1
+                        ELSE now() END AS until`, [tz, p]);
+      const args = [ctx.siteId, w.since, w.until];
+      const [opened, merged, open] = await Promise.all([
+        db(`SELECT pr_url, max(pr_number) AS pr_number, count(*)::int AS fixes,
+                   string_agg(DISTINCT action_type, ', ') AS types, max(pr_state) AS pr_state
+              FROM drafts WHERE site_id = $1 AND pr_url IS NOT NULL AND created_at >= $2 AND created_at < $3
+             GROUP BY pr_url
+            UNION ALL
+            SELECT r.pr_url, NULL, 0, NULL, NULL FROM auto_remediation_runs r
+             WHERE r.site_id = $1 AND r.pr_url IS NOT NULL AND r.started_at >= $2 AND r.started_at < $3
+               AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.site_id = $1 AND d.pr_url = r.pr_url AND d.created_at >= $2 AND d.created_at < $3)`, args),
+        db(`SELECT pr_url, pr_number, min(merged_at) AS merged_at FROM (
+              SELECT pr_url, pr_number, merged_at FROM deployments WHERE site_id = $1 AND merged_at >= $2 AND merged_at < $3
+              UNION ALL
+              SELECT pr_url, pr_number, implemented_at FROM drafts WHERE site_id = $1 AND pr_url IS NOT NULL AND implemented_at >= $2 AND implemented_at < $3
+            ) m WHERE pr_url IS NOT NULL OR pr_number IS NOT NULL GROUP BY pr_url, pr_number ORDER BY merged_at`, args),
+        db(`SELECT pr_url, max(pr_number) AS pr_number, count(*)::int AS fixes, min(created_at) AS since
+              FROM drafts WHERE site_id = $1 AND pr_state = 'open' AND pr_url IS NOT NULL
+             GROUP BY pr_url ORDER BY since`, [ctx.siteId]),
+      ]);
+      return {
+        period: p, timeZone: tz, since: w.since, until: w.until,
+        opened: dedupePrs(opened.rows).map((r) => ({ number: prNumber(r), url: r.pr_url, fixes: r.fixes || null, types: r.types || null, state: r.pr_state || null })),
+        merged: dedupePrs(merged.rows).map((r) => ({ number: prNumber(r), url: r.pr_url, mergedAt: r.merged_at })),
+        open: open.rows.map((r) => ({ number: prNumber(r), url: r.pr_url, fixes: r.fixes, since: r.since })),
+      };
+    },
+  },
+
   get_onboarding_status: {
     description: "Current onboarding state for this site: what is ready, what is blocked, what needs a human decision.",
     requiredRole: 'tenant_member',

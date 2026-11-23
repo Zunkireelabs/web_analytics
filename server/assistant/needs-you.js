@@ -5,6 +5,7 @@ import { getGoogleConnection } from '../store/project-google.js';
 import { getPosthogConnectionState } from '../store/project-posthog.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { inDraftScope } from '../lib/draft-scope.js';
+import { recommendForFinding } from './onboarding-state.js';
 
 // Everything for ONE site that is waiting on a person, in one list: approvals to give, issues the agents found, and
 // decisions they cannot make alone. It is computed from the real records every time (drafts, stage_promotions, agent
@@ -21,6 +22,18 @@ export const OVERDUE_AFTER_DAYS = 2;
 
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const ageDays = (at, now) => (at ? Math.max(0, Math.floor((now - new Date(at).getTime()) / DAY)) : 0);
+
+// One readable line for a decision card. site_understanding.evidence is an ARRAY of { detail, source } objects (see
+// onboarding-state.js recommendForFinding), so String(evidence) rendered "[object Object]" on every card. Only strings
+// ever reach the text; anything else is skipped rather than stringified.
+export function decisionDetail(u) {
+  const text = (v) => (typeof v === 'string' ? v.trim() : '');
+  const direct = text(u?.finding?.summary) || text(u?.finding?.question);
+  if (direct) return direct.slice(0, 200);
+  const evidence = Array.isArray(u?.evidence) ? u.evidence : [];
+  const details = evidence.map((e) => (typeof e === 'string' ? e.trim() : text(e?.detail))).filter(Boolean);
+  return details.slice(0, 2).join('; ').slice(0, 200);
+}
 
 // Pure: raw rows in, ordered items out. `now` is passed in so it is testable.
 export function buildNeedsYou({ drafts = [], stagePromotions = [], agentRuns = [], unresolved = [], connections = [], stageBranch = null, now = Date.now() } = {}) {
@@ -121,13 +134,30 @@ export function buildNeedsYou({ drafts = [], stagePromotions = [], agentRuns = [
     });
   }
 
-  for (const u of unresolved) {
+  // All open setup questions as ONE item, answered in place in the chat (one card per question used to fill the opening
+  // message, and its "Decide" button had no link so it did nothing). Each question carries the recommendation the
+  // repository evidence supports (recommendForFinding, arithmetic over recorded evidence, never a model guess), so the
+  // card can offer "use the recommended answer" per question or for all of them at once. Newest first.
+  // The key includes the question ids, so a NEW question makes this a new item that is raised again.
+  if (unresolved.length) {
+    const decisions = unresolved.map((u) => {
+      const best = recommendForFinding(u).recommendation;
+      return {
+        id: u.id, subject: u.subject || u.category, category: u.category, risk: u.risk || null,
+        detail: decisionDetail(u), ageDays: ageDays(u.created_at, now),
+        recommendation: best ? String(best.label || best.id || best.value || '') || null : null,
+        chosen: best ? (best.id ?? best.value ?? best.label ?? null) : null,
+      };
+    }).sort((a, b) => a.ageDays - b.ageDays || a.id - b.id);
+    const n = decisions.length;
+    const short = (subject) => String(subject || '').split('/').pop();
     items.push({
-      key: `decision:${u.id}`, kind: KIND.DECISION, blocksShipping: false,
-      title: `I need a decision: ${u.subject || u.category}`,
-      detail: String(u.finding?.summary || u.finding?.question || u.evidence || '').slice(0, 200),
-      ageDays: ageDays(u.created_at, now), count: 1, findingId: u.id,
-      actions: [{ id: 'confirm_decision', label: 'Decide', findingId: u.id }],
+      key: `decision:${decisions.map((d) => d.id).sort((a, b) => a - b).join(',')}`, kind: KIND.DECISION, blocksShipping: false,
+      title: `${plural(n, 'setup question needs', 'setup questions need')} your answer`,
+      detail: decisions.slice(0, 3).map((d) => short(d.subject)).join(', ') + (n > 3 ? ` and ${n - 3} more` : ''),
+      ageDays: Math.max(...decisions.map((d) => d.ageDays)), count: n, ids: decisions.map((d) => d.id),
+      decisions,
+      actions: [{ id: 'answer_decisions', label: n === 1 ? 'Answer it' : 'Answer them' }],
     });
   }
 

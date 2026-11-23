@@ -12,7 +12,7 @@ import { validateRenderingBatch } from './rendering-gate.js';
 import { validateWriteScope } from './write-scope-gate.js';
 import { validateSectionPreservation } from './section-preservation-gate.js';
 import { actionScopeFor } from './action-scope.js';
-import { findMarkerCorruption } from './marker-merge.js';
+import { findMarkerCorruption, findDuplicateFrontMatterKeys } from './marker-merge.js';
 
 // Every draft branch forks from — and every "current content" read (diff
 // preview, live-view, existence check) diffs against — the site's own
@@ -121,7 +121,14 @@ export async function getOrInitBatchBranch(site, date = new Date()) {
     if (/404|Not Found/i.test(err.message)) return { branchName, exists: false, conflicted: false };
     throw err;
   }
+  return syncBranchWithBase(site, branchName, beforeSha);
+}
 
+// Brings the default branch into a batch branch (never the other direction) and checks the result. Used for today's branch on every push,
+// and by the stale-batch guard (lib/stale-batch-guard.js) for an older open batch branch that fell behind. Returns the same shape
+// getOrInitBatchBranch always did; `synced` and `sha` tell a caller whether a merge commit was made.
+export async function syncBranchWithBase(site, branchName, beforeSha = null) {
+  const before = beforeSha || await getBranchSha(site, branchName);
   const synced = await mergeBranchFromBase(site, branchName, baseBranch(site));
   if (!synced.ok) return { branchName, exists: true, conflicted: true };
   if (!synced.synced) return { branchName, exists: true, conflicted: false };
@@ -135,10 +142,10 @@ export async function getOrInitBatchBranch(site, date = new Date()) {
   // git never notices. Checked here, right after the sync, so a corrupted
   // batch branch is caught before more drafts stack on top of it — not
   // three checks and a human reviewer later, as it was on PR #87.
-  const corruptedFiles = await findSyncCorruption(site, branchName, beforeSha, synced.sha);
+  const corruptedFiles = await findSyncCorruption(site, branchName, before, synced.sha);
   if (corruptedFiles.length) return { branchName, exists: true, conflicted: true, corrupted: true, corruptedFiles };
 
-  return { branchName, exists: true, conflicted: false };
+  return { branchName, exists: true, conflicted: false, synced: true, sha: synced.sha };
 }
 
 // Scans only the files the sync itself touched (via compareCommits) rather
@@ -163,7 +170,7 @@ async function findSyncCorruption(site, branchName, beforeSha, afterSha) {
   for (const path of changed.files) {
     const file = await getFileContent(site, path, branchName).catch(() => null);
     if (!file) continue;
-    const markers = findMarkerCorruption(file.content);
+    const markers = findMarkerCorruption(file.content, path);
     if (markers.length) corruptedFiles.push({ path, markers });
   }
   return corruptedFiles;
@@ -376,6 +383,13 @@ export async function pushDraftBranch(site, draft, files, target) {
   const renderGate = await validateRenderingBatch(site, files);
   if (!renderGate.ok) return renderGate;
 
+  // A file whose front matter repeats a key does not build (superrank-web PR #15, "duplicated mapping key"). Refused here, before anything is written,
+  // for the same reason as the gates around it: this is the one function every implementer funnels through.
+  const dupKeys = files.flatMap((f) => findDuplicateFrontMatterKeys(f.content, f.path).map((k) => `${f.path} (${k})`));
+  if (dupKeys.length) {
+    return { ok: false, reason: 'front-matter-duplicate-key', error: `This change would leave a front-matter key twice, which stops the site's build: ${dupKeys.join(', ')}. Nothing was pushed.` };
+  }
+
   // Section Preservation Gate (CLAUDE.md §2) — same placement and same
   // reasoning as the rendering gate directly above: checked before anything
   // is written, in the one function every implementer funnels through, so no
@@ -467,10 +481,33 @@ export async function openRollbackPr(site, draft, branchName) {
 // branch first and reuses it instead of erroring on GitHub's "a PR already
 // exists for this head" 422 — every draft approved the same day after the
 // first one hits this reuse path.
+// A daily fix batch adds and edits files; it never deletes one. When a batch PR is about to open into a STAGE branch and the diff against that branch
+// would DELETE files, the two long-lived branches have diverged: the batch is cut from the default branch, so whatever the default branch lacks
+// (work that lives only on stage) shows up as a deletion, and merging the PR would remove it from stage. Found on MOBILISE, 2026-11-23: PR 12 removed
+// 93 files (25 blog posts, /locations/, /compare/) from staging because main had been reset to the original site by PR 11. Refused here, before the PR
+// exists. Best-effort on its own plumbing: a failed compare must not block a batch (same posture as findSyncCorruption), it is logged.
+export async function findStageDeletions(site, base, branchName) {
+  try {
+    const { removed = [] } = await compareCommits(site, base, branchName);
+    return removed;
+  } catch (err) {
+    console.warn(`[github-ops] could not compare ${branchName} with ${base} for deletions: ${err.message}`);
+    return [];
+  }
+}
+
+function stageDeletionError(site, base, branchName, removed) {
+  const sample = removed.slice(0, 4).join(', ');
+  return {
+    ok: false, reason: 'batch-would-delete-from-stage',
+    error: `Opening this pull request into "${base}" would delete ${removed.length} file${removed.length === 1 ? '' : 's'} that exist on "${base}" (${sample}${removed.length > 4 ? ', …' : ''}). Daily fixes only add and edit files, so "${base}" and "${defaultBranchName(site)}" have diverged: "${base}" holds work "${defaultBranchName(site)}" does not. Nothing was opened. Bring the two branches in line first, then this batch can open.`,
+  };
+}
+
 export async function openPrForBranch(site, draft, branchName) {
   try {
     // WHERE this batch's PR goes is decided from everything on the branch, not only this draft (lib/pr-routing.js): a client with a
-    // stage branch gets light content edits straight into main, and anything heavier (landing page, blog post, template fix, or a
+    // stage branch gets tag-only edits straight into main, and anything else (visible content, landing page, blog post, template fix, or a
     // mix) as one PR into stage. A client with no stage branch is unchanged: always main.
     const types = new Set(await listBatchActionTypes(site.id, branchName).catch(() => []));
     if (draft?.action_type) types.add(draft.action_type);
@@ -481,6 +518,8 @@ export async function openPrForBranch(site, draft, branchName) {
       const pr = existing[0];
       // The day began as light edits (PR into main) and a heavier draft joined: move the same PR to stage.
       if (route.goesToStage && pr.base?.ref && pr.base.ref !== route.base) {
+        const removedOnRetarget = await findStageDeletions(site, route.base, branchName);
+        if (removedOnRetarget.length) return stageDeletionError(site, route.base, branchName, removedOnRetarget);
         await retargetPullRequest(site, pr.number, route.base);
       }
       await setBatchPrBase(site.id, branchName, route.goesToStage ? route.base : (pr.base?.ref || route.base)).catch(() => {});
@@ -489,6 +528,10 @@ export async function openPrForBranch(site, draft, branchName) {
 
     const base = route.base;
     const toStage = route.goesToStage;
+    if (base !== defaultBranchName(site)) {
+      const removed = await findStageDeletions(site, base, branchName);
+      if (removed.length) return stageDeletionError(site, base, branchName, removed);
+    }
     const { number, url } = await openPullRequest(site, {
       branch: branchName,
       base,

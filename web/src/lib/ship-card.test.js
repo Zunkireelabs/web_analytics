@@ -44,3 +44,21 @@ describe('the shipping card words', () => {
     assert.equal(plainReason({ reason: 'weird', error: 'Specific words' }), 'Specific words');
   });
 });
+
+describe('the waiting card does not invite a merge when the build is red or unknown', () => {
+  test('failing: says do not merge, offers no button, and links to the failing check', () => {
+    const c = cardFor({ step: 'waiting', prNumber: 15, prUrl: 'u', build: 'failing' }, 'fixes');
+    assert.match(c.title, /failing check\. Do not merge it yet/);
+    assert.equal(c.action, undefined);
+    assert.equal(c.attention, true);
+    assert.equal(c.link, 'u');
+  });
+  test('unchecked: says the checks have not reported and to wait for the green tick', () => {
+    const c = cardFor({ step: 'waiting', prNumber: 15, prUrl: 'u', build: 'unchecked' }, 'fixes');
+    assert.match(c.title, /checks have not reported yet/);
+    assert.equal(c.action, undefined);
+  });
+  test('passing (or no build field) keeps the existing wording', () => {
+    for (const build of ['passing', undefined]) assert.match(cardFor({ step: 'waiting', prNumber: 15, prUrl: 'u', build }, 'fixes').title, /Please review it and merge it on GitHub/);
+  });
+});

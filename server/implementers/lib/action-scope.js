@@ -23,7 +23,7 @@
 // backstop below because their target being "shared" IS the design, not an
 // accident of resolution.
 const GLOBAL_BY_DESIGN = new Set([
-  'analytics-install', 'security-headers', 'html-lang', 'llms-txt', 'robots-fix', 'robots-bootstrap', 'sitemap',
+  'analytics-install', 'security-headers', 'html-lang', 'llms-txt', 'robots-fix', 'robots-bootstrap', 'indexnow', 'sitemap',
 ]);
 
 // Pre-draft counterpart to the apply-time shared-template backstop (checkSharedTemplateWrite). A page-specific action whose page resolves

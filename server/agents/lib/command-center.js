@@ -3,8 +3,8 @@ import { getLatestFindings, getLatestAgentRuns } from './fresh-runs.js';
 import { getRecentActivity } from '../../store/agent-runs.js';
 import { getHealthScoreOnOrBefore } from '../../store/read.js';
 import { saveHealthScoreSnapshot } from '../../store/upsert.js';
-import { computeHealthScore } from './health-score.js';
-import { RECOMMENDATION_AGENT_IDS, OPPORTUNITY_AGENT_IDS } from './insights.js';
+import { computeHealthScore, buildHealthBreakdown, buildActionPlan } from './health-score.js';
+import { RECOMMENDATION_AGENT_IDS, OPPORTUNITY_AGENT_IDS, HEALTH_SCORE_AGENT_IDS } from './insights.js';
 import { buildRecommendations } from './recommendations.js';
 import { getFindingsDiff, healthChangeEntry } from './changes.js';
 import { listWatchlist } from '../../store/watchlist.js';
@@ -157,7 +157,7 @@ export async function getCommandCenterData(siteId) {
     // but its findings should still count toward this page's health score/
     // critical-issues the same as every other agent's now that it has a
     // matching agent_runs row (routes/action-center.js's generateDraft).
-    getLatestFindings(siteId, [...RECOMMENDATION_AGENT_IDS, 'geo-audit']),
+    getLatestFindings(siteId, HEALTH_SCORE_AGENT_IDS),
     getLatestAgentRuns(siteId, ['executive-report', 'competitor-intelligence', 'authority', 'ai-recommendation', 'country-intelligence', 'ai-visibility', 'geo-audit']),
     getRecentActivity(siteId, [...RECOMMENDATION_AGENT_IDS, 'executive-report'], 12),
     buildRecommendations(siteId),
@@ -246,6 +246,9 @@ export async function getCommandCenterData(siteId) {
     health: {
       score, penalty, findingsConsidered, trendWeek,
       trendMonth: monthAgoScore != null ? score - monthAgoScore : null,
+      // Where the score is being lost (per category, same formula as the score) and the open work in the order to do it.
+      breakdown: buildHealthBreakdown(allFindings, implementedFindingIds, catByAgent),
+      actionPlan: buildActionPlan(allFindings, implementedFindingIds),
     },
     executiveSummary: { narrative: execRun?.narrative || null, generatedAt: execRun?.created_at || null },
     stats: {

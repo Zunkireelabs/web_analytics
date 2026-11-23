@@ -1,4 +1,5 @@
 import { safeErrorMessage } from './lib/errors.js';
+import { createSseParser } from './lib/sse.js';
 
 // Ceiling only, not a target duration — Run Full Analysis legitimately awaits
 // ~19 parallel agents server-side, some LLM-heavy. Without this, a stalled
@@ -300,6 +301,43 @@ export const api = {
   // silent no-op, not a real override.
   assistant: {
     message: (message, conversationId, siteId) => req(`/assistant/message${siteId ? `?siteId=${siteId}` : ''}`, { method: 'POST', body: JSON.stringify({ message, conversationId }) }),
+    // The same chat, streamed: onDelta gets each piece of the answer as it is written, onStatus what it is looking up. Resolves with
+    // the final { message, actions, data }. Rejects with `.noStream` when the server has no streaming route (an older deploy), so
+    // the caller can fall back to message() above; with `.partial` when it broke after some words were already shown.
+    stream: async (message, conversationId, { onDelta, onStatus, signal, siteId } = {}) => {
+      if (readOnlyAccess) throw Object.assign(new Error('You have read-only access to this project, so you can look but not change anything.'), { status: 403, code: 'READ_ONLY' });
+      let res;
+      try {
+        res = await fetch(`${import.meta.env.BASE_URL}api/assistant/message/stream${siteId ? `?siteId=${encodeURIComponent(siteId)}` : ''}`, {
+          method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message, conversationId }), signal,
+        });
+      } catch (e) {
+        if (e?.name === 'AbortError') throw e;
+        throw new Error(safeErrorMessage(e?.message, 'Could not reach the server — check your connection and try again.'));
+      }
+      if (res.status === 401) { window.dispatchEvent(new Event('api:unauthorized')); throw new Error('UNAUTH'); }
+      if (!res.ok || !res.body) {
+        const body = await res.json().catch(() => ({}));
+        throw Object.assign(new Error(safeErrorMessage(body.error, 'Something went wrong — please try again.')), { status: res.status, noStream: [404, 405, 501].includes(res.status) || res.ok });
+      }
+      let final = null; let failure = null; let shown = false;
+      const parser = createSseParser((e) => {
+        if (e.type === 'delta') { shown = true; onDelta?.(e.text); }
+        else if (e.type === 'status') onStatus?.(e.text);
+        else if (e.type === 'final') final = e;
+        else if (e.type === 'error') failure = e;
+      });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parser.feed(decoder.decode(value, { stream: true }));
+      }
+      if (failure) throw Object.assign(new Error(safeErrorMessage(failure.message, 'Something went wrong — please try again.')), { partial: shown || Boolean(failure.partial) });
+      if (!final) throw Object.assign(new Error('The answer was cut off — please try again.'), { partial: shown });
+      return final;
+    },
     invoke: (capability, args, siteId) => req(`/assistant/invoke/${capability}${siteId ? `?siteId=${siteId}` : ''}`, { method: 'POST', body: JSON.stringify(args || {}) }),
     capabilities: (siteId) => req(`/assistant/capabilities${siteId ? `?siteId=${siteId}` : ''}`),
   },
@@ -605,12 +643,14 @@ export const api = {
     checkPrStatus: (id, siteId) => req(withSite(`/action-center/drafts/${id}/check-pr-status`, siteId), { method: 'POST' }),
     previewDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}/preview`, siteId)),
     rollback: (id, siteId) => req(withSite(`/action-center/drafts/${id}/rollback`, siteId), { method: 'POST' }),
-    executeSafeFixes: (limit, siteId) => req(withSite('/action-center/execute-safe-fixes', siteId), { method: 'POST', body: JSON.stringify({ limit }) }),
+    executeSafeFixes: (limit, siteId, scope) => req(withSite('/action-center/execute-safe-fixes', siteId), { method: 'POST', body: JSON.stringify({ limit, scope }) }),
     // scope: 'content' | 'fixes' limits it to that page's own drafts; omitted = every pending draft (as before).
     bulkApproveDrafts: (limit, siteId, scope) => req(withSite('/action-center/drafts/bulk-approve', siteId), { method: 'POST', body: JSON.stringify({ limit, scope }) }),
     latestExecutionJob: (siteId) => req(withSite('/action-center/execution-jobs/latest', siteId)),
     approveAndShip: (recommendationId, siteId) => req(withSite(`/action-center/recommendations/${recommendationId}/approve-and-ship`, siteId), { method: 'POST' }),
     recheckRecommendation: (recommendationId, siteId) => req(withSite(`/action-center/recommendations/${recommendationId}/recheck`, siteId), { method: 'POST' }),
+    // "This change to the page is intended": the page's latest capture becomes its baseline and the item is dismissed (seo-drift only).
+    acceptChange: (recommendationId, siteId) => req(withSite(`/action-center/recommendations/${recommendationId}/accept-change`, siteId), { method: 'POST' }),
     getExecutionJob: (id, siteId) => req(withSite(`/action-center/execution-jobs/${id}`, siteId)),
 
     todayExecutionStats: (siteId) => req(withSite('/action-center/execution-stats/today', siteId)),

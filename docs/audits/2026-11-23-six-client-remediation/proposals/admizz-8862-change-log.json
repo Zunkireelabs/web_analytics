@@ -1,0 +1,194 @@
+{
+  "site": 8862,
+  "baseRev": 46,
+  "repoMain": "2ce8ac1",
+  "phase1": [
+    {
+      "id": "F1",
+      "url": "/events/uk-education-expo-oct-2026",
+      "change": "add canonical, meta-title, open-graph adapters (nextjs-metadata-export)"
+    },
+    {
+      "id": "F2",
+      "url": "/study-in-canada",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F2",
+      "url": "/study-in-germany",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F2",
+      "url": "/study-in-newzealand",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F2",
+      "url": "/study-in-south-korea",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F2",
+      "url": "/study-in-dubai-from-nepal",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F2",
+      "url": "/study-in-finland-from-nepal",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F2",
+      "url": "/study-in-india-from-nepal",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F2",
+      "url": "/study-in-uae-from-nepal",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F2",
+      "url": "/study-in-uk-from-nepal",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F2",
+      "url": "/study-in-australia-from-nepal",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F4a",
+      "url": "/study-in-south-korea-from-nepal",
+      "change": "file docs/scraped-content/study-in-south-korea-from-nepal.md -> src/app/study-in-south-korea-from-nepal/page.tsx"
+    },
+    {
+      "id": "F4b",
+      "change": "add 53 page entries pointing each own-folder page at its own file (+ the same 3 metadata adapters the trailing-slash pattern already uses)"
+    }
+  ],
+  "phase2AddsOnTop": [
+    {
+      "id": "F3",
+      "change": "patterns[3] (/answers/*) gains faq page-data-object adapter"
+    },
+    {
+      "id": "F3",
+      "url": "/australia-student-visa-english-test-scores-ielts-pte-toefl-2026",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F3",
+      "url": "/compex-scholarship-2026-complete-guide-for-nepalese-students-to-study-in-india",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F3",
+      "url": "/germany-blocked-account-2026-nepali-students",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F3",
+      "url": "/how-to-get-your-noc-from-nepal-for-study-abroad",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F3",
+      "url": "/study-abroad-from-nepal",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F3",
+      "url": "/study-in-germany-from-nepal-costs-intakes-visa-2026",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F3",
+      "url": "/uk-student-visa-cost-2027",
+      "change": "add faq adapter page-data-object"
+    },
+    {
+      "id": "F3",
+      "url": "/uk-student-visa-from-nepal",
+      "change": "add faq adapter page-data-object"
+    }
+  ],
+  "ownFolderPagesAdded": [
+    "/accreditation-and-results",
+    "/ai-in-study-abroad-applications-what-universities-allow-nepali-students",
+    "/ai-in-universities-2026-assessment-integrity-international-students",
+    "/australia-2027-national-planning-level-student-visa-nepali-students",
+    "/australia-student-visa-changes-october-2026-nepali-students",
+    "/australia-student-visa-cost-funds-2026-27-nepali-students",
+    "/australia-student-visa-financial-capacity-proposal-nepali-students-2026",
+    "/australia-student-visa-subclass-500",
+    "/bank-balance-required-uk-student-visa-2027",
+    "/canada-levels-plan-2027-2029-student-arrivals-nepali-students",
+    "/canada-study-costs-gic-pgwp-2026-nepali-students",
+    "/canada-study-permit-cap-2026-nepali-students",
+    "/career-counseling-for-international-students",
+    "/cookie-policy",
+    "/course-finder",
+    "/explore-universities",
+    "/germany-scholarships-nepali-students-daad-2027",
+    "/germany-student-visa-financial-proof-blocked-account-sponsor-scholarship",
+    "/gks-scholarship-nepal-2027-graduate-what-to-prepare",
+    "/h1b-wage-weighted-lottery-2026-nepali-students-opt",
+    "/how-student-visa-consultants-help-you-get-approved-faster",
+    "/how-to-choose-genuine-education-consultancy-nepal-2026",
+    "/nepal-noc-numbers-2026-students-staying-in-nepal",
+    "/nepali-students-studying-medicine-abroad-permission-2026",
+    "/nrb-foreign-exchange-rules-students-nepal-2026",
+    "/online-application-vs-application-through-direct-consultancy",
+    "/post-study-work-options-uk-canada-usa-australia-nepali-students-2026",
+    "/proof-of-funds-study-abroad-nepal-2026",
+    "/questions-to-ask-uk-universities-education-expo-2026",
+    "/scholarship-application-tips-essay-resume-mistakes-nepali-students",
+    "/statement-of-purpose-sop-guide-nepali-students-2027",
+    "/student-visa-refusal-reasons-nepali-students-2027",
+    "/study-abroad-after-12th-nepal-guide-2027",
+    "/study-abroad-for-ai-and-stem-careers-nepali-students-2026",
+    "/study-abroad-intakes-2027-uk-usa-canada-australia-nepali-students",
+    "/study-abroad-parents-guide-nepal-2027",
+    "/study-abroad-rule-changes-calendar-2026-2028",
+    "/study-abroad-rule-changes",
+    "/study-abroad-visa-costs-compared-uk-usa-canada-australia-2026",
+    "/terms-of-service",
+    "/top-education-consultancy-nepal-2026-how-to-compare",
+    "/top-education-partner-in-nepal",
+    "/ugc-nepal-foreign-degree-equivalence-online-2026",
+    "/uk-credibility-interview-refusals-nepali-students-2026",
+    "/uk-evisa-digital-visa-systems-study-abroad-nepali-students-2026",
+    "/uk-graduate-visa-18-months-from-2027-nepali-students",
+    "/uk-international-student-levy-2028-nepali-students",
+    "/uk-student-visa-28-day-rule-Nepalese-students-2027",
+    "/uk-student-visa-dependants-rules-2027",
+    "/uk-student-visa-rule-changes-2026-27-nepali-students",
+    "/us-f1-duration-of-status-ended-2026",
+    "/us-f1-september-15-deadline-2026",
+    "/usa-f1-visa-interview-opt-nepali-students-2026"
+  ],
+  "dryRuns": {
+    "meta": {
+      "ok": 52,
+      "refused": {
+        "non-literal-existing-value": 1
+      }
+    },
+    "faqF2": {
+      "ok": 10,
+      "refused": {}
+    },
+    "faqF3": {
+      "ok": 8,
+      "refused": {}
+    },
+    "events": {
+      "canonical": "ok",
+      "meta-title": "ok",
+      "open-graph": "ok"
+    }
+  },
+  "problems": []
+}

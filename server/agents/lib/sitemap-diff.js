@@ -75,7 +75,7 @@ export function isSitemapCandidate(url, canonicalHost) {
 
 // Live-verifies computeMissingUrls' output. Only URLs that return 200 at the
 // requested address (no redirect), on the canonical host, with no query
-// string, and whose declared canonical (if any) is themselves are CONFIRMED
+// string, that are not noindex, and whose declared canonical (if any) is themselves are CONFIRMED
 // missing. Everything else is dropped with a reason; a probe that could not
 // observe the URL is `unverifiable` and never asserted. At most `maxProbes`
 // URLs are probed per run; the window rotates by `seed` (e.g. day number) so
@@ -97,6 +97,9 @@ export async function verifyMissingUrls(candidates, { canonicalHost = null, maxP
   for (const r of results) {
     if (r.verdict === 'unverifiable') unverifiable.push(r.url);
     else if (r.verdict !== 'live') dropped.push({ url: r.url, reason: r.verdict });
+    // A page that tells search engines not to index it must not be added to the sitemap: listing it contradicts the page itself
+    // (Search Console: "Submitted URL marked noindex"). Found 2026-11-23: Admizz had 20 noindex blog posts proposed.
+    else if (r.noindex) dropped.push({ url: r.url, reason: 'noindex' });
     else if (!isSelfCanonical(r)) dropped.push({ url: r.url, reason: 'canonicalized-elsewhere' });
     else confirmed.push(r.url);
   }

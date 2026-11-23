@@ -1,12 +1,13 @@
-import { getSearchPerformanceRange, getTopPagePerQuery } from '../store/read.js';
+import { getSearchPerformanceRange, getTopPagePerQuery, getSiteById } from '../store/read.js';
 import { analyzePageUrl, recommendationsFor, TAG_TO_GENERATOR, inferSchemaType } from './lib/page-content.js';
 import { priorityByRank, impactFromValue, effortFromDifficulty, makeFinding } from './lib/findings.js';
 import { callLLM } from '../llm.js';
 import { clipWindowToLag, GSC_LAG_DAYS } from './lib/window-coverage.js';
 import {
-  ctrAtPosition, TARGET_POSITION, TRAFFIC_GAIN_NOTE, TRAFFIC_GAIN_BASIS, DIFFICULTY_NOTE,
+  TARGET_POSITION, TRAFFIC_GAIN_BASIS, DIFFICULTY_NOTE,
   opportunityScore as scoreOpportunity, estimatedTrafficGain as scoreTrafficGain, estimatedDifficulty as scoreDifficulty,
 } from './lib/opportunity-scoring.js';
+import { buildSiteCtrCurve, trafficGainNote } from './lib/site-ctr-curve.js';
 
 export const meta = {
   id: 'opportunity',
@@ -42,9 +43,12 @@ export async function run({ siteId, start: rawStart, end: rawEnd, pageCache }) {
   // orchestrated run — keeps this agent independently runnable/testable
   // with identical output either way (see lib/fetch-cache.js).
   const fetchPage = pageCache || analyzePageUrl;
-  const [perf, pages] = await Promise.all([
+  const [perf, pages, site] = await Promise.all([
     getSearchPerformanceRange(siteId, start, end, 'query', 100),
     getTopPagePerQuery(siteId, start, end),
+    // Name only, for branded-query exclusion in the CTR curve; a failed
+    // lookup just means branded queries aren't excluded.
+    getSiteById(siteId).catch(() => null),
   ]);
   const pageByQuery = new Map(pages.map((p) => [p.query, p.page]));
 
@@ -76,14 +80,20 @@ export async function run({ siteId, start: rawStart, end: rawEnd, pageCache }) {
     }));
 
   const maxImpressions = candidates.reduce((m, c) => Math.max(m, c.impressions), 1);
-  const targetCtr = ctrAtPosition(TARGET_POSITION);
+  // This site's own CTR-by-position (lib/site-ctr-curve.js), from the same
+  // query rows; falls back toward the industry curve where data is thin.
+  const ctrCurve = buildSiteCtrCurve(
+    perf.map((q) => ({ query: q.dim_value, avgPosition: q.avg_position, clicks: q.clicks, impressions: q.impressions })),
+    { siteName: site?.name },
+  );
+  const targetCtr = ctrCurve.at(TARGET_POSITION);
 
   const scored = candidates.map((c) => ({
     ...c,
     opportunityScore: scoreOpportunity(c.impressions, c.avgPosition, STRIKING_MIN_POSITION, STRIKING_MAX_POSITION),
     estimatedTrafficGain: scoreTrafficGain(c.impressions, c.ctr, targetCtr),
-    // From a fixed generic CTR-by-position curve, not measured for this site —
-    // carried on the row so no consumer can show the number as a fact.
+    // A projection (this site's CTR curve, blended toward industry where thin)
+    // — carried on the row so no consumer can show the number as a fact.
     estimatedTrafficGainBasis: TRAFFIC_GAIN_BASIS,
     estimatedDifficulty: scoreDifficulty(c.avgPosition, c.impressions, maxImpressions, STRIKING_MIN_POSITION, STRIKING_MAX_POSITION),
   }));
@@ -127,7 +137,7 @@ export async function run({ siteId, start: rawStart, end: rawEnd, pageCache }) {
     return o.recommendations.map((tag) => makeFinding({
       id: `opportunity:${o.page}:${o.query}:${tag}`,
       evidence: { query: o.query, page: o.page, avgPosition: o.avgPosition, impressions: o.impressions, clicks: o.clicks, opportunityScore: o.opportunityScore },
-      whyItMatters: `"${o.query}" ranks #${o.avgPosition.toFixed(1)}, ${o.impressions} impressions — estimated (generic CTR curve, not measured for this site) +${o.estimatedTrafficGain} clicks if it reached position ${TARGET_POSITION}.`,
+      whyItMatters: `"${o.query}" ranks #${o.avgPosition.toFixed(1)}, ${o.impressions} impressions — estimated (${ctrCurve.source === 'industry' ? 'industry-average CTR curve, not measured for this site' : "from this site's own CTR curve"}) +${o.estimatedTrafficGain} clicks if it reached position ${TARGET_POSITION}.`,
       priority,
       recommendedAction: TAG_TO_GENERATOR[tag] === 'schema' && !schemaType
         ? null
@@ -156,7 +166,8 @@ export async function run({ siteId, start: rawStart, end: rawEnd, pageCache }) {
     findings,
     assumptions: {
       targetPosition: TARGET_POSITION,
-      trafficGainNote: TRAFFIC_GAIN_NOTE,
+      trafficGainNote: trafficGainNote(ctrCurve),
+      ctrCurve: ctrCurve.summary,
       trafficGainBasis: TRAFFIC_GAIN_BASIS,
       difficultyNote: DIFFICULTY_NOTE,
     },

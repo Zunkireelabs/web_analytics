@@ -2008,8 +2008,18 @@ describe('lacksDesignBaseline', () => {
     assert.equal(lacksDesignBaseline({ url_file_map: { siteRoot: {} } }, base), true);
   });
   test('does not hold when a configured template exists', () => {
-    const site = { url_file_map: { siteRoot: { componentTemplates: { expandContent: { x: 1 } } } } };
+    const site = { url_file_map: { siteRoot: { componentTemplates: { expandContent: { wrapper: '<div class="x">{{ROWS}}</div>' } } } } };
     assert.equal(lacksDesignBaseline(site, base), false);
+  });
+  // 2026-11-23: a site with a usable design PROFILE but no captured FAQ component got a generic <dl class="section"> FAQ
+  // projected from the profile, live on a blog post. A profile grounds prose; only a captured component may render one.
+  test('a usable design profile alone is NOT a baseline for a component', () => {
+    const site = { url_file_map: { siteRoot: { designProfile: { color: {}, spacing: {}, typography: {}, components: {} }, componentTemplates: { qaContent: { wrapper: '<div>{{ROWS}}</div>' } } } } };
+    assert.equal(lacksDesignBaseline(site, { ...base, componentKey: 'faq' }), true);
+  });
+  test('a template entry with no wrapper is not a usable captured component', () => {
+    const site = { url_file_map: { siteRoot: { componentTemplates: { expandContent: { verifiedAt: 'x' } } } } };
+    assert.equal(lacksDesignBaseline(site, base), true);
   });
   test('does not hold when a page capture exists', () => {
     const site = { url_file_map: { siteRoot: { pageComponentTemplates: { expandContent: {} } } } };

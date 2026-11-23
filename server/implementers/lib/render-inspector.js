@@ -1,6 +1,7 @@
 import { callLLM } from '../../llm.js';
 import { safeMessage } from '../../lib/errors.js';
 import { stripManagedMarkers } from '../../lib/managed-markers.js';
+import { hasExistingFaqStructure } from '../../lib/existing-faq.js';
 
 // Deterministic-first, fully autonomous render-mode inspection: replaces the
 // old static url_file_map.pages[url].render config as the source of truth
@@ -75,6 +76,13 @@ export function scanVisibleFaqSignals(fileContent) {
   let score = 0;
   const hasLoopQa = hasLoopQaPattern(fileContent);
   const hasSchema = FAQ_SCHEMA_PATTERN.test(fileContent);
+  // A FAQ the site already wrote itself (Markdown `## FAQ` + questions, or a faq-classed block) is structural evidence as
+  // strong as a loop: a second FAQ must never be added beside it. Managed markers are stripped so our own block never counts.
+  const hasOwnFaq = hasExistingFaqStructure(stripManagedMarkers(fileContent));
+  if (hasOwnFaq) {
+    score += 2;
+    evidence.push('the page already has its own FAQ section (a FAQ heading with questions under it, or a faq-classed block)');
+  }
   if (hasLoopQa) {
     score += 2;
     evidence.push('a templating loop renders question/answer fields (e.g. "{% for item in faq %}" or .map with .question/.answer)');
@@ -91,7 +99,7 @@ export function scanVisibleFaqSignals(fileContent) {
     score += 1;
     evidence.push('an existing FAQPage JSON-LD schema block is already present');
   }
-  const strength = (hasLoopQa || hasSchema) ? 'strong' : score >= 1 ? 'weak' : 'none';
+  const strength = (hasLoopQa || hasSchema || hasOwnFaq) ? 'strong' : score >= 1 ? 'weak' : 'none';
   return { strength, score, evidence };
 }
 
@@ -111,7 +119,8 @@ export function hasExistingFaqSchema(fileContent) {
 export function hasVisibleFaqSignal(fileContent) {
   const organicContent = stripManagedMarkers(fileContent);
   return hasLoopQaPattern(organicContent) ||
-    (ACCORDION_KEYWORD_PATTERN.test(organicContent) && FAQ_TEXT_PATTERN.test(organicContent));
+    (ACCORDION_KEYWORD_PATTERN.test(organicContent) && FAQ_TEXT_PATTERN.test(organicContent)) ||
+    hasExistingFaqStructure(organicContent);
 }
 
 // Structural sanity only — true for the overwhelming majority of real

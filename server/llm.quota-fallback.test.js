@@ -2,6 +2,10 @@ import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { isQuotaExhaustedError, isRetryable, openAiRoute, openAiPaused, noteOpenAiQuotaExhausted, noteOpenAiHealthy, fallbackAvailable, llmFallbackState, _resetQuotaBreakerForTest } from './llm.js';
 
+// Hermetic: llm.js pulls in db.js, which loads the developer's .env. A developer who has paused OpenAI there (LLM_OPENAI_PAUSED=true)
+// would otherwise see every test that expects the OpenAI route fail. CI has no .env, so this changes nothing there.
+delete process.env.LLM_OPENAI_PAUSED;
+
 // The real error OpenAI returned on 2026-11-20 for an exhausted project.
 const spendLimit429 = Object.assign(new Error('429 Your project has reached its configured enforced spend limit. Update your limit at https://platform.openai.com/settings/proj_x/limits.'), { status: 429, code: 'project_spend_limit_exceeded', type: 'insufficient_quota' });
 const rateLimit429 = Object.assign(new Error('429 Rate limit reached for gpt-4o-mini in organization on requests per min'), { status: 429, code: 'rate_limit_exceeded' });

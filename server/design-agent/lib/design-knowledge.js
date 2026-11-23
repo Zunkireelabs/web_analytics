@@ -28,6 +28,7 @@ export const DESIGN_PATTERNS = Object.freeze({
   'inline-style': { component: 'spacing', rootCause: 'Inline styles were used instead of this site\'s own utility classes.' },
   'design-incomplete': { component: 'design-profile', rootCause: 'The captured design does not cover what this page renders.' },
   'responsive-regression': { component: 'responsive-layout', rootCause: 'Rendered into this site\'s real page, the draft broke the layout at a real device width (overflow, clipping or unusable controls).' },
+  'style-fidelity-failed': { component: 'typography', rootCause: 'Rendered into this site\'s real page, the block does not carry the page\'s own typography (questions look like answers, or the font differs), so it shows as unstyled text.' },
   'render-deviation': { component: 'typography', rootCause: 'Rendered into a real page of this site, the draft measures differently (scale, spacing, line length or overflow).' },
   'design-integrity-failed': { component: 'design-profile', rootCause: 'The draft failed the design-integrity check against this site\'s captured roles.' },
   'template-missing-placeholder': { component: 'component-template', rootCause: 'A derived component template dropped a placeholder the generator needs.' },

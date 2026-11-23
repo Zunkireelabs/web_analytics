@@ -246,7 +246,7 @@ test('an empty reason is retryable rather than held against the item', () => {
 // every one of them a self-healing missing marker.
 
 test('a config-gap reason CODE is a human gap, not an item defect', () => {
-  for (const code of ['no-insertion-marker', 'no-file-mapping', 'no-markers-configured', 'no-repo']) {
+  for (const code of ['no-insertion-marker', 'no-file-mapping', 'no-markers-configured', 'no-repo', 'generated-sitemap']) {
     assert.equal(classifyAbandonReason(code).retryPolicy, RETRY_POLICY.NEEDS_HUMAN, code);
   }
 });
@@ -314,6 +314,9 @@ test('a CLAUDE.md §2 section-removal refusal waits on a human, and stops retryi
   const cases = [
     ['This content breaks the page\'s layout at a real device width: 1 new undersized tap target(s) at 390px (mobile).', 'needs_human'],
     ['responsive-regression', 'needs_human'],
+    // style-fidelity-gate.js: rendered into the real page, the block carries none of the page's typography (MOBILISE / Superrank bare FAQs, 2026-11-23)
+    ['This block would not look like the rest of the page: All 3 questions look exactly like their answers (same weight, size and colour), so the block would show as plain unstyled text.', 'needs_human'],
+    ['style-fidelity-failed', 'needs_human'],
     ['Rendered into a real "inline-article" page on this site it measures differently: line-length 64 → 160 (desktop). Held rather than shipped.', 'needs_human'],
     ['render-deviation', 'needs_human'],
     ['faq is held: this page\'s current design could not be confirmed against the live site (group-sample-unreachable). A stale design is not used; it will be retried automatically.', 'retry'],
@@ -333,6 +336,8 @@ test('a CLAUDE.md §2 section-removal refusal waits on a human, and stops retryi
 test('structuredApplyFailure: a design verdict reason becomes a refusal with its own code', () => {
   assert.deepEqual(structuredApplyFailure({ apply_reason: 'render-deviation' }), { reason: 'render-deviation', refusal: true });
   assert.deepEqual(structuredApplyFailure({ apply_reason: 'responsive-regression' }), { reason: 'responsive-regression', refusal: true });
+  // a refused unstyled block is a per-item verdict: it must never count as a systemic fault that trips the breaker
+  assert.deepEqual(structuredApplyFailure({ apply_reason: 'style-fidelity-failed' }), { reason: 'style-fidelity-failed', refusal: true });
 });
 
 test('structuredApplyFailure: a non-design reason keeps its code but is NOT auto-marked a refusal', () => {

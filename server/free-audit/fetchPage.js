@@ -455,4 +455,4 @@ async function fetchPage(inputUrl, { siteCache } = {}) {
   };
 }
 
-export { fetchPage, probeCanonicalTarget, probeBotAccess, probeHreflang, fetchMainPage, fetchSiblingFile, normalizeUrl, guardUrl, AuditError };
+export { fetchPage, probeCanonicalTarget, probeBotAccess, probeHreflang, fetchMainPage, fetchSiblingFile, followRedirects, normalizeUrl, guardUrl, AuditError };

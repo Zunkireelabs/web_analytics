@@ -47,8 +47,8 @@ export const AGENT_AREAS = {
     { name: 'Titles, speed and phones', what: 'Checks pages have a clear title and load fast on a phone', agents: ['technical-seo', 'mobile-usability', 'device-intelligence', 'cta-analysis'] },
     { name: 'Links between your pages', what: 'Finds pages that nothing links to', agents: ['internal-linking'] },
     { name: 'Duplicates and redirects', what: 'Finds the same page under several addresses, and broken paths', agents: ['duplicate-content', 'templated-duplicates', 'query-param-duplicates', 'url-variant-duplicates', 'redirect-chain', 'soft-404'] },
-    { name: 'What buyers search', what: 'Reads the searches that bring people to you', agents: ['query-intelligence', 'opportunity', 'keyword-narrative', 'visitor-behaviour', 'prospect-discovery'] },
-    { name: 'Sitemap and indexing', what: 'Checks Google can find every page', agents: ['sitemap', 'sitemap-conflict', 'gsc-url-audit'] },
+    { name: 'What buyers search', what: 'Reads the searches that bring people to you', agents: ['query-intelligence', 'opportunity', 'keyword-narrative', 'visitor-behaviour', 'prospect-discovery', 'seo-sxo'] },
+    { name: 'Sitemap and indexing', what: 'Checks Google can find every page', agents: ['sitemap', 'sitemap-conflict', 'gsc-url-audit', 'seo-drift', 'indexnow'] },
     { name: 'Trust and competitors', what: 'Looks at who links to you and who ranks instead of you', agents: ['authority', 'competitor-intelligence'] },
   ],
   geo: [

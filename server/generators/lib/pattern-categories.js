@@ -87,7 +87,7 @@ export function rootCauseForPattern(patternId) {
 const TECHNICAL_SEO_GENERATORS = new Set([
   'schema', 'schema-repair', 'security-headers', 'robots-fix', 'redirect-fix',
   'canonical', 'sitemap', 'html-lang', 'viewport', 'internal-links',
-  'llms-txt', 'broken-link-fix', 'analytics-install', 'duplicate-id-fix', 'open-graph',
+  'llms-txt', 'indexnow', 'broken-link-fix', 'analytics-install', 'duplicate-id-fix', 'open-graph',
 ]);
 
 export function topLevelCategoryForGenerator(generatorId) {

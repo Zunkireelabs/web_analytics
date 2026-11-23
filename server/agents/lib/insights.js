@@ -23,7 +23,12 @@ import { getLatestAgentRuns, getLatestFindings } from './fresh-runs.js';
 // entry here the analyst's keyword gaps were computed, stored and then read
 // by nobody — the agent was scheduled but structurally unable to produce a
 // recommendation.
-export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence', 'technical-seo', 'authority', 'ai-recommendation', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability', 'sitemap', 'growth-queries', 'trust-compliance', 'geo-signals', 'content-integrity', 'font-consistency', 'visual-quality', 'blog-image', 'keyword-narrative', 'soft-404', 'templated-duplicates', 'url-variant-duplicates', 'sitemap-conflict', 'blog-pagination', 'redirect-chain', 'query-param-duplicates', 'trend-radar', 'news-posts', 'visitor-behaviour'];
+export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence', 'technical-seo', 'authority', 'ai-recommendation', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability', 'sitemap', 'growth-queries', 'trust-compliance', 'geo-signals', 'content-integrity', 'font-consistency', 'visual-quality', 'blog-image', 'keyword-narrative', 'soft-404', 'templated-duplicates', 'url-variant-duplicates', 'sitemap-conflict', 'blog-pagination', 'redirect-chain', 'query-param-duplicates', 'trend-radar', 'news-posts', 'visitor-behaviour', 'seo-drift', 'seo-sxo', 'indexnow'];
+
+// Which agents' findings count toward the website health score. ONE list, used by both writers of the daily score (Command Center and
+// the nightly job), so the number cannot depend on which of them wrote last. geo-audit is not in RECOMMENDATION_AGENT_IDS (it runs
+// weekly, as a generator) but its findings still count, the same as every other agent's.
+export const HEALTH_SCORE_AGENT_IDS = [...RECOMMENDATION_AGENT_IDS, 'geo-audit'];
 
 
 // Findings from these agents are inherently upside-framed (growth,

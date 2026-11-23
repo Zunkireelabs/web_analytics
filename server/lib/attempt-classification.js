@@ -95,6 +95,8 @@ const CONFIG_GAP_REASON_CODES = new Set([
   'invalid-config',
   'sanity-config-invalid',
   'no-repo',
+  // The mapped sitemap is rebuilt by the site's own build (or is a template): a fact about the site, never about the item.
+  'generated-sitemap',
 ]);
 
 const TRANSIENT_REASON_CODES = new Set([
@@ -142,6 +144,9 @@ const DESIGN_SAMPLE_UNREACHABLE_CODES = new Set(['group-sample-unreachable', 'sa
 const LAYOUT_GATE_REASON_CODES = new Set([
   'responsive-regression',
   'render-deviation',
+  // style-fidelity-gate.js: rendered into the real page, the block does not carry the page's typography (unstyled text, a different font). A verdict about
+  // THIS block, identical on a retry of an unchanged page, so it must never count toward retiring the item or tripping the breaker.
+  'style-fidelity-failed',
 ]);
 
 // Autonomous design repair (generators/lib/design-repair.js) hands a failure it
@@ -218,6 +223,7 @@ const RULES = [
     addedBy: 'design-repair',
     match: (r) => LAYOUT_GATE_REASON_CODES.has(r)
       || /breaks the page.s layout at a real device width/i.test(r)
+      || /would not look like the rest of the page/i.test(r)
       || /measures differently/i.test(r) && /held rather than shipped/i.test(r),
     failureClass: FAILURE_CLASS.INVALID_INPUT,
     policy: RETRY_POLICY.NEEDS_HUMAN,

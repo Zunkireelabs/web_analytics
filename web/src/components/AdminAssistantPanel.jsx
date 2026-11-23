@@ -41,11 +41,17 @@ export default function AdminAssistantPanel({ clientId, onClose }) {
   const [error, setError] = useState(null);
   const [actions, setActions] = useState([]);
   const [siteName, setSiteName] = useState(null);
+  const [status, setStatus] = useState(null); // what it is looking up right now, until the first words arrive
+  const abortRef = useRef(null);
   const scrollRef = useRef(null);
 
   // Conversation is scoped to one client — carrying it across a client switch
   // would attach answers about site A to site B.
-  useEffect(() => { setMessages([]); setConversationId(null); setError(null); setActions([]); setInput(''); setSiteName(null); }, [clientId]);
+  useEffect(() => {
+    abortRef.current?.abort();
+    setMessages([]); setConversationId(null); setError(null); setActions([]); setInput(''); setSiteName(null); setStatus(null); setAsking(false);
+  }, [clientId]);
+  useEffect(() => () => abortRef.current?.abort(), []); // closing the panel stops the answer being written
 
   // Real per-client name for the greeting ("Hi, Admizz Education") — the
   // same get_onboarding_status capability the client Assistant uses,
@@ -59,8 +65,8 @@ export default function AdminAssistantPanel({ clientId, onClose }) {
   }, [clientId]);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages, asking]);
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: asking ? 'auto' : 'smooth' });
+  }, [messages, asking, status]);
 
   const ask = async (question) => {
     const text = (question ?? input).trim();
@@ -68,18 +74,57 @@ export default function AdminAssistantPanel({ clientId, onClose }) {
     setInput('');
     setError(null);
     setActions([]);
+    setStatus(null);
     setMessages((m) => [...m, { role: 'user', content: text }]);
     setAsking(true);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    // The answer is one growing assistant message: the first piece creates it, later pieces extend it.
+    const extend = (piece) => setMessages((m) => {
+      const last = m[m.length - 1];
+      if (last?.role === 'assistant' && last.streaming) return [...m.slice(0, -1), { ...last, content: last.content + piece }];
+      return [...m, { role: 'assistant', content: piece, streaming: true, citedFindings: [] }];
+    });
+    const settle = (patch) => setMessages((m) => {
+      const last = m[m.length - 1];
+      if (last?.role === 'assistant' && last.streaming) return [...m.slice(0, -1), { ...last, ...patch, streaming: false }];
+      return patch.content != null ? [...m, { role: 'assistant', ...patch, streaming: false }] : m;
+    });
+    let shown = false;
     try {
-      const res = await api.assistant.message(text, conversationId, clientId);
-      if (res.data?.conversationId) setConversationId(res.data.conversationId);
-      setMessages((m) => [...m, { role: 'assistant', content: res.message, citedFindings: res.data?.citedFindings || [] }]);
-      setActions(res.actions || []);
+      const final = await api.assistant.stream(text, conversationId, {
+        siteId: clientId, signal: controller.signal,
+        onStatus: setStatus,
+        onDelta: (piece) => { shown = true; setStatus(null); extend(piece); },
+      });
+      if (final.data?.conversationId) setConversationId(final.data.conversationId);
+      settle({ content: final.message, citedFindings: final.data?.citedFindings || [] });
+      setActions(final.actions || []);
     } catch (e) {
-      setError(e.message || 'Something went wrong — try again.');
-      setMessages((m) => m.slice(0, -1));
+      if (e?.name === 'AbortError') return;
+      if (e?.noStream && !shown) {
+        // An older server without the streaming route: the same question through the original call.
+        try {
+          const res = await api.assistant.message(text, conversationId, clientId);
+          if (res.data?.conversationId) setConversationId(res.data.conversationId);
+          settle({ content: res.message, citedFindings: res.data?.citedFindings || [] });
+          setActions(res.actions || []);
+        } catch (e2) {
+          setError(e2.message || 'Something went wrong — try again.');
+          setMessages((m) => m.slice(0, -1));
+        }
+      } else if (e?.partial) {
+        settle({});
+        setError(e.message || 'The answer was cut off — try again.');
+      } else {
+        setError(e.message || 'Something went wrong — try again.');
+        setMessages((m) => m.slice(0, -1));
+      }
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setAsking(false);
+      setStatus(null);
     }
   };
 
@@ -142,12 +187,15 @@ export default function AdminAssistantPanel({ clientId, onClose }) {
           )
         ))}
 
-        {asking && (
-          <div className="flex justify-start">
-            <div className="flex gap-1.5 items-center py-2">
-              {[0, 120, 240].map((d) => (
-                <span key={d} className="w-1.5 h-1.5 rounded-full bg-faint-2 animate-bounce" style={{ animationDelay: `${d}ms` }} />
-              ))}
+        {asking && (status || !messages[messages.length - 1]?.streaming) && (
+          <div className="flex justify-start" role="status" aria-live="polite">
+            <div className="flex gap-2 items-center py-2">
+              <span className="flex gap-1.5 items-center">
+                {[0, 120, 240].map((d) => (
+                  <span key={d} className="w-1.5 h-1.5 rounded-full bg-faint-2 animate-bounce" style={{ animationDelay: `${d}ms` }} />
+                ))}
+              </span>
+              {status && <span className="text-xs text-faint animate-fade-in">{status}</span>}
             </div>
           </div>
         )}

@@ -376,3 +376,77 @@ describe('preview — design gates run early, only when the approval flow asks f
     assert.notEqual(r.reason, 'design-incomplete');
   });
 });
+
+// superrank-web (2026-11-23): a generated post named its summary `description` and had no author/category/cover, so the Astro content schema rejected it
+// and the client's build stopped. A schema-validated site now gets its own key name, its configured defaults, or a clear refusal instead of a broken file.
+describe('resolveTargetAndBody — a new post must satisfy the site\'s content schema', () => {
+  const sibling = (cover) => ['---', 'title: "T"', 'excerpt: "E"', 'date: 2026-01-01', 'author: superrank-team', 'category: AEO Know-How', 'cover:', `  kind: ${cover}`, '---', '', 'Body'].join('\n');
+  const ASTRO_REPO = {
+    'src/content.config.ts': 'export const collections = {};',
+    'src/content/blog/a.md': sibling('agent'), 'src/content/blog/b.md': sibling('agent'), 'src/content/blog/c.md': sibling('pills'),
+  };
+  const mkSite = (extra = {}) => ({ id: 9, repo_owner: 'o', repo_name: 'r', repo_default_branch: 'main', url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/content/blog', extension: '.md', ...extra } } } });
+  const draft = { action_type: 'blog-outline', content: { title: 'A New Guide', metaDescription: 'A summary.', sections: [{ heading: 'One', body: 'Text.' }] } };
+
+  test('without defaults the post is refused and the reason names every missing key and where to set them', async () => {
+    const r = await resolveTargetAndBody(mkSite(), draft, repoDeps(ASTRO_REPO));
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'front-matter-incomplete');
+    assert.match(r.error, /"author", "category", "cover"/);
+    assert.match(r.error, /newContentTargets\["blog-outline"\]\.frontMatterDefaults/);
+  });
+
+  test('with the site\'s defaults the post uses the siblings\' own `excerpt` key and carries every required key', async () => {
+    const site = mkSite({ frontMatterDefaults: { author: 'superrank-team', category: 'AEO Know-How', cover: { kind: 'agent' } } });
+    const r = await resolveTargetAndBody(site, draft, repoDeps(ASTRO_REPO));
+    assert.equal(r.ok, true);
+    assert.match(r.body, /^excerpt: "A summary\."$/m);
+    assert.doesNotMatch(r.body, /^description:/m);
+    assert.match(r.body, /^author: "superrank-team"$/m);
+    assert.match(r.body, /^category: "AEO Know-How"$/m);
+    assert.match(r.body, /^cover:\n  kind: "agent"$/m);
+  });
+
+  test('a site with no build-time schema is not refused for lacking keys its siblings share (zunkireelabs-web style)', async () => {
+    const repo = {};
+    for (const n of ['a', 'b', 'c']) repo[`src/blog/${n}.md`] = '---\ntitle: "T"\ndate: 2026-01-01\nauthorId: sadin\nreadTime: 9\n---\nBody';
+    const site = { id: 1, repo_owner: 'o', repo_name: 'r', repo_default_branch: 'main', url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md' } } } };
+    const r = await resolveTargetAndBody(site, draft, repoDeps(repo));
+    assert.equal(r.ok, true);
+    assert.match(r.body, /^description: "A summary\."$/m);
+  });
+});
+
+// MOBILISE (2026-11-23): cookie-policy was configured to land in docs/, so PR 12 added docs/cookie-policy-mobilise.md, which no build reads. The
+// real location comes from the site's own legal pages.
+describe('resolveTargetAndBody — a new legal page is placed beside the site\'s own legal pages', () => {
+  const site = (cfg) => ({
+    id: 8874, repo_owner: 'o', repo_name: 'r', repo_default_branch: 'main',
+    url_file_map: {
+      pages: { '/terms': { file: 'src/terms/index.njk' }, '/privacy-policy': { file: 'src/privacy-policy/index.njk' } },
+      newContentTargets: { 'cookie-policy': cfg },
+    },
+  });
+  const REPO_LEGAL = { 'src/privacy-policy/index.njk': '---\nlayout: base.njk\ntitle: "Privacy"\n---\nBody', 'src/terms/index.njk': '---\ntitle: "Terms"\n---\nBody' };
+  const draft = { action_type: 'cookie-policy', content: { headline: 'Cookie Policy', metaTitle: 'Cookie Policy', sections: [{ heading: 'What are cookies', body: 'Small files.' }] } };
+
+  test('a placeholder docs/ target is replaced by src/cookie-policy/index.njk, /cookie-policy/ and the neighbours\' layout', async () => {
+    const r = await resolveTargetAndBody(site({ dir: 'docs', extension: '.md' }), draft, repoDeps(REPO_LEGAL));
+    assert.equal(r.ok, true);
+    assert.equal(r.filePath, 'src/cookie-policy/index.njk');
+    assert.match(r.body, /^permalink: "\/cookie-policy\/"$/m);
+    assert.match(r.body, /^layout: "base\.njk"$/m);
+  });
+
+  test('a site that configured a real directory keeps it', async () => {
+    const r = await resolveTargetAndBody(site({ dir: 'src/pages', extension: '.njk' }), draft, repoDeps(REPO_LEGAL));
+    assert.equal(r.ok, true);
+    assert.equal(r.filePath, 'src/pages/cookie-policy.njk');
+  });
+
+  test('a cookie page that already exists at the derived path is not overwritten', async () => {
+    const r = await resolveTargetAndBody(site({ dir: 'docs', extension: '.md' }), draft, repoDeps({ ...REPO_LEGAL, 'src/cookie-policy/index.njk': 'already here' }));
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'slug-conflict');
+  });
+});

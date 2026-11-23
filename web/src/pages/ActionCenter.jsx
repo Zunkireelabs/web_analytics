@@ -34,6 +34,7 @@ import {
 } from 'lucide-react';
 import { STATUS } from '../lib/palette.js';
 import { inDraftScope } from '../lib/draft-scope.js';
+import { runOutcome } from '../lib/run-outcome.js';
 import SignalBoxes from '../components/SignalBoxes.jsx';
 import DesignChoices from '../components/DesignChoices.jsx';
 
@@ -51,6 +52,7 @@ const GENERATOR_META = {
   viewport: { label: 'Viewport Meta Tag' },
   canonical: { label: 'Canonical Tags' },
   'robots-fix': { label: 'Robots.txt Fixes' },
+  indexnow: { label: 'IndexNow Key File' },
   'open-graph': { label: 'Open Graph Tags' },
   'broken-link-fix': { label: 'Broken Link Removal' },
   'redirect-fix': { label: 'Redirect Fixes' },
@@ -141,7 +143,11 @@ const BLOCKED_KIND_META = {
     className: 'amber',
   },
 };
+// A change to a live page that nothing here made (seo-drift) is not "blocked on setup": there is nothing to set up and nothing to
+// draft. It needs a decision (undo it, or mark it intended), so it says that instead of the generic blocked wording.
+const DRIFT_META = { icon: AlertTriangle, badge: 'Needs your decision', heading: 'A live page changed', className: 'amber' };
 function blockedMetaFor(item) {
+  if (item?.generatorId === 'seo-drift') return DRIFT_META;
   return BLOCKED_KIND_META[item?.blockedKind] || BLOCKED_KIND_META['our-config'];
 }
 
@@ -353,7 +359,6 @@ export default function ActionCenter({ scope }) {
   // clicked issue or draft open in a side drawer; each group card can show all of its issues; the date
   // range is tucked behind a button.
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [expandedKinds, setExpandedKinds] = useState({});
   useEffect(() => {
     if (!drawerOpen) return undefined;
     const onKey = (e) => { if (e.key === 'Escape') setDrawerOpen(false); };
@@ -517,7 +522,7 @@ export default function ActionCenter({ scope }) {
   // tick. Split out from executeSafeFixes below so both the fresh-run path
   // and the timed-out-POST recovery path (which also lands on a possibly
   // still-running job) drive the same loop.
-  const pollExecutionJob = (jobId) => {
+  const pollExecutionJob = (jobId, total) => {
     stopExecutionPoll();
     setIsRunningExecution(true);
     const tick = async () => {
@@ -525,7 +530,7 @@ export default function ActionCenter({ scope }) {
         const job = await api.actionCenter.getExecutionJob(jobId, siteId);
         const shipped = job.items.filter((i) => i.status === 'approved').length;
         const failed = job.items.filter((i) => i.status === 'failed').length;
-        setExecutionResult({ job, shipped, failed });
+        setExecutionResult({ job, shipped, failed, total });
         if (job.status !== 'preparing' && job.status !== 'executing') {
           stopExecutionPoll();
           setIsRunningExecution(false);
@@ -555,7 +560,7 @@ export default function ActionCenter({ scope }) {
       // ships — so this normally resolves in well under a second even for a
       // full 60-item run. What follows is deciding whether there's a
       // background job to watch.
-      const result = await api.actionCenter.executeSafeFixes(undefined, siteId);
+      const result = await api.actionCenter.executeSafeFixes(undefined, siteId, scope);
       if (!result.job || result.job.status === 'completed' || result.job.status === 'failed') {
         // Nothing to ship (already-drafted/paced down to zero) — done already.
         setExecutionResult(result);
@@ -565,7 +570,7 @@ export default function ActionCenter({ scope }) {
         loadDraftCounts();
         loadTodayStats();
       } else {
-        pollExecutionJob(result.job.id);
+        pollExecutionJob(result.job.id, result.total);
       }
     } catch (e) {
       // Only reachable now if the fast prepare step itself times out or the
@@ -696,6 +701,23 @@ export default function ActionCenter({ scope }) {
       setError(`${item.tag}: ${e.message || 'Re-check failed'}`);
     } finally {
       setRecheckingId(null);
+    }
+  };
+
+  // A change to a live page that nothing here made (seo-drift): "this is intended" makes the page as it is now the one future checks
+  // compare against, and the item goes away. Without it the same change would be reported every night.
+  const [acceptingId, setAcceptingId] = useState(null);
+  const acceptChange = async (item) => {
+    setAcceptingId(item.id);
+    try {
+      await api.actionCenter.acceptChange(item.id, siteId);
+      setSelectedRecommendation(null);
+      setDrawerOpen(false);
+      loadRecs();
+    } catch (e) {
+      setError(`${item.tag}: ${e.message || 'Could not mark this change as intended'}`);
+    } finally {
+      setAcceptingId(null);
     }
   };
 
@@ -872,16 +894,18 @@ export default function ActionCenter({ scope }) {
       )}
 
       {executionResult && (
-        <div className={`rounded-card text-sm px-4 py-3 mb-6 ${isRunningExecution ? 'bg-muted text-text' : 'bg-[#e8f7ee] text-[#1a7f4b]'}`}>
+        <div className={`rounded-card text-sm px-4 py-3 mb-6 ${isRunningExecution ? 'bg-muted text-text' : runOutcome(executionResult).ok ? 'bg-[#e8f7ee] text-[#1a7f4b]' : 'bg-[#fdf3e1] text-[#8a5300]'}`}>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="flex items-center gap-2">
               {isRunningExecution
                 ? <Zap size={14} className="shrink-0" />
-                : <CheckCircle2 size={14} className="shrink-0" />}
+                : runOutcome(executionResult).ok
+                  ? <CheckCircle2 size={14} className="shrink-0" />
+                  : <AlertTriangle size={14} className="shrink-0" />}
               <span>
                 {isRunningExecution
-                  ? `Shipping… ${executionResult.shipped + executionResult.failed} of ${executionResult.job?.items?.length ?? '?'} processed so far (${executionResult.shipped} shipped${executionResult.failed > 0 ? `, ${executionResult.failed} failed` : ''}).`
-                  : <>Shipped {executionResult.shipped}{executionResult.failed > 0 ? `, ${executionResult.failed} failed` : ''} — committed to one branch{executionResult.job?.pr_url ? ', one PR opened' : ''}.</>}
+                  ? `Shipping… ${executionResult.shipped + executionResult.failed} of ${executionResult.total ?? executionResult.job?.items?.length ?? '?'} processed so far (${executionResult.shipped} shipped${executionResult.failed > 0 ? `, ${executionResult.failed} failed` : ''}).`
+                  : runOutcome(executionResult).text}
               </span>
             </span>
             <span className="flex items-center gap-2 shrink-0">
@@ -932,9 +956,9 @@ export default function ActionCenter({ scope }) {
       )}
 
       {tab === 'drafts' && bulkApproveResult && (
-        <div className="rounded-card bg-[#e8f7ee] text-[#1a7f4b] text-sm px-4 py-3 mb-6 flex flex-wrap items-center justify-between gap-2">
+        <div className={`rounded-card ${runOutcome(bulkApproveResult).ok ? 'bg-[#e8f7ee] text-[#1a7f4b]' : 'bg-[#fdf3e1] text-[#8a5300]'} text-sm px-4 py-3 mb-6 flex flex-wrap items-center justify-between gap-2`}>
           <span>
-            Shipped {bulkApproveResult.shipped}{bulkApproveResult.failed > 0 ? `, ${bulkApproveResult.failed} failed` : ''} — committed to one branch{bulkApproveResult.job?.pr_url ? ', one PR opened' : ''}.
+            {runOutcome(bulkApproveResult).text}
           </span>
           {bulkApproveResult.job?.pr_url && (
             <a href={bulkApproveResult.job.pr_url} target="_blank" rel="noreferrer" className="btn btn--light btn--sm shrink-0">
@@ -1068,6 +1092,13 @@ export default function ActionCenter({ scope }) {
                       {recheckResult?.id === sel.id && !recheckResult.changed && (
                         <span className="text-[13px] text-faint">Still detected — not fixed yet.</span>
                       )}
+                      {sel.generatorId === 'seo-drift' && (
+                        <Button variant="light" onClick={() => acceptChange(sel)} disabled={acceptingId === sel.id}
+                          title="Use the page as it is now as the one to compare against from here on, and stop reporting this change">
+                          <Check size={14} />
+                          {acceptingId === sel.id ? 'Saving…' : 'This change is intended'}
+                        </Button>
+                      )}
                       {sel.riskTier === 'safe' && (
                         <Button variant="light" onClick={() => generate(sel)} disabled={generatingId === sel.id || shippingId === sel.id}>
                           {generatingId === sel.id ? 'Drafting…' : 'Preview draft only'}
@@ -1080,7 +1111,7 @@ export default function ActionCenter({ scope }) {
                           template) — swapping out the real button for a
                           disabled pill would contradict the note above, which
                           already says "not blocked." */}
-                      {sel.blockedReason && sel.blockedKind !== 'design-degraded' ? (
+                      {sel.generatorId === 'seo-drift' ? null : sel.blockedReason && sel.blockedKind !== 'design-degraded' ? (
                         <Badge tone={selBlue ? 'outline' : 'amber'}>
                           {selBlue ? 'In progress — nothing to do' : 'Blocked — resolve the setup above'}
                         </Badge>
@@ -1206,12 +1237,10 @@ export default function ActionCenter({ scope }) {
       const count = (p) => items.filter((i) => i.priority === p).length;
       const crit = count('high'), imp = count('medium'), minor = items.length - crit - imp;
       const danger = Boolean(kind.danger) && items.length > 0;
-      const expanded = Boolean(expandedKinds[k]);
-      const shown = expanded ? items : items.slice(0, 4);
       const seg = (n, color) => (n > 0 ? <span style={{ width: `${(n / items.length) * 100}%`, background: color }} /> : null);
       return (
-        <section key={k} className="min-w-0">
-          <div className="tray"><div className="tray-card overflow-hidden" style={danger ? { boxShadow: `inset 0 3px 0 ${STATUS.critical.color}, var(--ring)` } : undefined}>
+        <section key={k} className="min-w-0 h-full">
+          <div className="tray h-full"><div className="tray-card overflow-hidden h-full flex flex-col" style={danger ? { boxShadow: `inset 0 3px 0 ${STATUS.critical.color}, var(--ring)` } : undefined}>
             <div className="px-4 pt-4 pb-3 flex items-start gap-3">
               <span className="w-9 h-9 rounded-control grid place-items-center shrink-0"
                 style={danger ? { background: '#fdecec', color: STATUS.critical.text } : { background: 'var(--muted)', color: 'var(--text)' }}><Icon size={17} /></span>
@@ -1232,13 +1261,16 @@ export default function ActionCenter({ scope }) {
               </div>
             )}
             {items.length === 0 ? (
-              <div className="px-4 py-8 text-center border-t border-border">
+              <div className="flex-1 px-4 py-8 text-center border-t border-border flex flex-col items-center justify-center">
                 <span className="w-9 h-9 rounded-full grid place-items-center mx-auto" style={{ background: 'var(--green-tint)', color: 'var(--green)' }}><ShieldCheck size={17} /></span>
                 <p className="mt-2 text-[13px] text-text">{k === 'security' ? 'No security issues found' : 'Nothing here right now'}</p>
               </div>
             ) : (
-              <div>
-                {shown.map((item) => {
+              // Fixed-height list that scrolls inside the card: the page never grows with the backlog and the three
+              // cards in the row stay the same height (grid items-stretch + h-full). overscroll-contain keeps the
+              // wheel from scrolling the page once the list hits its end.
+              <div className="flex-1 min-h-0 max-h-[440px] overflow-y-auto overscroll-contain">
+                {items.map((item) => {
                   const on = drawerOpen && selectedRecommendation?.id === item.id;
                   const itemUrl = item.url || item.params?.page;
                   const path = itemUrl ? pagePathFor(itemUrl) : null;
@@ -1247,7 +1279,7 @@ export default function ActionCenter({ scope }) {
                       className={`w-full text-left px-4 py-3 border-t border-border flex gap-2.5 hover:bg-[#fafafa] ${on ? 'bg-primary-tint' : ''}`}>
                       <span className="w-2 h-2 rounded-full mt-1.5 shrink-0" style={{ background: SEV[item.priority] || SEV.low }} title={SEV_LABEL[item.priority] || 'Minor'} />
                       <span className="min-w-0 flex-1">
-                        <span className="block text-[13px] font-medium text-fg leading-[18px]">{titleFor(item)}</span>
+                        <span className="block text-[13px] font-medium text-fg leading-[18px] line-clamp-2 [overflow-wrap:anywhere]" title={titleFor(item)}>{titleFor(item)}</span>
                         <span className="block text-xs text-text mt-0.5 line-clamp-2">{item.reason}</span>
                         {path && <span className="block text-[11px] text-faint mt-1 truncate">{path}</span>}
                       </span>
@@ -1255,13 +1287,6 @@ export default function ActionCenter({ scope }) {
                     </button>
                   );
                 })}
-                {items.length > 4 && (
-                  <div className="px-3 py-2 border-t border-border">
-                    <Button variant="ghost" size="sm" onClick={() => setExpandedKinds((e) => ({ ...e, [k]: !e[k] }))}>
-                      {expanded ? 'Show fewer' : `Show all ${items.length}`}
-                    </Button>
-                  </div>
-                )}
               </div>
             )}
           </div></div>
@@ -1366,7 +1391,7 @@ export default function ActionCenter({ scope }) {
               <div className="grid gap-3 lg:grid-cols-3">{[0, 1, 2].map((i) => <div key={i} className="h-56 rounded-card bg-muted animate-pulse" />)}</div>
             ) : (
               <>
-                <div className="grid gap-3 lg:grid-cols-3 items-start">{KIND_ORDER.map(groupCard)}</div>
+                <div className="grid gap-3 lg:grid-cols-3 items-stretch">{KIND_ORDER.map(groupCard)}</div>
                 <SignalBoxes items={openIssues} inProgress={(recs?.items || []).filter((i) => i.lifecycle === 'in_progress')} fixed={implementedDrafts} only={sourceFilter}
                   titleFor={titleFor} draftTitleFor={(d) => `${(GENERATOR_META[d.action_type] || { label: d.action_type }).label} · ${draftTarget(d)}`}
                   onOpen={openIssue} onOpenDraft={(d) => { setTab('implemented'); pickDraft(d); }} renderBadge={(item) => stateBadge(item, false)} />

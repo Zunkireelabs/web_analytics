@@ -40,12 +40,27 @@ export function buildAuthorizeUrl({ redirectUri, state, env = process.env }) {
 }
 
 export class GithubConnectError extends Error {
-  constructor(code, message) { super(message || code); this.code = code; }
+  // `status` is the HTTP status GitHub answered with, when there was one: a 401 means the person's token is gone, anything else is not their sign-in.
+  constructor(code, message, status = null) { super(message || code); this.code = code; this.status = status; }
 }
 
 async function json(res, what) {
-  if (!res.ok) throw new GithubConnectError('github_failed', `${what} failed (${res.status})`);
+  if (!res.ok) throw new GithubConnectError('github_failed', `${what} failed (${res.status})`, res.status);
   return res.json();
+}
+
+/**
+ * What to tell the person when reading their repositories failed. Only a 401 from GitHub means their sign-in is gone (and only then is the session dropped);
+ * a rate limit, a GitHub outage or a missing permission says so and keeps the sign-in. The old route called every failure "expired", which sent a person round
+ * and round "Connect again" when the real cause was never their sign-in (a server with no GitHub App set up, or a GitHub 403/5xx).
+ * @returns {{ dropSession: boolean, message: string }}
+ */
+export function describeRepoReadFailure(err) {
+  const status = err instanceof GithubConnectError ? err.status : null;
+  if (status === 401) return { dropSession: true, message: 'Your GitHub sign-in has expired. Connect again.' };
+  if (status === 403 || status === 429) return { dropSession: false, message: 'GitHub is limiting requests right now. Wait a minute and refresh; your sign-in is still good.' };
+  if (status >= 500) return { dropSession: false, message: 'GitHub is having trouble right now. Try again in a minute; your sign-in is still good.' };
+  return { dropSession: false, message: 'GitHub could not be read just now. Try again in a minute.' };
 }
 
 export async function exchangeCode({ code, redirectUri, env = process.env, fetchImpl = fetch }) {

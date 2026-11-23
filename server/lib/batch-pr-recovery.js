@@ -44,7 +44,7 @@ import { getSiteById } from '../store/read.js';
 import { markDraftAbandoned, markDraftPrOpened, clearApplyErrorForPushedDraft } from '../store/drafts.js';
 import { recordAttempt } from '../store/recommendation-attempts.js';
 import { RETRY_POLICY } from './attempt-classification.js';
-import { listCommitSubjectsAheadOfBase, listOpenPullRequestsForBranch, getLastKnownRateLimit } from '../github/client.js';
+import { listCommitSubjectsAheadOfBase, listOpenPullRequestsForBranch, getLastKnownRateLimit, findMergedPullRequestForHead, listPullRequestCommitSubjects } from '../github/client.js';
 import { logInternal } from './errors.js';
 
 // pushDraftBranch's commit subject is
@@ -58,7 +58,7 @@ function commitSubjectMatchesDraft(subject, draftId) {
 
 // One branch's worth of drafts. Returns a per-branch summary; never throws
 // for an ordinary GitHub failure, so one bad branch cannot stop the sweep.
-async function recoverBranch(site, branchName, drafts, { apply, log, openPr }) {
+async function recoverBranch(site, branchName, drafts, { apply, log, openPr, findPrMerged = findMergedPullRequestForHead, listPrCommitSubjects = listPullRequestCommitSubjects }) {
   const siteId = site.id;
   const summary = { branch: branchName, drafts: drafts.length, opened: 0, adopted: 0, abandoned: 0, skipped: 0 };
 
@@ -120,6 +120,35 @@ async function recoverBranch(site, branchName, drafts, { apply, log, openPr }) {
       log?.(`[pr-recovery] site ${siteId}: branch ${branchName} recheck failed — leaving ${missing.length} unconfirmed draft(s) for the next run`);
       summary.skipped += missing.length;
       missing = [];
+    }
+  }
+
+  // "Not ahead of main" is ALSO what a MERGED branch looks like: once its PR merges, every commit on it is reachable from
+  // main and the compare above returns none. Before calling anything missing, look for a merged PR from this branch and
+  // check its commits; a draft found there shipped — attach it to that PR (the normal merge check then marks it
+  // implemented) instead of abandoning live work (2026-11-23: nine merged drafts were abandoned this way).
+  if (missing.length) {
+    let merged = null; let mergedSubjects = [];
+    try {
+      merged = await findPrMerged(site, branchName);
+      if (merged) mergedSubjects = await listPrCommitSubjects(site, merged.number);
+    } catch (err) {
+      // Can't tell merged from missing right now: leave them for the next run rather than abandon on a guess.
+      const ref = logInternal(`batch-pr-recovery.mergedCheck ${branchName}`, err);
+      log?.(`[pr-recovery] site ${siteId}: could not check merged PRs for ${branchName} (ref: ${ref}) — leaving ${missing.length} draft(s) for the next run`);
+      summary.skipped += missing.length;
+      missing = [];
+    }
+    if (merged) {
+      const shipped = missing.filter((d) => mergedSubjects.some((sub) => commitSubjectMatchesDraft(sub, d.id)));
+      missing = missing.filter((d) => !shipped.includes(d));
+      for (const draft of shipped) {
+        summary.adopted += 1;
+        if (!apply) continue;
+        await markDraftPrOpened(siteId, draft.id, { prNumber: merged.number, prUrl: merged.url, rollbackSnapshot: null })
+          .catch((err) => logInternal(`batch-pr-recovery.adoptMerged draft ${draft.id}`, err));
+      }
+      if (shipped.length) log?.(`[pr-recovery] site ${siteId}: ${shipped.length} draft(s) on ${branchName} were merged in PR #${merged.number} — attached, not abandoned`);
     }
   }
 

@@ -91,6 +91,7 @@ export async function getLatestFindings(siteId, agentIds) {
       agentId: r.agent_id,
       agentVersion: r.agent_version,
       summary: r.narrative,
+      createdAt: r.created_at,
       findings: r.facts?.findings || [],
       // Every batch-rotated agent's facts carries checkedPages (this run's
       // rotation batch) — lets recommendation auto-close tell "fixed" apart

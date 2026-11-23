@@ -1,14 +1,19 @@
 import { resolveFile, resolveActionFile, resolveLineKeys, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, isPageMapped, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
 import { isTemplatedSitemap } from './lib/sitemap-guard.js';
+import { detectBuildGeneratedSitemap, generatedSitemapMessage } from './lib/sitemap-generator-detect.js';
 import { guardSiteRootWrite, isTemplatedFile } from './lib/site-root-write-guard.js';
+import { indexNowTargetPath } from './lib/indexnow-file.js';
+import { keyFileContent } from '../lib/indexnow.js';
 import { computeBlogPaginationMerge, pushBlogPaginationBranch, previewLiveBlogPagination } from './lib/blog-pagination-inject.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, resolveBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, getRepoTree } from '../github/client.js';
+import { stripManagedMarkers } from '../lib/managed-markers.js';
+import { MARKDOWN_NATIVE_TYPES, isMarkdownFile, learnMarkdownConventions, renderMarkdownNative, placeMarkdownMarker, loadSiblingMarkdown, planMarkdownTitleField, expandedContentBelowClosingSection } from './lib/markdown-native.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
 import { planRedirect } from './lib/redirect-writer.js';
 import { planSecurityHeaders } from './lib/host-headers-writer.js';
 import { HEADER_BY_KEY } from '../generators/security-headers.js';
-import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
+import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS, draftHasTable } from './lib/marker-merge.js';
 import { resolveInsertion, buildUnresolvedInsertionFailure } from './lib/insertion-engine.js';
 import { loadExpandStructurePrior } from '../design-agent/lib/expand-structure-loader.js';
 import { classifyPageType } from '../design-agent/live-analysis/schema.js';
@@ -25,6 +30,8 @@ import { decideFaqRenderMode, checkSchemaOnlyFaqMatchesVisible, faqSchemaRequire
 import { COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, checkDesignIntegrityGate, resolvePageComponentTemplate, lacksDesignBaseline } from './lib/design-drift.js';
 import { designGateMode } from '../design-agent/lib/design-completeness.js';
 import { checkResponsivePreview, describeResponsiveRegressions } from '../generators/lib/responsive-preview-gate.js';
+import { checkStyleFidelity, styleFidelityMode, describeStyleIssues } from '../generators/lib/style-fidelity-gate.js';
+import { resolveStylePageUrl } from '../generators/lib/stage-page-url.js';
 import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination-routes.js';
 import { checkSharedTemplateWrite } from './lib/action-scope.js';
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
@@ -43,7 +50,7 @@ export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'redirect-add', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'sitemap-frontmatter-exclude', 'blog-pagination', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx', 'compression-nginx'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'indexnow', 'redirect-fix', 'redirect-add', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'sitemap-frontmatter-exclude', 'blog-pagination', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx', 'compression-nginx'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -117,6 +124,9 @@ async function pushSitemapBranch(site, draft, batchInfo) {
   if (current && isTemplatedSitemap(current.content)) {
     return { ok: false, reason: 'generated-sitemap', error: `${path} is a template that generates the sitemap, not a static sitemap.xml — writing XML into it would stop new pages from being listed. Fix the page's own sitemap setting instead, or map a static sitemap file.` };
   }
+  // ...nor one the site's own build regenerates: the write would be overwritten at the next build (see lib/sitemap-generator-detect.js).
+  const generator = await detectBuildGeneratedSitemap((p) => getFileContent(site, p, baseBranch(site)));
+  if (generator.generated) return { ok: false, reason: 'generated-sitemap', error: generatedSitemapMessage(path, generator.reason) };
   return pushDraftBranch(site, draft, [{ path, content: draft.content.sitemapXml }], batchInfo);
 }
 
@@ -374,6 +384,17 @@ async function previewLiveRedirectChainNginx(site, draft) {
   const file = await getFileContent(site, path, baseBranch(site));
   if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${baseBranch(site)}".` };
   return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'redirectTarget', content: file.content }] };
+}
+
+// The IndexNow key file: one brand-new file, <siteRoot.indexnowDir>/<key>.txt, containing the key (generators/indexnow.js). The path is rebuilt
+// here from the site's configured folder and the draft's key (validated to letters, digits and dashes), never taken from the draft as given.
+const INDEXNOW_NOT_CONFIGURED = 'site.url_file_map.siteRoot.indexnowDir (the repo folder the site serves at its root) is not configured, or the draft has no valid IndexNow key.';
+async function pushIndexNowBranch(site, draft, batchInfo) {
+  const path = indexNowTargetPath(site, draft.content?.key);
+  if (!path) return { ok: false, reason: 'no-file-mapping', error: INDEXNOW_NOT_CONFIGURED };
+  const guard = await guardSiteRootWrite({ path, kind: 'indexnow', readFile: (p) => getFileContent(site, p, baseBranch(site)) });
+  if (!guard.ok) return guard;
+  return pushDraftBranch(site, draft, [{ path, content: keyFileContent(draft.content.key) }], batchInfo);
 }
 
 // robots-bootstrap is site-level like llms-txt/sitemap, and
@@ -1385,6 +1406,39 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     if (!visibility.ok) return { ok: false, reason: visibility.code, error: visibility.error };
   }
 
+  // A link the page ALREADY has (in its own content, not inside one of our markers) is never added a second time —
+  // e.g. a "Related guides" list that already points at the target. Only links still missing are written.
+  if (draft.action_type === 'internal-links' && Array.isArray(draft.content?.suggestions)) {
+    const organic = stripManagedMarkers(file.content || '');
+    const pathOf = (u) => { try { return new URL(u, 'https://x.invalid').pathname.replace(/\/+$/, ''); } catch { return null; } };
+    const alreadyLinked = (u) => {
+      const p = pathOf(u);
+      if (!p) return false;
+      const esc = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`(?:href=["'{]|\\]\\()(?:https?://[^/"')]+)?${esc}/?(?:[#?"')]|$)`, 'i').test(organic);
+    };
+    const missing = draft.content.suggestions.filter((sg) => sg?.targetUrl && !alreadyLinked(sg.targetUrl));
+    if (!missing.length) {
+      return { ok: false, reason: 'already-linked', error: 'This page already links to every suggested target, so nothing was added.' };
+    }
+    if (missing.length !== draft.content.suggestions.length) draft = { ...draft, content: { ...draft.content, suggestions: missing } };
+  }
+
+  // A Markdown/MDX page is written in the site's own Markdown, learned from its sibling pages (markdown-native.js),
+  // never as HTML from a component template: the site's renderer then gives it the site's real design. Holds — never
+  // guesses — when no sibling shows the component. Everything template-related below is skipped for this path.
+  let markdownNative = null;
+  if (mode === 'visible' && isMarkdownFile(filePath) && MARKDOWN_NATIVE_TYPES.has(draft.action_type)) {
+    const siblings = await loadSiblingMarkdown(site, filePath, { getRepoTree, getFileContent, ref: branch }).catch(() => null);
+    if (!siblings) {
+      return { ok: false, reason: 'markdown-conventions-unavailable', error: 'Could not read the other pages in this collection to learn how the site writes this section; retrying later rather than guessing.' };
+    }
+    const conventions = learnMarkdownConventions(siblings);
+    const rendered = renderMarkdownNative(draft.action_type, draft.content, conventions, { fileBody: file.content });
+    if (!rendered.ok) return { ok: false, reason: rendered.reason, error: rendered.error };
+    markdownNative = { conventions, rendered };
+  }
+
   // Checked only when this action type has SOME real design claim to verify
   // — a configured site-level componentTemplates entry, a previously
   // page-captured one, or a usable design profile buildMergeValues would
@@ -1410,28 +1464,38 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   const siteLevelTemplate = componentKey && site.url_file_map?.siteRoot?.componentTemplates?.[componentKey];
   const hasPageCaptures = componentKey && site.url_file_map?.siteRoot?.pageComponentTemplates?.[componentKey];
   let componentTemplatesForMerge = site.url_file_map?.siteRoot?.componentTemplates;
-  // Nothing of this site's design to ground the markup in: hold, never ship
-  // the generic built-in fallback onto a real client page.
-  if (lacksDesignBaseline(site, { componentKey, mode, gateMode: designGateMode() })) {
-    // Same self-heal as frontend.js's completeness hold (design-gates.js): ask
-    // the Design Agent to capture this site so the next run can ship, and keep
-    // the miss as knowledge for this tenant. Best effort — never masks the hold.
+  // Nothing of this site's REAL design for this component to ground the markup in: hold, never ship generic or
+  // projected markup onto a real client page. A general design profile (colours, spacing, type) no longer counts as a
+  // baseline for a COMPONENT: building a FAQ/table/links block from it is how an unstyled <dl class="section"> FAQ
+  // reached a live blog post (2026-11-23). Only a template captured from the site's own component may render it.
+  const holdForComponentCapture = async (detail) => {
     await (await import('../store/design-gate-decisions.js')).recordGateDecision(site.id, {
       draftId: draft.id ?? null, actionType: draft.action_type, gate: 'completeness', mode: 'enforce', blocked: true,
-      reason: 'no-design-profile', detail: { componentKey, repairable: true },
+      reason: 'no-component-template', detail: { componentKey, repairable: true, ...detail },
     }).catch(() => {});
-    await (await import('../design-agent/lib/design-block-repair.js')).requeueProfileForRepeatedBlocks(site).catch(() => {});
+    // Ask the Design Agent to capture THIS component from the site (deduped: one pending job per site + component).
+    await (async () => {
+      const jobs = await import('../store/execution-jobs.js');
+      if (await jobs.getQueuedComponentTemplateJob(site.id, draft.action_type)) return;
+      await jobs.createComponentTemplateJob(site.id, [draft.action_type], { pageUrl: page });
+    })().catch(() => {});
     await (await import('../store/design-knowledge.js')).recordDesignFailure(site.id, {
-      patternId: 'design-incomplete', pageUrl: page, detail: `no captured design for ${componentKey}`,
+      patternId: 'design-incomplete', pageUrl: page, detail: `no captured ${componentKey} component for this page`,
       draftId: draft.id ?? null, validation: { passed: false, gate: 'baseline', mode: 'enforce' },
     }).catch(() => {});
     return {
       ok: false, reason: 'design-incomplete',
-      error: `This site has no captured design (no template, page capture or usable design profile) for "${componentKey}", so this was held for review instead of shipping generic markup. Run the Design Agent for the site, then retry.`,
+      error: `This site has no captured "${componentKey}" component that matches this page, so this was held instead of `
+        + 'shipping markup the site never uses. The Design Agent has been asked to capture it; this retries once it has.',
       componentKey, actionType: draft.action_type,
     };
+  };
+  if (!markdownNative && lacksDesignBaseline(site, { componentKey, mode, gateMode: designGateMode() })) {
+    // Same self-heal as before (the profile repair) plus a capture of this specific component.
+    await (await import('../design-agent/lib/design-block-repair.js')).requeueProfileForRepeatedBlocks(site).catch(() => {});
+    return holdForComponentCapture({ resolution: 'no-captured-template' });
   }
-  if (mode === 'visible' && componentKey && (siteLevelTemplate || hasPageCaptures || siteHasUsableDesignProfile(site))) {
+  if (!markdownNative && mode === 'visible' && componentKey && (siteLevelTemplate || hasPageCaptures || siteHasUsableDesignProfile(site))) {
     const resolved = await resolvePageComponentTemplate(site, draft.action_type, page);
     if (!resolved.ok) {
       return {
@@ -1451,6 +1515,18 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     if (resolved.tier && resolved.tier !== 'site' && resolved.template) {
       componentTemplatesForMerge = { ...site.url_file_map?.siteRoot?.componentTemplates, [componentKey]: resolved.template };
     }
+    // Resolution can succeed with NO template (e.g. no page URL: the empty site tier). buildMergeValues would then
+    // project one from the design profile or use its built-in default — never the site's own component.
+    if (designGateMode() === 'enforce' && !componentTemplatesForMerge?.[componentKey]?.wrapper) {
+      return holdForComponentCapture({ resolution: resolved.reason || resolved.source || 'no-template' });
+    }
+  }
+
+  // A table is its own component: with no table captured from this site, a draft carrying one would ship a generic
+  // inline-styled or projected table. Hold it until the site's real table style is captured.
+  if (!markdownNative && designGateMode() === 'enforce' && mode === 'visible' && ['expand-content', 'refresh-content'].includes(draft.action_type)
+    && !site.url_file_map?.siteRoot?.componentTemplates?.table && draftHasTable(draft.content)) {
+    return holdForComponentCapture({ resolution: 'no-captured-table', component: 'table' });
   }
 
   // The design-integrity gate (design-integrity-gate proposal, change 04) —
@@ -1469,7 +1545,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // checkDesignIntegrityGate's own comment: verifyProfileRoles catches the
   // real incident class — a confirmed role-mismatch — automatically, and a
   // failure here quarantines only THIS draft, never the whole site).
-  if (mode === 'visible' && siteHasUsableDesignProfile(site)) {
+  if (!markdownNative && mode === 'visible' && siteHasUsableDesignProfile(site)) {
     const gate = await checkDesignIntegrityGate(site, { actionType: draft.action_type, findingId: draft.finding_id });
     if (!gate.ok) {
       return {
@@ -1489,7 +1565,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // schema type doesn't already exist before inserting one).
   const suppressSchema = INSPECTABLE_ACTION_TYPES.includes(draft.action_type) && hasExistingFaqSchema(file.content);
   const hasLinkMap = Boolean(site.url_file_map && (Object.keys(site.url_file_map.pages || {}).length || (site.url_file_map.patterns || []).length));
-  const built = buildMergeValues(draft.action_type, draft.content, mode, componentTemplatesForMerge, site.url_file_map?.siteRoot?.designProfile, {
+  const built = markdownNative ? { ok: true, values: { [MARKER_FIELD_BY_ACTION_TYPE[draft.action_type]]: markdownNative.rendered.value } } : buildMergeValues(draft.action_type, draft.content, mode, componentTemplatesForMerge, site.url_file_map?.siteRoot?.designProfile, {
     suppressSchema, page, fileContent: file.content,
     // A link target must resolve in this site's url_file_map; a site with no
     // page map at all is not judged on it (nothing to resolve against).
@@ -1519,7 +1595,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   let responsivePreview = null;
   const componentField = MARKER_FIELD_BY_ACTION_TYPE[draft.action_type];
   const marker = componentField && markerMap[componentField];
-  if (mode === 'visible' && componentKey && marker && built.values[componentField]) {
+  if (!markdownNative && mode === 'visible' && componentKey && marker && built.values[componentField]) {
     responsivePreview = await checkResponsivePreview({
       pageUrl: page, marker, newContentHtml: built.values[componentField],
     }).catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
@@ -1545,6 +1621,34 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     }
   }
 
+  // Style fidelity (generators/lib/style-fidelity-gate.js) — the responsive check above asks whether the block overflows or clips; this one asks whether it LOOKS
+  // like the page it lands on. Same live-page render, but it also covers a first insertion (no marker on the live page yet) and Markdown sites, which the
+  // responsive check skips. A bare <dl> FAQ passes every other check and renders as plain text (MOBILISE and Superrank, 2026-11-23); here it is refused.
+  // STYLE_FIDELITY_GATE=log records without refusing, =off skips. A check that could not run (page unreachable, no browser) is never a verdict.
+  const styleMode = styleFidelityMode();
+  if (styleMode !== 'off' && mode === 'visible' && componentField && marker && built.values[componentField]) {
+    // Judged where the change will land: the stage site when the client has one (its stage design may not be live yet), the live page otherwise.
+    const stylePage = await resolveStylePageUrl(site, page).catch(() => ({ url: page, source: 'live' }));
+    const style = await checkStyleFidelity({ pageUrl: stylePage.url, marker, newContentHtml: built.values[componentField] })
+      .catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
+    // The check did not run (the live page was unreachable, or no browser slot was free): that is NOT a pass. Held and retried, exactly as the responsive check
+    // above holds the same situation, rather than shipped unlooked-at. (Production's last 3 days: 3 browser-based runs skipped because every slot was busy.)
+    if (!style.ok && ['unreachable', 'browser-unavailable'].includes(style.reason) && styleMode === 'enforce') {
+      return { ok: false, reason: 'unreachable', error: 'The style check could not run (the live page was unreachable, or no browser was available), so this was held, not shipped.' };
+    }
+    if (style.ok && !style.skip && !style.passed) {
+      const summary = describeStyleIssues(style.issues);
+      if (styleMode === 'enforce') {
+        return {
+          ok: false, reason: 'style-fidelity-failed',
+          error: `This block would not look like the rest of the page: ${summary}`,
+          issues: style.issues, draftHtml: built.values[componentField], pageUrl: page, marker,
+        };
+      }
+      console.warn(`[style-fidelity] log mode — ${page} (${marker}): ${summary}`);
+    }
+  }
+
   // Resolves any marker in markerMap that isn't already in the live file —
   // the universal insertion engine (insertion-engine.js's resolveInsertion):
   // learned-strategy-first (strategy-registry.js), then real structural
@@ -1565,7 +1669,26 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   const placement = expandPrior && componentField
     ? { field: componentField, beforeRoles: expandPrior.placement.before }
     : null;
-  const { content: ensuredContent, unresolved } = await resolveInsertion(site, file.content, filePath, markerMap, { placement, lineKeys: resolveLineKeys(site, page, draft.action_type) });
+  let placedContent = markdownNative
+    ? placeMarkdownMarker(file.content, markerMap[MARKER_FIELD_BY_ACTION_TYPE[draft.action_type]], markdownNative.rendered).content
+    : file.content;
+  let lineKeysForInsert = resolveLineKeys(site, page, draft.action_type);
+  // A title fix on a Markdown page goes to the site's SEO-title field, never the visible headline (markdown-native.js).
+  if (draft.action_type === 'meta-title' && isMarkdownFile(filePath)) {
+    const siblings = await loadSiblingMarkdown(site, filePath, { getRepoTree, getFileContent, ref: branch }).catch(() => []);
+    const plan = planMarkdownTitleField(placedContent, siblings, lineKeysForInsert);
+    if (!plan.ok) return { ok: false, reason: plan.reason, error: plan.error };
+    placedContent = plan.content;
+    lineKeysForInsert = plan.lineKeys;
+  }
+  const { content: ensuredContent, unresolved } = await resolveInsertion(site, placedContent, filePath, markerMap, { placement, lineKeys: lineKeysForInsert });
+
+  // Body sections go above the page's FAQ and Related guides, never below them. Placement moves an empty slot; a slot that could not be
+  // moved (it already holds content, or its heading was not found) is refused here rather than shipped under the FAQ.
+  if (markdownNative && (draft.action_type === 'expand-content' || draft.action_type === 'refresh-content')) {
+    const below = expandedContentBelowClosingSection(ensuredContent, markerMap[MARKER_FIELD_BY_ACTION_TYPE[draft.action_type]]);
+    if (below) return { ok: false, reason: 'expanded-content-below-faq', error: below };
+  }
 
   const spliced = spliceMarkers(ensuredContent, markerMap, built.values);
   // Per this platform's daily-batch contract: a field that couldn't be
@@ -1649,6 +1772,7 @@ export async function apply(site, draft, opts = {}) {
   if (draft.action_type === 'redirect-chain-nginx') return pushRedirectChainNginxBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'robots-fix') return pushRobotsFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'robots-bootstrap') return pushRobotsBootstrapBranch(site, draft, batchInfo);
+  if (draft.action_type === 'indexnow') return pushIndexNowBranch(site, draft, batchInfo);
   if (draft.action_type === 'redirect-fix') return pushRedirectFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'redirect-add') return pushRedirectAddBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'broken-link-fix') return pushBrokenLinkFixBranch(site, draft, batchInfo, beforeRef);
@@ -1714,6 +1838,12 @@ export async function preview(site, draft, opts = {}) {
       const file = await getFileContent(site, path, baseBranch(site));
       return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'robotsTxt', content: file?.content || '' }] };
     }
+    if (draft.action_type === 'indexnow') {
+      const path = indexNowTargetPath(site, draft.content?.key);
+      if (!path) return { ok: false, reason: 'no-file-mapping', error: INDEXNOW_NOT_CONFIGURED };
+      const file = await getFileContent(site, path, baseBranch(site));
+      return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'indexnowKeyFile', content: file?.content || '' }] };
+    }
     if (draft.action_type === 'redirect-fix') return previewLiveRedirectFix(site, draft);
     if (draft.action_type === 'redirect-add') return previewLiveRedirectAdd(site, draft);
     if (draft.action_type === 'broken-link-fix') return previewLiveBrokenLinkFix(site, draft);
@@ -1759,6 +1889,12 @@ export async function preview(site, draft, opts = {}) {
     if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.robotsTxt is not configured.' };
     const file = await getFileContent(site, path, beforeRef);
     return { ok: true, filePath: path, oldContent: file?.content || '', newContent: draft.content.robotsTxt };
+  }
+  if (draft.action_type === 'indexnow') {
+    const path = indexNowTargetPath(site, draft.content?.key);
+    if (!path) return { ok: false, reason: 'no-file-mapping', error: INDEXNOW_NOT_CONFIGURED };
+    const file = await getFileContent(site, path, beforeRef);
+    return { ok: true, filePath: path, oldContent: file?.content || '', newContent: keyFileContent(draft.content.key) };
   }
   if (draft.action_type === 'redirect-fix') return computeRedirectFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'redirect-add') return computeRedirectAddMerge(site, draft, beforeRef);

@@ -23,14 +23,28 @@ function normalizeForCompare(url) {
 export { normalizeForCompare as normalizeUrlForCompare };
 
 // The declared <link rel="canonical"> of a page, absolutized, or null when
-// the page declares none. `unreadable: true` when the HTML could not be
-// fetched/parsed at all (caller must not treat that as "no canonical").
+// the page declares none, plus whether the page tells search engines not to
+// index it (<meta name="robots|googlebot" content="...noindex...">).
+// `unreadable: true` when the HTML could not be fetched/parsed at all (caller
+// must not treat that as "no canonical" / "indexable").
+export function pageIsNoindex($) {
+  let noindex = false;
+  $('meta[name]').each((_, el) => {
+    const name = String($(el).attr('name') || '').toLowerCase();
+    if (name !== 'robots' && name !== 'googlebot') return;
+    if (/(^|[\s,])(noindex|none)([\s,]|$)/i.test(String($(el).attr('content') || ''))) noindex = true;
+  });
+  return noindex;
+}
+
 export async function readCanonical(url, { fetchPage = fetchHtml } = {}) {
   const page = await fetchPage(url);
-  if (!page?.ok) return { canonical: null, unreadable: true };
-  const href = cheerio.load(page.html)('link[rel="canonical"]').first().attr('href');
-  if (!href) return { canonical: null, unreadable: false };
-  try { return { canonical: new URL(href, url).href, unreadable: false }; } catch { return { canonical: null, unreadable: false }; }
+  if (!page?.ok) return { canonical: null, unreadable: true, noindex: false };
+  const $ = cheerio.load(page.html);
+  const noindex = pageIsNoindex($);
+  const href = $('link[rel="canonical"]').first().attr('href');
+  if (!href) return { canonical: null, unreadable: false, noindex };
+  try { return { canonical: new URL(href, url).href, unreadable: false, noindex }; } catch { return { canonical: null, unreadable: false, noindex }; }
 }
 
 // One bounded probe: follows redirects manually (never trusts a followed
@@ -49,9 +63,9 @@ export async function probeUrl(url, { checkCanonical = false, followRedirects = 
   if (r.finalStatus === 404 || r.finalStatus === 410) return { url, verdict: 'dead', status: r.finalStatus };
   if (r.finalStatus >= 200 && r.finalStatus < 300) {
     if (!checkCanonical) return { url, verdict: 'live', status: r.finalStatus, canonical: null };
-    const { canonical, unreadable } = await readCanonical(url, { fetchPage });
+    const { canonical, unreadable, noindex } = await readCanonical(url, { fetchPage });
     if (unreadable) return { url, verdict: 'unverifiable', status: r.finalStatus, reason: 'page HTML could not be read to check its canonical' };
-    return { url, verdict: 'live', status: r.finalStatus, canonical };
+    return { url, verdict: 'live', status: r.finalStatus, canonical, noindex };
   }
   return { url, verdict: 'unverifiable', status: r.finalStatus ?? null, reason: `HTTP ${r.finalStatus} is not proof either way` };
 }

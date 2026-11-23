@@ -15,6 +15,9 @@ let openPrs = [];
 let compareThrows = null;
 let budgetLow = false;
 let openPrThrows = null;
+let mergedPr = null;          // a merged PR whose head is the batch branch, or null
+let mergedSubjects = [];     // that PR's commit subjects
+let mergedThrows = null;
 let calls;
 
 const resolve = (p) => new URL(p, import.meta.url).href;
@@ -43,6 +46,8 @@ mock.module(resolve('../github/client.js'), {
       return commitSubjects;
     },
     listOpenPullRequestsForBranch: async () => openPrs,
+    findMergedPullRequestForHead: async () => { if (mergedThrows) throw mergedThrows; return mergedPr; },
+    listPullRequestCommitSubjects: async () => mergedSubjects,
     getLastKnownRateLimit: () => ({ low: budgetLow, remaining: budgetLow ? 5 : 4000, reset: null, at: null }),
   },
 });
@@ -64,6 +69,9 @@ beforeEach(() => {
   openPrThrows = null;
   budgetLow = false;
   openPrs = [];
+  mergedPr = null;
+  mergedSubjects = [];
+  mergedThrows = null;
   draftRows = [
     { id: 101, finding_id: 'f1', branch_name: 'action-center/batch-1-2026-09-08', action_type: 'qa-content' },
     { id: 102, finding_id: 'f2', branch_name: 'action-center/batch-1-2026-09-08', action_type: 'expand-content' },
@@ -202,5 +210,32 @@ describe('recoverUnopenedBatchPrs', () => {
     const result = await run();
     assert.equal(result.skipped, 2);
     assert.equal(calls.openedFor.length, 0, 'this pass exists because a rate limit broke the batch — it must not add to one');
+  });
+});
+
+describe('a branch whose PR already MERGED is not mistaken for a failed push (2026-11-23)', () => {
+  test('drafts found in the merged PR are attached to it, never abandoned', async () => {
+    commitSubjects = []; // merged into main: nothing is "ahead" any more, on both reads
+    mergedPr = { number: 14, url: 'https://github.com/acme/site/pull/14', mergedAt: '2026-11-23T06:18:00Z' };
+    mergedSubjects = ['Action Center: batch — apply qa-content draft #101; apply expand-content draft #102'];
+    await run();
+    assert.deepEqual(calls.abandoned, []);
+    assert.deepEqual(calls.prOpened.map((c) => [c.id, c.prNumber]), [[101, 14], [102, 14]]);
+  });
+
+  test('a draft NOT in the merged PR is still treated as a failed push', async () => {
+    commitSubjects = [];
+    mergedPr = { number: 14, url: 'u', mergedAt: 'x' };
+    mergedSubjects = ['Action Center: apply qa-content draft #101'];
+    await run();
+    assert.deepEqual(calls.prOpened.map((c) => c.id), [101]);
+    assert.deepEqual(calls.abandoned.map((c) => c.id), [102]);
+  });
+
+  test('when merged PRs cannot be read, nothing is abandoned on a guess', async () => {
+    commitSubjects = [];
+    mergedThrows = new Error('rate limited');
+    await run();
+    assert.deepEqual(calls.abandoned, []);
   });
 });

@@ -17,6 +17,8 @@ import { deriveOnboardingState, recommendForFinding, explainFailure, ASSISTANT_S
 // a deterministic router cannot hallucinate a capability that does not exist.
 
 const INTENTS = [
+  // First: "any PR today?", "what got merged yesterday", "PRs this week". Answered straight from the records.
+  { id: 'prs', patterns: [/\b(prs?|pull[- ]?requests?)\b/i, /\bmerged?\b/i, /\bdeploy(ed|ments?|s)?\b/i] },
   { id: 'week', patterns: [/\b(what|anything)\b.*\b(changed|went live|shipped|published)\b/i, /\b(this|last) week\b/i, /\bwhat('s| has| have)? been (done|changed|published)\b/i] },
   { id: 'findings', patterns: [/\b(what|show|list|give)\b.*\b(found|find|findings|waiting|pending|to fix|needs? (me|my|you)|everything|broken|issues?)\b/i, /\bwhat('s| is) (broken|waiting)\b/i, /\b(full|complete) list\b/i] },
   { id: 'status', patterns: [/\bhow('s| is)?\b.*\b(onboarding|going|progress|setup)\b/i, /\bstatus\b/i, /\bhow far\b/i] },
@@ -61,6 +63,9 @@ export function classifyIntent(message) {
 // raw error, because the caller always has the deterministic capability-list
 // reply to fall back to.
 async function tryDataFallback(ctx, message, conversationId, deps) {
+  // The streaming chat (chat-stream.js) answers these itself, live, with tools. It asks handleMessage only for the replies that
+  // need no AI, and this marker says "not one of those" without paying for the slow copilot path first.
+  if (deps?.deferAi) return { deferred: true };
   try {
     const result = await invokeCapability('ask_growth_copilot', ctx, { message, conversationId }, deps);
     if (result.ok) {
@@ -144,7 +149,20 @@ export async function handleMessage({ ctx, message, deps = {}, conversationId = 
 
   const intent = classifyIntent(message);
 
-  const status = await invokeCapability('get_onboarding_status', ctx, {}, deps);
+  // Factual questions with an exact answer in the database skip everything below (onboarding reads, the AI path):
+  // one capability, a few indexed queries, a reply composed from the rows. Milliseconds, and never a guess.
+  if (intent === 'prs') {
+    const result = await invokeCapability('get_pr_activity', ctx, { period: periodFromMessage(message) }, deps)
+      .catch((err) => { console.warn('[assistant] get_pr_activity failed:', err.message); return { ok: false }; });
+    if (result.ok) return { state: ASSISTANT_STATE.READY, message: composePrs(result.data), data: result.data, actions: [] };
+    return { state: ASSISTANT_STATE.FAILED, message: 'I could not read the pull request records just now. Please try again in a moment.', data: {}, actions: [] };
+  }
+
+  // Two independent reads — run together, not one after the other.
+  const [status, unresolvedResult] = await Promise.all([
+    invokeCapability('get_onboarding_status', ctx, {}, deps),
+    invokeCapability('list_unresolved_decisions', ctx, {}, deps),
+  ]);
   if (!status.ok) return { state: ASSISTANT_STATE.FAILED, message: status.remedy || 'Unable to read onboarding status.', data: status, actions: [] };
 
   const onboarding = deriveOnboardingState({
@@ -152,7 +170,6 @@ export async function handleMessage({ ctx, message, deps = {}, conversationId = 
     repoConnected: status.data.site.repoConnected,
   });
 
-  const unresolvedResult = await invokeCapability('list_unresolved_decisions', ctx, {}, deps);
   const unresolved = unresolvedResult.ok ? unresolvedResult.data : [];
 
   switch (intent) {
@@ -451,4 +468,45 @@ export function composeWeek({ total, byType }) {
   if (!total) return 'Nothing has gone live on your site in the last 7 days. Anything waiting on you is in the Action Center.';
   const parts = byType.map((t) => `${t.count} ${t.type.replace(/-/g, ' ')}`).join(', ');
   return `${total} ${total === 1 ? 'change' : 'changes'} went live in the last 7 days: ${parts}.`;
+}
+
+// "yesterday" / "this week" / anything else = today.
+export function periodFromMessage(message) {
+  const t = String(message || '').toLowerCase();
+  if (/\byesterday\b/.test(t)) return 'yesterday';
+  if (/\b(this|last|past) week\b|\b7 days\b|\bweekly\b|\bthis week\b/.test(t)) return 'week';
+  return 'today';
+}
+
+// Plain words from get_pr_activity's rows. No model call; every number and link comes from the records.
+export function composePrs(d) {
+  const when = { today: 'today', yesterday: 'yesterday', week: 'in the last 7 days' }[d.period] || 'today';
+  const label = (pr) => (pr.number ? `#${pr.number}` : 'a pull request');
+  const link = (pr) => (pr.url ? ` — ${pr.url}` : '');
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const lines = [];
+
+  if (!d.opened.length && !d.merged.length) {
+    lines.push(`No pull request was opened or merged ${when}.`);
+  } else {
+    lines.push(`${when[0].toUpperCase()}${when.slice(1)}: ${plural(d.opened.length, 'pull request', 'pull requests')} opened, ${d.merged.length} merged.`);
+    for (const pr of d.opened) {
+      const what = pr.fixes ? ` (${plural(pr.fixes, 'fix', 'fixes')}${pr.types ? `: ${pr.types}` : ''})` : '';
+      lines.push(`- Opened ${label(pr)}${what}${pr.state ? `, now ${pr.state}` : ''}${link(pr)}`);
+    }
+    for (const pr of d.merged) lines.push(`- Merged ${label(pr)}${link(pr)}`);
+  }
+
+  if (d.open.length) {
+    lines.push('', `Open right now, waiting for review or merge: ${plural(d.open.length, 'pull request', 'pull requests')}.`);
+    for (const pr of d.open.slice(0, 5)) {
+      const days = pr.since ? Math.floor((Date.now() - new Date(pr.since).getTime()) / 86_400_000) : null;
+      lines.push(`- ${label(pr)} (${plural(pr.fixes, 'fix', 'fixes')}${days != null ? `, ${days < 1 ? 'since today' : `${days}d old`}` : ''})${link(pr)}`);
+    }
+    if (d.open.length > 5) lines.push(`- …and ${d.open.length - 5} more.`);
+  } else {
+    lines.push('', 'No pull request is open right now.');
+  }
+  if (d.timeZone && d.period !== 'week') lines.push(`(Days are counted in this project's time zone, ${d.timeZone}.)`);
+  return lines.join('\n');
 }

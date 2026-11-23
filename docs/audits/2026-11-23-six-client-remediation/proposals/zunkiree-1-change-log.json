@@ -1,0 +1,152 @@
+{
+  "site": 1,
+  "baseRev": 63,
+  "repoMain": "91c68d7",
+  "changes": [
+    {
+      "change": "refile",
+      "url": "/",
+      "file": "src/pages/homepage-v2.njk"
+    },
+    {
+      "change": "rekey",
+      "from": "/services/",
+      "to": "/solutions/",
+      "file": "src/pages/solutions.njk"
+    },
+    {
+      "change": "remove-dead",
+      "url": "/products/gaamma/",
+      "was": "src/pages/products/gaamma.njk",
+      "reason": "file gone; URL 301s to a case study"
+    },
+    {
+      "change": "rekey",
+      "from": "/services/aeo-seo/",
+      "to": "/solutions/aeo-seo/",
+      "file": "src/pages/solutions/aeo-seo.njk"
+    },
+    {
+      "change": "remove-dead",
+      "url": "/products/dental-ai/",
+      "was": "src/pages/products/dental-ai.njk",
+      "reason": "file gone; URL 301s to a case study"
+    },
+    {
+      "change": "rekey",
+      "from": "/services/ai-ecommerce/",
+      "to": "/solutions/ai-ecommerce/",
+      "file": "src/pages/solutions/ai-ecommerce.njk"
+    },
+    {
+      "change": "rekey",
+      "from": "/services/data-systems/",
+      "to": "/solutions/data-systems/",
+      "file": "src/pages/solutions/data-systems.njk"
+    },
+    {
+      "change": "rekey",
+      "from": "/services/ai-development/",
+      "to": "/solutions/ai-development/",
+      "file": "src/pages/solutions/ai-development.njk"
+    },
+    {
+      "change": "rekey",
+      "from": "/services/app-development/",
+      "to": "/solutions/app-development/",
+      "file": "src/pages/solutions/app-development.njk"
+    },
+    {
+      "change": "rekey",
+      "from": "/services/custom-software/",
+      "to": "/solutions/custom-software/",
+      "file": "src/pages/solutions/custom-software.njk"
+    },
+    {
+      "change": "rekey",
+      "from": "/services/web-development/",
+      "to": "/solutions/web-development/",
+      "file": "src/pages/solutions/web-development.njk"
+    },
+    {
+      "change": "rekey",
+      "from": "/services/saas-development/",
+      "to": "/solutions/saas-development/",
+      "file": "src/pages/solutions/saas-development.njk"
+    },
+    {
+      "change": "rekey",
+      "from": "/nl/services/web-development",
+      "to": "/nl/solutions/web-development",
+      "file": "src/pages/nl/solutions/web-development.njk"
+    },
+    {
+      "change": "remove-dead",
+      "url": "/products/ai-booking-engine/",
+      "was": "src/pages/products/ai-booking-engine.njk",
+      "reason": "file gone; URL 301s to a case study"
+    },
+    {
+      "change": "remove-dead",
+      "url": "/products/ai-commerce-agent/",
+      "was": "src/pages/products/ai-commerce-agent.njk",
+      "reason": "file gone; URL 301s to a case study"
+    },
+    {
+      "change": "rekey",
+      "from": "/services/ai-customer-experience/",
+      "to": "/solutions/ai-customer-experience/",
+      "file": "src/pages/solutions/ai-customer-experience.njk"
+    },
+    {
+      "change": "add",
+      "url": "/blog/insights/",
+      "file": "src/blog/insights.njk",
+      "note": "listing page; the /blog/<slug> pattern wrongly matched it to a .md that does not exist"
+    },
+    {
+      "change": "add",
+      "url": "/nl/solutions/ai-ecommerce/",
+      "file": "src/pages/nl/solutions/ai-ecommerce.njk"
+    },
+    {
+      "change": "adapter",
+      "url": "/solutions/",
+      "adapter": "faq -> src/_data/servicesFaq.json"
+    },
+    {
+      "change": "pattern",
+      "match": "^/products/(orca|search|ai-crm)/?$",
+      "adapter": "faq -> src/_data/platformProducts.js (items in `faq`)"
+    }
+  ],
+  "resolved": {
+    "/": "src/pages/homepage-v2.njk",
+    "/solutions/": "src/pages/solutions.njk",
+    "/solutions/app-development/": "src/pages/solutions/app-development.njk",
+    "/solutions/custom-software/": "src/pages/solutions/custom-software.njk",
+    "/nl/solutions/ai-ecommerce/": "src/pages/nl/solutions/ai-ecommerce.njk",
+    "/blog/insights/": "src/blog/insights.njk",
+    "/blog/some-post/": "src/blog/some-post.md",
+    "/nl/solutions/web-development": "src/pages/nl/solutions/web-development.njk"
+  },
+  "adapterDryRuns": [
+    {
+      "page": "/solutions/",
+      "ok": true
+    },
+    {
+      "page": "/products/orca/",
+      "ok": true
+    },
+    {
+      "page": "/products/search/",
+      "ok": true
+    },
+    {
+      "page": "/products/ai-crm/",
+      "ok": true
+    }
+  ],
+  "problems": []
+}

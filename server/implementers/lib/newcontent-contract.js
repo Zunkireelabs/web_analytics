@@ -51,10 +51,19 @@ const MAX_SIBLINGS = 8;
 // target directory actually calls them. Order only breaks ties when a
 // directory somehow uses more than one.
 const FIELD_ALIASES = {
+  // The short summary a post's listing/meta reads. Superrank's posts call it `excerpt`; the renderer used to write `description` regardless, which
+  // its content schema rejected ("excerpt: Required") and stopped the build.
+  description: ['description', 'excerpt', 'summary', 'metaDescription', 'teaser'],
   featuredImage: ['featuredImage', 'image', 'heroImage', 'cover', 'coverImage', 'thumbnail'],
   featuredImageAlt: ['featuredImageAlt', 'imageAlt', 'image_alt', 'coverAlt', 'alt'],
   featuredImageCredit: ['featuredImageCredit', 'imageCredit', 'image_credit', 'credit', 'photoCredit'],
 };
+
+// Keys that are never required of a new file even when every sibling has one: they describe the file's history or routing, not its content.
+// An Astro content collection's schema file: the build rejects a content file whose front matter does not satisfy it.
+const CONTENT_SCHEMA_FILE = /^src\/content(\/config|\.config)\.(ts|mts|js|mjs)$/;
+
+const OPTIONAL_BY_NATURE = new Set(['updated', 'lastmod', 'modified', 'featured', 'draft', 'tags', 'seoTitle', 'slug', 'permalink', 'layout', 'templateEngineOverride', 'eleventyExcludeFromCollections']);
 
 // Front-matter KEYS only. Deliberately not a YAML parser: the values are
 // irrelevant here (and untrusted tenant content), and a real parser would
@@ -100,7 +109,7 @@ function isRepresentative(path, extension) {
   return !/^index\./i.test(name);
 }
 
-const UNKNOWN = Object.freeze({ layout: null, unknown: true, fieldNames: {}, sampled: 0 });
+const UNKNOWN = Object.freeze({ layout: null, unknown: true, fieldNames: {}, requiredKeys: [], schemaValidated: false, sampled: 0 });
 
 // Reads one file at `path` and returns its front-matter keys plus the layout
 // it declares (null when it declares none), or null when there was nothing to
@@ -132,7 +141,7 @@ async function readFrontMatter(readFile, site, path, ref) {
 // their company should satisfy. Shared by the directory-sampling path and the
 // single-source-file path (translations) so the two can never disagree about
 // what "this file declares no layout" means.
-function contractFromSamples(samples) {
+function contractFromSamples(samples, { schemaValidated = false } = {}) {
   if (!samples.length) return UNKNOWN;
 
   // If the files that a human wrote declare no layout, a directory data
@@ -155,7 +164,15 @@ function contractFromSamples(samples) {
     if (used) fieldNames[canonical] = used;
   }
 
-  return { layout, unknown: false, fieldNames, sampled: samples.length };
+  // Keys EVERY sampled sibling declares, enforced ONLY on a site whose build validates front matter against a schema (an Astro content collection:
+  // `src/content.config.ts`). There a file that lacks one stops the build ("author: Required"). On any other stack a missing key is tolerated (the
+  // template just renders without it), and siblings that all happen to share a key prove nothing: zunkireelabs-web's posts all carry `readTime`, its
+  // template does not need it. Only trusted from 3+ siblings, and never for keys that are optional by nature. Sorted for stable output.
+  const requiredKeys = schemaValidated && samples.length >= 3
+    ? [...samples[0].keys].filter((k) => samples.every((s) => s.keys.includes(k)) && !OPTIONAL_BY_NATURE.has(k)).sort()
+    : [];
+
+  return { layout, unknown: false, fieldNames, requiredKeys, schemaValidated, sampled: samples.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -256,8 +273,10 @@ export async function deriveNewContentContract(site, { dir, extension, ref } = {
 
   return memoized(cacheFor(deps), cacheKey(site, branch, `${dir}|${extension}`), deps.now, async () => {
     let paths;
+    let schemaValidated = false;
     try {
       const { files } = await tree(site, branch);
+      schemaValidated = (files || []).some((p) => CONTENT_SCHEMA_FILE.test(p));
       const prefix = dir.endsWith('/') ? dir : `${dir}/`;
       paths = (files || [])
         .filter((p) => p.startsWith(prefix) && !p.slice(prefix.length).includes('/'))
@@ -274,7 +293,7 @@ export async function deriveNewContentContract(site, { dir, extension, ref } = {
       const sample = await readFrontMatter(readFile, site, path, branch);
       if (sample) samples.push(sample);
     }
-    return contractFromSamples(samples);
+    return contractFromSamples(samples, { schemaValidated });
   });
 }
 
@@ -307,4 +326,16 @@ function mostCommon(values) {
   const counts = new Map();
   for (const v of values) counts.set(v, (counts.get(v) || 0) + 1);
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
+
+/**
+ * Which keys a new file's front matter is missing, judged against what every sibling declares. `body` is the finished file text. Returns [] when the
+ * contract learned nothing (unknown/few siblings): absence of evidence never blocks anything. `provided` lists keys a caller supplies from site
+ * config (newContentTargets[type].frontMatterDefaults), which are written into the file by the renderer and so already appear in `body`.
+ */
+export function missingRequiredKeys(body, contract) {
+  if (!contract || contract.unknown || !contract.requiredKeys?.length) return [];
+  const have = new Set(frontMatterKeys(body));
+  return contract.requiredKeys.filter((k) => !have.has(k));
 }

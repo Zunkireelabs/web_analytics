@@ -243,6 +243,13 @@ export function verificationMethodFor(draft, { siteOrigin = null } = {}) {
     return { method: VERIFICATION_METHOD.REDIRECT, target: from, expected: { to: draft?.input?.to ?? draft?.content?.to ?? null } };
   }
 
+  // The IndexNow key file: confirmed live when https://<site>/<key>.txt serves the key.
+  if (type === 'indexnow') {
+    const key = draft?.content?.key;
+    if (!siteOrigin || !key) return { method: VERIFICATION_METHOD.UNVERIFIABLE, reason: 'No site origin or key is recorded, so the key file cannot be fetched to confirm it is being served.' };
+    return { method: VERIFICATION_METHOD.SITE_ASSET, target: new URL(`/${key}.txt`, siteOrigin).href, expected: { structure: 'indexnow-key', key } };
+  }
+
   // Generators whose shipped artifact is NOT prose, so the generic "longest sentence" needle below would pick the wrong thing:
   // internal-links' longest string is the model's RATIONALE (never written to the page), schema-repair's is a slice of
   // serialised JSON (re-serialised by the site), and meta-title's is only the description. Each is verified on what it really ships.

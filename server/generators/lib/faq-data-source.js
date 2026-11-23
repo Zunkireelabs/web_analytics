@@ -2,6 +2,7 @@ import { getFileContent, defaultBranchName } from '../../github/client.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { stripManagedMarkers } from '../../lib/managed-markers.js';
 import { hasOrganicFaqSignal } from '../../lib/faq-signal.js';
+import { extractMarkdownFaqItems } from '../../lib/existing-faq.js';
 
 // Finds a page's REAL, already-existing FAQ content grounded in the site's
 // own repo — never LLM-fabricated — so a generator can use it verbatim
@@ -44,6 +45,14 @@ export async function findRealFaqDataSource(site, pageUrl) {
   // for both the data-source match below and the organicSignal fallback.
   const organic = stripManagedMarkers(file.content);
   const organicSignal = hasOrganicFaqSignal(organic);
+
+  // A Markdown page whose FAQ is written in the page itself (`## FAQ` then `### Question?` / `**Question?** answer`):
+  // the page's own questions, verbatim, are the real data. Schema built from them always matches what visitors see;
+  // inventing different ones is what put mismatched hidden FAQs on eight pages (2026-11-23).
+  if (/\.mdx?$/i.test(filePath)) {
+    const mdItems = extractMarkdownFaqItems(organic);
+    if (mdItems.length >= 2) return { ok: true, items: mdItems, dataFile: filePath };
+  }
 
   const match = LOOP_PATTERN.exec(organic);
   if (!match) return { ok: false, organicSignal };

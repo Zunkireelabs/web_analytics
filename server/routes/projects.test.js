@@ -349,6 +349,26 @@ describe('connecting a project', () => {
       assert.equal((await call(method, path, { userId: STRANGER, params: P(ADMIZZ) })).statusCode, 404, `${path} as a stranger`);
     }
   });
+  // 2026-11-23: a server with no GitHub App sign-in settings showed "Your GitHub sign-in has expired. Connect again." and "Connect with GitHub" could never work.
+  test('a server without the GitHub sign-in settings says so, and does not claim the person\'s sign-in expired', async () => {
+    const keys = ['GITHUB_APP_CLIENT_ID', 'GITHUB_APP_CLIENT_SECRET', 'GITHUB_CONNECT_APP_ID', 'GITHUB_CONNECT_APP_PRIVATE_KEY_B64'];
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]])); keys.forEach((k) => delete process.env[k]);
+    try {
+      const res = await call('get', '/projects/:siteId/connect/github/mine', { userId: PLATFORM, params: P(ADMIZZ) });
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual([res.body.signedIn, res.body.configured, res.body.repos], [false, false, []]);
+      assert.match(res.body.error, /not set up on this server/);
+      assert.doesNotMatch(res.body.error, /expired/);
+    } finally { for (const k of keys) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  });
+  test('a configured server with no GitHub sign-in yet is just "not signed in", with no error', async () => {
+    const env = { GITHUB_APP_CLIENT_ID: 'cid', GITHUB_APP_CLIENT_SECRET: 'sec', GITHUB_CONNECT_APP_ID: '1', GITHUB_CONNECT_APP_PRIVATE_KEY_B64: 'a2V5' };
+    const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]])); Object.assign(process.env, env);
+    try {
+      const res = await call('get', '/projects/:siteId/connect/github/mine', { userId: PLATFORM, params: P(ADMIZZ) });
+      assert.deepEqual([res.body.signedIn, res.body.configured, res.body.error], [false, true, undefined]);
+    } finally { for (const k of Object.keys(env)) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  });
   test('Google needs a real Search Console property and a numeric GA4 id from the lists', async () => {
     const bad = (body) => call('post', '/projects/:siteId/connect/google', { userId: PLATFORM, params: P(ADMIZZ), body });
     assert.equal((await bad({ gscProperty: 'admizz.com', ga4PropertyId: '123' })).statusCode, 400);

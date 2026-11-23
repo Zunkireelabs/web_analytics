@@ -1,0 +1,45 @@
+a live capture failure propagates rather than being caught into a custom error object
+ok, no findings when every page is consistent
+flags an outlier and attaches a recommendedAction only when it has an inline override
+flags a CSS-class outlier and routes it through typography-drift when a real site convention is resolvable
+a bare hero h1 on a page-unique wrapper is never auto-fixed or compared to other wrappers
+a surviving finding carries a confirmed verification
+flags an outlier but attaches no recommendedAction when its class already matches the resolved convention
+a landing-style template with its own confirmed h1 size is not flagged against a different interior-page majority
+font-consistency agent
+lists this week implemented, queued and waiting work only
+week
+old impact evidence is not pushed out by a long run of newer technical outcomes
+a long run of newer impact outcomes does not hide older technical failures either
+each family is capped at 30 independently
+getLearnedConfidenceMap — separate windows per outcome family
+ok, zero findings when vision flags nothing
+a hallucinated page (not in this run's own capture) is discarded, never trusted
+an unknown fixType outside the closed set is discarded, never trusted
+confirmed by the deterministic check -> a real safe-tier finding, ships autonomously, no manual insert
+NOT confirmed by the deterministic check -> manual Action Center recommendation, not a silently-dropped finding
+a page-content analysis failure (fetch error) is treated as unconfirmed, not thrown
+multiple independent defects on the SAME page are all processed, not just the first
+a genuinely duplicate (page, fixType) candidate from vision collapses to one finding
+two unconfirmed defects on the same page each get their own manual recommendation, not one merged row
+expectedImpact.value is the real defective-region count, not a constant 1
+priority is ranked by real defect extent, not hardcoded high for everything
+an unconfirmed, vision-only flag never outranks a confirmed defect
+a vision call failure degrades to zero candidates rather than throwing the whole agent run
+visual-quality agent
+a failed refresh KEEPS the last good list, so real crawlers are not turned into "unverified"
+vendor IP list cache
+AI crawler analytics on a real database
+skippedProfileDerivation only refreshes lastCheckedAt, leaving the stored profile otherwise untouched
+design-profile job — cheap-rescan persistence branching
+server/e2e/design-validation.e2e.db.test.js
+server/lib/action-center-reconciler.test.js
+no code in the server merges a pull request: human merge cannot be bypassed
+configuration and safety boundaries
+every table listed as reached through a parent still has a foreign key to that parent
+every parent used above carries a tenant key itself, directly or through another classified table
+every table is classified
+all 23 tenant tables have client_id NOT NULL and a foreign key to clients; the OAuth lookalikes point at oauth_clients
+the analyst client_id tables
+server/routes/action-center.page-type.test.js
+server/routes/workspaces.test.js

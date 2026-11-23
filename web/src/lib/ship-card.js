@@ -22,6 +22,13 @@ export function cardFor(state, scope) {
       return { title: 'Merged to stage. Open the PR to main for review?', sub: 'I only open it. A teammate reviews and merges main on GitHub.',
         action: { id: 'open_main', label: 'Open PR to main' }, later: 'Later' };
     case 'waiting':
+      // A PR whose checks fail is not "ready": say so, and do not invite a merge. An unknown result is said to be unknown, never green.
+      if (state.build === 'failing') {
+        return { title: `The PR${state.prNumber ? ` (#${state.prNumber})` : ''} to main has a failing check. Do not merge it yet.`, sub: 'The site\'s own build did not pass, so merging would break your live site. Open the PR to see which check failed; I am holding it until it is fixed.', info: true, link: state.prUrl, linkLabel: 'See the failing check on GitHub', attention: true };
+      }
+      if (state.build === 'unchecked') {
+        return { title: `The PR${state.prNumber ? ` (#${state.prNumber})` : ''} to main is open, but its checks have not reported yet.`, sub: 'Wait for the green tick on GitHub before merging. It goes live the moment it is merged, and this app never merges main.', info: true, link: state.prUrl, linkLabel: 'Open the PR on GitHub' };
+      }
       return { title: `The PR${state.prNumber ? ` (#${state.prNumber})` : ''} to main is open. Please review it and merge it on GitHub.`, sub: 'It goes live the moment it is merged. This app never merges main, so a person on your team does it. I will remind you if it waits.', info: true, link: state.prUrl, linkLabel: 'Open the PR on GitHub' };
     default: return null;
   }
