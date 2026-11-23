@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { __testables } from './audit-url-file-map.js';
 
-const { partitionPreDraftBlocked, targetRendersCode, classifyNginxMarker, summarizeExistingTracking, fileForAction, looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent } = __testables;
+const { describeNginxMarker, partitionPreDraftBlocked, targetRendersCode, classifyNginxMarker, summarizeExistingTracking, fileForAction, looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent } = __testables;
 
 describe('extractMetaContent', () => {
   test('reads a real og:title content value', () => {
@@ -234,5 +234,26 @@ describe('partitionPreDraftBlocked (Admizz: wrapper pages whose body actions are
   test('an unreadable file stays fatal rather than being waved through', () => {
     const r = partitionPreDraftBlocked([rows('missing.tsx', 'internal-links')], content({}));
     assert.equal(r.stillFatal.length, 1);
+  });
+});
+
+describe('describeNginxMarker (the audit crashed with "Cannot read properties of undefined (reading \'slice\')" on every status except blocked)', () => {
+  test('present and self-heals do not need a locations list, and must not throw', () => {
+    assert.equal(describeNginxMarker(classifyNginxMarker('server {\n    root /x;\n    # SEOAI:SECURITY-HEADERS:START\n    # SEOAI:SECURITY-HEADERS:END\n}\n')), 'present');
+    assert.match(describeNginxMarker({ status: 'self-heals' }), /self-healing/);
+  });
+  test('blocked names the offending locations and the refusal reason', () => {
+    const out = describeNginxMarker({ status: 'blocked', reason: 'headers-not-inherited', locations: ['~* \\.html$', '/api'] });
+    assert.match(out, /REFUSED \(headers-not-inherited\)/);
+    assert.match(out, /\.html\$, \/api set their own add_header/);
+  });
+  test('blocked without a locations array still does not throw', () => {
+    assert.doesNotThrow(() => describeNginxMarker({ status: 'blocked', reason: 'headers-not-inherited' }));
+  });
+  test('fatal states the reason', () => {
+    assert.match(describeNginxMarker({ status: 'fatal', reason: 'no-insertion-marker' }), /MISSING \(fatal: no-insertion-marker/);
+  });
+  test('every status the classifier can return has a description (no silent default)', () => {
+    for (const status of ['present', 'self-heals', 'blocked', 'fatal']) assert.doesNotMatch(describeNginxMarker({ status, reason: 'r', locations: [] }), /unknown status/);
   });
 });
