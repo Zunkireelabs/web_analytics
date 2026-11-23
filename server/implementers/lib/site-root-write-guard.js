@@ -29,13 +29,20 @@ export function siblingSourcePaths(path) {
 }
 
 /**
- * @param {{ path: string, kind: 'llms'|'robots-bootstrap', readFile: (p: string) => Promise<{content: string}|null> }} p
+ * @param {{ path: string, kind: 'llms'|'robots-bootstrap'|'indexnow', readFile: (p: string) => Promise<{content: string}|null> }} p
  * @returns {Promise<{ok: true, mode: 'create'|'overwrite'|'keep-front-matter', frontMatter?: string} | {ok: false, reason: string, error: string}>}
  *   llms: overwrite a plain file; keep a template's front matter and replace only its body; never create next to an existing source.
  *   robots-bootstrap: only ever CREATES. An existing file means the live site is missing robots.txt for a build or deploy reason.
  */
 export async function guardSiteRootWrite({ path, kind, readFile }) {
   const existing = await readFile(path);
+  // An IndexNow key file is a brand-new file named after the site's own key. It is only ever CREATED: if it is already in the repository
+  // the work is done, and there is nothing to overwrite. (No sibling-template check: nothing is expected to produce a file with that name.)
+  if (kind === 'indexnow') {
+    return existing
+      ? { ok: false, reason: 'file-exists', error: `${path} is already in the repository, so the IndexNow key file is already set up.` }
+      : { ok: true, mode: 'create' };
+  }
   if (kind === 'robots-bootstrap') {
     if (existing) {
       return {

@@ -1,0 +1,212 @@
+
+-- GITHUB CREDENTIALS -- OK, repo reachable.
+(skipped 1 URL(s) that redirect or 404 — not auditable as pages:)
+  404  https://superrank.si/blog/introducing-brand-perception
+
+=== Site #8871 "Superrank" (Zunkireelabs/superrank-web) — 81 real candidate pages, 8 action types ===
+
+-- NO FILE MAPPING (0) --
+
+-- UNMAPPED BUT LIVE-VERIFIED OK, not a gap (0) -- (no file mapping, but the live page already renders a correct canonical / og:title+og:description — shared layout handles it)
+
+-- NO MARKERS CONFIGURED (meta-title) (0) --
+
+-- NO MARKERS CONFIGURED (faq) (0) --
+
+-- NO MARKERS CONFIGURED (schema) (0) --
+
+-- NO MARKERS CONFIGURED (internal-links) (0) --
+
+-- NO MARKERS CONFIGURED (canonical) (0) --
+
+-- NO MARKERS CONFIGURED (open-graph) (0) --
+
+-- NO MARKERS CONFIGURED (expand-content) (0) --
+
+-- NO MARKERS CONFIGURED (qa-content) (0) --
+
+-- FILE NOT FOUND IN REPO (0) --
+
+-- MARKERS MISSING BUT SELF-HEALING (ensureMarkers creates these automatically at apply time — no action needed) (81) --
+  [canonical:canonical] https://superrank.si/blog/how-to-track-google-ai-overviews -> src/content/blog/how-to-track-google-ai-overviews.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/ -> src/pages/index.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/robots-txt-for-ai-crawlers-gptbot-claudebot-perplexitybot -> src/content/blog/robots-txt-for-ai-crawlers-gptbot-claudebot-perplexitybot.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/a-60-day-plan-to-grow-ai-search-visibility -> src/content/blog/a-60-day-plan-to-grow-ai-search-visibility.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/the-complete-guide-to-answer-engine-optimization-aeo -> src/content/blog/the-complete-guide-to-answer-engine-optimization-aeo.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/how-seo-agencies-can-sell-aeo-and-geo-services -> src/content/blog/how-seo-agencies-can-sell-aeo-and-geo-services.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/forums-and-communities-in-ai-answers -> src/content/blog/forums-and-communities-in-ai-answers.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/what-is-answer-engine-optimization-aeo -> src/content/blog/what-is-answer-engine-optimization-aeo.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/ai-overviews-tracking-tools-compared -> src/content/blog/ai-overviews-tracking-tools-compared.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/how-to-rank-in-google-ai-overviews -> src/content/blog/how-to-rank-in-google-ai-overviews.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/pricing -> src/pages/pricing.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/technical-seo-audit-checklist-for-2026 -> src/content/blog/technical-seo-audit-checklist-for-2026.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/schema-markup-for-ai-search-which-json-ld-types-matter -> src/content/blog/schema-markup-for-ai-search-which-json-ld-types-matter.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/what-is-an-ai-seo-agent -> src/content/blog/what-is-an-ai-seo-agent.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/pricing-agencies -> src/pages/pricing-agencies.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/the-key-to-prompt-tracking -> src/content/blog/the-key-to-prompt-tracking.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/from-keyword-research-to-prompt-research -> src/content/blog/from-keyword-research-to-prompt-research.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/how-to-get-cited-by-chatgpt -> src/content/blog/how-to-get-cited-by-chatgpt.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/get-started -> src/pages/get-started.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/how-to-track-your-brand-in-chatgpt-and-perplexity -> src/content/blog/how-to-track-your-brand-in-chatgpt-and-perplexity.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/changelog -> src/pages/changelog.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/product/citations-sources -> src/pages/product/citations-sources.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog -> src/pages/blog/index.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/white-label-ai-search-reports-for-seo-agencies -> src/content/blog/white-label-ai-search-reports-for-seo-agencies.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/geo-for-saas-companies -> src/content/blog/geo-for-saas-companies.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/how-to-define-and-track-your-citation-rate -> src/content/blog/how-to-define-and-track-your-citation-rate.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/how-to-get-cited-by-perplexity -> src/content/blog/how-to-get-cited-by-perplexity.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/superrank-vs-ahrefs -> src/content/blog/superrank-vs-ahrefs.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/aeo-for-shopify-and-ecommerce-stores -> src/content/blog/aeo-for-shopify-and-ecommerce-stores.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/what-is-superrank-and-what-does-it-do -> src/content/blog/what-is-superrank-and-what-does-it-do.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/terms -> src/pages/terms.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/chatgpt-built-its-own-search-index -> src/content/blog/chatgpt-built-its-own-search-index.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/superrank-vs-scrunch-ai -> src/content/blog/superrank-vs-scrunch-ai.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/the-aeo-checklist-for-a-page -> src/content/blog/the-aeo-checklist-for-a-page.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/autonomous-seo -> src/pages/autonomous-seo.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/talk-to-us -> src/pages/talk-to-us.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/how-to-get-your-saas-recommended-by-chatgpt -> src/content/blog/how-to-get-your-saas-recommended-by-chatgpt.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/how-to-write-comparison-pages-ai-assistants-cite -> src/content/blog/how-to-write-comparison-pages-ai-assistants-cite.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/docs -> src/pages/docs.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/product/competitor-tracking -> src/pages/product/competitor-tracking.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/international-seo-for-ai-search-hreflang-and-geo-signals -> src/content/blog/international-seo-for-ai-search-hreflang-and-geo-signals.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/book-demo -> src/pages/book-demo.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/ai-mention-citation-recommendation-difference -> src/content/blog/ai-mention-citation-recommendation-difference.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/xml-sitemap-and-robots-txt-mistakes-that-cost-you-pages -> src/content/blog/xml-sitemap-and-robots-txt-mistakes-that-cost-you-pages.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/use-cases/enterprise -> src/pages/use-cases/enterprise.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/chatgpt-shopping-optimization-in-2026-us-vs-europe -> src/content/blog/chatgpt-shopping-optimization-in-2026-us-vs-europe.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/superrank-vs-profound -> src/content/blog/superrank-vs-profound.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/research -> src/pages/research.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/mcp -> src/pages/mcp.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/canonical-hreflang-and-redirect-errors-that-hide-pages -> src/content/blog/canonical-hreflang-and-redirect-errors-that-hide-pages.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/product/content-gaps -> src/pages/product/content-gaps.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/how-to-get-recommended-by-google-gemini -> src/content/blog/how-to-get-recommended-by-google-gemini.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/product/technical-seo-audit -> src/pages/product/technical-seo-audit.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/faq-schema-for-ai-answers-faqpage-json-ld -> src/content/blog/faq-schema-for-ai-answers-faqpage-json-ld.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/ai-assistants-judge-your-company-by-its-name -> src/content/blog/ai-assistants-judge-your-company-by-its-name.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/core-web-vitals-and-page-speed-for-ai-crawlers -> src/content/blog/core-web-vitals-and-page-speed-for-ai-crawlers.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/what-to-do-when-chatgpt-gets-your-company-wrong -> src/content/blog/what-to-do-when-chatgpt-gets-your-company-wrong.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/autonomous-seo-agent-vs-seo-tools-what-is-the-difference -> src/content/blog/autonomous-seo-agent-vs-seo-tools-what-is-the-difference.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/ai-search-visibility-in-nepal -> src/content/blog/ai-search-visibility-in-nepal.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/how-to-keep-content-fresh-for-ai-search -> src/content/blog/how-to-keep-content-fresh-for-ai-search.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/superrank-vs-traditional-seo-tools -> src/content/blog/superrank-vs-traditional-seo-tools.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/use-cases/saas -> src/pages/use-cases/saas.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/privacy -> src/pages/privacy.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/use-cases/e-commerce -> src/pages/use-cases/e-commerce.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/partners/referral -> src/pages/partners/referral.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/ai-search-for-nepal-tourism-trekking-hotels-and-tours -> src/content/blog/ai-search-for-nepal-tourism-trekking-hotels-and-tours.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/brand-mentions-vs-backlinks-what-ai-search-rewards -> src/content/blog/brand-mentions-vs-backlinks-what-ai-search-rewards.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/ecommerce-aeo-audit-checklist -> src/content/blog/ecommerce-aeo-audit-checklist.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/superrank-vs-semrush -> src/content/blog/superrank-vs-semrush.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/page-fix-checker -> src/pages/page-fix-checker.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/llms-txt-and-md-files-ai-visibility-helper-or-hoax -> src/content/blog/llms-txt-and-md-files-ai-visibility-helper-or-hoax.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/how-to-write-answer-blocks-ai-assistants-quote -> src/content/blog/how-to-write-answer-blocks-ai-assistants-quote.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/how-agencies-run-ai-search-fixes-across-many-client-sites -> src/content/blog/how-agencies-run-ai-search-fixes-across-many-client-sites.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/can-ai-fix-your-seo-for-you -> src/content/blog/can-ai-fix-your-seo-for-you.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/integrations -> src/pages/integrations.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/compare -> src/pages/compare.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/product/automatic-fixes -> src/pages/product/automatic-fixes.astro (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/superrank-vs-athenahq -> src/content/blog/superrank-vs-athenahq.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/profound-alternatives-compared -> src/content/blog/profound-alternatives-compared.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/blog/how-chatgpt-deep-research-reads-your-site-what-the-logs-reveal -> src/content/blog/how-chatgpt-deep-research-reads-your-site-what-the-logs-reveal.md (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://superrank.si/product/ai-visibility -> src/pages/product/ai-visibility.astro (will auto-create SEOAI:CANONICAL)
+
+-- OPEN GRAPH LIVE-VERIFIED OK, not fatal (81) -- (no per-page marker exists, but the live page already has correct og:title/og:description — likely auto-derived by the shared layout; nothing to fix)
+  https://superrank.si/blog/how-to-track-google-ai-overviews -> src/content/blog/how-to-track-google-ai-overviews.md
+  https://superrank.si/ -> src/pages/index.astro
+  https://superrank.si/blog/robots-txt-for-ai-crawlers-gptbot-claudebot-perplexitybot -> src/content/blog/robots-txt-for-ai-crawlers-gptbot-claudebot-perplexitybot.md
+  https://superrank.si/blog/a-60-day-plan-to-grow-ai-search-visibility -> src/content/blog/a-60-day-plan-to-grow-ai-search-visibility.md
+  https://superrank.si/blog/the-complete-guide-to-answer-engine-optimization-aeo -> src/content/blog/the-complete-guide-to-answer-engine-optimization-aeo.md
+  https://superrank.si/blog/how-seo-agencies-can-sell-aeo-and-geo-services -> src/content/blog/how-seo-agencies-can-sell-aeo-and-geo-services.md
+  https://superrank.si/blog/forums-and-communities-in-ai-answers -> src/content/blog/forums-and-communities-in-ai-answers.md
+  https://superrank.si/blog/what-is-answer-engine-optimization-aeo -> src/content/blog/what-is-answer-engine-optimization-aeo.md
+  https://superrank.si/blog/ai-overviews-tracking-tools-compared -> src/content/blog/ai-overviews-tracking-tools-compared.md
+  https://superrank.si/blog/how-to-rank-in-google-ai-overviews -> src/content/blog/how-to-rank-in-google-ai-overviews.md
+  https://superrank.si/pricing -> src/pages/pricing.astro
+  https://superrank.si/blog/technical-seo-audit-checklist-for-2026 -> src/content/blog/technical-seo-audit-checklist-for-2026.md
+  https://superrank.si/blog/schema-markup-for-ai-search-which-json-ld-types-matter -> src/content/blog/schema-markup-for-ai-search-which-json-ld-types-matter.md
+  https://superrank.si/blog/what-is-an-ai-seo-agent -> src/content/blog/what-is-an-ai-seo-agent.md
+  https://superrank.si/pricing-agencies -> src/pages/pricing-agencies.astro
+  https://superrank.si/blog/the-key-to-prompt-tracking -> src/content/blog/the-key-to-prompt-tracking.md
+  https://superrank.si/blog/from-keyword-research-to-prompt-research -> src/content/blog/from-keyword-research-to-prompt-research.md
+  https://superrank.si/blog/how-to-get-cited-by-chatgpt -> src/content/blog/how-to-get-cited-by-chatgpt.md
+  https://superrank.si/get-started -> src/pages/get-started.astro
+  https://superrank.si/blog/how-to-track-your-brand-in-chatgpt-and-perplexity -> src/content/blog/how-to-track-your-brand-in-chatgpt-and-perplexity.md
+  https://superrank.si/changelog -> src/pages/changelog.astro
+  https://superrank.si/product/citations-sources -> src/pages/product/citations-sources.astro
+  https://superrank.si/blog -> src/pages/blog/index.astro
+  https://superrank.si/blog/white-label-ai-search-reports-for-seo-agencies -> src/content/blog/white-label-ai-search-reports-for-seo-agencies.md
+  https://superrank.si/blog/geo-for-saas-companies -> src/content/blog/geo-for-saas-companies.md
+  https://superrank.si/blog/how-to-define-and-track-your-citation-rate -> src/content/blog/how-to-define-and-track-your-citation-rate.md
+  https://superrank.si/blog/how-to-get-cited-by-perplexity -> src/content/blog/how-to-get-cited-by-perplexity.md
+  https://superrank.si/blog/superrank-vs-ahrefs -> src/content/blog/superrank-vs-ahrefs.md
+  https://superrank.si/blog/aeo-for-shopify-and-ecommerce-stores -> src/content/blog/aeo-for-shopify-and-ecommerce-stores.md
+  https://superrank.si/blog/what-is-superrank-and-what-does-it-do -> src/content/blog/what-is-superrank-and-what-does-it-do.md
+  https://superrank.si/terms -> src/pages/terms.astro
+  https://superrank.si/blog/chatgpt-built-its-own-search-index -> src/content/blog/chatgpt-built-its-own-search-index.md
+  https://superrank.si/blog/superrank-vs-scrunch-ai -> src/content/blog/superrank-vs-scrunch-ai.md
+  https://superrank.si/blog/the-aeo-checklist-for-a-page -> src/content/blog/the-aeo-checklist-for-a-page.md
+  https://superrank.si/autonomous-seo -> src/pages/autonomous-seo.astro
+  https://superrank.si/talk-to-us -> src/pages/talk-to-us.astro
+  https://superrank.si/blog/how-to-get-your-saas-recommended-by-chatgpt -> src/content/blog/how-to-get-your-saas-recommended-by-chatgpt.md
+  https://superrank.si/blog/how-to-write-comparison-pages-ai-assistants-cite -> src/content/blog/how-to-write-comparison-pages-ai-assistants-cite.md
+  https://superrank.si/docs -> src/pages/docs.astro
+  https://superrank.si/product/competitor-tracking -> src/pages/product/competitor-tracking.astro
+  https://superrank.si/blog/international-seo-for-ai-search-hreflang-and-geo-signals -> src/content/blog/international-seo-for-ai-search-hreflang-and-geo-signals.md
+  https://superrank.si/book-demo -> src/pages/book-demo.astro
+  https://superrank.si/blog/ai-mention-citation-recommendation-difference -> src/content/blog/ai-mention-citation-recommendation-difference.md
+  https://superrank.si/blog/xml-sitemap-and-robots-txt-mistakes-that-cost-you-pages -> src/content/blog/xml-sitemap-and-robots-txt-mistakes-that-cost-you-pages.md
+  https://superrank.si/use-cases/enterprise -> src/pages/use-cases/enterprise.astro
+  https://superrank.si/blog/chatgpt-shopping-optimization-in-2026-us-vs-europe -> src/content/blog/chatgpt-shopping-optimization-in-2026-us-vs-europe.md
+  https://superrank.si/blog/superrank-vs-profound -> src/content/blog/superrank-vs-profound.md
+  https://superrank.si/research -> src/pages/research.astro
+  https://superrank.si/mcp -> src/pages/mcp.astro
+  https://superrank.si/blog/canonical-hreflang-and-redirect-errors-that-hide-pages -> src/content/blog/canonical-hreflang-and-redirect-errors-that-hide-pages.md
+  https://superrank.si/product/content-gaps -> src/pages/product/content-gaps.astro
+  https://superrank.si/blog/how-to-get-recommended-by-google-gemini -> src/content/blog/how-to-get-recommended-by-google-gemini.md
+  https://superrank.si/product/technical-seo-audit -> src/pages/product/technical-seo-audit.astro
+  https://superrank.si/blog/faq-schema-for-ai-answers-faqpage-json-ld -> src/content/blog/faq-schema-for-ai-answers-faqpage-json-ld.md
+  https://superrank.si/blog/ai-assistants-judge-your-company-by-its-name -> src/content/blog/ai-assistants-judge-your-company-by-its-name.md
+  https://superrank.si/blog/core-web-vitals-and-page-speed-for-ai-crawlers -> src/content/blog/core-web-vitals-and-page-speed-for-ai-crawlers.md
+  https://superrank.si/blog/what-to-do-when-chatgpt-gets-your-company-wrong -> src/content/blog/what-to-do-when-chatgpt-gets-your-company-wrong.md
+  https://superrank.si/blog/autonomous-seo-agent-vs-seo-tools-what-is-the-difference -> src/content/blog/autonomous-seo-agent-vs-seo-tools-what-is-the-difference.md
+  https://superrank.si/blog/ai-search-visibility-in-nepal -> src/content/blog/ai-search-visibility-in-nepal.md
+  https://superrank.si/blog/how-to-keep-content-fresh-for-ai-search -> src/content/blog/how-to-keep-content-fresh-for-ai-search.md
+  https://superrank.si/blog/superrank-vs-traditional-seo-tools -> src/content/blog/superrank-vs-traditional-seo-tools.md
+  https://superrank.si/use-cases/saas -> src/pages/use-cases/saas.astro
+  https://superrank.si/privacy -> src/pages/privacy.astro
+  https://superrank.si/use-cases/e-commerce -> src/pages/use-cases/e-commerce.astro
+  https://superrank.si/partners/referral -> src/pages/partners/referral.astro
+  https://superrank.si/blog/ai-search-for-nepal-tourism-trekking-hotels-and-tours -> src/content/blog/ai-search-for-nepal-tourism-trekking-hotels-and-tours.md
+  https://superrank.si/blog/brand-mentions-vs-backlinks-what-ai-search-rewards -> src/content/blog/brand-mentions-vs-backlinks-what-ai-search-rewards.md
+  https://superrank.si/blog/ecommerce-aeo-audit-checklist -> src/content/blog/ecommerce-aeo-audit-checklist.md
+  https://superrank.si/blog/superrank-vs-semrush -> src/content/blog/superrank-vs-semrush.md
+  https://superrank.si/page-fix-checker -> src/pages/page-fix-checker.astro
+  https://superrank.si/blog/llms-txt-and-md-files-ai-visibility-helper-or-hoax -> src/content/blog/llms-txt-and-md-files-ai-visibility-helper-or-hoax.md
+  https://superrank.si/blog/how-to-write-answer-blocks-ai-assistants-quote -> src/content/blog/how-to-write-answer-blocks-ai-assistants-quote.md
+  https://superrank.si/blog/how-agencies-run-ai-search-fixes-across-many-client-sites -> src/content/blog/how-agencies-run-ai-search-fixes-across-many-client-sites.md
+  https://superrank.si/blog/can-ai-fix-your-seo-for-you -> src/content/blog/can-ai-fix-your-seo-for-you.md
+  https://superrank.si/integrations -> src/pages/integrations.astro
+  https://superrank.si/compare -> src/pages/compare.astro
+  https://superrank.si/product/automatic-fixes -> src/pages/product/automatic-fixes.astro
+  https://superrank.si/blog/superrank-vs-athenahq -> src/content/blog/superrank-vs-athenahq.md
+  https://superrank.si/blog/profound-alternatives-compared -> src/content/blog/profound-alternatives-compared.md
+  https://superrank.si/blog/how-chatgpt-deep-research-reads-your-site-what-the-logs-reveal -> src/content/blog/how-chatgpt-deep-research-reads-your-site-what-the-logs-reveal.md
+  https://superrank.si/product/ai-visibility -> src/pages/product/ai-visibility.astro
+
+-- MARKERS MISSING, FATAL (need a one-time human-placed anchor before any draft for this field can apply) (0) --
+
+-- ADAPTER-ROUTED, not deep-checked here (0) --
+
+-- RENDER CAPABILITY GAPS (0) -- (net-new pages this site can generate but the gate will block at apply time)
+  OK — every configured newContentTargets extension has a recorded, markdown-safe renderCapabilities entry.
+
+-- NEW CONTENT TARGETS NOT CONFIGURED (0/7) -- (not fatal; any recommendation of this type will block until configured)
+  OK — every known net-new content type has a target configured.
+
+-- AUTHOR AVATAR ASPECT-RATIO GAPS (0) -- (a non-square logo/avatar declared as rendering inside a circular crop frame)
+
+-- NGINX SECURITY-HEADERS MARKER (nginx/static.conf) -- MISSING (fatal — must be hand-placed; see generators/security-headers.js)
+
+-- ANALYTICS-INSTALL (sitewide, src/layouts/Layout.astro) -- marker missing, FATAL (expected SEOAI:ANALYTICSSCRIPTGA4, reason: fatal-no-head-region).
+
+Site #8871: gaps found — see above.

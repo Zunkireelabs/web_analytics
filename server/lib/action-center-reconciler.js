@@ -73,6 +73,8 @@ import { recheckRecommendation, CAPABILITY_GAP_BLOCK_PREFIX } from '../agents/li
 import { verifyRecommendation, VERIFICATION_DECISION } from '../generators/lib/verification-layer.js';
 import { getGenerator } from '../generators/registry.js';
 import { recoverUnopenedBatchPrs } from './batch-pr-recovery.js';
+import { repairOpenBatchPrBuilds, buildRepairMode } from './pr-build-repair-pass.js';
+import { checkOpenBatchBranches, staleBatchMode } from './stale-batch-guard.js';
 // capabilityGapDetector was previously exercised only via
 // scripts/shadow-test-capability-gap-recovery.js in shadow mode (a stubbed
 // decisionEngineFn that never writes to the `decisions` table). Calling the
@@ -730,13 +732,19 @@ export async function reconcileSite(siteId, { idleHours = IDLE_RECLAIM_HOURS, ap
     log,
     openPr: async (id, draftId) => (await import('../routes/action-center.js')).openDraftPr(id, draftId),
   });
+  // Pass 0b — read the build of every PR the agent has open and repair what failed (lib/pr-build-repair.js). PR_BUILD_REPAIR=log (the default) only
+  // reports; a dry run of the reconciler (apply: false) never writes either. Best-effort: it must not stop the passes below.
+  const buildRepair = await repairOpenBatchPrBuilds(siteId, { mode: apply ? buildRepairMode() : (buildRepairMode() === 'off' ? 'off' : 'log'), log }).catch((err) => { log?.(`[build-repair] site ${siteId}: pass failed (${String(err.message || err).slice(0, 160)})`); return null; });
+  // Pass 0c — an open agent PR whose branch fell behind the default branch can revert work already there when merged (lib/stale-batch-guard.js).
+  // STALE_BATCH_GUARD=log (the default) only reports; a dry run never writes. Best-effort: it must not stop the passes below.
+  const staleBranches = await checkOpenBatchBranches(siteId, { mode: apply ? staleBatchMode() : (staleBatchMode() === 'off' ? 'off' : 'log'), log }).catch((err) => { log?.(`[stale-batch] site ${siteId}: pass failed (${String(err.message || err).slice(0, 160)})`); return null; });
   const itemDefects = await reconcileStuckApprovedDrafts(siteId, { apply, log });
   const stalled = await reclaimStalledDrafts(siteId, { idleHours, apply, log });
   const failures = await classifyUnrecordedFailures(siteId, { apply, log });
   const capabilityGaps = await surfaceCapabilityGaps(siteId, { apply, log });
   const recovery = await driveAutonomousRecovery(siteId, { apply, log });
   const refusalRecovery = await driveAutonomousRefusalRecovery(siteId, { apply, log });
-  return { siteId, prRecovery, stalled, failures, itemDefects, capabilityGaps, recovery, refusalRecovery };
+  return { siteId, prRecovery, buildRepair, staleBranches, stalled, failures, itemDefects, capabilityGaps, recovery, refusalRecovery };
 }
 
 // Every site, one at a time. Sequential on purpose: this shares a connection

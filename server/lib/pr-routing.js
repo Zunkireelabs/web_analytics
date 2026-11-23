@@ -1,17 +1,18 @@
 // Where a day's batch pull request is opened for a CLIENT repository (SRANK-47 follow-up, owner decision 2026-11-06).
 //
 // A client with no stage branch: always straight into its production branch (main).
-// A client WITH a stage branch (sites.pr_target_branch): a batch made only of LIGHT content edits goes straight into main; any batch
+// A client WITH a stage branch (sites.pr_target_branch): a batch made only of LIGHT edits (tags, alt text: nothing visible) goes straight into main; any batch
 // that includes anything else (a landing page, a blog post, a translation, a template or code fix, or a mix) goes into the stage
 // branch as ONE pull request, and once a person merges that, the agent opens the stage -> main promotion PR
 // (lib/stage-promotion.js). The agent never merges anything.
 //
-// "Light" means edits to the text and tags of pages that already exist (owner decision 2026-11-06): page text, titles, FAQs, direct
-// answers, internal links, image alt text, Open Graph and canonical tags. Everything not listed here (landing pages, blog posts,
-// translations, schema, redirects, sitemap, template and code fixes) takes the stage detour, so a type added later is safe by default.
+// "Light" means edits that CANNOT change how a page looks: its title and description tags, image alt text, Open Graph and canonical tags (owner decision
+// 2026-11-06, narrowed 2026-11-23). Everything that adds or rewrites VISIBLE content (an FAQ, a direct answer, expanded or refreshed text, Q&A, internal links)
+// now takes the stage detour too, so a person sees it on the stage site before it can reach production. The narrowing is a direct result of two real
+// incidents: unstyled FAQs on MOBILISE and Superrank, both from automatic fixes that had been classed as light and so went straight to main. A type added
+// later (a landing page, a blog post, a translation, schema, redirects, sitemap, template and code fixes) is safe by default for the same reason.
 export const LIGHT_CONTENT_TYPES = Object.freeze([
-  'refresh-content', 'expand-content', 'qa-content',
-  'meta-title', 'faq', 'direct-answer', 'internal-links', 'alt-text', 'open-graph', 'canonical',
+  'meta-title', 'alt-text', 'open-graph', 'canonical',
 ]);
 const LIGHT = new Set(LIGHT_CONTENT_TYPES);
 

@@ -1767,8 +1767,10 @@ export function siteHasUsableDesignProfile(site) {
 export function lacksDesignBaseline(site, { componentKey, mode, gateMode }) {
   if (gateMode !== 'enforce' || mode !== 'visible' || !componentKey) return false;
   const root = site?.url_file_map?.siteRoot;
-  if (root?.componentTemplates?.[componentKey] || root?.pageComponentTemplates?.[componentKey]) return false;
-  return !siteHasUsableDesignProfile(site);
+  // Only a template captured from the site's own component (site, page-type or page tier) is a baseline. A usable
+  // design profile alone used to count, which let buildMergeValues project a generic block (e.g. a <dl> FAQ) the site
+  // never uses onto a live page (2026-11-23). The profile still grounds prose; it no longer invents components.
+  return !(root?.componentTemplates?.[componentKey]?.wrapper || root?.pageComponentTemplates?.[componentKey]);
 }
 
 // Generators whose output is real, visible page content — the set every
@@ -1800,7 +1802,7 @@ export const DESIGN_CONTEXT_GENERATOR_IDS = new Set([
 // confirms it produces no visible styling, so a new generator defaults to
 // GETTING the check rather than silently skipping it.
 export const NO_MARKUP_GENERATOR_IDS = new Set([
-  'meta-title', 'schema', 'canonical', 'sitemap', 'robots-fix', 'robots-bootstrap', 'security-headers',
+  'meta-title', 'schema', 'canonical', 'sitemap', 'robots-fix', 'robots-bootstrap', 'indexnow', 'security-headers',
   'html-lang', 'viewport', 'open-graph', 'llms-txt', 'analytics-install',
   'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'geo-audit', 'blog-image',
 ]);

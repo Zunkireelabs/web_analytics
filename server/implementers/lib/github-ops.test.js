@@ -56,7 +56,7 @@ mock.module(resolve('../../store/drafts.js'), { namedExports: { listBatchActionT
 
 const {
   pushDraftBranch, openPrForBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush,
-  getOrInitBatchBranch, batchBranchConflictError,
+  getOrInitBatchBranch, batchBranchConflictError, syncBranchWithBase,
 } = await import('./github-ops.js');
 
 const site = { id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main' };
@@ -676,4 +676,123 @@ describe('page design-integrity gate in pushDraftBranch — every markup-writing
     process.env.PAGE_DESIGN_INTEGRITY = 'nonsense';
     assert.equal((await pushDraftBranch(site, { id: 9, action_type: 'faq', content: {} }, [{ path: 'p.njk', content: OFF_DESIGN }], target)).ok, false);
   }));
+});
+
+// superrank-web PR #15: a post whose front matter names a key twice does not build ("duplicated mapping key").
+describe('pushDraftBranch refuses a duplicated front-matter key', () => {
+  test('nothing is written to GitHub, and the reason names the file and the key', async () => {
+    let wrote = false;
+    defaults.commitFilesAtomic = async () => { wrote = true; return { sha: 'new' }; };
+    defaults.getBranchSha = async () => 'sha123';
+    try {
+      const result = await pushDraftBranch(
+        site, draft,
+        [{ path: 'src/content/blog/post.md', content: '---\ntitle: "A"\ndescription: "B"\ntitle: "C"\n---\n\nBody\n' }],
+        { branchName: 'action-center/batch-1-2026-11-23', exists: true },
+      );
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'front-matter-duplicate-key');
+      assert.match(result.error, /src\/content\/blog\/post\.md \(title\)/);
+      assert.equal(wrote, false);
+    } finally {
+      defaults.commitFilesAtomic = async () => { throw new Error('Bad credentials (401)'); };
+      defaults.getBranchSha = async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); };
+    }
+  });
+});
+
+// MOBILISE, 2026-11-23: PR 12 was cut from main and opened into staging. main had been reset to the original site by PR 11, so the PR deleted 93 files
+// (25 blog posts, /locations/, /compare/) from staging. A daily batch only adds and edits files, so a deletion into a stage branch means the branches
+// diverged, and the PR is refused before it exists.
+describe('openPrForBranch refuses a batch that would delete files from the stage branch', () => {
+  const stageSite = { ...site, pr_target_branch: 'staging' };
+  const heavy = { id: 7, action_type: 'cookie-policy', branch_name: 'action-center/batch-8874-2026-11-21', content: {} };
+  const reset = () => {
+    defaults.compareCommits = async () => ({ files: [], removed: [] });
+    defaults.listOpenPullRequestsForBranch = async () => [];
+    defaults.openPullRequest = async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); };
+  };
+  beforeEach(reset);
+
+  test('a PR into staging whose diff deletes files is not opened, and the reason names them', async () => {
+    let opened = false;
+    defaults.compareCommits = async (_s, base, head) => ({ files: ['src/blog/a/index.njk', 'src/compare/index.njk', 'x.njk'], removed: ['src/blog/a/index.njk', 'src/compare/index.njk'], _args: [base, head] });
+    defaults.openPullRequest = async () => { opened = true; return { number: 12, url: 'u' }; };
+    const r = await openPrForBranch(stageSite, heavy, heavy.branch_name);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'batch-would-delete-from-stage');
+    assert.match(r.error, /into "staging" would delete 2 files/);
+    assert.match(r.error, /src\/blog\/a\/index\.njk/);
+    assert.match(r.error, /"staging" holds work "main" does not/);
+    assert.equal(opened, false);
+  });
+
+  test('the same batch with no deletions opens normally, against the stage branch', async () => {
+    let base = null;
+    defaults.openPullRequest = async (_s, o) => { base = o.base; return { number: 13, url: 'u13' }; };
+    const r = await openPrForBranch(stageSite, heavy, heavy.branch_name);
+    assert.equal(r.ok, true);
+    assert.equal(base, 'staging');
+  });
+
+  test('a compare that fails (GitHub trouble) does not block the batch', async () => {
+    defaults.compareCommits = async () => { throw new Error('502'); };
+    defaults.openPullRequest = async () => ({ number: 14, url: 'u14' });
+    assert.equal((await openPrForBranch(stageSite, heavy, heavy.branch_name)).ok, true);
+  });
+
+  test('a site with no stage branch is not compared at all', async () => {
+    let compared = false;
+    defaults.compareCommits = async () => { compared = true; return { files: [], removed: ['x'] }; };
+    defaults.openPullRequest = async () => ({ number: 15, url: 'u15' });
+    assert.equal((await openPrForBranch(site, heavy, heavy.branch_name)).ok, true);
+    assert.equal(compared, false);
+  });
+});
+
+// The stale-batch guard (lib/stale-batch-guard.js) brings main into an OLDER open batch branch with the same operation today's branch gets.
+describe('syncBranchWithBase — any batch branch, not only today\'s', () => {
+  const reset = () => {
+    defaults.getBranchSha = async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); };
+    defaults.mergeBranchFromBase = async () => ({ ok: true, conflicted: false, synced: false });
+    defaults.compareCommits = async () => ({ files: [] });
+    defaults.getFileContent = async () => null;
+  };
+
+  test('merges the default branch INTO the named branch and reports the new merge commit', async () => {
+    let merged;
+    defaults.getBranchSha = async () => 'before-sha';
+    defaults.mergeBranchFromBase = async (_s, branch, base) => { merged = { branch, base }; return { ok: true, conflicted: false, synced: true, sha: 'after-sha' }; };
+    try {
+      const r = await syncBranchWithBase(site, 'action-center/batch-1-2026-11-21');
+      assert.deepEqual(merged, { branch: 'action-center/batch-1-2026-11-21', base: 'main' });
+      assert.equal(r.synced, true); assert.equal(r.sha, 'after-sha'); assert.equal(r.conflicted, false);
+    } finally { reset(); }
+  });
+
+  test('a branch already up to date is reported as not synced (no merge commit)', async () => {
+    defaults.getBranchSha = async () => 'same';
+    try { assert.equal((await syncBranchWithBase(site, 'action-center/batch-1-2026-11-21')).synced, undefined); } finally { reset(); }
+  });
+
+  test('a merge conflict is reported as conflicted and nothing is claimed as synced', async () => {
+    defaults.getBranchSha = async () => 'before-sha';
+    defaults.mergeBranchFromBase = async () => ({ ok: false, conflicted: true });
+    try {
+      const r = await syncBranchWithBase(site, 'action-center/batch-1-2026-11-21');
+      assert.equal(r.conflicted, true); assert.equal(r.synced, undefined);
+    } finally { reset(); }
+  });
+
+  test('a clean merge that duplicates a marker is held as corrupted, exactly as for today\'s branch', async () => {
+    const path = 'src/pages/a.njk';
+    defaults.getBranchSha = async () => 'before-sha';
+    defaults.mergeBranchFromBase = async () => ({ ok: true, conflicted: false, synced: true, sha: 'after-sha' });
+    defaults.compareCommits = async () => ({ files: [path] });
+    defaults.getFileContent = async () => ({ content: 'title: "A" # SEOAI:TITLE\ntitle: "B" # SEOAI:TITLE\n', sha: 'x' });
+    try {
+      const r = await syncBranchWithBase(site, 'action-center/batch-1-2026-11-21');
+      assert.equal(r.conflicted, true); assert.equal(r.corrupted, true);
+    } finally { reset(); }
+  });
 });

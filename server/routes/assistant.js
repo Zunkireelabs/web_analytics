@@ -3,6 +3,7 @@ import { requireAuth } from './login.js';
 import { getUserById } from '../store/users.js';
 import { getSiteById } from '../store/read.js';
 import { handleMessage } from '../assistant/assistant.js';
+import { runStreamingChat, FRIENDLY_ERROR } from '../assistant/chat-stream.js';
 import { invokeCapability, capabilitiesFor } from '../assistant/capabilities.js';
 
 const router = Router();
@@ -40,6 +41,43 @@ router.post('/assistant/message', async (req, res, next) => {
     const result = await handleMessage({ ctx, message, conversationId: conversationId || null });
     res.json(result);
   } catch (e) { next(e); }
+});
+
+// The same chat as /assistant/message, but streamed as server-sent events so the answer appears word by word (see
+// assistant/chat-stream.js for the events). Same session-bound context; nothing about the site comes from the request.
+router.post('/assistant/message/stream', async (req, res, next) => {
+  try {
+    const { message, conversationId } = req.body || {};
+    if (!message?.trim()) return res.status(400).json({ error: 'message is required' });
+    const ctx = await resolveContext(req);
+
+    res.status(200).set({
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no', // nginx must not hold the words back
+    });
+    res.flushHeaders();
+
+    // Closing the chat (or the tab) stops the model call instead of paying for an answer nobody will read.
+    const controller = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+    const emit = (event) => { if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(event)}\n\n`); };
+    // A comment line every 15s keeps proxies from closing a connection that is waiting on a slow lookup.
+    const heartbeat = setInterval(() => { if (!res.writableEnded && !res.destroyed) res.write(': keep-alive\n\n'); }, 15_000);
+    try {
+      await runStreamingChat({ ctx, message, conversationId: conversationId || null, emit, signal: controller.signal });
+    } catch (err) {
+      console.error('[assistant] stream failed:', err?.message || err);
+      emit({ type: 'error', message: FRIENDLY_ERROR });
+    } finally {
+      clearInterval(heartbeat);
+      res.end();
+    }
+  } catch (e) {
+    if (res.headersSent) return res.end();
+    next(e);
+  }
 });
 
 // Direct capability invocation for the UI's structured actions (confirm

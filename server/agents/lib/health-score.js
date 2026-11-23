@@ -152,3 +152,55 @@ export function computeHealthScore(findings, implementedFindingIds = new Set(), 
     findingsReported: reportedCount,
   };
 }
+
+// ── Rollup: where the score is being lost, and what to do about it in what order ─────────────────────────────────────────────────────
+// Built from the SAME deduped findings and the SAME per-finding penalty as computeHealthScore, so the numbers add up: each category's
+// share is its part of the (uncapped) penalty the score is made of. Severity and the phased plan follow claude-seo's audit report
+// (critical / high / medium / low with a fix window), mapped onto this system's three priorities: high = critical, medium =
+// important, low = minor.
+const penaltyOf = (f, maxMagnitude, categoryByAgentId) => (
+  categoryWeightFor(f.agentId, categoryByAgentId) * TIER_WEIGHT[f.priority] * (0.5 + 0.5 * (Math.abs(f.expectedImpact?.value ?? 0) / maxMagnitude))
+);
+
+/** @returns [{ category, open, critical, important, minor, penalty, share }] biggest loss first; empty when nothing is open */
+export function buildHealthBreakdown(findings, implementedFindingIds = new Set(), categoryByAgentId = new Map()) {
+  const deduped = getOpenScoreableFindings(findings, implementedFindingIds);
+  if (!deduped.length) return [];
+  const maxMagnitude = Math.max(1, ...deduped.map((f) => Math.abs(f.expectedImpact?.value ?? 0)));
+  const byCategory = new Map();
+  let total = 0;
+  for (const f of deduped) {
+    const category = categoryByAgentId?.get(f.agentId)?.category || 'other';
+    const row = byCategory.get(category) || { category, open: 0, critical: 0, important: 0, minor: 0, penalty: 0 };
+    const p = penaltyOf(f, maxMagnitude, categoryByAgentId);
+    row.open += 1; row.penalty += p; total += p;
+    if (f.priority === 'high') row.critical += 1; else if (f.priority === 'medium') row.important += 1; else row.minor += 1;
+    byCategory.set(category, row);
+  }
+  return [...byCategory.values()]
+    .map((r) => ({ ...r, penalty: Math.round(r.penalty * 10) / 10, share: total > 0 ? Math.round((r.penalty / total) * 100) / 100 : 0 }))
+    .sort((a, b) => b.penalty - a.penalty || a.category.localeCompare(b.category));
+}
+
+export const PLAN_PHASES = [
+  { key: 'critical', priority: 'high', name: 'Critical fixes', window: 'This week' },
+  { key: 'important', priority: 'medium', name: 'High-impact improvements', window: 'Weeks 2 to 3' },
+  { key: 'minor', priority: 'low', name: 'Content and polish', window: 'Within the month' },
+];
+
+/**
+ * The open work in the order to do it. Each phase lists its biggest items first (by the finding's own expected impact).
+ * @returns [{ key, name, window, count, items: [{ id, whyItMatters, page, agentId }] }]; a final "Ongoing" phase is the standing habit.
+ */
+export function buildActionPlan(findings, implementedFindingIds = new Set(), { perPhase = 5 } = {}) {
+  const deduped = getOpenScoreableFindings(findings, implementedFindingIds);
+  const phases = PLAN_PHASES.map((ph) => {
+    const items = deduped.filter((f) => f.priority === ph.priority)
+      .sort((a, b) => Math.abs(b.expectedImpact?.value ?? 0) - Math.abs(a.expectedImpact?.value ?? 0) || String(a.id).localeCompare(String(b.id)));
+    return {
+      key: ph.key, name: ph.name, window: ph.window, count: items.length,
+      items: items.slice(0, perPhase).map((f) => ({ id: f.id, whyItMatters: f.whyItMatters || null, page: f.evidence?.page || null, agentId: f.agentId || null })),
+    };
+  });
+  return [...phases, { key: 'ongoing', name: 'Keep it healthy', window: 'Every week', count: 0, items: [] }];
+}

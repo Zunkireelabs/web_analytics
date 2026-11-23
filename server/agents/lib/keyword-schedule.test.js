@@ -77,9 +77,14 @@ const dbm = await import('../../db.js');
 let skip = isLocal ? false : 'not a local database';
 if (!skip) { try { await dbm.query('SELECT schedule_batch FROM keyword_gaps LIMIT 1'); } catch (e) { skip = `no local database (${e.code || e.message})`; } }
 
+// The real planner looks keywords up on Google's results page (a paid, budgeted call), so every schedule test that is not ABOUT merging
+// hands it this stand-in. A test must never reach the real one from a developer machine that has DataForSEO credentials in .env.
+const NO_MERGE = { serpMergeEnabled: () => false, planSerpMerges: async () => ({ merges: [] }) };
+
 describe('the schedule on a real database', { skip }, () => {
   const created = [];
-  after(async () => { for (const id of created) await dbm.query('DELETE FROM sites WHERE id = $1', [id]).catch(() => {}); });
+  // recommendations do not cascade from sites, so they go first; a swallowed foreign-key error here used to leave one test site behind per run
+  after(async () => { for (const id of created) { await dbm.query('DELETE FROM recommendations WHERE site_id = $1', [id]).catch(() => {}); await dbm.query('DELETE FROM sites WHERE id = $1', [id]).catch(() => {}); } });
 
   async function makeSite(dayOfProgramme) {
     const d = `ks${crypto.randomBytes(3).toString('hex')}.test`;
@@ -99,7 +104,7 @@ describe('the schedule on a real database', { skip }, () => {
     const mine = await addGap(site.id, 'my own keyword', 'user_request');
     const made = [];
     const create = async (siteId, gap) => { made.push(gap.topic); return { recommendationId: null }; };
-    const out = await runKeywordScheduleForSite(site.id, site, { deps: { createRecommendation: create } });
+    const out = await runKeywordScheduleForSite(site.id, site, { deps: { createRecommendation: create, serpMerge: NO_MERGE } });
     assert.equal(out.phase, 'gather');
     assert.deepEqual(made, ['my own keyword']);
     assert.ok(mine);
@@ -111,7 +116,7 @@ describe('the schedule on a real database', { skip }, () => {
     for (const t of ['a one', 'b two', 'c three', 'd four']) await addGap(site.id, t);
     const made = [];
     const create = async (siteId, gap) => { made.push(gap.topic); return { recommendationId: null }; };
-    const out = await runKeywordScheduleForSite(site.id, site, { deps: { createRecommendation: create } });
+    const out = await runKeywordScheduleForSite(site.id, site, { deps: { createRecommendation: create, serpMerge: NO_MERGE } });
     assert.equal(out.phase, 'ship');
     assert.equal(made.length, 2);
     const { rows: [s] } = await dbm.query('SELECT keyword_cycle_count FROM sites WHERE id = $1', [site.id]);
@@ -138,4 +143,51 @@ describe('the schedule on a real database', { skip }, () => {
     assert.equal(first.params.clientRequested, true);
     assert.equal((await assignBlogSlots(site.id, site, { now })).booked, 0, 'running again books nothing more');
   });
+
+  describe('keywords that Google treats as the same search', () => {
+    const merge = (merges) => ({ serpMergeEnabled: () => true, planSerpMerges: async () => ({ merges }) });
+    const planFor = (site, ids) => ids.map((id) => ({ keywordId: id, topic: `t${id}`, intoId: 0, intoTopic: 'primary', shared: 8, note: `Merged into "primary": 8 of 10 pages are the same` }));
+
+    test('a folded keyword is not queued; it is dismissed with a note saying where it went, and the rest are queued', async () => {
+      const { runKeywordScheduleForSite } = await import('./keyword-schedule.js');
+      const site = await makeSite(31);
+      const ids = []; for (const t of ['a one', 'b two', 'c three', 'd four']) ids.push(await addGap(site.id, t));
+      const made = [];
+      const create = async (siteId, gap) => { made.push(gap.topic); return { recommendationId: null }; };
+      // fold whichever keyword is shipped first into the other(s): ask for the first two ids to be folded
+      let folded;
+      const serpMerge = { serpMergeEnabled: () => true, planSerpMerges: async ({ keywords }) => { folded = keywords[0]; return { merges: [{ keywordId: folded.id, topic: folded.topic, intoId: keywords[1].id, intoTopic: keywords[1].topic, shared: 9, note: `Merged into "${keywords[1].topic}": 9 of 10 pages are the same` }] }; } };
+      const out = await runKeywordScheduleForSite(site.id, site, { deps: { createRecommendation: create, serpMerge } });
+      assert.equal(out.merged, 1);
+      assert.ok(!made.includes(folded.topic), 'the folded keyword was not queued');
+      assert.equal(made.length, 1, 'half of 4 is 2; one of them was folded away');
+      const { rows: [g] } = await dbm.query('SELECT status, followup_note FROM keyword_gaps WHERE id = $1', [folded.id]);
+      assert.equal(g.status, 'dismissed');
+      assert.match(g.followup_note, /^Merged into ".+": 9 of 10 pages are the same/);
+      assert.ok(ids.length === 4);
+    });
+
+    test('with the merge switched off, or when the planner fails, everything is queued exactly as before', async () => {
+      const { runKeywordScheduleForSite } = await import('./keyword-schedule.js');
+      for (const serpMerge of [{ serpMergeEnabled: () => false, planSerpMerges: async () => { throw new Error('must not be called'); } }, { serpMergeEnabled: () => true, planSerpMerges: async () => { throw new Error('serp down'); } }]) {
+        const site = await makeSite(31);
+        for (const t of ['a one', 'b two', 'c three', 'd four']) await addGap(site.id, t);
+        const made = [];
+        const create = async (siteId, gap) => { made.push(gap.topic); return { recommendationId: null }; };
+        const out = await runKeywordScheduleForSite(site.id, site, { deps: { createRecommendation: create, serpMerge } });
+        assert.equal(made.length, 2); assert.equal(out.merged, 0);
+        const { rows } = await dbm.query(`SELECT count(*)::int AS n FROM keyword_gaps WHERE site_id = $1 AND status = 'dismissed'`, [site.id]);
+        assert.equal(rows[0].n, 0);
+      }
+    });
+
+    test('a dry run changes nothing and makes no lookups', async () => {
+      const { runKeywordScheduleForSite } = await import('./keyword-schedule.js');
+      const site = await makeSite(31);
+      for (const t of ['a one', 'b two', 'c three', 'd four']) await addGap(site.id, t);
+      const out = await runKeywordScheduleForSite(site.id, site, { dryRun: true, deps: { serpMerge: { serpMergeEnabled: () => true, planSerpMerges: async () => { throw new Error('a dry run must not look anything up'); } } } });
+      assert.equal(out.merged, 0);
+    });
+  });
+
 });

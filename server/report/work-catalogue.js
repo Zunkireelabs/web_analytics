@@ -82,6 +82,12 @@ export const CATALOGUE = {
     will: () => 'We will publish a guide telling AI tools what your site is about.',
     why: 'AI tools can only recommend what they can read.',
   },
+  indexnow: {
+    group: 'Foundation', title: 'Set your site up to tell Bing about changes',
+    did: () => 'We added the small file that lets your site tell Bing and Yandex the moment a page changes.',
+    will: () => 'We will add the small file that lets your site tell Bing and Yandex the moment a page changes.',
+    why: 'Other search engines hear about your changes straight away instead of days later.',
+  },
   canonical: {
     group: 'Foundation', title: 'Helped Google find and list your pages',
     did: (c) => `We told Google which version of ${n(c, 'page', 'pages')} is the main one.`,

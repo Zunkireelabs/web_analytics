@@ -130,7 +130,45 @@ const ANY_MARKER_TOKEN_RE = /#\s*SEOAI:([A-Za-z0-9_-]+)(?::(START|END))?|<!--\s*
 // git-level "clean" merge is therefore not sufficient evidence the sync is
 // actually safe; this function is the content-level check that catches what
 // git's line-based diff cannot.
-export function findMarkerCorruption(fileContent) {
+// A YAML front matter that names the same top-level key twice is invalid: Astro (js-yaml) stops the build with "duplicated mapping key", Eleventy and Jekyll
+// fail the same way. Found on superrank-web PR #15 (2026-11-23). The marker counts below cannot see it, because the two lines need not carry a marker at all
+// (one can be the page's own key and the other a key a draft wrote), so the keys are read directly. Only a key that starts in column 0 counts: indented lines
+// belong to a nested value or a block scalar. Returns the repeated key names, in order of first repetition. Only markdown/template files are read; a `.astro`
+// or script file's `---` fence holds code, not YAML.
+const YAML_FRONT_MATTER_FILE = /\.(md|markdown|mdx|njk|liquid|html?)$/i;
+export function findDuplicateFrontMatterKeys(fileContent, filePath = '') {
+  if (filePath && !YAML_FRONT_MATTER_FILE.test(filePath)) return [];
+  const fmLen = frontMatterLength(String(fileContent || ''));
+  if (fmLen == null) return [];
+  const seen = new Set();
+  const repeated = [];
+  for (const line of fileContent.slice(0, fmLen).split(/\r?\n/)) {
+    const m = /^(["']?)([A-Za-z0-9_.-]+)\1\s*:(\s|$)/.exec(line);
+    if (!m) continue;
+    if (seen.has(m[2])) { if (!repeated.includes(m[2])) repeated.push(m[2]); } else seen.add(m[2]);
+  }
+  return repeated;
+}
+
+// The repair for findDuplicateFrontMatterKeys: a key written twice keeps its FIRST line (the one an in-place edit leaves; when a merge keeps both the
+// draft's and main's copy, the draft's comes first), and the later copies go, with any indented lines belonging to them. Nothing else in the file is
+// touched. Returns the content unchanged when there is nothing to repair.
+export function dedupeFrontMatterKeys(fileContent, filePath = '') {
+  if (!findDuplicateFrontMatterKeys(fileContent, filePath).length) return fileContent;
+  const fmLen = frontMatterLength(fileContent);
+  const lines = fileContent.slice(0, fmLen).split('\n');
+  const seen = new Set(); const out = []; let skipping = false;
+  for (const line of lines) {
+    const m = /^(["']?)([A-Za-z0-9_.-]+)\1\s*:(\s|$)/.exec(line);
+    if (/^---\s*$/.test(line)) skipping = false; // the fence is never part of a repeated key
+    else if (m) { skipping = seen.has(m[2]); seen.add(m[2]); }
+    else if (skipping && line.trim() && !/^\s/.test(line)) skipping = false;
+    if (!skipping) out.push(line);
+  }
+  return out.join('\n') + fileContent.slice(fmLen);
+}
+
+export function findMarkerCorruption(fileContent, filePath = '') {
   const lineCounts = new Map();
   const blockCounts = new Map();
   let m;
@@ -154,6 +192,7 @@ export function findMarkerCorruption(fileContent) {
   for (const [name, { start, end }] of blockCounts) {
     if (start > 1 || end > 1 || start !== end) corrupted.push(name);
   }
+  for (const key of findDuplicateFrontMatterKeys(fileContent, filePath)) corrupted.push(`front-matter key "${key}"`);
   return corrupted;
 }
 
@@ -1254,6 +1293,15 @@ const DEFAULT_TABLE_STYLE = {
   td: 'padding:0.5em 0.75em;border-bottom:1px solid rgba(128,128,128,0.25)',
   tdFirst: 'padding:0.5em 0.75em;border-bottom:1px solid rgba(128,128,128,0.25);font-weight:600',
 };
+
+// Whether an expand/refresh draft would render ANY table (a structured section.table, or a Markdown table in a body).
+// backend.js holds such a draft on a page with no captured componentTemplates.table rather than shipping
+// DEFAULT_TABLE_STYLE / a projected table the site never uses (design-preservation rule, 2026-11-23).
+export function draftHasTable(content) {
+  const sections = Array.isArray(content?.sections) ? content.sections : [];
+  return sections.some((sec) => (Array.isArray(sec?.table) && sec.table.length > 0)
+    || /^\s*\|.*\|\s*$\n^\s*\|?\s*:?-{3,}/m.test(String(sec?.body || '')));
+}
 
 function renderComparisonTable(table, style = {}) {
   if (!Array.isArray(table) || !table.length) return '';

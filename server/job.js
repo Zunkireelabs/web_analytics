@@ -21,7 +21,7 @@ import { runAgent } from './agents/runner.js';
 import { trendRadarDue } from './agents/lib/trend-cadence.js';
 import { saveAgentRun, getLatestAgentRuns } from './store/agent-runs.js';
 import { meta as execReportMeta, orchestrationStatus } from './agents/executive-report.js';
-import { computeHealthScore } from './agents/lib/health-score.js';
+import { computeCurrentHealthScore } from './agents/lib/current-health-score.js';
 import { RECOMMENDATION_AGENT_IDS } from './agents/lib/insights.js';
 import { detectNotificationEvents } from './notifications/detect.js';
 import { notifyDesignCaptureHeld } from './notifications/design-blocked.js';
@@ -48,7 +48,7 @@ import { splitByFreshness, maxInsightAgeDays } from './lib/analyst-insight-fresh
 import { runAnalystFusion } from './agents/lib/analyst-fusion.js';
 import { sweepAnalystOutcomes } from './agents/lib/analyst-outcome.js';
 import { checkFaqOnboardingCoverage } from './agents/lib/faq-onboarding-check.js';
-import { getImplementedFindingIds, countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
+import { countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
 import { countShippedFileEditsTodayAllSites } from './store/shipping-queue.js';
 import { AUTONOMOUS_DRAFT_SOURCES } from './lib/autonomous-quota.js';
 import { isShippable, isActiveSite, isShipCatchupOwed, checkShipStall, shouldNotifyStaffOfStall, SHIP_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './lib/ship-window.js';
@@ -101,7 +101,7 @@ import { ensureSitemapRegistered } from './ingest/sitemap-register.js';
 // where it belongs — in each agent's own page batch size — rather than by
 // starving the agent of runs.
 const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation', 'trend-radar']);
-const WEEKLY_ONLY_AGENT_IDS = new Set(['content-gap', 'growth-queries']);
+const WEEKLY_ONLY_AGENT_IDS = new Set(['content-gap', 'growth-queries', 'seo-sxo']);
 const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !THROTTLED_AGENT_IDS.has(id) && !WEEKLY_ONLY_AGENT_IDS.has(id));
 
 // Records the shared Google OAuth connection's health from organic pipeline
@@ -247,8 +247,9 @@ export async function runDailyAgentAnalysisForSite(site) {
     narrative: result.narrative, error: health.message, tookMs: null,
   });
 
-  const implementedFindingIds = await getImplementedFindingIds(site.id);
-  const { score } = computeHealthScore(result.findings, implementedFindingIds);
+  // The same score Command Center shows (every agent's latest findings, category-weighted). It was computed here from this run's own
+  // findings alone, without the category weights, and written to the same daily slot: see agents/lib/current-health-score.js.
+  const { score } = await computeCurrentHealthScore(site.id);
   const today = new Date().toISOString().slice(0, 10);
   await saveHealthScoreSnapshot(site.id, today, score)
     .catch((err) => console.error(`[job] site ${site.id} health score snapshot failed:`, err.message));

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveNewContentContract, deriveContractFromSourceFile, frontMatterKeys, makeContractCache } from './newcontent-contract.js';
+import { deriveNewContentContract, deriveContractFromSourceFile, frontMatterKeys, makeContractCache, missingRequiredKeys } from './newcontent-contract.js';
 
 // Shaped like a real site row: the branch column is `repo_default_branch`.
 // There is no `default_branch` column, and the module used to read that name —
@@ -317,5 +317,47 @@ describe('contract caching — one repo tree per batch run, not one per draft', 
     const deps = depsFor(files, { cache });
     for (const dir of ['a', 'b', 'c']) await deriveNewContentContract(SITE, { dir, extension: '.md' }, deps);
     assert.equal(cache.size(), 2);
+  });
+});
+
+// superrank-web (2026-11-23): an Astro content collection rejected a generated post ("excerpt: Required", no author/category/cover) and stopped the
+// client's build. The generator now learns the summary key from the siblings, and knows which keys every sibling carries on a schema-validated site.
+const post = (extra) => ['---', 'title: "T"', 'excerpt: "E"', 'date: 2026-01-01', 'author: team', 'category: News', ...extra, '---', '', 'Body'].join('\n');
+const ASTRO_DIR = {
+  'src/content.config.ts': 'export const collections = {};',
+  'src/content/blog/a.md': post(['cover:', '  kind: agent']),
+  'src/content/blog/b.md': post(['cover:', '  kind: agent']),
+  'src/content/blog/c.md': post(['cover:', '  kind: pills']),
+};
+describe('deriveNewContentContract — a schema-validated (Astro content collection) site', () => {
+  const dir = { dir: 'src/content/blog', extension: '.md' };
+  test('learns the summary key is `excerpt`, not `description`', async () => {
+    const c = await deriveNewContentContract(SITE, dir, depsFor(ASTRO_DIR));
+    assert.equal(c.fieldNames.description, 'excerpt');
+  });
+  test('requires every key all siblings carry (and never the optional-by-nature ones)', async () => {
+    const files = { ...ASTRO_DIR, 'src/content/blog/d.md': post(['cover:', '  kind: agent', 'updated: 2026-02-01', 'featured: true']) };
+    const c = await deriveNewContentContract(SITE, dir, depsFor(files));
+    assert.equal(c.schemaValidated, true);
+    assert.deepEqual(c.requiredKeys, ['author', 'category', 'cover', 'date', 'excerpt', 'title']);
+  });
+  test('missingRequiredKeys names what a generated file lacks', async () => {
+    const c = await deriveNewContentContract(SITE, dir, depsFor(ASTRO_DIR));
+    assert.deepEqual(missingRequiredKeys('---\ntitle: "T"\ndescription: "D"\ndate: 2026-11-22\n---\nBody', c), ['author', 'category', 'cover', 'excerpt']);
+    assert.deepEqual(missingRequiredKeys(post(['cover:', '  kind: agent']), c), []);
+  });
+  test('fewer than three siblings prove nothing: no key is required', async () => {
+    const two = { 'src/content.config.ts': 'x', 'src/content/blog/a.md': ASTRO_DIR['src/content/blog/a.md'], 'src/content/blog/b.md': ASTRO_DIR['src/content/blog/b.md'] };
+    assert.deepEqual((await deriveNewContentContract(SITE, dir, depsFor(two))).requiredKeys, []);
+  });
+});
+
+describe('deriveNewContentContract — a site WITHOUT a build-time schema is never held to its siblings\' shared keys', () => {
+  test('zunkireelabs-web style blog: posts share readTime/authorId, its template does not need them, so nothing is required', async () => {
+    const files = { ...REAL_BLOG_DIR, 'src/blog/third.md': REAL_BLOG_DIR['src/blog/how-to-choose-ai-development-company.md'] };
+    const c = await deriveNewContentContract(SITE, { dir: 'src/blog', extension: '.md' }, depsFor(files));
+    assert.equal(c.schemaValidated, false);
+    assert.deepEqual(c.requiredKeys, []);
+    assert.deepEqual(missingRequiredKeys('---\ntitle: "x"\n---\n', c), []);
   });
 });

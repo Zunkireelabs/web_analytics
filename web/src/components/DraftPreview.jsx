@@ -247,6 +247,21 @@ export default function DraftPreview({ actionType, content, onSelectTitle }) {
         </div>
       );
 
+    case 'indexnow':
+      return (
+        <div className="space-y-5">
+          <Group label="New file to add to the site">
+            <Code wrap>{content.path}</Code>
+          </Group>
+          <Group label="What the file contains">
+            <Code wrap>{content.fileContent}</Code>
+          </Group>
+          <Field label="What it does">
+            Lets this site tell Bing, Yandex and other search engines the moment a page changes, instead of waiting for them to find out on their own. The file only holds the site's own key; it changes nothing visitors see.
+          </Field>
+        </div>
+      );
+
     case 'llms-txt':
       return (
         <div className="space-y-5">

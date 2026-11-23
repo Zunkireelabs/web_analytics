@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { listRepoBranches, connectAppCredentials, githubConnectConfigured, buildAuthorizeUrl, redirectUriFor, exchangeCode, listUserRepos, GithubConnectError } from './user-auth.js';
+import { listRepoBranches, connectAppCredentials, githubConnectConfigured, buildAuthorizeUrl, redirectUriFor, exchangeCode, listUserRepos, GithubConnectError, describeRepoReadFailure } from './user-auth.js';
 
 const env = { GITHUB_APP_CLIENT_ID: 'cid', GITHUB_APP_CLIENT_SECRET: 'sec', GITHUB_CONNECT_APP_ID: '5493269', GITHUB_CONNECT_APP_PRIVATE_KEY_B64: 'a2V5' };
 const ok = (body) => ({ ok: true, status: 200, json: async () => body });
@@ -55,4 +55,39 @@ test('listRepoBranches puts the default first and reads with the person token', 
   const out = await listRepoBranches('TOK', { owner: 'acme', name: 'blog', defaultBranch: 'main' }, { fetchImpl });
   assert.deepEqual(out, [{ name: 'main', default: true }, { name: 'dev', default: false }, { name: 'stage', default: false }]);
   assert.deepEqual(seen, ['Bearer TOK']);
+});
+
+// 2026-11-23: a server with no GitHub App sign-in settings, and any GitHub error at all, both showed "Your GitHub sign-in has expired. Connect again.", which sent a
+// person round in circles. Only a 401 from GitHub means the sign-in is gone.
+test('a GitHub error carries its HTTP status', async () => {
+  const fetchImpl = async () => ({ ok: false, status: 403, json: async () => ({}) });
+  await assert.rejects(listUserRepos('T', { fetchImpl }), (e) => e instanceof GithubConnectError && e.status === 403 && e.code === 'github_failed');
+});
+
+test('only a 401 means the sign-in expired, and only then is the session dropped', () => {
+  const err = (status) => new GithubConnectError('github_failed', 'x', status);
+  assert.deepEqual(describeRepoReadFailure(err(401)), { dropSession: true, message: 'Your GitHub sign-in has expired. Connect again.' });
+  for (const status of [403, 429]) {
+    const r = describeRepoReadFailure(err(status));
+    assert.equal(r.dropSession, false, String(status));
+    assert.match(r.message, /limiting requests.*sign-in is still good/);
+  }
+  for (const status of [500, 502, 503]) {
+    const r = describeRepoReadFailure(err(status));
+    assert.equal(r.dropSession, false, String(status));
+    assert.match(r.message, /having trouble.*sign-in is still good/);
+  }
+});
+
+test('anything else (a network error, an unexpected throw) keeps the sign-in and says GitHub could not be read', () => {
+  for (const e of [new Error('ECONNRESET'), new GithubConnectError('exchange_failed', 'x'), null, undefined]) {
+    const r = describeRepoReadFailure(e);
+    assert.equal(r.dropSession, false);
+    assert.match(r.message, /could not be read just now/);
+  }
+});
+
+test('a message never carries the raw error text or a token', () => {
+  const r = describeRepoReadFailure(new GithubConnectError('github_failed', 'GitHub installations failed (401) token=ghu_SECRET', 401));
+  assert.doesNotMatch(r.message, /ghu_|token=|installations failed/);
 });

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { explainAttrGap, hasMarker, classifyMarkerGap, ensureMarkers, spliceMarkers, isHeadScopedField, isNoEofInsertField, buildMergeValues, findMarkerCorruption, renderExpandedHtml, sanitizeCapturedTemplate } from './marker-merge.js';
+import { explainAttrGap, hasMarker, classifyMarkerGap, ensureMarkers, spliceMarkers, isHeadScopedField, isNoEofInsertField, buildMergeValues, findMarkerCorruption, findDuplicateFrontMatterKeys, dedupeFrontMatterKeys, renderExpandedHtml, sanitizeCapturedTemplate } from './marker-merge.js';
 
 // Regression coverage for the zunkireelabs-web PR #87 incident: two
 // independent title drafts (one landed on main, one on the batch branch)
@@ -1757,5 +1757,56 @@ describe('lineKeys: description lives under another key', () => {
     const r = ensureMarkers(ZENNLY, { title: 'TITLE' }, 'x.njk', { lineKeys: { description: 'metaDescription' } });
     assert.match(r.content, /^title: "Discount Leakage[^"]*" # SEOAI:TITLE$/m);
     assert.equal(ensureMarkers(ZENNLY, { title: 'TITLE' }, 'x.njk').content, r.content);
+  });
+});
+
+// superrank-web PR #15 (2026-11-23): the Astro build stopped with "duplicated mapping key" on a blog post's front matter.
+describe('findDuplicateFrontMatterKeys', () => {
+  const post = (fm) => `---\n${fm}\n---\n\nBody text.\n`;
+  test('a front matter with every key once is clean', () => {
+    assert.deepEqual(findDuplicateFrontMatterKeys(post('title: "A"\ndescription: "B"\ndate: 2026-11-01'), 'a.md'), []);
+  });
+  test('a repeated top-level key is reported once, by name', () => {
+    assert.deepEqual(findDuplicateFrontMatterKeys(post('title: "A"\ndescription: "B"\ntitle: "C"\ntitle: "D"'), 'a.md'), ['title']);
+  });
+  test('quoted keys and CRLF line endings are read too', () => {
+    assert.deepEqual(findDuplicateFrontMatterKeys('---\r\n"title": "A"\r\ntitle: "B"\r\n---\r\nx', 'a.md'), ['title']);
+  });
+  test('the same key nested under another key, or inside a block scalar, is not a repeat', () => {
+    assert.deepEqual(findDuplicateFrontMatterKeys(post('title: "A"\nauthor:\n  title: "Dr"\nsummary: |\n  title: not a key\n  more'), 'a.md'), []);
+  });
+  test('a repeated key after the closing --- (body text) is not read', () => {
+    assert.deepEqual(findDuplicateFrontMatterKeys('---\ntitle: "A"\n---\ntitle: "B"\n', 'a.md'), []);
+  });
+  test('a file with no front matter, or a script file, is never flagged', () => {
+    assert.deepEqual(findDuplicateFrontMatterKeys('title: a\ntitle: b\n', 'a.md'), []);
+    assert.deepEqual(findDuplicateFrontMatterKeys('---\ntitle: a\ntitle: b\n---\n', 'page.astro'), []);
+  });
+  test('findMarkerCorruption reports it too, so the batch-branch sync check catches it', () => {
+    assert.deepEqual(findMarkerCorruption(post('title: "A"\ntitle: "B"'), 'a.md'), ['front-matter key "title"']);
+    assert.deepEqual(findMarkerCorruption(post('title: "A"'), 'a.md'), []);
+  });
+});
+
+describe('dedupeFrontMatterKeys', () => {
+  const post = (fm) => `---\n${fm}\n---\n\nBody text.\n`;
+  test('keeps the FIRST copy of a repeated key and drops the later ones, blank lines between them included only where the key was', () => {
+    const out = dedupeFrontMatterKeys(post('title: "New"\nexcerpt: "New e"\n\ntitle: "Old"\nexcerpt: "Old e"\ndate: 2026-01-01'), 'a.md');
+    assert.equal(out, post('title: "New"\nexcerpt: "New e"\n\ndate: 2026-01-01'));
+    assert.deepEqual(findDuplicateFrontMatterKeys(out, 'a.md'), []);
+  });
+  test('a repeated key takes its indented continuation lines with it, and the closing fence survives', () => {
+    const out = dedupeFrontMatterKeys(post('cover:\n  kind: a\ntitle: "T"\ncover:\n  kind: b'), 'a.md');
+    assert.equal(out, post('cover:\n  kind: a\ntitle: "T"'));
+  });
+  test('the body is never touched', () => {
+    const src = '---\ntitle: "A"\ntitle: "B"\n---\ntitle: "in the body"\ntitle: "again"\n';
+    assert.equal(dedupeFrontMatterKeys(src, 'a.md'), '---\ntitle: "A"\n---\ntitle: "in the body"\ntitle: "again"\n');
+  });
+  test('a file with nothing to repair comes back unchanged, and so does a script file', () => {
+    const ok = post('title: "A"\ndate: 2026-01-01');
+    assert.equal(dedupeFrontMatterKeys(ok, 'a.md'), ok);
+    const astro = '---\ntitle: a\ntitle: b\n---\n';
+    assert.equal(dedupeFrontMatterKeys(astro, 'page.astro'), astro);
   });
 });

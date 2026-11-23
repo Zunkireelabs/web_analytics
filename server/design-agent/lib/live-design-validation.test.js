@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  computeLayoutFingerprint, compareLayouts, captureCoverage, validatePageDesign, checkEditDesignIntegrity,
+  computeLayoutFingerprint, compareLayouts, captureCoverage, validatePageDesign, checkEditDesignIntegrity, findBareAddedBlock,
   attachValidatedContext, validatedContextFor, buildDesignContext, liveDesignValidationEnabled, pageDesignIntegrityMode,
   createLimiter, createFetchCache, captureOnce,
 } from './live-design-validation.js';
@@ -362,5 +362,19 @@ describe('a deleted group sample (404/410) does not hold the rest of the group',
     const r = await V(siteWith(), O + '/blog/b', w);
     assert.equal(r.status, 'blocked');
     assert.equal(r.httpStatus, 502);
+  });
+});
+
+describe('findBareAddedBlock', () => {
+  test('reads only the lines the edit added, and only the outermost block element', () => {
+    const before = '<main>\n<p>Hi</p>\n</main>';
+    assert.equal(findBareAddedBlock(before, before.replace('</main>', '<dl>\n<dt class="a">Q</dt>\n</dl>\n</main>')), 'dl');
+    assert.equal(findBareAddedBlock(before, before.replace('</main>', '<dl class="faq">\n<dt>Q</dt>\n</dl>\n</main>')), null);
+    assert.equal(findBareAddedBlock(before, before.replace('</main>', '<div className={styles.faq}>\n<p>x</p>\n</div>\n</main>')), null);
+    assert.equal(findBareAddedBlock(before, before.replace('<p>Hi</p>', '<p>Hello</p>')), null);
+  });
+  test('a block that already existed bare is not blamed on this edit', () => {
+    const before = '<main>\n<div>\n<p>Hi</p>\n</div>\n</main>';
+    assert.equal(findBareAddedBlock(before, before.replace('<p>Hi</p>', '<p>Hi there</p>')), null);
   });
 });

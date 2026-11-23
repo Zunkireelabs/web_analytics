@@ -61,6 +61,8 @@ const SITE_LEVEL_GENERATOR_IDS = new Set([
   // Exactly one robots.txt per site, same as robots-fix above — a site
   // either has one or doesn't, so this can never collide across pages.
   'robots-bootstrap',
+  // One IndexNow key per site, and one key file for it.
+  'indexnow',
 ]);
 
 // Every `reportOnly.kind` any agent raises (agents/types.js's ReportOnly) —
@@ -81,7 +83,7 @@ const REPORT_ONLY_KINDS = new Set([
   'device-ctr-deficit', 'competitor-outranking', 'competitor-backlink-gap',
   'font-size-inconsistency', 'keyword-cluster-gap', 'templated-duplicate-family',
   'url-variant-duplicate', 'sitemap-index-conflict', 'redirect-chain', 'query-param-duplicate',
-  'soft-404',
+  'soft-404', 'seo-drift', 'sxo-mismatch',
 ]);
 
 // Marks a blocked_reason as coming from action-center-reconciler.js's
@@ -685,9 +687,14 @@ export async function recheckRecommendation(siteId, recommendationId, { refreshE
     const { message } = safeMessage('recommendation-coordinator.recheckRecommendation', err, 'This recommendation could not be re-checked right now — it stays open until the next run.');
     return { status: 'open', changed: false, reason: message };
   }
+  // A report-only finding (REPORT_ONLY_KINDS) has no recommendedAction, only reportOnly.kind and .page, and is keyed exactly as
+  // buildRecommendations keys it. Without this branch it never matched, so "Re-check now" closed EVERY report-only row as "no
+  // longer detected" even while the problem was still there, and it only came back with the next nightly run.
   const match = (output.facts?.findings || []).find((f) => (
-    f.recommendedAction?.generatorId === rec.recommendation_type
-    && recommendationPageKey({ generatorId: f.recommendedAction.generatorId, params: f.recommendedAction.params }) === rec.page
+    (f.recommendedAction?.generatorId === rec.recommendation_type
+      && recommendationPageKey({ generatorId: f.recommendedAction.generatorId, params: f.recommendedAction.params }) === rec.page)
+    || (!f.recommendedAction?.generatorId && f.reportOnly?.kind === rec.recommendation_type
+      && recommendationPageKey({ generatorId: f.reportOnly.kind, params: { page: f.reportOnly.page || '' } }) === rec.page)
   ));
   if (!match) {
     await closeRecommendation(rec.id);
@@ -808,7 +815,11 @@ export async function getRecommendations(siteId) {
         source: r.detecting_agents[0], agentName: catByAgent.get(r.detecting_agents[0])?.name || r.detecting_agents[0],
         detectingAgents: r.detecting_agents, supportingAgents: r.supporting_agents,
         tag: r.issue, generatorId: r.recommendation_type, bucket, category,
-        reason: r.reason, params: r.params, priority: r.priority, expectedImpact: r.expected_impact,
+        // A leftover content fix on page N of a list stays on the board (syncFromGrounded leaves closing it to a person) but nothing can
+        // ever ship it, so it must not count toward "N critical issues need attention" (2026-11-23: two /blog/articles/page/10/ cards did).
+        reason: r.reason, params: r.params,
+        priority: isUnshippablePaginationFix(r.recommendation_type, r.page) ? 'low' : r.priority,
+        expectedImpact: r.expected_impact,
         riskTier: r.risk_tier,
         // Only forecast_risk-driven recommendations carry a real value here
         // (see analyst-seo-mapping.js's seoDraftEligibility) — everything

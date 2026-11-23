@@ -32,6 +32,10 @@ mock.module(resolve('../agents/lib/page-content.js'), {
     hasSufficientGroundingContent: () => false,
   },
 });
+// The SERP lookup is a paid call and the inventory read is a database read: neither belongs in a test about the design-context prompt,
+// and a developer's DataForSEO credentials in .env must never cause a real lookup from here.
+mock.module(resolve('../lib/serp.js'), { namedExports: { fetchSerp: async () => ({ ok: false, reason: 'not_configured' }) } });
+mock.module(resolve('../store/page-inventory.js'), { namedExports: { listPageInventory: async () => [] } });
 mock.module(resolve('./lib/pexels-client.js'), {
   namedExports: {
     searchImage: async () => null,

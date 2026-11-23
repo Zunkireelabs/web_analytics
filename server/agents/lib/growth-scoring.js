@@ -1,6 +1,7 @@
 import { stageScore } from '../../lib/growth-stage.js';
 import { severityTierFor, severityTierLabel, SEVERITY_TIER } from './severity-tiers.js';
-import { ctrAtPosition, opportunityScore, estimatedTrafficGain, TARGET_POSITION } from './opportunity-scoring.js';
+import { opportunityScore, estimatedTrafficGain, TARGET_POSITION } from './opportunity-scoring.js';
+import { INDUSTRY_CTR_CURVE } from './site-ctr-curve.js';
 
 // Scores one recommendation by how much organic growth acting on it is
 // likely to produce, so the daily run can attempt the 60 BEST eligible items
@@ -43,7 +44,9 @@ const DEMAND_CAP = 300;
 // sitting at a high but stable level, which is the entire behaviour change.
 // Capped all the same, so one catastrophic page cannot claim the whole day.
 const DECLINE_CAP = 600;
-export function demandScore(metrics) {
+// `ctrCurve` (site-ctr-curve.js) is this site's own CTR-by-position; defaults to
+// the fixed industry curve, which is exactly the pre-site-curve behaviour.
+export function demandScore(metrics, ctrCurve = INDUSTRY_CTR_CURVE) {
   if (!metrics || !metrics.impressions) return { score: 0, factors: [] };
   const { impressions, avgPosition, ctr } = metrics;
   const factors = [];
@@ -66,11 +69,11 @@ export function demandScore(metrics) {
     }
     // Already ranking but under-clicked for that rank: the cheapest real
     // traffic on the site, since the ranking work is already done.
-    const expectedCtr = ctrAtPosition(avgPosition);
+    const expectedCtr = ctrCurve.at(avgPosition);
     if (avgPosition <= 10 && expectedCtr > 0 && ctr < expectedCtr * 0.6) {
-      const gain = Math.min(100, estimatedTrafficGain(impressions, ctr, ctrAtPosition(TARGET_POSITION)) * 2);
+      const gain = Math.min(100, estimatedTrafficGain(impressions, ctr, ctrCurve.at(TARGET_POSITION)) * 2);
       score += gain;
-      factors.push(`ctr-gap (pos ${avgPosition}, ctr ${(ctr * 100).toFixed(1)}% vs ${(expectedCtr * 100).toFixed(1)}% expected, +${gain.toFixed(0)})`);
+      factors.push(`ctr-gap (pos ${avgPosition}, ctr ${(ctr * 100).toFixed(1)}% vs ${(expectedCtr * 100).toFixed(1)}% expected [${ctrCurve.sourceAt(avgPosition)} curve], +${gain.toFixed(0)})`);
     }
   }
 
@@ -195,13 +198,13 @@ const LABEL_BONUS = { High: 40, Medium: 20, Low: 0 };
  * @returns { score, tier, tierLabel, factors: string[] }
  */
 export function scoreRecommendation(rec, ctx = {}) {
-  const { pageMetrics, learnedMap, groupSizes, groupKeyFor, declines, industryMap, growth } = ctx;
+  const { pageMetrics, learnedMap, groupSizes, groupKeyFor, declines, industryMap, growth, ctrCurve } = ctx;
   const tier = severityTierFor(rec.recommendation_type);
   const factors = [`tier ${tier} (${severityTierLabel(rec.recommendation_type)})`];
   let score = tierBase(tier);
 
   const page = rec.params?.page || rec.page || null;
-  const demand = demandScore(page ? pageMetrics?.get(page) : null);
+  const demand = demandScore(page ? pageMetrics?.get(page) : null, ctrCurve);
   score += demand.score;
   factors.push(...demand.factors);
 

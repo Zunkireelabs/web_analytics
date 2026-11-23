@@ -49,3 +49,36 @@ describe('validatePageDesignIntegrity', () => {
     assert.equal((await run2('<div class="neon-hero"></div>', 'enforce')).ok, false, 'enforce blocks');
   });
 });
+
+// MOBILISE /inside/ (2026-11-23): an FAQ went out as a bare <dl> with no classes, which renders as unstyled text. It added no UNKNOWN class, so the
+// old rules let it through. A content block must arrive dressed in the site's classes.
+describe('an added content block must carry classes (unstyled-block)', () => {
+  const BARE_FAQ = BASE.replace('</main>', '<!-- SEOAI:FAQ:START --><dl>\n  <dt class="captured-only-class">Q?</dt>\n  <dd>A.</dd>\n</dl><!-- SEOAI:FAQ:END --></main>');
+  const DRESSED_FAQ = BASE.replace('</main>', '<!-- SEOAI:FAQ:START --><dl class="faq-wrap">\n  <dt class="faq-row">Q?</dt>\n  <dd>A.</dd>\n</dl><!-- SEOAI:FAQ:END --></main>');
+  test('a bare <dl> FAQ is refused with the unstyled-block reason and nothing else is blamed', async () => {
+    const { r, records } = await run(BARE_FAQ);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'page-design-integrity-failed');
+    assert.deepEqual(r.issues.map((i) => i.type), ['unstyled-block']);
+    assert.match(r.error, /bare <dl>/);
+    assert.deepEqual(records[0].issues.map((i) => i.type), ['unstyled-block']);
+  });
+  test('the same FAQ wrapped in the site\'s own classes passes', async () => {
+    assert.equal((await run(DRESSED_FAQ)).r.ok, true);
+  });
+  test('log mode records it and ships; off ships without looking', async () => {
+    assert.equal((await run(BARE_FAQ, { mode: 'log' })).r.ok, true);
+    assert.equal((await run(BARE_FAQ, { mode: 'off' })).r.ok, true);
+  });
+  test('only block-adding edit types are held to it; a meta-title edit that happens to add a bare div is not', async () => {
+    assert.equal((await run(BARE_FAQ, { draft: { id: 2, action_type: 'meta-title', input: { page: '/blog/b' } } })).r.ok, true);
+  });
+  test('a site with no captured design is not held to it (nothing to compare against)', async () => {
+    const bare = { id: 4, url_file_map: { siteRoot: {} } };
+    const r = await validatePageDesignIntegrity(bare, { id: 1, action_type: 'faq' }, [{ path: 'src/b.njk', content: BASE.replace('</main>', '<dl><dt>Q?</dt><dd>A.</dd></dl></main>') }], { fetchFile: async () => ({ content: BASE }), mode: 'enforce' });
+    assert.equal(r.ok, true);
+  });
+  test('an edit that adds no block at all (a paragraph, a text change) is untouched', async () => {
+    assert.equal((await run(BASE.replace('Body', 'Body, reworded.'))).r.ok, true);
+  });
+});

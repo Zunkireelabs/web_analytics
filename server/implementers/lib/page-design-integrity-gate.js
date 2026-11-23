@@ -27,6 +27,8 @@ const getDesignProfile = (site) => site?.url_file_map?.siteRoot?.designProfile |
 // positives can be measured (design-review-store.js).
 const MARKUP_FILE = /\.(html?|jsx|tsx|astro|njk|liquid|md|mdx|vue|svelte|php|ejs|hbs|handlebars)$/i;
 // Edits whose job IS to add a script (structured data, analytics) — the script rule is waived for them.
+// Edits that add a visible content BLOCK; one that arrives with no classes is refused (checkEditDesignIntegrity's unstyled-block rule).
+const BLOCK_ACTION_TYPES = new Set(['faq', 'qa-content', 'expand-content', 'internal-links', 'direct-answer', 'refresh-content']);
 const SCRIPT_PERMITTED_ACTION_TYPES = new Set(['schema', 'schema-repair', 'analytics-install']);
 
 export async function validatePageDesignIntegrity(site, draft, files, {
@@ -67,6 +69,7 @@ export async function validatePageDesignIntegrity(site, draft, files, {
       before: existing.content, after: file.content, profile, componentTemplates: templates,
       extraVocabulary: captured ? [...capturedClasses(captured.sections)] : null,
       allowScripts: SCRIPT_PERMITTED_ACTION_TYPES.has(draft?.action_type),
+      blockEdit: BLOCK_ACTION_TYPES.has(draft?.action_type),
     });
     if (record) {
       await Promise.resolve(record(site.id, {

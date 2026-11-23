@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { shipStep, mergeStagePr, stageBranchOf } from './ship-flow.js';
+import { shipStep, mergeStagePr, stageBranchOf, buildStateOf } from './ship-flow.js';
 
 const stageSite = { repo_default_branch: 'main', pr_target_branch: 'stage' };
 const mainSite = { repo_default_branch: 'main', pr_target_branch: null };
@@ -93,5 +93,23 @@ describe('merging into stage is guarded', () => {
   test('GitHub declining the merge is reported, not hidden', async () => {
     const r = await mergeStagePr(stageSite, 1, { userId: 5 }, { ...ok(), merge: async () => ({ merged: false }) });
     assert.equal(r.reason, 'not-merged');
+  });
+});
+
+// superrank-web PR #15 (2026-11-23) sat as "ready to merge" while its build failed. The card now reads what GitHub says about the checks.
+describe('a PR with failing or unknown checks is not presented as ready', () => {
+  const open = (state) => shipStep({ drafts: [d('pr_opened', { pr_number: 15, pr_base_branch: 'main', pr_mergeable_state: state })], site: mainSite });
+  test('GitHub "unstable" (a check failed), "blocked" and "dirty" are failing', () => {
+    for (const s of ['unstable', 'blocked', 'dirty']) assert.equal(open(s).build, 'failing', s);
+  });
+  test('"clean" is passing', () => assert.equal(open('clean').build, 'passing'));
+  test('no recorded state, or "unknown", is unchecked: unknown is not green', () => {
+    assert.equal(open(null).build, 'unchecked');
+    assert.equal(open('unknown').build, 'unchecked');
+  });
+  test('one failing PR among several makes the card failing; a mix of passing and unchecked is unchecked', () => {
+    assert.equal(buildStateOf([{ pr_mergeable_state: 'clean' }, { pr_mergeable_state: 'unstable' }]), 'failing');
+    assert.equal(buildStateOf([{ pr_mergeable_state: 'clean' }, { pr_mergeable_state: null }]), 'unchecked');
+    assert.equal(buildStateOf([]), 'unchecked');
   });
 });

@@ -35,7 +35,7 @@ const ACTION_LABELS = {
   'internal-links': 'Internal Links', 'blog-outline': 'Blog Post',
   'landing-page': 'Landing Page', translation: 'Translation', 'llms-txt': 'llms.txt & AI-Crawler Robots.txt',
   'security-headers': 'Security Headers', 'html-lang': 'Page Language',
-  viewport: 'Viewport Meta Tag', canonical: 'Canonical Tag', 'robots-fix': 'Robots.txt Fix',
+  viewport: 'Viewport Meta Tag', canonical: 'Canonical Tag', 'robots-fix': 'Robots.txt Fix', indexnow: 'IndexNow Key File',
   'open-graph': 'Open Graph Tags', 'broken-link-fix': 'Broken Link Removal', 'redirect-fix': 'Redirect Link Fix',
 
   'expand-content': 'Content Expansion', sitemap: 'Sitemap Update', 'geo-audit': 'GEO Audit Report', 'direct-answer': 'Direct Answer',

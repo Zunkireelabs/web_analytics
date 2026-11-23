@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectInsertionPoint, detectWithTrustedContainer, isJsxFile, isHtmlLikeFile, isVueFile, isSvelteFile } from './structural-detect.js';
+import { detectHeadRegion, detectInsertionPoint, detectWithTrustedContainer, isJsxFile, isHtmlLikeFile, isVueFile, isSvelteFile } from './structural-detect.js';
 
 describe('file-type routing', () => {
   test('isJsxFile / isHtmlLikeFile', () => {
@@ -456,5 +456,72 @@ describe('the page footer is not any element that has "footer" in its class', ()
   test('with nothing stronger, an element whose class says footer is still used', () => {
     const c = `---\n{ "x": 1 }\n---\n<section><p>${long}</p></section>\n<div class="site-footer">f</div>\n`;
     assert.equal(detectInsertionPoint(c, 'a.njk').fileKind, 'html-before-footer');
+  });
+});
+
+describe('detectHeadRegion — template expressions inside <head> (SuperRank Layout.astro regression)', () => {
+  const astro = `---
+const { title, noindex } = Astro.props;
+---
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+{noindex ? <meta name="robots" content="noindex"> : <meta name="robots" content="index,follow">}
+{!noindex && <link rel="canonical" href={url}>}
+<slot name="head" />
+<title>{title}</title>
+</head>
+<body><slot /></body>
+</html>
+`;
+
+  test('a head containing {expression} lines is still found, and the offset is exactly the literal </head>', () => {
+    const r = detectHeadRegion(astro);
+    assert.equal(r.ok, true);
+    assert.equal(astro.slice(r.insertBeforeOffset, r.insertBeforeOffset + 7), '</head>');
+  });
+
+  test('a plain head still uses the real parser path unchanged', () => {
+    const c = '<html><head><title>x</title></head><body></body></html>';
+    const r = detectHeadRegion(c);
+    assert.equal(r.ok, true);
+    assert.equal(c.slice(r.insertBeforeOffset, r.insertBeforeOffset + 7), '</head>');
+  });
+
+  test('refuses when </head> sits inside an unbalanced template expression', () => {
+    const c = '<head>\n{cond ? <meta a="b">\n</head>\n';
+    assert.equal(detectHeadRegion(c).ok, false);
+  });
+
+  test('refuses an ambiguous file with two <head> tags or two </head> tags', () => {
+    assert.equal(detectHeadRegion('<head>{a}</head><head>{b}</head>').ok, false);
+  });
+
+  test('a </head> that only appears inside an HTML comment is ignored', () => {
+    assert.equal(detectHeadRegion('<head>{a}<!-- </head> --></head>').ok, true);
+    assert.equal(detectHeadRegion('<!-- <head>{a}</head> -->').ok, false);
+  });
+
+  test('a file with no head at all is still refused', () => {
+    assert.equal(detectHeadRegion('<div>{x}</div>').ok, false);
+  });
+
+  test('a <head> mentioned in a front-matter JS comment does not make the file ambiguous (real Layout.astro shape)', () => {
+    const c = `---
+// Every page: <head> (SEO, social tags, fonts), header, footer.
+const { noindex } = Astro.props;
+---
+<html><head>
+{noindex ? <meta name="robots" content="noindex"> : <meta name="robots" content="index">}
+</head><body></body></html>
+`;
+    const r = detectHeadRegion(c);
+    assert.equal(r.ok, true);
+    assert.equal(c.slice(r.insertBeforeOffset, r.insertBeforeOffset + 7), '</head>');
+  });
+
+  test('a real second <head> in the markup is still ambiguous even when front matter is masked', () => {
+    assert.equal(detectHeadRegion('---\nx\n---\n<head>{a}</head><head>{b}</head>').ok, false);
   });
 });

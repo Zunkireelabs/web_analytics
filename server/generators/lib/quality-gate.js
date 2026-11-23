@@ -1,5 +1,6 @@
 import { findScaffoldingIssues } from './content-scaffolding-guard.js';
 import { findDuplicateParagraphs } from './duplicate-content-guard.js';
+import { findProgrammaticIssues } from './programmatic-guard.js';
 import { findSchemaIssues } from './schema-structure-guard.js';
 import { findEmptySections } from './empty-section-guard.js';
 import { checkPositioning } from './positioning-guard.js';
@@ -139,6 +140,9 @@ export async function runQualityGate(content, generatorId, siteId, { site = null
     ...(needsPositioningCheck ? await checkPositioning(content, siteId) : []),
     ...(needsLegalFactCheck ? findUnverifiedLegalClaims(content) : []),
     ...(needsClaimGroundingCheck ? findUngroundedClaims(content) : []),
+    // Pages made in bulk from one template (landing-page): a draft that is mostly the wording of the site's other such pages fails with
+    // a correction, so generateDraft regenerates it. Skipped for every other generator, and on any read failure. See programmatic-guard.js.
+    ...(await findProgrammaticIssues(content, generatorId, siteId)),
     ...(needsDesignConsistencyCheck ? checkDesignConsistency(content).issues : []),
     // Applies to EVERY generator, same "not scoped to an allow-list"
     // discipline as checkPlaceholders above — any generator could in

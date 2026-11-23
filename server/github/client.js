@@ -504,7 +504,31 @@ export async function compareCommits(site, base, head) {
   const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`);
   if (!res.ok) throw new Error(`compareCommits failed (${res.status}): ${await res.text()}`);
   const data = await res.json();
-  return { files: (data.files || []).map((f) => f.filename) };
+  // `removed` is what the compare says the head DELETES relative to the base (status 'removed'); callers that only need names keep using `files`.
+  return { files: (data.files || []).map((f) => f.filename), removed: (data.files || []).filter((f) => f.status === 'removed').map((f) => f.filename) };
+}
+
+// How far `head` is from `base`, read-only: commits head is ahead of / behind base, and the files each side changed since they diverged.
+// `headFiles` is what the branch itself changed (the work it carries); `baseFiles` is what base changed since the branch was cut (what the
+// branch has not seen). A file in both is the one a stale branch can silently revert. GitHub caps each file list at 300 (`truncated`).
+export async function compareBranchStatus(site, base, head) {
+  const get = async (a, b) => {
+    const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/compare/${encodeURIComponent(a)}...${encodeURIComponent(b)}`);
+    if (!res.ok) throw new Error(`compareBranchStatus failed (${res.status}): ${await res.text()}`);
+    return res.json();
+  };
+  const forward = await get(base, head);
+  const behindBy = forward.behind_by ?? 0;
+  const out = {
+    aheadBy: forward.ahead_by ?? 0, behindBy,
+    headFiles: (forward.files || []).map((f) => f.filename), baseFiles: [], truncated: (forward.files || []).length >= 300,
+  };
+  if (behindBy > 0) {
+    const reverse = await get(head, base);
+    out.baseFiles = (reverse.files || []).map((f) => f.filename);
+    out.truncated = out.truncated || (reverse.files || []).length >= 300;
+  }
+  return out;
 }
 
 // Atomically writes N files to `branch` as ONE commit via the Git Data API
@@ -669,6 +693,33 @@ export async function listMergedPullRequestsForBase(site, base, { pages = 2 } = 
   return out;
 }
 
+// The most recently MERGED pull request whose head is `branch` (null when none). Read-only. Used by batch-pr-recovery.js
+// so a batch branch whose commits are no longer "ahead of main" BECAUSE they were merged is not mistaken for a branch whose
+// push never landed (2026-11-23: nine merged, live drafts were marked abandoned after PR #14 on superrank-web merged).
+export async function findMergedPullRequestForHead(site, branch) {
+  const owner = site?.repo_owner;
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/pulls?state=closed&head=${encodeURIComponent(`${owner}:${branch}`)}&sort=updated&direction=desc&per_page=20`);
+  if (!res.ok) throw new Error(`findMergedPullRequestForHead failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  const pr = (Array.isArray(data) ? data : []).find((p) => p.merged_at && p.head?.ref === branch);
+  return pr ? { number: pr.number, url: pr.html_url, mergedAt: pr.merged_at } : null;
+}
+
+// Subject lines of every commit in a pull request (GitHub caps this list at 250).
+export async function listPullRequestCommitSubjects(site, prNumber) {
+  const out = [];
+  for (let page = 1; page <= 3; page += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/pulls/${prNumber}/commits?per_page=100&page=${page}`);
+    if (!res.ok) throw new Error(`listPullRequestCommitSubjects failed (${res.status}): ${await res.text()}`);
+    // eslint-disable-next-line no-await-in-loop
+    const data = await res.json();
+    for (const c of Array.isArray(data) ? data : []) out.push(String(c?.commit?.message || '').split('\n')[0]);
+    if (!Array.isArray(data) || data.length < 100) break;
+  }
+  return out;
+}
+
 // The files a pull request changed (added / modified / removed / renamed), every page.
 export async function listPullRequestFiles(site, prNumber) {
   const out = [];
@@ -813,6 +864,24 @@ export async function getCheckRunsForRef(site, ref) {
   if (!res.ok) throw new Error(`getCheckRunsForRef failed (${res.status}): ${await res.text()}`);
   const data = await res.json();
   return (data.check_runs || []).map((r) => ({ name: r.name, status: r.status, conclusion: r.conclusion }));
+}
+
+// The same check runs, with the ids and links the build-repair loop (lib/pr-build-repair.js) needs to read WHY one failed. For a GitHub Actions job the
+// check run id is the job id, which is what getJobLogText takes.
+export async function getCheckRunsDetailedForRef(site, ref) {
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/commits/${encodeURIComponent(ref)}/check-runs?per_page=100`);
+  if (!res.ok) throw new Error(`getCheckRunsDetailedForRef failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  return (data.check_runs || []).map((r) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion, url: r.html_url ?? null, completedAt: r.completed_at ?? null }));
+}
+
+// The plain-text log of one GitHub Actions job (GitHub answers with a redirect to the log file; fetch follows it). Truncated to the LAST `maxChars`:
+// the error is at the end of a build log, and a long install step above it is noise.
+export async function getJobLogText(site, jobId, { maxChars = 120000 } = {}) {
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/actions/jobs/${jobId}/logs`);
+  if (!res.ok) throw new Error(`getJobLogText failed (${res.status}): ${await res.text()}`);
+  const text = await res.text();
+  return text.length > maxChars ? text.slice(-maxChars) : text;
 }
 
 // Lists open PRs whose head is exactly `branch` — used to detect "does

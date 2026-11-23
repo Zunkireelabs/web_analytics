@@ -14,6 +14,10 @@ mock.module('openai', { defaultExport: class RecordingOpenAI {
 } });
 const { resolveProviderAndModel, callLLM } = await import('./llm.js');
 
+// Hermetic: the import above loads db.js, which loads the developer's .env. A developer who has paused OpenAI there
+// (LLM_OPENAI_PAUSED=true) would otherwise see every test that expects the OpenAI route fail. CI has no .env, so nothing changes there.
+delete process.env.LLM_OPENAI_PAUSED;
+
 // Live today: REPORT_PROVIDER=openai with REPORT_MODEL_DAILY=gpt-4o-mini / MONTHLY=gpt-4o, both keys set.
 const LIVE = {
   REPORT_PROVIDER: 'openai', REPORT_MODEL_DAILY: 'gpt-4o-mini', REPORT_MODEL_MONTHLY: 'gpt-4o',

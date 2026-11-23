@@ -9,6 +9,7 @@ import { projectComponentTemplate } from '../../design-agent/lib/design-profile.
 import { getDesignAgentStatus } from '../../implementers/lib/design-agent-status.js';
 import { isDataReady } from '../../implementers/adapters/data-array-content.js';
 import { isDataReady as isTsNamedExportReady } from '../../implementers/adapters/ts-named-export-content.js';
+import { isDataReady as isTsKeyedRecordReady } from '../../implementers/adapters/ts-keyed-record-fields.js';
 import { fetchSoftNotFoundFingerprint, isSoftNotFound } from './technical-seo-analysis.js';
 import { FRONTEND_ACTION_TYPES } from '../../implementers/frontend.js';
 import { getFileContent, getRepoTree } from '../../github/client.js';
@@ -23,6 +24,8 @@ import { nestedIdsFromPageUrl } from '../../implementers/adapters/data-array-con
 import { evaluateLocationServiceGap, GAP_CLASS } from './location-service-gap.js';
 import { getCachedGapEvaluation, saveGapEvaluation } from '../../store/location-service-gaps.js';
 import { findOpenRecommendation, insertRecommendation } from '../../store/recommendations.js';
+import { hasExistingFaqStructure } from '../../lib/existing-faq.js';
+import { stripManagedMarkers } from '../../lib/managed-markers.js';
 
 // The gates that decide whether a candidate recommendation is real, and
 // whether it may enter the unattended chain.
@@ -566,6 +569,13 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
         if (file && INSPECTABLE_ACTION_TYPES.includes(generatorId) && hasExistingFaqSchema(file.content)) {
           return { drop: 'faq-schema-already-present', blockedReason: null };
         }
+        // The page already has its OWN FAQ in markup (e.g. a <section class="faq-x"> accordion) that cannot be read back
+        // verbatim: a faq/qa-content draft could only add a second, different FAQ, which generators then refuse anyway.
+        // A Markdown page's own FAQ CAN be read verbatim (faq-data-source.js), so it stays eligible for schema built from it.
+        if (file && INSPECTABLE_ACTION_TYPES.includes(generatorId) && !/\.mdx?$/i.test(filePath || '')
+          && hasExistingFaqStructure(stripManagedMarkers(file.content))) {
+          return { drop: 'page-has-own-faq', blockedReason: null };
+        }
       }
     }
 
@@ -587,6 +597,11 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
       // answered by the adapter's own identifyTarget — one definition. Not identified -> dropped, never routed to a shared template.
       if (adapterConfig?.id === 'ts-named-export-content'
         && !(await isTsNamedExportReady(site, page, adapterConfig, cachedFetchFile, baseBranch(site)))) {
+        return { drop: 'adapter-data-not-ready', blockedReason: null };
+      }
+      // ts-keyed-record-fields (SEO fields in a keyed TS record, e.g. post-seo-overrides.ts): identified by the adapter's own check.
+      if (adapterConfig?.id === 'ts-keyed-record-fields'
+        && !(await isTsKeyedRecordReady(site, page, adapterConfig, cachedFetchFile, baseBranch(site), generatorId))) {
         return { drop: 'adapter-data-not-ready', blockedReason: null };
       }
       if (adapterConfig?.id === 'data-array-content'

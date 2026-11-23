@@ -54,7 +54,7 @@ describe('going back to Browse', () => {
 });
 
 // Every specialist the registry lists (checked 2026-11-20 against listAgentMeta) and the group its category puts it in.
-const REGISTRY = { seo: ['authority', 'competitor-intelligence', 'device-intelligence', 'duplicate-content', 'internal-linking', 'keyword-narrative', 'mobile-usability', 'opportunity', 'prospect-discovery', 'query-intelligence', 'technical-seo', 'templated-duplicates', 'visitor-behaviour', 'cta-analysis', 'gsc-url-audit', 'query-param-duplicates', 'redirect-chain', 'sitemap-conflict', 'sitemap', 'soft-404', 'url-variant-duplicates'],
+const REGISTRY = { seo: ['authority', 'competitor-intelligence', 'device-intelligence', 'duplicate-content', 'internal-linking', 'keyword-narrative', 'mobile-usability', 'opportunity', 'prospect-discovery', 'query-intelligence', 'technical-seo', 'templated-duplicates', 'visitor-behaviour', 'cta-analysis', 'gsc-url-audit', 'query-param-duplicates', 'redirect-chain', 'sitemap-conflict', 'sitemap', 'soft-404', 'url-variant-duplicates', 'seo-drift', 'seo-sxo', 'indexnow'],
   geo: ['ai-visibility', 'country-intelligence', 'geo-signals', 'growth-queries'], content: ['ai-recommendation', 'blog-image', 'comparison-opportunity', 'content-gap', 'content-integrity', 'font-consistency', 'news-posts', 'trend-radar', 'visual-quality'],
   executive: ['executive-report'], accessibility: ['accessibility'], security: ['security-headers', 'trust-compliance'] };
 

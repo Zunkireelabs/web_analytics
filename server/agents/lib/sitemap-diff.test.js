@@ -173,6 +173,13 @@ describe('live verification of missing URLs', () => {
     assert.ok(r.dropped.some((d) => d.reason === 'canonicalized-elsewhere'));
   });
 
+  test('a noindex page is never "missing from the sitemap": listing it would contradict the page itself', async () => {
+    const probe = async (u) => live(u, { canonical: u, noindex: u.endsWith('/hidden-post/') });
+    const r = await verifyMissingUrls(['https://a.com/real-post/', 'https://a.com/hidden-post/'], { canonicalHost: 'a.com', probe });
+    assert.deepEqual(r.confirmed, ['https://a.com/real-post/']);
+    assert.deepEqual(r.dropped, [{ url: 'https://a.com/hidden-post/', reason: 'noindex' }]);
+  });
+
   test('caps probes per run and reports the rest as skipped', async () => {
     const urls = Array.from({ length: 10 }, (_, i) => `https://a.com/p${i}/`);
     const r = await verifyMissingUrls(urls, { canonicalHost: 'a.com', maxProbes: 4, probe: async (u) => live(u) });

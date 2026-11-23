@@ -5,6 +5,8 @@ import { computeMissingUrls, buildMissingUrlsFinding, verifyMissingUrls, dominan
 import { getTechnicalSeoSignalsForPages } from '../store/technical-seo-checks.js';
 import { isConfirmedBlocked } from './lib/index-status.js';
 import { callLLM } from '../llm.js';
+import { getFileContent, defaultBranchName } from '../github/client.js';
+import { detectBuildGeneratedSitemap } from '../implementers/lib/sitemap-generator-detect.js';
 
 export const meta = {
   id: 'sitemap',
@@ -96,7 +98,14 @@ export async function run({ siteId }) {
   // missing, same "one finding per shared root cause" convention as
   // security-headers.js's site-wide missing-headers finding.
   const built = buildMissingUrlsFinding({ sitemapPath, missingUrls, orphanedUrls });
-  const finding = sitemapPath ? built : {
+  // A sitemap the site's own build regenerates (prebuild script / next-sitemap) is the generator's to change, not a file to patch: the edit would
+  // be overwritten at the next build and could list pages the generator leaves out on purpose. Information only, no automatic fix.
+  const generator = sitemapPath ? await detectBuildGeneratedSitemap((p) => getFileContent(site, p, defaultBranchName(site))) : { generated: false };
+  const finding = generator.generated ? {
+    ...built,
+    recommendedAction: null,
+    whyItMatters: `${built.whyItMatters} This site's own build regenerates its sitemap (${generator.reason}), so the platform does not edit the file: a change written there would be overwritten at the next build. If these pages should be listed, change the site's sitemap generator.`,
+  } : sitemapPath ? built : {
     ...built,
     recommendedAction: null,
     whyItMatters: `${built.whyItMatters} This site's sitemap is not mapped to a file in its repository (url_file_map.siteRoot.sitemap), so it cannot be updated automatically: if a framework generates it, these pages need to be included by that configuration, otherwise map the file with connect-repo.`,

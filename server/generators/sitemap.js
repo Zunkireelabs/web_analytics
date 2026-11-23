@@ -2,6 +2,7 @@ import { getSiteById } from '../store/read.js';
 import { getFileContent, defaultBranchName } from '../github/client.js';
 import { listPageInventory, listOrphanedPages } from '../store/page-inventory.js';
 import { discoverSitemapEntries } from '../agents/lib/site-discovery.js';
+import { detectBuildGeneratedSitemap, generatedSitemapMessage } from '../implementers/lib/sitemap-generator-detect.js';
 
 // Pure, deterministic generator — no LLM call, nothing to ground beyond this
 // site's own already-discovered pages (page_inventory) and its own live
@@ -92,6 +93,11 @@ export async function generate({ siteId, params }) {
       'its sitemap from this template, so url_file_map.siteRoot.sitemap should not be set for it at all — unset ' +
       'it via `npm run connect-repo` rather than generating a draft here.'
     ), { status: 400, userFacing: true });
+  }
+
+  const generator = await detectBuildGeneratedSitemap((p) => getFileContent(site, p, ref));
+  if (generator.generated) {
+    throw Object.assign(new Error(generatedSitemapMessage(sitemapPath, generator.reason)), { status: 400, userFacing: true });
   }
 
   const [existingEntries, inventory, orphanedPages] = await Promise.all([

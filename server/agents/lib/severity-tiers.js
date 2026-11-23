@@ -87,6 +87,7 @@ const TIER_BY_GENERATOR = {
   'alt-text': SEVERITY_TIER.CLEANUP,
   'blog-image': SEVERITY_TIER.CLEANUP,
   'llms-txt': SEVERITY_TIER.CLEANUP,
+  indexnow: SEVERITY_TIER.CLEANUP, // an optional speed-up for Bing and Yandex, never a fault
   'geo-audit': SEVERITY_TIER.CLEANUP,
   'cookie-policy': SEVERITY_TIER.CLEANUP,
   'privacy-policy': SEVERITY_TIER.CLEANUP,

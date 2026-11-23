@@ -42,14 +42,36 @@ function templateEngineOverrideField(site) {
     : null;
 }
 
-function frontMatter(fields, site) {
+// A value from site config, as YAML: a scalar, an array of scalars (inline), or one level of nested keys (an Astro `cover: { kind: agent }`). Anything
+// deeper is refused by being skipped: a platform that guesses at YAML nesting writes files the build rejects.
+function yamlScalar(v) { return typeof v === 'string' ? JSON.stringify(v) : String(v); }
+const isScalar = (v) => ['string', 'number', 'boolean'].includes(typeof v);
+function defaultsYaml(defaults, taken) {
+  const out = [];
+  for (const [key, value] of Object.entries(defaults || {})) {
+    if (taken.has(key) || !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(key)) continue;
+    if (isScalar(value)) out.push(`${key}: ${yamlScalar(value)}`);
+    else if (Array.isArray(value) && value.every(isScalar)) out.push(`${key}: [${value.map(yamlScalar).join(', ')}]`);
+    else if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const inner = Object.entries(value).filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_-]*$/.test(k) && (isScalar(v) || (Array.isArray(v) && v.every(isScalar))))
+        .map(([k, v]) => `  ${k}: ${Array.isArray(v) ? `[${v.map(yamlScalar).join(', ')}]` : yamlScalar(v)}`);
+      if (inner.length) out.push(`${key}:`, ...inner);
+    }
+  }
+  return out;
+}
+
+function frontMatter(fields, site, defaults = null) {
   const lines = ['---'];
   const override = templateEngineOverrideField(site);
   if (override) fields = [override, ...fields];
+  const taken = new Set();
   for (const [key, value] of fields) {
     if (value == null || value === '') continue;
     lines.push(`${key}: "${escapeYaml(value)}"`);
+    taken.add(key);
   }
+  lines.push(...defaultsYaml(defaults, taken));
   lines.push('---', '');
   return lines.join('\n');
 }
@@ -83,14 +105,14 @@ function featuredImageFields(content, fieldNames) {
   ];
 }
 
-export function renderLandingPageBody(content, site, { permalink = null, layout = null, fieldNames = {} } = {}) {
+export function renderLandingPageBody(content, site, { permalink = null, layout = null, fieldNames = {}, frontMatterDefaults = null } = {}) {
   const front = frontMatter([
     ['layout', layout],
     ['permalink', permalink],
     ['title', content.metaTitle || content.headline],
-    ['description', content.metaDescription || content.subheadline],
+    [fieldNames.description || 'description', content.metaDescription || content.subheadline],
     ...featuredImageFields(content, fieldNames),
-  ], site);
+  ], site, frontMatterDefaults);
   const parts = [`# ${content.headline || content.target}`];
   if (content.subheadline) parts.push(content.subheadline);
   for (const s of content.sections || []) {
@@ -102,7 +124,7 @@ export function renderLandingPageBody(content, site, { permalink = null, layout 
   return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'landing-page' })}\n`;
 }
 
-export function renderBlogOutlineBody(content, site, { permalink = null, layout = null, fieldNames = {} } = {}) {
+export function renderBlogOutlineBody(content, site, { permalink = null, layout = null, fieldNames = {}, frontMatterDefaults = null } = {}) {
   // `fieldNames` maps a canonical field onto whatever THIS directory's
   // existing posts call it (newcontent-contract.js). The defaults below are
   // only what gets used when no sibling could be read — they are not a
@@ -121,7 +143,7 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
     ['layout', layout],
     ['permalink', permalink],
     ['title', content.title || content.topic],
-    ['description', content.metaDescription],
+    [fieldNames.description || 'description', content.metaDescription],
     ['date', new Date().toISOString().slice(0, 10)],
     // Optional single-label category (e.g. 'Insights' for trend posts) —
     // only when the draft carries one, via blog-outline.js's params.category.
@@ -138,7 +160,7 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
     [creditKey, content.featuredImage?.photographer
       ? `Photo by ${content.featuredImage.photographer} on Pexels`
       : null],
-  ], site);
+  ], site, frontMatterDefaults);
   const parts = [];
   for (const s of content.sections || []) {
     if (!s?.heading) continue;
@@ -247,15 +269,15 @@ export function renderBlogOutlineBodyTsx(content, site, { canonicalUrl = null } 
 // filler sections before it — since the whole point of this content type is
 // the AI-citation "answer-first" pattern: a real assistant (or a human
 // skimming) gets the complete answer without scrolling past preamble.
-export function renderDirectAnswerBody(content, site, { permalink = null, layout = null, fieldNames = {} } = {}) {
+export function renderDirectAnswerBody(content, site, { permalink = null, layout = null, fieldNames = {}, frontMatterDefaults = null } = {}) {
   const front = frontMatter([
     ['layout', layout],
     ['permalink', permalink],
     ['title', content.title || content.heading || content.query],
-    ['description', content.directAnswer?.slice(0, 155)],
+    [fieldNames.description || 'description', content.directAnswer?.slice(0, 155)],
     ['date', new Date().toISOString().slice(0, 10)],
     ...featuredImageFields(content, fieldNames),
-  ], site);
+  ], site, frontMatterDefaults);
   const parts = [`# ${content.heading || content.query}`, content.directAnswer || ''];
   for (const s of content.supportingSections || []) {
     if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);

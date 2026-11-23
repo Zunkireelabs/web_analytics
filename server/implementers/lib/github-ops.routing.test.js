@@ -50,17 +50,24 @@ describe('openPrForBranch routing', () => {
     assert.equal(out.base, 'main');
   });
 
-  test('stage branch + light content only: straight to main', async () => {
-    batchTypes = ['refresh-content', 'expand-content'];
-    const out = await openPrForBranch(siteStage, draft('refresh-content'), BRANCH);
+  test('stage branch + tag-only edits: straight to main', async () => {
+    batchTypes = ['meta-title', 'canonical'];
+    const out = await openPrForBranch(siteStage, draft('meta-title'), BRANCH);
     assert.equal(calls.opened[0].base, 'main');
     assert.equal(out.base, 'main');
     assert.doesNotMatch(calls.opened[0].body, /promotes/);
     assert.deepEqual(calls.baseRecorded, [{ siteId: 1, branch: BRANCH, base: 'main' }]);
   });
 
+  test('stage branch + a visible fix (an FAQ): the PR opens into stage so a person sees it before production', async () => {
+    batchTypes = ['faq'];
+    const out = await openPrForBranch(siteStage, draft('faq'), BRANCH);
+    assert.equal(calls.opened[0].base, 'stage');
+    assert.equal(out.base, 'stage');
+  });
+
   test('stage branch + a landing page: the PR opens into stage and says what happens after the merge', async () => {
-    batchTypes = ['refresh-content'];
+    batchTypes = ['meta-title'];
     const out = await openPrForBranch(siteStage, draft('landing-page'), BRANCH);
     assert.equal(calls.opened[0].base, 'stage');
     assert.equal(out.base, 'stage');
@@ -94,11 +101,19 @@ describe('openPrForBranch routing', () => {
     assert.equal(calls.retargeted.length, 0);
   });
 
-  test('a light-only day whose PR already targets main is left alone', async () => {
+  test('a tag-only day whose PR already targets main is left alone', async () => {
     existing = [pr('main')];
-    batchTypes = ['refresh-content'];
-    const out = await openPrForBranch(siteStage, draft('expand-content'), BRANCH);
+    batchTypes = ['meta-title'];
+    const out = await openPrForBranch(siteStage, draft('canonical'), BRANCH);
     assert.equal(out.retargeted, false);
     assert.equal(calls.retargeted.length, 0);
+  });
+
+  test('a visible fix joining a day whose PR targets main moves that PR to stage', async () => {
+    existing = [pr('main')];
+    batchTypes = ['meta-title'];
+    const out = await openPrForBranch(siteStage, draft('expand-content'), BRANCH);
+    assert.equal(out.retargeted, true);
+    assert.deepEqual(calls.retargeted, [{ number: 12, base: 'stage' }]);
   });
 });

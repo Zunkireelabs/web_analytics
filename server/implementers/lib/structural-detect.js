@@ -580,6 +580,31 @@ export function detectWithTrustedContainer(fileContent, filePath, fileKind, cont
 // existing at all, even empty, is real evidence of the right place; head
 // content is metadata, not prose, so "substantial text" isn't a meaningful
 // signal here.
+// Blank out what can mention `<head>` without being markup, preserving offsets: HTML comments, and a leading
+// `---` front-matter / Astro-frontmatter block (a JS comment there can say "<head> (SEO, social tags)").
+function maskHtmlComments(text) {
+  const blank = (m) => ' '.repeat(m.length);
+  return text
+    .replace(/^(\uFEFF?\s*)---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?=\r?\n|$)/, (m, lead) => lead + blank(m.slice(lead.length)))
+    .replace(/<!--[\s\S]*?-->/g, blank);
+}
+
+function detectLiteralHeadClose(fileContent) {
+  const text = maskHtmlComments(String(fileContent || ''));
+  const opens = [...text.matchAll(/<head(?=[\s>/])[^>]*>/gi)];
+  const closes = [...text.matchAll(/<\/head\s*>/gi)];
+  if (opens.length !== 1 || closes.length !== 1) return null;
+  const openEnd = opens[0].index + opens[0][0].length;
+  const closeAt = closes[0].index;
+  if (closeAt < openEnd) return null;
+  let depth = 0;
+  for (const ch of text.slice(openEnd, closeAt)) {
+    if (ch === '{') depth++;
+    else if (ch === '}' && --depth < 0) return null;
+  }
+  return depth === 0 ? closeAt : null;
+}
+
 export function detectHeadRegion(fileContent) {
   let $;
   try {
@@ -588,7 +613,16 @@ export function detectHeadRegion(fileContent) {
     return { ok: false, reason: 'parse-error', error: err.message };
   }
   const head = $('head').toArray().find((node) => node.sourceCodeLocation?.endTag);
-  if (!head) return { ok: false, reason: 'no-head-element', error: 'No <head> element with a real closing tag was found in this file.' };
+  if (!head) {
+    // A spec-compliant HTML5 parser closes <head> implicitly at the first non-head content, and a template
+    // expression (`{noindex ? <meta …> : <meta …>}`, `{cond && <link …>}`) is text to it — so Astro/JSX-style
+    // layouts lose their real </head> (SuperRank's Layout.astro). Fall back to the LITERAL tag, but only when
+    // the evidence is unambiguous: exactly one <head> and one </head> outside comments, in order, with the
+    // template braces between them balanced (so the closing tag is not inside an expression).
+    const literal = detectLiteralHeadClose(fileContent);
+    if (literal) return { ok: true, fileKind: 'html', insertBeforeOffset: literal, containerDescription: 'head' };
+    return { ok: false, reason: 'no-head-element', error: 'No <head> element with a real closing tag was found in this file.' };
+  }
   return {
     ok: true,
     fileKind: 'html',

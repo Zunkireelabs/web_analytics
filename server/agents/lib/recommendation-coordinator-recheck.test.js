@@ -101,6 +101,38 @@ describe('recheckRecommendation — existing behavior is unchanged when refreshE
   });
 });
 
+describe('recheckRecommendation — a REPORT-ONLY row (no generator, reportOnly.kind instead)', () => {
+  const rec = () => ({ id: 20, status: 'open', recommendation_type: 'seo-drift', page: PAGE, detecting_agents: ['seo-drift'], finding_ids: ['f20'], params: { page: PAGE } });
+  const finding = (page) => ({ id: `seo-drift:page:${page}`, recommendedAction: null, reportOnly: { kind: 'seo-drift', page } });
+
+  test('still detected: stays open. It must NOT be closed just because the finding has no generator to match on', async () => {
+    recById = rec();
+    runAgentImpl = async () => ({ facts: { findings: [finding(PAGE)] } });
+    const result = await recheckRecommendation(1, 20);
+    assert.deepEqual(result, { status: 'open', changed: false });
+    assert.deepEqual(closedIds, []);
+  });
+
+  test('no longer detected: closes as superseded', async () => {
+    recById = rec();
+    runAgentImpl = async () => ({ facts: { findings: [] } });
+    assert.deepEqual(await recheckRecommendation(1, 20), { status: 'superseded', changed: true });
+    assert.deepEqual(closedIds, [20]);
+  });
+
+  test('a finding of the same kind on a DIFFERENT page does not keep this one open', async () => {
+    recById = rec();
+    runAgentImpl = async () => ({ facts: { findings: [finding('https://zunkireelabs.com/other/')] } });
+    assert.deepEqual(await recheckRecommendation(1, 20), { status: 'superseded', changed: true });
+  });
+
+  test('a finding with a generator never matches by report-only kind', async () => {
+    recById = rec();
+    runAgentImpl = async () => ({ facts: { findings: [{ recommendedAction: { generatorId: 'meta-title', params: { page: PAGE } }, reportOnly: { kind: 'seo-drift', page: PAGE } }] } });
+    assert.deepEqual(await recheckRecommendation(1, 20), { status: 'superseded', changed: true });
+  });
+});
+
 describe('recheckRecommendation — refreshEvidence: true (the autonomous-recovery path)', () => {
   test('still detected: merges the FRESH params from re-detection, preserving finding identity', async () => {
     recById = {

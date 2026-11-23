@@ -9,6 +9,7 @@ import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
 import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { repairSiteTemplates } from '../agents/lib/template-repair.js';
 import { syncFromGrounded, getRecommendations, recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
+import { acceptDriftChange } from '../agents/lib/seo-drift-accept.js';
 import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation.js';
 // Its own module, not auto-remediation.js's export, because this file and
 // auto-remediation.js already import each other — see ship-pacing.js.
@@ -1813,7 +1814,7 @@ function shipRecommendationWithTimeout(siteId, rec, opts, { timeoutMs = SAFE_FIX
 // the (slow) shipping loop in runSafeFixesJob below so the route can respond
 // with a real job id the instant selection is done, instead of the browser
 // blocking on the whole batch — see the route handler's own comment.
-export async function prepareSafeFixesJob(siteId, { userId, limit = SAFE_FIX_BATCH_LIMIT } = {}) {
+export async function prepareSafeFixesJob(siteId, { userId, limit = SAFE_FIX_BATCH_LIMIT, scope } = {}) {
   // Over-fetch, THEN trim, then take `limit`. Selecting exactly `limit` rows
   // first and pacing them afterwards means every held item silently consumes
   // a slot: a site whose top 60 contain 28 blog-outline candidates would ship
@@ -1831,7 +1832,11 @@ export async function prepareSafeFixesJob(siteId, { userId, limit = SAFE_FIX_BAT
   // This bulk path is a selector the unattended rules must also bind: a
   // title/canonical/redirect/content change on a page that earns clicks is
   // held for a person, same as in auto-remediation.js (protected-pages.js).
-  const rawSelected = rawSelectedAll.filter((r) => !isProtectedChange(r, protectedPages));
+  // `scope` is the page the button was clicked on ('fixes' = Action Center,
+  // 'content' = Content page; absent = both, as before). Without it the
+  // Action Center's "Fix 37 automatically" selected 47 — the extra 10 were
+  // content items (blog outlines, expansions) shown only on the Content page.
+  const rawSelected = rawSelectedAll.filter((r) => inDraftScope(r.recommendation_type, scope) && !isProtectedChange(r, protectedPages));
   const job = await createExecutionJob(siteId, { trigger: 'bulk', requestedBy: userId });
 
   // Same exclusion auto-remediation.js's unattended path already applies
@@ -1977,13 +1982,23 @@ export async function runSafeFixesJob({ job, recs, pendingDraftFilePaths, site, 
       await setRecommendationExecutionState(p.recId, { executionJobId: job.id, executionStatus: 'shipped' });
     }));
     await appendJobLog(job.id, `Batch pushed and PR opened: ${finalization.prUrl} (${finalization.pushed} commit(s)).`);
+  } else if (finalization.prUrl) {
+    // Nothing from THIS run reached the branch, but finalize still pushed
+    // commits already waiting on it (e.g. content-repair queue items) and
+    // opened a PR for them. That PR is real and must not be stranded — but it
+    // is not this run's work, so it is logged and NOT recorded on the job.
+    // Recording it made the UI report "one PR opened" for a run that shipped
+    // nothing (2026-11-23: run stopped on the GitHub budget before item 1,
+    // banner linked an unrelated 2-file PR).
+    await appendJobLog(job.id, `No item from this run was shipped. ${finalization.pushed} commit(s) already waiting on ${branchName} from earlier work were pushed as ${finalization.prUrl} — not part of this run.`);
   }
 
+  const ownPr = pending.length > 0 && finalization.ok;
   const finishedJob = await finishExecutionJob(job.id, {
     status: shipped > 0 ? 'completed' : 'failed',
-    branchName: finalization.ok ? branchName : lastSuccess?.branch_name,
-    prNumber: finalization.prNumber ?? lastSuccess?.pr_number,
-    prUrl: finalization.prUrl ?? lastSuccess?.pr_url,
+    branchName: ownPr ? branchName : lastSuccess?.branch_name,
+    prNumber: ownPr ? finalization.prNumber : lastSuccess?.pr_number,
+    prUrl: ownPr ? finalization.prUrl : lastSuccess?.pr_url,
   });
   return { job: finishedJob, shipped, failed };
 }
@@ -2096,13 +2111,18 @@ export async function bulkApproveDrafts(siteId, { userId, limit = DRAFT_BULK_APP
     failed += pendingIds.length;
   } else if (pendingIds.length > 0) {
     await appendJobLog(job.id, `Batch pushed and PR opened: ${finalization.prUrl} (${finalization.pushed} commit(s)).`);
+  } else if (finalization.prUrl) {
+    // Same as runSafeFixesJob: a PR for commits that were already waiting on
+    // the branch is not this run's PR — log it, don't record it on the job.
+    await appendJobLog(job.id, `No draft from this run was shipped. ${finalization.pushed} commit(s) already waiting on ${branchName} from earlier work were pushed as ${finalization.prUrl} — not part of this run.`);
   }
 
+  const ownPr = pendingIds.length > 0 && finalization.ok;
   const finishedJob = await finishExecutionJob(job.id, {
     status: shipped > 0 ? 'completed' : 'failed',
-    branchName: finalization.ok ? branchName : undefined,
-    prNumber: finalization.prNumber,
-    prUrl: finalization.prUrl,
+    branchName: ownPr ? branchName : undefined,
+    prNumber: ownPr ? finalization.prNumber : undefined,
+    prUrl: ownPr ? finalization.prUrl : undefined,
   });
   return { job: finishedJob, shipped, failed };
 }
@@ -2165,7 +2185,8 @@ export async function queueForNextBlogDay(siteId, rec) {
 // would otherwise become an unhandled promise rejection).
 router.post('/action-center/execute-safe-fixes', async (req, res, next) => {
   try {
-    const prepared = await prepareSafeFixesJob(req.siteId, { userId: req.userId, limit: req.body?.limit });
+    const scope = ['content', 'fixes'].includes(req.body?.scope) ? req.body.scope : undefined;
+    const prepared = await prepareSafeFixesJob(req.siteId, { userId: req.userId, limit: req.body?.limit, scope });
     if (prepared.recs.length === 0) {
       return res.json({ job: prepared.job, shipped: 0, failed: 0 });
     }
@@ -2238,6 +2259,17 @@ router.post('/action-center/recommendations/:id/recheck', async (req, res, next)
     res.json(await recheckRecommendation(req.siteId, req.params.id));
   } catch (e) {
     if (e.status) return respondWithStatusError(res, e, 'This recommendation could not be re-checked right now.');
+    next(e);
+  }
+});
+
+// "This change to the page is intended": the page's latest capture becomes its baseline and the recommendation is dismissed (see
+// agents/lib/seo-drift-accept.js). Only valid on a seo-drift recommendation of the caller's own project.
+router.post('/action-center/recommendations/:id/accept-change', async (req, res, next) => {
+  try {
+    res.json(await acceptDriftChange(req.siteId, req.params.id));
+  } catch (e) {
+    if (e.status) return respondWithStatusError(res, e, 'This change could not be accepted right now.');
     next(e);
   }
 });

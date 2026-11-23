@@ -42,7 +42,7 @@ export function keyFromPage(page, config) {
 
 const sub = (s, key) => s.replaceAll('{key}', key);
 
-async function proveKey(site, config, key, fetchFile, ref) {
+export async function proveKey(site, config, key, fetchFile, ref) {
   const ev = config.keyEvidence;
   if (!ev?.file) return { ok: false, reason: 'target-not-identified', error: `"${key}" is not in ${config.dataFile} and no keyEvidence is configured to prove it is a real page — refusing to create it.` };
   const file = await fetchFile(site, sub(ev.file, key), ref);

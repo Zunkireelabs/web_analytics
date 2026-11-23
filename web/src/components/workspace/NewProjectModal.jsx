@@ -10,6 +10,7 @@ import BusinessProfileFields, { gbpReady, gbpSource } from './BusinessProfileFie
 import { DEFAULT_GOAL, goalComplete } from '../../lib/workspace.js';
 import { useAccess } from '../../lib/access.jsx';
 import { openConnectTab, useConnectTab, GITHUB_ERRORS } from '../../lib/connect-tab.js';
+import { githubSourceFor } from '../../lib/github-source.js';
 
 // Adding a project, end to end, with no staff step anywhere in it:
 //
@@ -250,6 +251,7 @@ export default function NewProjectModal({ workspace, first = false, project: exi
   const [mine, setMine] = useState(null); // the signed-in person's own GitHub repositories; null = not loaded
  // staff: 'app' = every repo the SuperRank app reaches, 'mine' = the signed-in GitHub account's own
   const [useShared, setUseShared] = useState(false); // staff only: list SuperRank's shared account instead of a connected one
+  const [ghChoice, setGhChoice] = useState(null); // staff only: 'app' = pick from the SuperRank app's repositories (no sign-in), 'mine' = sign in as themselves; null = the default
   const [ghWaiting, setGhWaiting] = useState(false); // GitHub is open in another tab and this step is waiting for it
   const [ghNote, setGhNote] = useState(null); // 'connected' once the other tab reports back
   const loadConnect = async (siteId, { shared = false } = {}) => {
@@ -307,7 +309,7 @@ export default function NewProjectModal({ workspace, first = false, project: exi
   const close = () => {
     const created = project;
     setStep(1); setName(''); setDomain(''); setNameTouched(false); setGoal(DEFAULT_GOAL); setProject(null);
-    setConnect(null); setGithub(null); setGsc(null); setGa4(null); setRepo(null); setGithubChecks(null); setUseStage(false); setStage('stage'); setUseShared(false);
+    setConnect(null); setGithub(null); setGsc(null); setGa4(null); setRepo(null); setGithubChecks(null); setUseStage(false); setStage('stage'); setUseShared(false); setGhChoice(null);
     setBaseline('idle'); setError(null); setBusy(false); setMine(null); setBranches(null); setBranch('');
     setGhWaiting(false); setGhNote(null); setJumpToNeeded(false);
     onClose(created);
@@ -399,7 +401,8 @@ export default function NewProjectModal({ workspace, first = false, project: exi
   const restrictedNow = Boolean(connect?.githubRestricted);
   // Everyone connects the same way: signing in to GitHub as themselves. Only while that sign-in is not set up on the
   // server do staff fall back to the shared SuperRank app list, so a project can still be linked.
-  const effSource = connect?.github?.canConnect || notice?.github ? 'mine' : 'app';
+  // Staff may also pick from the repositories the SuperRank app can already reach, with no GitHub sign-in (lib/github-source.js).
+  const effSource = githubSourceFor({ restricted: restrictedNow, canConnect: Boolean(connect?.github?.canConnect), returnedFromGithub: Boolean(notice?.github), staffChoice: ghChoice });
   const saveGithub = () => run(async () => {
     const [owner, repoName] = String(repo).split('/');
     const usingMine = restrictedNow || effSource === 'mine';
@@ -818,11 +821,19 @@ export default function NewProjectModal({ workspace, first = false, project: exi
           <div className="flex items-center gap-2 text-[13px] text-faint py-6 justify-center"><Loader2 size={15} className="animate-spin" />Reading your repositories…</div>
         ) : (
           <>
-            {effSource === 'mine' && <>{stageChips}{mineBlock()}{whatNext}</>}
+            {effSource === 'mine' && <>
+              <div className="flex items-center gap-2 rounded-control bg-muted px-3 py-2 text-xs text-text" style={{ boxShadow: 'inset 0 0 0 1px var(--border)' }}>
+                <Info size={14} className="text-primary shrink-0" />
+                <span className="flex-1 min-w-0">Changing a repository on an organisation that already has the SuperRank app? Staff can pick it without signing in to GitHub.</span>
+                <button type="button" className="text-fg underline underline-offset-2 hover:text-primary shrink-0" onClick={() => setGhChoice('app')}>Pick from the app's repositories</button>
+              </div>
+              {stageChips}{mineBlock()}{whatNext}
+            </>}
             {effSource === 'app' && (<>
             <div className="flex items-center gap-2 rounded-control bg-muted px-3 py-2 text-xs text-text" style={{ boxShadow: 'inset 0 0 0 1px var(--border)' }}>
               <Info size={14} className="text-primary shrink-0" />
               <span className="flex-1 min-w-0"><span className="text-fg font-medium">SuperRank GitHub app</span> · every repository it can reach · visible to SuperRank staff only</span>
+              {connect?.github?.canConnect && <button type="button" className="text-fg underline underline-offset-2 hover:text-primary shrink-0" onClick={() => setGhChoice('mine')}>Sign in with my own GitHub instead</button>}
             </div>
             {ghError && <Note tone="amber" icon={AlertTriangle}>{ghError}</Note>}
             {repos.length === 0 ? (

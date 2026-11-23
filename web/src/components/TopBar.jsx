@@ -38,7 +38,9 @@ export default function TopBar({ isInternal, isPlatformAdmin, isProduct, onOpenM
       )}
 
       <div className="ml-auto flex items-center gap-1.5">
-        {isInternal && <NotificationBell isPlatformAdmin={isPlatformAdmin} />}
+        {/* The notifications API is platform-admin only (routes/notifications.js), so the bell is too: an internal user who is not a
+            platform admin used to get a bell that polled an endpoint guaranteed to answer 404. */}
+        {isPlatformAdmin && <NotificationBell isPlatformAdmin={isPlatformAdmin} />}
       </div>
     </header>
   );

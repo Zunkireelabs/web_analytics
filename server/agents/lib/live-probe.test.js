@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 
 process.env.DATABASE_URL ||= 'postgres://test:test@localhost:5432/test';
 
-const { probeUrl, probeMany, readCanonical, isSelfCanonical, createVariantProber } = await import('./live-probe.js');
+const { probeUrl, probeMany, readCanonical, isSelfCanonical, createVariantProber, pageIsNoindex } = await import('./live-probe.js');
+const cheerio = await import('cheerio');
 
 const ok200 = (url) => ({ chain: [{ url, status: 200 }], finalStatus: 200, hops: 0, error: null });
 const page = (canonical) => async () => ({ ok: true, html: `<html><head>${canonical ? `<link rel="canonical" href="${canonical}">` : ''}</head></html>` });
@@ -39,7 +40,7 @@ describe('probeUrl', () => {
 
 describe('readCanonical / probeMany / createVariantProber', () => {
   test('no canonical tag is null, not unreadable', async () => {
-    assert.deepEqual(await readCanonical('https://a.com/', { fetchPage: page(null) }), { canonical: null, unreadable: false });
+    assert.deepEqual(await readCanonical('https://a.com/', { fetchPage: page(null) }), { canonical: null, unreadable: false, noindex: false });
   });
 
   test('probeMany respects the per-run cap', async () => {
@@ -56,5 +57,27 @@ describe('readCanonical / probeMany / createVariantProber', () => {
     assert.equal(m.get('https://a.com/3').verdict, 'unverifiable');
     await probeVariants(['https://a.com/1']);
     assert.equal(calls, 2);
+  });
+});
+
+describe('noindex detection', () => {
+  const html = (meta) => cheerio.load(`<html><head>${meta}</head></html>`);
+  test('robots / googlebot meta with noindex (or none) is noindex, in any case and with other directives', () => {
+    assert.equal(pageIsNoindex(html('<meta name="robots" content="noindex, nofollow">')), true);
+    assert.equal(pageIsNoindex(html('<meta name="ROBOTS" content="follow,NOINDEX">')), true);
+    assert.equal(pageIsNoindex(html('<meta name="googlebot" content="noindex">')), true);
+    assert.equal(pageIsNoindex(html('<meta name="robots" content="none">')), true);
+  });
+  test('indexable pages and unrelated meta are not noindex', () => {
+    assert.equal(pageIsNoindex(html('')), false);
+    assert.equal(pageIsNoindex(html('<meta name="robots" content="index, follow">')), false);
+    assert.equal(pageIsNoindex(html('<meta name="robots" content="max-snippet:-1">')), false);
+    assert.equal(pageIsNoindex(html('<meta name="description" content="how to noindex a page">')), false);
+  });
+  test('probeUrl reports noindex for a live page', async () => {
+    const noindexPage = async () => ({ ok: true, html: '<html><head><meta name="robots" content="noindex"></head></html>' });
+    const r = await probeUrl('https://a.com/x', { checkCanonical: true, followRedirects: async (u) => ok200(u), fetchPage: noindexPage });
+    assert.equal(r.verdict, 'live');
+    assert.equal(r.noindex, true);
   });
 });

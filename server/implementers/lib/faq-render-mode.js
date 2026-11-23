@@ -114,6 +114,16 @@ async function checkCrossMechanismAndLiveFaq(site, page, { readLivePage = analyz
         source: 'live-page',
       };
     }
+    // A FAQ written as headings or bold questions (Markdown `## FAQ` + `### Question?`) has no button/summary/dt to
+    // count, so the bar above never saw it (2026-11-23: eight pages got a second FAQ). A FAQ-named heading (or
+    // faq-classed markup) together with question-shaped content is the same evidence of an existing visible FAQ.
+    if (live?.ok && live.analysis?.hasFaqHeading && live.analysis?.hasVisibleFaqContent) {
+      return {
+        mode: 'schema-only', confidence: 90,
+        reason: 'The live page already shows its own FAQ section (a FAQ heading with questions under it) — publishing structured data only, since a page never gets a second visible FAQ.',
+        source: 'live-page',
+      };
+    }
   } catch { /* fall through */ }
   return null;
 }

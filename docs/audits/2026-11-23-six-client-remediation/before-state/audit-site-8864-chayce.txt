@@ -1,0 +1,537 @@
+
+-- GITHUB CREDENTIALS -- OK, repo reachable.
+(skipped 38 URL(s) that redirect or 404 — not auditable as pages:)
+  308 -> https://chayceproperties.com/  http://chayceproperties.com/
+  301 -> https://chayceproperties.com/blog/removals-company-for-older-people-near-me-what-to-look-for/  https://chayceproperties.com/blog/moving-company-for-seniors-near-me-what-to-look-for/
+  301 -> https://chayceproperties.com/elderly-removals-kettering/  https://chayceproperties.com/senior-movers-kettering/
+  410  https://chayceproperties.com/online-casino-gambling-united-kingdom/
+  410  https://chayceproperties.com/?h=8020347041280
+  410  https://chayceproperties.com/best-gambling-website-uk/
+  410  https://chayceproperties.com/?h=123210041280
+  301 -> https://chayceproperties.com/blog/  https://chayceproperties.com/news/
+  410  https://chayceproperties.com/?h=11159752051280
+  410  https://chayceproperties.com/best-real-money-online-casinos-in-united-kingdom/
+  301 -> https://chayceproperties.com/elderly-removals-faq/  https://chayceproperties.com/faq/
+  410  https://chayceproperties.com/roulette-strategy-united-kingdom/
+  410  https://chayceproperties.com/?p=9224
+  410  https://chayceproperties.com/shop/storeSearch/KeepCriteriaInput.aspx?&transition=top31702254042280
+  410  https://chayceproperties.com/how-to-find-the-best-united-kingdom-free-spins/
+  301 -> https://chayceproperties.com/blog/planning-furniture-and-floor-plan-for-a-smaller-home/  https://chayceproperties.com/blog/what-to-do-with-unwanted-furniture-downsizing-uk/
+  410  https://chayceproperties.com/?h=29577140011280
+  410  https://chayceproperties.com/gala-casino-glasgow/
+  410  https://chayceproperties.com/?h=6232951071280
+  410  https://chayceproperties.com/?h=10032586011280
+  410  https://chayceproperties.com/?h=22327479011280
+  410  https://chayceproperties.com/?h=8109098091280
+  410  https://chayceproperties.com/?h=2473320021280
+  410  https://chayceproperties.com/craps-dice-names/
+  410  https://chayceproperties.com/shop/storeSearch/KeepCriteriaInput.aspx?&transition=top32276883012280
+  410  https://chayceproperties.com/shop/storeSearch/KeepCriteriaInput.aspx?&transition=top18223179012280
+  410  https://chayceproperties.com/?h=1630566011280
+  410  https://chayceproperties.com/casinos-in-scotland/
+  410  https://chayceproperties.com/shop/storeSearch/KeepCriteriaInput.aspx?&transition=top737270012280
+  410  https://chayceproperties.com/?h=7523858001280
+  410  https://chayceproperties.com/?h=19684239111280
+  410  https://chayceproperties.com/list-of-all-united-kingdom-casinos/
+  410  https://chayceproperties.com/?p=1815
+  301 -> https://chayceproperties.com/blog/choosing-removals-company-for-elderly-person-uk/  https://chayceproperties.com/blog/questions-to-ask-a-removals-company-uk/
+  410  https://chayceproperties.com/?p=17919
+  410  https://chayceproperties.com/?h=2064096001280
+  410  https://chayceproperties.com/?h=3653425011280
+  410  https://chayceproperties.com/gambling-in-united-kingdom-legal/
+
+=== Site #8864 "Chayceproperties" (zunkireelabs/web-chayce-properties) — 52 real candidate pages, 8 action types ===
+
+-- NO FILE MAPPING (58) --
+  [faq] https://chayceproperties.com/elderly-removals-market-harborough/
+  [schema] https://chayceproperties.com/elderly-removals-market-harborough/
+  [internal-links] https://chayceproperties.com/elderly-removals-market-harborough/
+  [expand-content] https://chayceproperties.com/elderly-removals-market-harborough/
+  [qa-content] https://chayceproperties.com/elderly-removals-market-harborough/
+  [faq] https://chayceproperties.com/elderly-removals-corby/
+  [schema] https://chayceproperties.com/elderly-removals-corby/
+  [internal-links] https://chayceproperties.com/elderly-removals-corby/
+  [expand-content] https://chayceproperties.com/elderly-removals-corby/
+  [qa-content] https://chayceproperties.com/elderly-removals-corby/
+  [faq] https://chayceproperties.com/elderly-removals-wellingborough/
+  [schema] https://chayceproperties.com/elderly-removals-wellingborough/
+  [internal-links] https://chayceproperties.com/elderly-removals-wellingborough/
+  [expand-content] https://chayceproperties.com/elderly-removals-wellingborough/
+  [qa-content] https://chayceproperties.com/elderly-removals-wellingborough/
+  [faq] https://chayceproperties.com/elderly-removals-daventry/
+  [schema] https://chayceproperties.com/elderly-removals-daventry/
+  [internal-links] https://chayceproperties.com/elderly-removals-daventry/
+  [expand-content] https://chayceproperties.com/elderly-removals-daventry/
+  [qa-content] https://chayceproperties.com/elderly-removals-daventry/
+  [meta-title] https://chayceproperties.com/blog/later-life-relocation-uk-practical-guide/
+  [faq] https://chayceproperties.com/blog/later-life-relocation-uk-practical-guide/
+  [schema] https://chayceproperties.com/blog/later-life-relocation-uk-practical-guide/
+  [internal-links] https://chayceproperties.com/blog/later-life-relocation-uk-practical-guide/
+  [expand-content] https://chayceproperties.com/blog/later-life-relocation-uk-practical-guide/
+  [qa-content] https://chayceproperties.com/blog/later-life-relocation-uk-practical-guide/
+  [meta-title] https://chayceproperties.com/blog/removals-company-for-older-people-near-me-what-to-look-for/
+  [faq] https://chayceproperties.com/blog/removals-company-for-older-people-near-me-what-to-look-for/
+  [schema] https://chayceproperties.com/blog/removals-company-for-older-people-near-me-what-to-look-for/
+  [internal-links] https://chayceproperties.com/blog/removals-company-for-older-people-near-me-what-to-look-for/
+  [expand-content] https://chayceproperties.com/blog/removals-company-for-older-people-near-me-what-to-look-for/
+  [qa-content] https://chayceproperties.com/blog/removals-company-for-older-people-near-me-what-to-look-for/
+  [faq] https://chayceproperties.com/elderly-removals-rushden/
+  [schema] https://chayceproperties.com/elderly-removals-rushden/
+  [internal-links] https://chayceproperties.com/elderly-removals-rushden/
+  [expand-content] https://chayceproperties.com/elderly-removals-rushden/
+  [qa-content] https://chayceproperties.com/elderly-removals-rushden/
+  [meta-title] https://chayceproperties.com/blog/dbs-checked-removals-uk-what-to-ask/
+  [faq] https://chayceproperties.com/blog/dbs-checked-removals-uk-what-to-ask/
+  [schema] https://chayceproperties.com/blog/dbs-checked-removals-uk-what-to-ask/
+  [internal-links] https://chayceproperties.com/blog/dbs-checked-removals-uk-what-to-ask/
+  [expand-content] https://chayceproperties.com/blog/dbs-checked-removals-uk-what-to-ask/
+  [qa-content] https://chayceproperties.com/blog/dbs-checked-removals-uk-what-to-ask/
+  [faq] https://chayceproperties.com/elderly-removals-kettering/
+  [schema] https://chayceproperties.com/elderly-removals-kettering/
+  [internal-links] https://chayceproperties.com/elderly-removals-kettering/
+  [expand-content] https://chayceproperties.com/elderly-removals-kettering/
+  [qa-content] https://chayceproperties.com/elderly-removals-kettering/
+  [faq] https://chayceproperties.com/elderly-removals-leicester/
+  [schema] https://chayceproperties.com/elderly-removals-leicester/
+  [internal-links] https://chayceproperties.com/elderly-removals-leicester/
+  [expand-content] https://chayceproperties.com/elderly-removals-leicester/
+  [qa-content] https://chayceproperties.com/elderly-removals-leicester/
+  [faq] https://chayceproperties.com/elderly-removals-milton-keynes/
+  [schema] https://chayceproperties.com/elderly-removals-milton-keynes/
+  [internal-links] https://chayceproperties.com/elderly-removals-milton-keynes/
+  [expand-content] https://chayceproperties.com/elderly-removals-milton-keynes/
+  [qa-content] https://chayceproperties.com/elderly-removals-milton-keynes/
+
+-- UNMAPPED BUT LIVE-VERIFIED OK, not a gap (22) -- (no file mapping, but the live page already renders a correct canonical / og:title+og:description — shared layout handles it)
+  [open-graph] https://chayceproperties.com/elderly-removals-market-harborough/
+  [open-graph] https://chayceproperties.com/elderly-removals-corby/
+  [open-graph] https://chayceproperties.com/elderly-removals-wellingborough/
+  [open-graph] https://chayceproperties.com/elderly-removals-daventry/
+  [open-graph] https://chayceproperties.com/blog/later-life-relocation-uk-practical-guide/
+  [open-graph] https://chayceproperties.com/blog/removals-company-for-older-people-near-me-what-to-look-for/
+  [open-graph] https://chayceproperties.com/elderly-removals-rushden/
+  [open-graph] https://chayceproperties.com/blog/dbs-checked-removals-uk-what-to-ask/
+  [open-graph] https://chayceproperties.com/elderly-removals-kettering/
+  [open-graph] https://chayceproperties.com/elderly-removals-leicester/
+  [open-graph] https://chayceproperties.com/elderly-removals-milton-keynes/
+  [canonical] https://chayceproperties.com/elderly-removals-market-harborough/
+  [canonical] https://chayceproperties.com/elderly-removals-corby/
+  [canonical] https://chayceproperties.com/elderly-removals-wellingborough/
+  [canonical] https://chayceproperties.com/elderly-removals-daventry/
+  [canonical] https://chayceproperties.com/blog/later-life-relocation-uk-practical-guide/
+  [canonical] https://chayceproperties.com/blog/removals-company-for-older-people-near-me-what-to-look-for/
+  [canonical] https://chayceproperties.com/elderly-removals-rushden/
+  [canonical] https://chayceproperties.com/blog/dbs-checked-removals-uk-what-to-ask/
+  [canonical] https://chayceproperties.com/elderly-removals-kettering/
+  [canonical] https://chayceproperties.com/elderly-removals-leicester/
+  [canonical] https://chayceproperties.com/elderly-removals-milton-keynes/
+
+-- NO MARKERS CONFIGURED (meta-title) (0) --
+
+-- NO MARKERS CONFIGURED (faq) (0) --
+
+-- NO MARKERS CONFIGURED (schema) (0) --
+
+-- NO MARKERS CONFIGURED (internal-links) (0) --
+
+-- NO MARKERS CONFIGURED (canonical) (0) --
+
+-- NO MARKERS CONFIGURED (open-graph) (0) --
+
+-- NO MARKERS CONFIGURED (expand-content) (0) --
+
+-- NO MARKERS CONFIGURED (qa-content) (0) --
+
+-- FILE NOT FOUND IN REPO (0) --
+
+-- MARKERS MISSING BUT SELF-HEALING (ensureMarkers creates these automatically at apply time — no action needed) (303) --
+  [meta-title:title] https://chayceproperties.com/blog/uk-house-moving-checklist/ -> src/blog/uk-house-moving-checklist.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/uk-house-moving-checklist/ -> src/blog/uk-house-moving-checklist.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/uk-house-moving-checklist/ -> src/blog/uk-house-moving-checklist.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/uk-house-moving-checklist/ -> src/blog/uk-house-moving-checklist.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/uk-house-moving-checklist/ -> src/blog/uk-house-moving-checklist.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/uk-house-moving-checklist/ -> src/blog/uk-house-moving-checklist.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/uk-house-moving-checklist/ -> src/blog/uk-house-moving-checklist.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/uk-house-moving-checklist/ -> src/blog/uk-house-moving-checklist.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/cost-of-moving-house-uk/ -> src/blog/cost-of-moving-house-uk.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/cost-of-moving-house-uk/ -> src/blog/cost-of-moving-house-uk.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/cost-of-moving-house-uk/ -> src/blog/cost-of-moving-house-uk.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/cost-of-moving-house-uk/ -> src/blog/cost-of-moving-house-uk.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/cost-of-moving-house-uk/ -> src/blog/cost-of-moving-house-uk.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/cost-of-moving-house-uk/ -> src/blog/cost-of-moving-house-uk.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/cost-of-moving-house-uk/ -> src/blog/cost-of-moving-house-uk.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/cost-of-moving-house-uk/ -> src/blog/cost-of-moving-house-uk.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/change-of-address-checklist-uk/ -> src/blog/change-of-address-checklist-uk.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/change-of-address-checklist-uk/ -> src/blog/change-of-address-checklist-uk.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/change-of-address-checklist-uk/ -> src/blog/change-of-address-checklist-uk.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/change-of-address-checklist-uk/ -> src/blog/change-of-address-checklist-uk.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/change-of-address-checklist-uk/ -> src/blog/change-of-address-checklist-uk.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/change-of-address-checklist-uk/ -> src/blog/change-of-address-checklist-uk.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/change-of-address-checklist-uk/ -> src/blog/change-of-address-checklist-uk.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/change-of-address-checklist-uk/ -> src/blog/change-of-address-checklist-uk.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/storage-when-moving-house-uk-how-it-works/ -> src/blog/storage-when-moving-house-uk-how-it-works.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/storage-when-moving-house-uk-how-it-works/ -> src/blog/storage-when-moving-house-uk-how-it-works.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/storage-when-moving-house-uk-how-it-works/ -> src/blog/storage-when-moving-house-uk-how-it-works.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/storage-when-moving-house-uk-how-it-works/ -> src/blog/storage-when-moving-house-uk-how-it-works.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/storage-when-moving-house-uk-how-it-works/ -> src/blog/storage-when-moving-house-uk-how-it-works.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/storage-when-moving-house-uk-how-it-works/ -> src/blog/storage-when-moving-house-uk-how-it-works.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/storage-when-moving-house-uk-how-it-works/ -> src/blog/storage-when-moving-house-uk-how-it-works.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/storage-when-moving-house-uk-how-it-works/ -> src/blog/storage-when-moving-house-uk-how-it-works.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/stamp-duty-for-first-time-buyers-england-worked-examples/ -> src/blog/stamp-duty-for-first-time-buyers-england-worked-examples.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/stamp-duty-for-first-time-buyers-england-worked-examples/ -> src/blog/stamp-duty-for-first-time-buyers-england-worked-examples.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/stamp-duty-for-first-time-buyers-england-worked-examples/ -> src/blog/stamp-duty-for-first-time-buyers-england-worked-examples.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/stamp-duty-for-first-time-buyers-england-worked-examples/ -> src/blog/stamp-duty-for-first-time-buyers-england-worked-examples.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/stamp-duty-for-first-time-buyers-england-worked-examples/ -> src/blog/stamp-duty-for-first-time-buyers-england-worked-examples.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/stamp-duty-for-first-time-buyers-england-worked-examples/ -> src/blog/stamp-duty-for-first-time-buyers-england-worked-examples.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/stamp-duty-for-first-time-buyers-england-worked-examples/ -> src/blog/stamp-duty-for-first-time-buyers-england-worked-examples.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/stamp-duty-for-first-time-buyers-england-worked-examples/ -> src/blog/stamp-duty-for-first-time-buyers-england-worked-examples.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/ -> src/index.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/ -> src/index.njk (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/ -> src/index.njk (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/ -> src/index.njk (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/ -> src/index.njk (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/ -> src/index.njk (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/ -> src/index.njk (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/ -> src/index.njk (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/moving-into-a-retirement-village-uk-guide/ -> src/blog/moving-into-a-retirement-village-uk-guide.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/moving-into-a-retirement-village-uk-guide/ -> src/blog/moving-into-a-retirement-village-uk-guide.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/moving-into-a-retirement-village-uk-guide/ -> src/blog/moving-into-a-retirement-village-uk-guide.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/moving-into-a-retirement-village-uk-guide/ -> src/blog/moving-into-a-retirement-village-uk-guide.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/moving-into-a-retirement-village-uk-guide/ -> src/blog/moving-into-a-retirement-village-uk-guide.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/moving-into-a-retirement-village-uk-guide/ -> src/blog/moving-into-a-retirement-village-uk-guide.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/moving-into-a-retirement-village-uk-guide/ -> src/blog/moving-into-a-retirement-village-uk-guide.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/moving-into-a-retirement-village-uk-guide/ -> src/blog/moving-into-a-retirement-village-uk-guide.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/downsizing-checklist-what-to-keep-uk/ -> src/blog/downsizing-checklist-what-to-keep-uk.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/downsizing-checklist-what-to-keep-uk/ -> src/blog/downsizing-checklist-what-to-keep-uk.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/downsizing-checklist-what-to-keep-uk/ -> src/blog/downsizing-checklist-what-to-keep-uk.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/downsizing-checklist-what-to-keep-uk/ -> src/blog/downsizing-checklist-what-to-keep-uk.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/downsizing-checklist-what-to-keep-uk/ -> src/blog/downsizing-checklist-what-to-keep-uk.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/downsizing-checklist-what-to-keep-uk/ -> src/blog/downsizing-checklist-what-to-keep-uk.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/downsizing-checklist-what-to-keep-uk/ -> src/blog/downsizing-checklist-what-to-keep-uk.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/downsizing-checklist-what-to-keep-uk/ -> src/blog/downsizing-checklist-what-to-keep-uk.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/probate-house-clearance/ -> src/areas/probate-house-clearance.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/probate-house-clearance/ -> src/areas/probate-house-clearance.njk (will auto-create SEOAI:METADESCRIPTION)
+  [canonical:canonical] https://chayceproperties.com/probate-house-clearance/ -> src/areas/probate-house-clearance.njk (will auto-create SEOAI:CANONICAL)
+  [meta-title:title] https://chayceproperties.com/packages/ -> src/packages.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/packages/ -> src/packages.njk (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/packages/ -> src/packages.njk (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/packages/ -> src/packages.njk (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/packages/ -> src/packages.njk (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/packages/ -> src/packages.njk (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/packages/ -> src/packages.njk (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/packages/ -> src/packages.njk (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/guides/ -> src/guides.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/guides/ -> src/guides.njk (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/guides/ -> src/guides.njk (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/guides/ -> src/guides.njk (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/guides/ -> src/guides.njk (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/guides/ -> src/guides.njk (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/guides/ -> src/guides.njk (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/guides/ -> src/guides.njk (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/packing-services-london-what-to-expect-uk/ -> src/blog/packing-services-london-what-to-expect-uk.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/packing-services-london-what-to-expect-uk/ -> src/blog/packing-services-london-what-to-expect-uk.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/packing-services-london-what-to-expect-uk/ -> src/blog/packing-services-london-what-to-expect-uk.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/packing-services-london-what-to-expect-uk/ -> src/blog/packing-services-london-what-to-expect-uk.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/packing-services-london-what-to-expect-uk/ -> src/blog/packing-services-london-what-to-expect-uk.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/packing-services-london-what-to-expect-uk/ -> src/blog/packing-services-london-what-to-expect-uk.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/packing-services-london-what-to-expect-uk/ -> src/blog/packing-services-london-what-to-expect-uk.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/packing-services-london-what-to-expect-uk/ -> src/blog/packing-services-london-what-to-expect-uk.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/how-it-works/ -> src/how-it-works.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/how-it-works/ -> src/how-it-works.njk (will auto-create SEOAI:METADESCRIPTION)
+  [canonical:canonical] https://chayceproperties.com/how-it-works/ -> src/how-it-works.njk (will auto-create SEOAI:CANONICAL)
+  [meta-title:title] https://chayceproperties.com/blog/what-does-a-full-service-removals-company-do/ -> src/blog/what-does-a-full-service-removals-company-do.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/what-does-a-full-service-removals-company-do/ -> src/blog/what-does-a-full-service-removals-company-do.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/what-does-a-full-service-removals-company-do/ -> src/blog/what-does-a-full-service-removals-company-do.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/what-does-a-full-service-removals-company-do/ -> src/blog/what-does-a-full-service-removals-company-do.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/what-does-a-full-service-removals-company-do/ -> src/blog/what-does-a-full-service-removals-company-do.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/what-does-a-full-service-removals-company-do/ -> src/blog/what-does-a-full-service-removals-company-do.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/what-does-a-full-service-removals-company-do/ -> src/blog/what-does-a-full-service-removals-company-do.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/what-does-a-full-service-removals-company-do/ -> src/blog/what-does-a-full-service-removals-company-do.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/elderly-move-manager-uk/ -> src/areas/elderly-move-manager-uk.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/elderly-move-manager-uk/ -> src/areas/elderly-move-manager-uk.njk (will auto-create SEOAI:METADESCRIPTION)
+  [canonical:canonical] https://chayceproperties.com/elderly-move-manager-uk/ -> src/areas/elderly-move-manager-uk.njk (will auto-create SEOAI:CANONICAL)
+  [meta-title:title] https://chayceproperties.com/blog/ -> src/blog/index.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/ -> src/blog/index.njk (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/ -> src/blog/index.njk (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/ -> src/blog/index.njk (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/ -> src/blog/index.njk (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/ -> src/blog/index.njk (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/ -> src/blog/index.njk (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/ -> src/blog/index.njk (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/privacy-policy/ -> src/privacy-policy.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/privacy-policy/ -> src/privacy-policy.njk (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/privacy-policy/ -> src/privacy-policy.njk (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/privacy-policy/ -> src/privacy-policy.njk (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/privacy-policy/ -> src/privacy-policy.njk (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/privacy-policy/ -> src/privacy-policy.njk (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/privacy-policy/ -> src/privacy-policy.njk (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/privacy-policy/ -> src/privacy-policy.njk (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/discovery/ -> src/discovery.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/discovery/ -> src/discovery.njk (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/discovery/ -> src/discovery.njk (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/discovery/ -> src/discovery.njk (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/discovery/ -> src/discovery.njk (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/discovery/ -> src/discovery.njk (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/discovery/ -> src/discovery.njk (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/discovery/ -> src/discovery.njk (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/platinum-bespoke/ -> src/platinum-bespoke.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/platinum-bespoke/ -> src/platinum-bespoke.njk (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/platinum-bespoke/ -> src/platinum-bespoke.njk (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/platinum-bespoke/ -> src/platinum-bespoke.njk (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/platinum-bespoke/ -> src/platinum-bespoke.njk (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/platinum-bespoke/ -> src/platinum-bespoke.njk (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/platinum-bespoke/ -> src/platinum-bespoke.njk (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/platinum-bespoke/ -> src/platinum-bespoke.njk (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/care-home-removals/ -> src/areas/care-home-removals.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/care-home-removals/ -> src/areas/care-home-removals.njk (will auto-create SEOAI:METADESCRIPTION)
+  [canonical:canonical] https://chayceproperties.com/care-home-removals/ -> src/areas/care-home-removals.njk (will auto-create SEOAI:CANONICAL)
+  [meta-title:title] https://chayceproperties.com/silver-comfort/ -> src/silver-comfort.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/silver-comfort/ -> src/silver-comfort.njk (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/silver-comfort/ -> src/silver-comfort.njk (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/silver-comfort/ -> src/silver-comfort.njk (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/silver-comfort/ -> src/silver-comfort.njk (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/silver-comfort/ -> src/silver-comfort.njk (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/silver-comfort/ -> src/silver-comfort.njk (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/silver-comfort/ -> src/silver-comfort.njk (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/moving-house-with-dementia-in-the-family/ -> src/blog/moving-house-with-dementia-in-the-family.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/moving-house-with-dementia-in-the-family/ -> src/blog/moving-house-with-dementia-in-the-family.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/moving-house-with-dementia-in-the-family/ -> src/blog/moving-house-with-dementia-in-the-family.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/moving-house-with-dementia-in-the-family/ -> src/blog/moving-house-with-dementia-in-the-family.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/moving-house-with-dementia-in-the-family/ -> src/blog/moving-house-with-dementia-in-the-family.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/moving-house-with-dementia-in-the-family/ -> src/blog/moving-house-with-dementia-in-the-family.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/moving-house-with-dementia-in-the-family/ -> src/blog/moving-house-with-dementia-in-the-family.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/moving-house-with-dementia-in-the-family/ -> src/blog/moving-house-with-dementia-in-the-family.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/moving-an-elderly-person-into-a-care-home-checklist/ -> src/blog/moving-an-elderly-person-into-a-care-home-checklist.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/moving-an-elderly-person-into-a-care-home-checklist/ -> src/blog/moving-an-elderly-person-into-a-care-home-checklist.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/moving-an-elderly-person-into-a-care-home-checklist/ -> src/blog/moving-an-elderly-person-into-a-care-home-checklist.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/moving-an-elderly-person-into-a-care-home-checklist/ -> src/blog/moving-an-elderly-person-into-a-care-home-checklist.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/moving-an-elderly-person-into-a-care-home-checklist/ -> src/blog/moving-an-elderly-person-into-a-care-home-checklist.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/moving-an-elderly-person-into-a-care-home-checklist/ -> src/blog/moving-an-elderly-person-into-a-care-home-checklist.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/moving-an-elderly-person-into-a-care-home-checklist/ -> src/blog/moving-an-elderly-person-into-a-care-home-checklist.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/moving-an-elderly-person-into-a-care-home-checklist/ -> src/blog/moving-an-elderly-person-into-a-care-home-checklist.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/moving-after-probate-clearing-a-loved-ones-home/ -> src/blog/moving-after-probate-clearing-a-loved-ones-home.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/moving-after-probate-clearing-a-loved-ones-home/ -> src/blog/moving-after-probate-clearing-a-loved-ones-home.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/moving-after-probate-clearing-a-loved-ones-home/ -> src/blog/moving-after-probate-clearing-a-loved-ones-home.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/moving-after-probate-clearing-a-loved-ones-home/ -> src/blog/moving-after-probate-clearing-a-loved-ones-home.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/moving-after-probate-clearing-a-loved-ones-home/ -> src/blog/moving-after-probate-clearing-a-loved-ones-home.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/moving-after-probate-clearing-a-loved-ones-home/ -> src/blog/moving-after-probate-clearing-a-loved-ones-home.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/moving-after-probate-clearing-a-loved-ones-home/ -> src/blog/moving-after-probate-clearing-a-loved-ones-home.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/moving-after-probate-clearing-a-loved-ones-home/ -> src/blog/moving-after-probate-clearing-a-loved-ones-home.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/when-to-downsize-uk/ -> src/blog/when-to-downsize-uk.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/when-to-downsize-uk/ -> src/blog/when-to-downsize-uk.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/when-to-downsize-uk/ -> src/blog/when-to-downsize-uk.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/when-to-downsize-uk/ -> src/blog/when-to-downsize-uk.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/when-to-downsize-uk/ -> src/blog/when-to-downsize-uk.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/when-to-downsize-uk/ -> src/blog/when-to-downsize-uk.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/when-to-downsize-uk/ -> src/blog/when-to-downsize-uk.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/when-to-downsize-uk/ -> src/blog/when-to-downsize-uk.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/storage-during-your-move/ -> src/areas/storage-during-your-move.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/storage-during-your-move/ -> src/areas/storage-during-your-move.njk (will auto-create SEOAI:METADESCRIPTION)
+  [canonical:canonical] https://chayceproperties.com/storage-during-your-move/ -> src/areas/storage-during-your-move.njk (will auto-create SEOAI:CANONICAL)
+  [meta-title:title] https://chayceproperties.com/gold-prestige/ -> src/gold-prestige.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/gold-prestige/ -> src/gold-prestige.njk (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/gold-prestige/ -> src/gold-prestige.njk (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/gold-prestige/ -> src/gold-prestige.njk (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/gold-prestige/ -> src/gold-prestige.njk (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/gold-prestige/ -> src/gold-prestige.njk (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/gold-prestige/ -> src/gold-prestige.njk (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/gold-prestige/ -> src/gold-prestige.njk (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/who-can-help-an-older-person-move-home-uk/ -> src/blog/who-can-help-an-older-person-move-home-uk.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/who-can-help-an-older-person-move-home-uk/ -> src/blog/who-can-help-an-older-person-move-home-uk.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/who-can-help-an-older-person-move-home-uk/ -> src/blog/who-can-help-an-older-person-move-home-uk.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/who-can-help-an-older-person-move-home-uk/ -> src/blog/who-can-help-an-older-person-move-home-uk.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/who-can-help-an-older-person-move-home-uk/ -> src/blog/who-can-help-an-older-person-move-home-uk.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/who-can-help-an-older-person-move-home-uk/ -> src/blog/who-can-help-an-older-person-move-home-uk.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/who-can-help-an-older-person-move-home-uk/ -> src/blog/who-can-help-an-older-person-move-home-uk.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/who-can-help-an-older-person-move-home-uk/ -> src/blog/who-can-help-an-older-person-move-home-uk.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/downsizing-companies-uk-how-to-choose/ -> src/blog/downsizing-companies-uk-how-to-choose.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/downsizing-companies-uk-how-to-choose/ -> src/blog/downsizing-companies-uk-how-to-choose.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/downsizing-companies-uk-how-to-choose/ -> src/blog/downsizing-companies-uk-how-to-choose.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/downsizing-companies-uk-how-to-choose/ -> src/blog/downsizing-companies-uk-how-to-choose.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/downsizing-companies-uk-how-to-choose/ -> src/blog/downsizing-companies-uk-how-to-choose.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/downsizing-companies-uk-how-to-choose/ -> src/blog/downsizing-companies-uk-how-to-choose.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/downsizing-companies-uk-how-to-choose/ -> src/blog/downsizing-companies-uk-how-to-choose.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/downsizing-companies-uk-how-to-choose/ -> src/blog/downsizing-companies-uk-how-to-choose.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/trust-and-safeguarding/ -> src/areas/trust-and-safeguarding.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/trust-and-safeguarding/ -> src/areas/trust-and-safeguarding.njk (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/trust-and-safeguarding/ -> src/areas/trust-and-safeguarding.njk (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/trust-and-safeguarding/ -> src/areas/trust-and-safeguarding.njk (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/trust-and-safeguarding/ -> src/areas/trust-and-safeguarding.njk (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/trust-and-safeguarding/ -> src/areas/trust-and-safeguarding.njk (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/trust-and-safeguarding/ -> src/areas/trust-and-safeguarding.njk (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/trust-and-safeguarding/ -> src/areas/trust-and-safeguarding.njk (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/later-life-relocation-closer-to-family-uk/ -> src/blog/later-life-relocation-closer-to-family-uk.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/later-life-relocation-closer-to-family-uk/ -> src/blog/later-life-relocation-closer-to-family-uk.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/later-life-relocation-closer-to-family-uk/ -> src/blog/later-life-relocation-closer-to-family-uk.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/later-life-relocation-closer-to-family-uk/ -> src/blog/later-life-relocation-closer-to-family-uk.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/later-life-relocation-closer-to-family-uk/ -> src/blog/later-life-relocation-closer-to-family-uk.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/later-life-relocation-closer-to-family-uk/ -> src/blog/later-life-relocation-closer-to-family-uk.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/later-life-relocation-closer-to-family-uk/ -> src/blog/later-life-relocation-closer-to-family-uk.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/later-life-relocation-closer-to-family-uk/ -> src/blog/later-life-relocation-closer-to-family-uk.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/elderly-removals-cost-uk/ -> src/blog/elderly-removals-cost-uk.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/elderly-removals-cost-uk/ -> src/blog/elderly-removals-cost-uk.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/elderly-removals-cost-uk/ -> src/blog/elderly-removals-cost-uk.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/elderly-removals-cost-uk/ -> src/blog/elderly-removals-cost-uk.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/elderly-removals-cost-uk/ -> src/blog/elderly-removals-cost-uk.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/elderly-removals-cost-uk/ -> src/blog/elderly-removals-cost-uk.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/elderly-removals-cost-uk/ -> src/blog/elderly-removals-cost-uk.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/elderly-removals-cost-uk/ -> src/blog/elderly-removals-cost-uk.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/settling-in-after-your-move/ -> src/blog/settling-in-after-your-move.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/settling-in-after-your-move/ -> src/blog/settling-in-after-your-move.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/settling-in-after-your-move/ -> src/blog/settling-in-after-your-move.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/settling-in-after-your-move/ -> src/blog/settling-in-after-your-move.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/settling-in-after-your-move/ -> src/blog/settling-in-after-your-move.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/settling-in-after-your-move/ -> src/blog/settling-in-after-your-move.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/settling-in-after-your-move/ -> src/blog/settling-in-after-your-move.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/settling-in-after-your-move/ -> src/blog/settling-in-after-your-move.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk/ -> src/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk/ -> src/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk/ -> src/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk/ -> src/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk/ -> src/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk/ -> src/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk/ -> src/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk/ -> src/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/settling-in-help-for-older-people-after-a-move-uk/ -> src/blog/settling-in-help-for-older-people-after-a-move-uk.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/settling-in-help-for-older-people-after-a-move-uk/ -> src/blog/settling-in-help-for-older-people-after-a-move-uk.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/settling-in-help-for-older-people-after-a-move-uk/ -> src/blog/settling-in-help-for-older-people-after-a-move-uk.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/settling-in-help-for-older-people-after-a-move-uk/ -> src/blog/settling-in-help-for-older-people-after-a-move-uk.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/settling-in-help-for-older-people-after-a-move-uk/ -> src/blog/settling-in-help-for-older-people-after-a-move-uk.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/settling-in-help-for-older-people-after-a-move-uk/ -> src/blog/settling-in-help-for-older-people-after-a-move-uk.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/settling-in-help-for-older-people-after-a-move-uk/ -> src/blog/settling-in-help-for-older-people-after-a-move-uk.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/settling-in-help-for-older-people-after-a-move-uk/ -> src/blog/settling-in-help-for-older-people-after-a-move-uk.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/chayce-packages-explained-what-each-includes/ -> src/blog/chayce-packages-explained-what-each-includes.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/chayce-packages-explained-what-each-includes/ -> src/blog/chayce-packages-explained-what-each-includes.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/chayce-packages-explained-what-each-includes/ -> src/blog/chayce-packages-explained-what-each-includes.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/chayce-packages-explained-what-each-includes/ -> src/blog/chayce-packages-explained-what-each-includes.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/chayce-packages-explained-what-each-includes/ -> src/blog/chayce-packages-explained-what-each-includes.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/chayce-packages-explained-what-each-includes/ -> src/blog/chayce-packages-explained-what-each-includes.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/chayce-packages-explained-what-each-includes/ -> src/blog/chayce-packages-explained-what-each-includes.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/chayce-packages-explained-what-each-includes/ -> src/blog/chayce-packages-explained-what-each-includes.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/choosing-removals-company-for-elderly-person-uk/ -> src/blog/choosing-removals-company-for-elderly-person-uk.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/choosing-removals-company-for-elderly-person-uk/ -> src/blog/choosing-removals-company-for-elderly-person-uk.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/choosing-removals-company-for-elderly-person-uk/ -> src/blog/choosing-removals-company-for-elderly-person-uk.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/choosing-removals-company-for-elderly-person-uk/ -> src/blog/choosing-removals-company-for-elderly-person-uk.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/choosing-removals-company-for-elderly-person-uk/ -> src/blog/choosing-removals-company-for-elderly-person-uk.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/choosing-removals-company-for-elderly-person-uk/ -> src/blog/choosing-removals-company-for-elderly-person-uk.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/choosing-removals-company-for-elderly-person-uk/ -> src/blog/choosing-removals-company-for-elderly-person-uk.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/choosing-removals-company-for-elderly-person-uk/ -> src/blog/choosing-removals-company-for-elderly-person-uk.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/blog/what-is-a-moving-consultation-what-to-expect-uk/ -> src/blog/what-is-a-moving-consultation-what-to-expect-uk.md (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/blog/what-is-a-moving-consultation-what-to-expect-uk/ -> src/blog/what-is-a-moving-consultation-what-to-expect-uk.md (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/blog/what-is-a-moving-consultation-what-to-expect-uk/ -> src/blog/what-is-a-moving-consultation-what-to-expect-uk.md (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/blog/what-is-a-moving-consultation-what-to-expect-uk/ -> src/blog/what-is-a-moving-consultation-what-to-expect-uk.md (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/blog/what-is-a-moving-consultation-what-to-expect-uk/ -> src/blog/what-is-a-moving-consultation-what-to-expect-uk.md (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/blog/what-is-a-moving-consultation-what-to-expect-uk/ -> src/blog/what-is-a-moving-consultation-what-to-expect-uk.md (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/blog/what-is-a-moving-consultation-what-to-expect-uk/ -> src/blog/what-is-a-moving-consultation-what-to-expect-uk.md (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/blog/what-is-a-moving-consultation-what-to-expect-uk/ -> src/blog/what-is-a-moving-consultation-what-to-expect-uk.md (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/for-professionals/ -> src/areas/for-professionals.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/for-professionals/ -> src/areas/for-professionals.njk (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/for-professionals/ -> src/areas/for-professionals.njk (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/for-professionals/ -> src/areas/for-professionals.njk (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/for-professionals/ -> src/areas/for-professionals.njk (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/for-professionals/ -> src/areas/for-professionals.njk (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/for-professionals/ -> src/areas/for-professionals.njk (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/for-professionals/ -> src/areas/for-professionals.njk (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/elderly-removals-faq/ -> src/areas/senior-moving-faq.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/elderly-removals-faq/ -> src/areas/senior-moving-faq.njk (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/elderly-removals-faq/ -> src/areas/senior-moving-faq.njk (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/elderly-removals-faq/ -> src/areas/senior-moving-faq.njk (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/elderly-removals-faq/ -> src/areas/senior-moving-faq.njk (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/elderly-removals-faq/ -> src/areas/senior-moving-faq.njk (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/elderly-removals-faq/ -> src/areas/senior-moving-faq.njk (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/elderly-removals-faq/ -> src/areas/senior-moving-faq.njk (will auto-create SEOAI:QACONTENT)
+  [meta-title:title] https://chayceproperties.com/compare/ -> src/areas/compare.njk (will auto-create SEOAI:TITLE)
+  [meta-title:description] https://chayceproperties.com/compare/ -> src/areas/compare.njk (will auto-create SEOAI:METADESCRIPTION)
+  [faq:faq] https://chayceproperties.com/compare/ -> src/areas/compare.njk (will auto-create SEOAI:FAQ)
+  [schema:schema] https://chayceproperties.com/compare/ -> src/areas/compare.njk (will auto-create SEOAI:SCHEMA)
+  [internal-links:links] https://chayceproperties.com/compare/ -> src/areas/compare.njk (will auto-create SEOAI:INTERNALLINKS)
+  [canonical:canonical] https://chayceproperties.com/compare/ -> src/areas/compare.njk (will auto-create SEOAI:CANONICAL)
+  [expand-content:expandedContent] https://chayceproperties.com/compare/ -> src/areas/compare.njk (will auto-create SEOAI:EXPANDEDCONTENT)
+  [qa-content:qaContent] https://chayceproperties.com/compare/ -> src/areas/compare.njk (will auto-create SEOAI:QACONTENT)
+
+-- OPEN GRAPH LIVE-VERIFIED OK, not fatal (41) -- (no per-page marker exists, but the live page already has correct og:title/og:description — likely auto-derived by the shared layout; nothing to fix)
+  https://chayceproperties.com/blog/uk-house-moving-checklist/ -> src/blog/uk-house-moving-checklist.md
+  https://chayceproperties.com/blog/cost-of-moving-house-uk/ -> src/blog/cost-of-moving-house-uk.md
+  https://chayceproperties.com/blog/change-of-address-checklist-uk/ -> src/blog/change-of-address-checklist-uk.md
+  https://chayceproperties.com/blog/storage-when-moving-house-uk-how-it-works/ -> src/blog/storage-when-moving-house-uk-how-it-works.md
+  https://chayceproperties.com/blog/stamp-duty-for-first-time-buyers-england-worked-examples/ -> src/blog/stamp-duty-for-first-time-buyers-england-worked-examples.md
+  https://chayceproperties.com/ -> src/index.njk
+  https://chayceproperties.com/blog/moving-into-a-retirement-village-uk-guide/ -> src/blog/moving-into-a-retirement-village-uk-guide.md
+  https://chayceproperties.com/blog/downsizing-checklist-what-to-keep-uk/ -> src/blog/downsizing-checklist-what-to-keep-uk.md
+  https://chayceproperties.com/probate-house-clearance/ -> src/areas/probate-house-clearance.njk
+  https://chayceproperties.com/packages/ -> src/packages.njk
+  https://chayceproperties.com/guides/ -> src/guides.njk
+  https://chayceproperties.com/blog/packing-services-london-what-to-expect-uk/ -> src/blog/packing-services-london-what-to-expect-uk.md
+  https://chayceproperties.com/how-it-works/ -> src/how-it-works.njk
+  https://chayceproperties.com/blog/what-does-a-full-service-removals-company-do/ -> src/blog/what-does-a-full-service-removals-company-do.md
+  https://chayceproperties.com/elderly-move-manager-uk/ -> src/areas/elderly-move-manager-uk.njk
+  https://chayceproperties.com/blog/ -> src/blog/index.njk
+  https://chayceproperties.com/privacy-policy/ -> src/privacy-policy.njk
+  https://chayceproperties.com/discovery/ -> src/discovery.njk
+  https://chayceproperties.com/platinum-bespoke/ -> src/platinum-bespoke.njk
+  https://chayceproperties.com/care-home-removals/ -> src/areas/care-home-removals.njk
+  https://chayceproperties.com/silver-comfort/ -> src/silver-comfort.njk
+  https://chayceproperties.com/blog/moving-house-with-dementia-in-the-family/ -> src/blog/moving-house-with-dementia-in-the-family.md
+  https://chayceproperties.com/blog/moving-an-elderly-person-into-a-care-home-checklist/ -> src/blog/moving-an-elderly-person-into-a-care-home-checklist.md
+  https://chayceproperties.com/blog/moving-after-probate-clearing-a-loved-ones-home/ -> src/blog/moving-after-probate-clearing-a-loved-ones-home.md
+  https://chayceproperties.com/blog/when-to-downsize-uk/ -> src/blog/when-to-downsize-uk.md
+  https://chayceproperties.com/storage-during-your-move/ -> src/areas/storage-during-your-move.njk
+  https://chayceproperties.com/gold-prestige/ -> src/gold-prestige.njk
+  https://chayceproperties.com/blog/who-can-help-an-older-person-move-home-uk/ -> src/blog/who-can-help-an-older-person-move-home-uk.md
+  https://chayceproperties.com/blog/downsizing-companies-uk-how-to-choose/ -> src/blog/downsizing-companies-uk-how-to-choose.md
+  https://chayceproperties.com/trust-and-safeguarding/ -> src/areas/trust-and-safeguarding.njk
+  https://chayceproperties.com/blog/later-life-relocation-closer-to-family-uk/ -> src/blog/later-life-relocation-closer-to-family-uk.md
+  https://chayceproperties.com/blog/elderly-removals-cost-uk/ -> src/blog/elderly-removals-cost-uk.md
+  https://chayceproperties.com/blog/settling-in-after-your-move/ -> src/blog/settling-in-after-your-move.md
+  https://chayceproperties.com/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk/ -> src/blog/stay-or-move-adapting-a-home-or-moving-in-later-life-uk.md
+  https://chayceproperties.com/blog/settling-in-help-for-older-people-after-a-move-uk/ -> src/blog/settling-in-help-for-older-people-after-a-move-uk.md
+  https://chayceproperties.com/blog/chayce-packages-explained-what-each-includes/ -> src/blog/chayce-packages-explained-what-each-includes.md
+  https://chayceproperties.com/blog/choosing-removals-company-for-elderly-person-uk/ -> src/blog/choosing-removals-company-for-elderly-person-uk.md
+  https://chayceproperties.com/blog/what-is-a-moving-consultation-what-to-expect-uk/ -> src/blog/what-is-a-moving-consultation-what-to-expect-uk.md
+  https://chayceproperties.com/for-professionals/ -> src/areas/for-professionals.njk
+  https://chayceproperties.com/elderly-removals-faq/ -> src/areas/senior-moving-faq.njk
+  https://chayceproperties.com/compare/ -> src/areas/compare.njk
+
+-- MARKERS MISSING, FATAL (need a one-time human-placed anchor before any draft for this field can apply) (25) --
+  [faq:faq] https://chayceproperties.com/probate-house-clearance/ -> src/areas/probate-house-clearance.njk (expected SEOAI:FAQ, reason: fatal-no-safe-anchor)
+  [schema:schema] https://chayceproperties.com/probate-house-clearance/ -> src/areas/probate-house-clearance.njk (expected SEOAI:SCHEMA, reason: fatal-no-safe-anchor)
+  [internal-links:links] https://chayceproperties.com/probate-house-clearance/ -> src/areas/probate-house-clearance.njk (expected SEOAI:INTERNALLINKS, reason: fatal-no-safe-anchor)
+  [expand-content:expandedContent] https://chayceproperties.com/probate-house-clearance/ -> src/areas/probate-house-clearance.njk (expected SEOAI:EXPANDEDCONTENT, reason: fatal-no-safe-anchor)
+  [qa-content:qaContent] https://chayceproperties.com/probate-house-clearance/ -> src/areas/probate-house-clearance.njk (expected SEOAI:QACONTENT, reason: fatal-no-safe-anchor)
+  [faq:faq] https://chayceproperties.com/how-it-works/ -> src/how-it-works.njk (expected SEOAI:FAQ, reason: fatal-no-safe-anchor)
+  [schema:schema] https://chayceproperties.com/how-it-works/ -> src/how-it-works.njk (expected SEOAI:SCHEMA, reason: fatal-no-safe-anchor)
+  [internal-links:links] https://chayceproperties.com/how-it-works/ -> src/how-it-works.njk (expected SEOAI:INTERNALLINKS, reason: fatal-no-safe-anchor)
+  [expand-content:expandedContent] https://chayceproperties.com/how-it-works/ -> src/how-it-works.njk (expected SEOAI:EXPANDEDCONTENT, reason: fatal-no-safe-anchor)
+  [qa-content:qaContent] https://chayceproperties.com/how-it-works/ -> src/how-it-works.njk (expected SEOAI:QACONTENT, reason: fatal-no-safe-anchor)
+  [faq:faq] https://chayceproperties.com/elderly-move-manager-uk/ -> src/areas/elderly-move-manager-uk.njk (expected SEOAI:FAQ, reason: fatal-no-safe-anchor)
+  [schema:schema] https://chayceproperties.com/elderly-move-manager-uk/ -> src/areas/elderly-move-manager-uk.njk (expected SEOAI:SCHEMA, reason: fatal-no-safe-anchor)
+  [internal-links:links] https://chayceproperties.com/elderly-move-manager-uk/ -> src/areas/elderly-move-manager-uk.njk (expected SEOAI:INTERNALLINKS, reason: fatal-no-safe-anchor)
+  [expand-content:expandedContent] https://chayceproperties.com/elderly-move-manager-uk/ -> src/areas/elderly-move-manager-uk.njk (expected SEOAI:EXPANDEDCONTENT, reason: fatal-no-safe-anchor)
+  [qa-content:qaContent] https://chayceproperties.com/elderly-move-manager-uk/ -> src/areas/elderly-move-manager-uk.njk (expected SEOAI:QACONTENT, reason: fatal-no-safe-anchor)
+  [faq:faq] https://chayceproperties.com/care-home-removals/ -> src/areas/care-home-removals.njk (expected SEOAI:FAQ, reason: fatal-no-safe-anchor)
+  [schema:schema] https://chayceproperties.com/care-home-removals/ -> src/areas/care-home-removals.njk (expected SEOAI:SCHEMA, reason: fatal-no-safe-anchor)
+  [internal-links:links] https://chayceproperties.com/care-home-removals/ -> src/areas/care-home-removals.njk (expected SEOAI:INTERNALLINKS, reason: fatal-no-safe-anchor)
+  [expand-content:expandedContent] https://chayceproperties.com/care-home-removals/ -> src/areas/care-home-removals.njk (expected SEOAI:EXPANDEDCONTENT, reason: fatal-no-safe-anchor)
+  [qa-content:qaContent] https://chayceproperties.com/care-home-removals/ -> src/areas/care-home-removals.njk (expected SEOAI:QACONTENT, reason: fatal-no-safe-anchor)
+  [faq:faq] https://chayceproperties.com/storage-during-your-move/ -> src/areas/storage-during-your-move.njk (expected SEOAI:FAQ, reason: fatal-no-safe-anchor)
+  [schema:schema] https://chayceproperties.com/storage-during-your-move/ -> src/areas/storage-during-your-move.njk (expected SEOAI:SCHEMA, reason: fatal-no-safe-anchor)
+  [internal-links:links] https://chayceproperties.com/storage-during-your-move/ -> src/areas/storage-during-your-move.njk (expected SEOAI:INTERNALLINKS, reason: fatal-no-safe-anchor)
+  [expand-content:expandedContent] https://chayceproperties.com/storage-during-your-move/ -> src/areas/storage-during-your-move.njk (expected SEOAI:EXPANDEDCONTENT, reason: fatal-no-safe-anchor)
+  [qa-content:qaContent] https://chayceproperties.com/storage-during-your-move/ -> src/areas/storage-during-your-move.njk (expected SEOAI:QACONTENT, reason: fatal-no-safe-anchor)
+
+-- ADAPTER-ROUTED, not deep-checked here (8) --
+  data-array-content: 8 page/type combination(s)
+
+-- RENDER CAPABILITY GAPS (0) -- (net-new pages this site can generate but the gate will block at apply time)
+  OK — every configured newContentTargets extension has a recorded, markdown-safe renderCapabilities entry.
+
+-- NEW CONTENT TARGETS NOT CONFIGURED (0/7) -- (not fatal; any recommendation of this type will block until configured)
+  OK — every known net-new content type has a target configured.
+
+-- AUTHOR AVATAR ASPECT-RATIO GAPS (0) -- (a non-square logo/avatar declared as rendering inside a circular crop frame)
+
+-- NGINX SECURITY-HEADERS MARKER (nginx/templates/default.conf.template) -- present
+
+-- ANALYTICS-INSTALL (sitewide, src/_includes/base.njk) -- marker missing but self-healing (will auto-create SEOAI:ANALYTICSSCRIPTGA4 at apply time).
+
+Site #8864: gaps found — see above.

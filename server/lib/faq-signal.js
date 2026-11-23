@@ -1,4 +1,5 @@
 import { stripManagedMarkers } from './managed-markers.js';
+import { hasExistingFaqStructure } from './existing-faq.js';
 
 // Cheap regex/structural evidence that a page already has a real, organic
 // (non tool-managed) FAQ/Q&A block — used to decide whether a generator may
@@ -30,5 +31,7 @@ const FAQ_TEXT_PATTERN = /frequently asked questions|\bfaqs?\b/i;
 export function hasOrganicFaqSignal(text) {
   const organic = stripManagedMarkers(text || '');
   return LOOP_QA_PATTERNS.some((re) => re.test(organic)) ||
-    (ACCORDION_KEYWORD_PATTERN.test(organic) && FAQ_TEXT_PATTERN.test(organic));
+    (ACCORDION_KEYWORD_PATTERN.test(organic) && FAQ_TEXT_PATTERN.test(organic)) ||
+    // A Markdown `## FAQ` section with questions, or a faq-classed block (existing-faq.js) — missed before 2026-11-23.
+    hasExistingFaqStructure(organic);
 }

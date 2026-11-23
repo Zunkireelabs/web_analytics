@@ -1,4 +1,5 @@
 import KpiStrip from './layout/KpiStrip.jsx';
+import { healthSubline } from '../lib/health-subline.js';
 
 // Compact top-of-page score strip for AI Growth: Overall (Website Health),
 // SEO (Authority Score), AEO (AI-visibility readiness), GEO (geo-audit).
@@ -29,7 +30,7 @@ export default function GrowthScores({ data, loading }) {
     : undefined;
 
   const items = [
-    { label: 'Overall', value: scoreValue(data?.health?.score), delta: healthDelta, sub: 'Weighted across all agents' },
+    { label: 'Overall', value: scoreValue(data?.health?.score), delta: healthDelta, sub: healthSubline(data?.health) },
     { label: 'SEO', value: scoreValue(data?.authority?.score), sub: captionFor('Backlink authority', data?.authorityMeta) },
     { label: 'AEO', value: scoreValue(data?.aiVisibility?.score), sub: captionFor('AI visibility readiness', data?.aiVisibilityMeta) },
     { label: 'GEO', value: scoreValue(data?.geoAudit?.score), sub: captionFor('Generative engine visibility', data?.geoAuditMeta) },

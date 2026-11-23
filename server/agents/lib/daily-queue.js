@@ -61,6 +61,9 @@ export function buildDailyQueue({
   industryMap = new Map(),
   // The project's growth stage (lib/growth-stage.js growthStageFor), or null. Only read by scoreRecommendation, which bounds it.
   growth = null,
+  // This site's CTR-by-position curve (site-ctr-curve.js), or null for the fixed industry curve. Only read by
+  // scoreRecommendation's ctr-gap demand bonus.
+  ctrCurve = null,
   // Set<findingId> | null — when provided, restricts the analyst lane to
   // recommendations analyst-fusion.js actually fused and shipped as an 'act'
   // verdict (analyst_evidence.finding_id), rather than every recommendation
@@ -75,7 +78,7 @@ export function buildDailyQueue({
   const sizes = groupSizes(candidates);
   const scored = candidates.map((rec) => ({
     rec,
-    ...scoreRecommendation(rec, { pageMetrics, learnedMap, groupSizes: sizes, groupKeyFor, declines, industryMap, growth }),
+    ...scoreRecommendation(rec, { pageMetrics, learnedMap, groupSizes: sizes, groupKeyFor, declines, industryMap, growth, ctrCurve: ctrCurve || undefined }),
   })).sort((a, b) => b.score - a.score);
 
   if (remaining <= 0 || scored.length === 0) {
