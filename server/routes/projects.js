@@ -31,7 +31,8 @@ import { encryptSecret, secretBoxConfigured } from '../lib/secret-box.js';
 import { getProjectGoogleAuth, forgetProjectGoogleAuth } from '../auth/project-google.js';
 import { githubConnectConfigured, newGithubNonce, redirectUriFor as githubRedirectUriFor, buildAuthorizeUrl as buildGithubAuthorizeUrl, exchangeCode as exchangeGithubCode, listUserRepos, GithubConnectError, listRepoBranches, connectAppCredentials, CONNECT_KEY_ENV, describeRepoReadFailure } from '../github/user-auth.js';
 import { buildBusinessConsentUrl, exchangeBusinessCode, listBusinessLocations } from '../integrations/gbp-locations.js';
-import { updateSiteConnection, updateSiteRepoConfig, updateSiteAutoRemediation, setSiteBusinessProfile, getSiteBusinessProfile } from '../db.js';
+import { updateSiteConnection, updateSiteRepoConfig, updateSiteAutoRemediation, setSiteBusinessProfile, getSiteBusinessProfile, patchUrlFileMap } from '../db.js';
+import { isRepoSwitch, applyRepoSwitchReset } from '../lib/repo-switch.js';
 
 // Repo discovery, the config audit and the baseline sequence are loaded only
 // when a connect or baseline request actually runs. They pull in the whole
@@ -1068,6 +1069,7 @@ router.post('/projects/:siteId/connect/github', requireAuth, requireProjectRole(
       }
     }
 
+    const repoBefore = req.project; // the project as it was BEFORE this connect: decides whether this is a move to a different repository
     let site = await updateSiteRepoConfig({
       siteId: req.projectId,
       repoOwner: match.owner,
@@ -1082,6 +1084,21 @@ router.post('/projects/:siteId/connect/github', requireAuth, requireProjectRole(
       ...(mine ? { githubAppId: Number(process.env.GITHUB_CONNECT_APP_ID), githubAppPrivateKeyEnvVar: CONNECT_KEY_ENV } : {}),
     });
     if (mine) delete req.session.githubUser; // the sign-in did its job; nothing of it stays
+
+    // A move to a DIFFERENT repository: what was saved about the old one (map, design profile, templates) no longer describes this repo. Keep it under
+    // _previousRepo, clear it, and let the steps below re-read the design and rebuild the map. See lib/repo-switch.js.
+    if (isRepoSwitch(repoBefore, site)) {
+      try {
+        await applyRepoSwitchReset(req.projectId, { from: `${repoBefore.repo_owner}/${repoBefore.repo_name}`, to: match.fullName }, { patch: patchUrlFileMap });
+        site = (await getSiteById(req.projectId)) || site;
+        await recordAuditEvent(req, {
+          action: 'tenant.repo_switched', targetType: 'site', targetId: String(req.projectId), tenantSiteId: req.projectId, tenantName: site.name,
+          metadata: { workspaceId: req.project.workspace_id, from: `${repoBefore.repo_owner}/${repoBefore.repo_name}`, to: match.fullName, mapKeptUnder: '_previousRepo', selfServe: true }, success: true,
+        });
+      } catch (err) {
+        console.error(`[projects] repo switch cleanup failed for site ${req.projectId}:`, err.message);
+      }
+    }
 
     await recordAuditEvent(req, {
       action: 'tenant.repo_connected', targetType: 'site', targetId: String(req.projectId), tenantSiteId: req.projectId, tenantName: site.name,
