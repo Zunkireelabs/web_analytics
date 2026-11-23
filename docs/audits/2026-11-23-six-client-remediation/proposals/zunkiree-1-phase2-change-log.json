@@ -1,0 +1,107 @@
+{
+  "site": 1,
+  "baseRev": 64,
+  "dryRuns": [
+    {
+      "industry": "education",
+      "action": "meta-title",
+      "ok": true
+    },
+    {
+      "industry": "education",
+      "action": "faq",
+      "ok": true
+    },
+    {
+      "industry": "education",
+      "action": "internal-links",
+      "ok": true
+    },
+    {
+      "industry": "education",
+      "action": "expand-content",
+      "ok": true
+    },
+    {
+      "industry": "education",
+      "action": "qa-content",
+      "ok": true
+    },
+    {
+      "industry": "agencies",
+      "action": "meta-title",
+      "ok": true
+    },
+    {
+      "industry": "agencies",
+      "action": "faq",
+      "ok": true
+    },
+    {
+      "industry": "agencies",
+      "action": "internal-links",
+      "ok": true
+    },
+    {
+      "industry": "agencies",
+      "action": "expand-content",
+      "ok": true
+    },
+    {
+      "industry": "agencies",
+      "action": "qa-content",
+      "ok": true
+    },
+    {
+      "industry": "healthcare",
+      "action": "meta-title",
+      "ok": true
+    },
+    {
+      "industry": "healthcare",
+      "action": "faq",
+      "ok": true
+    },
+    {
+      "industry": "healthcare",
+      "action": "internal-links",
+      "ok": true
+    },
+    {
+      "industry": "healthcare",
+      "action": "expand-content",
+      "ok": true
+    },
+    {
+      "industry": "healthcare",
+      "action": "qa-content",
+      "ok": true
+    },
+    {
+      "industry": "real-estate",
+      "action": "meta-title",
+      "ok": true
+    },
+    {
+      "industry": "real-estate",
+      "action": "faq",
+      "ok": true
+    },
+    {
+      "industry": "real-estate",
+      "action": "internal-links",
+      "ok": true
+    },
+    {
+      "industry": "real-estate",
+      "action": "expand-content",
+      "ok": true
+    },
+    {
+      "industry": "real-estate",
+      "action": "qa-content",
+      "ok": true
+    }
+  ],
+  "problems": []
+}

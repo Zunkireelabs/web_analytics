@@ -54,5 +54,10 @@ Prepared and dry-run (32 of 32 real-data dry-runs), NOT applied: `chayce-8864-ph
 (FAQ with `q`/`a` keys, a structured `relatedPosts` list for internal links, text fields for expanded content and Q&A on the 20 city pages; schema and
 the 5 front-matter pages declared not applicable with reasons). Apply only after the engine here is deployed AND the Chayce template PR is on `main`.
 
+Prepared and dry-run (20 of 20 real-data dry-runs), NOT applied: `zunkiree-1-phase2-industries-map.json`, merged with `--base zunkiree-1-proposed-map.json --engine-deployed`
+(an `/industries/<id>/` pattern: title/description, FAQ, related posts, expanded content and Q&A; schema declared not applicable on the industry and product
+pages because their templates already render it). Apply only after the engine here is deployed AND zunkireelabs-web #153 (the industry template block) is on `main`.
+The industries data fix (zunkireelabs-web #151) is already on `stage`; it must also be on `main`.
+
 Copies of the maps from before the writes (outside git, same reason as the others): `pre-apply-map-8864-rev29.json` and
 `pre-apply-map-8862-rev48-before-phase3.json`.

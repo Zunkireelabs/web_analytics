@@ -151,6 +151,26 @@ describe('planProposal — Chayce phase 2 (city actions, on top of the applied b
   });
 });
 
+describe('planProposal — Zunkiree phase 2 (industries pattern, on top of the applied phase 1)', () => {
+  const base = load('zunkiree-1-proposed-map.json'); const proposed = load('zunkiree-1-phase2-industries-map.json');
+  test('adds one industries pattern with five adapters and two schema declarations, and changes no page entry', () => {
+    const { conflicts, summary, merged } = planProposal(base, clone(base), proposed);
+    assert.deepEqual(conflicts, []);
+    assert.equal(summary.pagesAdded.length + summary.pagesRemoved.length + summary.pagesChanged.length, 0);
+    assert.equal(summary.patternsAfter, summary.patternsBefore + 1);
+    const p = merged.patterns.find((x) => x.match === '^/industries/([^/]+)/?$');
+    assert.deepEqual(Object.keys(p.adapters).sort(), ['expand-content', 'faq', 'internal-links', 'meta-title', 'qa-content']);
+    assert.equal(p.adapters['internal-links'].itemsField, 'relatedPosts');
+    assert.equal(p.adapters.faq.dataFile, 'src/_data/industries.js');
+    assert.deepEqual(merged.notApplicable.map((r) => r.actions), [['schema'], ['schema']]);
+    assert.ok(merged.notApplicable.every((r) => r.reason.length > 20));
+  });
+  test('refuses to run before the engine is deployed', () => {
+    assert.match(checkGuards({ site: 1, proposalName: 'zunkiree-1-phase2-industries-map.json', engineDeployed: false }), /engine change deployed/);
+    assert.equal(checkGuards({ site: 1, proposalName: 'zunkiree-1-phase2-industries-map.json', engineDeployed: true }), null);
+  });
+});
+
 describe('checkGuards', () => {
   test('only sites 1 and 8862 are allowed', () => {
     assert.deepEqual([...ALLOWED_SITES].sort((a, b) => a - b), [1, 8862, 8864]);
