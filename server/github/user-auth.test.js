@@ -91,3 +91,22 @@ test('a message never carries the raw error text or a token', () => {
   const r = describeRepoReadFailure(new GithubConnectError('github_failed', 'GitHub installations failed (401) token=ghu_SECRET', 401));
   assert.doesNotMatch(r.message, /ghu_|token=|installations failed/);
 });
+
+test('listUserRepos also says which installation each repo came from, its repository setting and how many it exposed', async () => {
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/user')) return ok({ login: 'yukta' });
+    if (url.includes('/user/installations?')) return ok({ installations: [
+      { id: 7, app_slug: 'superrank', account: { login: 'Zunkireelabs' }, repository_selection: 'selected', html_url: 'https://github.com/organizations/Zunkireelabs/settings/installations/7' },
+      { id: 8, app_slug: 'superrank', account: { login: 'other' }, repository_selection: 'all', html_url: 'javascript:alert(1)' },
+    ] });
+    if (url.includes('/installations/7/repositories')) return ok({ repositories: [
+      { owner: { login: 'Zunkireelabs' }, name: 'a', full_name: 'Zunkireelabs/a', default_branch: 'main', private: true },
+      { owner: { login: 'Zunkireelabs' }, name: 'b', full_name: 'Zunkireelabs/b', default_branch: 'main', private: true },
+    ] });
+    return ok({ repositories: [] });
+  };
+  const out = await listUserRepos('T', { fetchImpl });
+  const z = out.installations.find((i) => i.account === 'Zunkireelabs');
+  assert.deepEqual([z.app, z.repositorySelection, z.repoCount, z.manageUrl], ['superrank', 'selected', 2, 'https://github.com/organizations/Zunkireelabs/settings/installations/7']);
+  assert.equal(out.installations.find((i) => i.account === 'other').manageUrl, null, 'only an https://github.com link is ever offered');
+});

@@ -341,8 +341,8 @@ router.get('/projects/:siteId/connect/github/mine', requireAuth, requireProjectR
     const g = githubSessionFor(req);
     if (!g) return res.json({ signedIn: false, repos: [], configured: true });
     try {
-      const { login, repos } = await listUserRepos(g.token);
-      res.json({ signedIn: true, configured: true, login, repos, installUrl: process.env.GITHUB_APP_SLUG ? `https://github.com/apps/${process.env.GITHUB_APP_SLUG}/installations/new` : null });
+      const { login, repos, installations } = await listUserRepos(g.token);
+      res.json({ signedIn: true, configured: true, login, repos, installations, installUrl: process.env.GITHUB_APP_SLUG ? `https://github.com/apps/${process.env.GITHUB_APP_SLUG}/installations/new` : null });
     } catch (err) {
       const why = describeRepoReadFailure(err);
       console.warn(`[projects] GitHub repository list failed for site ${req.projectId}: ${err instanceof GithubConnectError ? `${err.code}${err.status ? ` (${err.status})` : ''}` : 'unexpected error'}; ${why.dropSession ? 'sign-in dropped' : 'sign-in kept'}.`);

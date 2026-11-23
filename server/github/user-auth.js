@@ -86,8 +86,17 @@ export async function listUserRepos(token, { fetchImpl = fetch } = {}) {
   const inst = await json(await get(`${API}/user/installations?per_page=100`, token, fetchImpl), 'GitHub installations');
   const rows = [];
   const installations = Array.isArray(inst.installations) ? inst.installations : [];
+  // What was read, so the screen can say WHICH app and WHICH installations the list came from. A list that silently shows only some repos looks
+  // like a stale cache; naming the installation and its repository setting shows it is the installation's own access (and where to change it).
+  const sources = [];
   await Promise.all(installations.map(async (installation) => {
     const account = installation.account?.login || null;
+    const source = {
+      installationId: String(installation.id), app: installation.app_slug || null, account,
+      repositorySelection: installation.repository_selection || null, repoCount: 0,
+      manageUrl: typeof installation.html_url === 'string' && /^https:\/\/github\.com\//.test(installation.html_url) ? installation.html_url : null,
+    };
+    sources.push(source);
     for (let page = 1; ; page += 1) {
       const data = await json(await get(`${API}/user/installations/${installation.id}/repositories?per_page=100&page=${page}`, token, fetchImpl), 'GitHub repositories');
       const repos = data.repositories || [];
@@ -97,11 +106,16 @@ export async function listUserRepos(token, { fetchImpl = fetch } = {}) {
           defaultBranch: r.default_branch || 'main', private: Boolean(r.private),
           installationId: String(installation.id), account,
         });
+        source.repoCount += 1;
       }
       if (repos.length < 100) break;
     }
   }));
-  return { login: who.login || null, repos: rows.sort((a, b) => a.fullName.localeCompare(b.fullName)) };
+  return {
+    login: who.login || null,
+    repos: rows.sort((a, b) => a.fullName.localeCompare(b.fullName)),
+    installations: sources.sort((a, b) => String(a.account).localeCompare(String(b.account))),
+  };
 }
 
 // The branches of one repository, read with the person's own token, so only a repository they can reach
