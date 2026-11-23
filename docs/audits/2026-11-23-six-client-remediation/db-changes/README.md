@@ -37,10 +37,15 @@ After each write the stored map was read back and compared with the approved pro
 | 1 | 1 Zunkiree | `zunkiree-1-proposed-map.json` (12 pages added, 15 removed, 1 changed, 1 pattern added) | 63 -> 64 |
 | 2 | 8862 Admizz | `admizz-8862-phase1-config-only-map.json` (53 pages added, 12 changed) | 46 -> 47 |
 | 3 | 8862 Admizz | `admizz-8862-phase2-needs-engine-map.json` (`{...post}` FAQ adapters, `/answers/*` pattern) | 47 -> 48 |
+| 4 | 8864 Chayce | `chayce-8864-proposed-map.json` (one pattern: `^/blog/([^/]+)/?$` -> `src/blog/$1.md`; newly covers 19 blog posts, changes no page entry) | 29 -> 30 |
 
 Full copies of both maps from just before the first write were saved outside git (they hold client configuration), as
 `pre-apply-map-1-rev63.json` and `pre-apply-map-8862-rev46.json`, in the working scratch folder of the 2026-11-23 session. To reverse a
 site, restore its map from that copy (keeping the then-current `_rev`).
 
 ## 4. No other production write
-Sites 8864, 8871, 8872 and 8874 were not changed.
+Sites 8871, 8872 and 8874 were not changed.
+
+Prepared and dry-run (0 conflicts) but NOT applied, awaiting approval: `admizz-8862-phase3-faq-more-pages-map.json` (FAQ adapter on 19 more
+Admizz pages, applied with `--base admizz-8862-phase2-needs-engine-map.json`). Copy of the Chayce map from before its write:
+`pre-apply-map-8864-rev29.json` (outside git, same reason as the others).

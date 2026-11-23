@@ -1,0 +1,27 @@
+{
+  "site": 8864,
+  "baseRev": 29,
+  "change": "append pattern {\"match\":\"^/blog/([^/]+)/?$\",\"file\":\"src/blog/$1.md\"}",
+  "newlyCovered": [
+    "/blog/avoiding-scams-when-hiring-help-for-an-older-persons-move-uk/",
+    "/blog/care-home-assisted-living-sheltered-housing-or-staying-put-uk/",
+    "/blog/dbs-checked-removals-uk-what-to-ask/",
+    "/blog/difference-between-senior-relocation-and-downsizing-chayce-properties/",
+    "/blog/downsizing-in-northampton-local-help-and-what-to-plan/",
+    "/blog/helping-a-parent-move-home-when-you-live-far-away-uk/",
+    "/blog/how-to-downsize-a-family-home-uk-step-by-step/",
+    "/blog/later-life-relocation-uk-practical-guide/",
+    "/blog/moving-a-parent-into-a-care-home-northampton-local-guide/",
+    "/blog/moving-an-elderly-parent-into-your-home-uk/",
+    "/blog/moving-checklist-for-older-people-uk/",
+    "/blog/moving-day-checklist-uk/",
+    "/blog/moving-house-process-uk-step-by-step/",
+    "/blog/moving-in-northamptonshire-councils-council-tax/",
+    "/blog/moving-into-a-care-home-from-hospital-uk/",
+    "/blog/professional-house-management-and-downsizing-reclaiming-your-life-by-delegating-both/",
+    "/blog/removals-company-for-older-people-near-me-what-to-look-for/",
+    "/blog/retirement-housing-in-northampton-uk-guide/",
+    "/blog/what-to-do-with-furniture-when-downsizing-uk/"
+  ],
+  "problems": []
+}

@@ -83,14 +83,48 @@ describe('planProposal ignores key order (the database re-orders keys inside eac
   });
 });
 
+describe('planProposal — Chayce (site 8864): one blog pattern', () => {
+  const base = load('base-8864.json'); const proposed = load('chayce-8864-proposed-map.json');
+  test('adds exactly one pattern and changes no page entry', () => {
+    const { conflicts, summary, merged } = planProposal(base, clone(base), proposed);
+    assert.deepEqual(conflicts, []);
+    assert.deepEqual([summary.pagesAdded.length, summary.pagesRemoved.length, summary.pagesChanged.length], [0, 0, 0]);
+    assert.equal(summary.patternsAfter, summary.patternsBefore + 1);
+    assert.deepEqual(merged.patterns[merged.patterns.length - 1], { match: '^/blog/([^/]+)/?$', file: 'src/blog/$1.md' });
+  });
+  test('re-running after it is applied is a noop', () => {
+    const first = planProposal(base, clone(base), proposed).merged;
+    assert.equal(planProposal(base, first, proposed).summary.noop, true);
+  });
+});
+
+describe('planProposal — Admizz phase 3 on top of the applied phase 2 (--base)', () => {
+  const base = load('admizz-8862-phase2-needs-engine-map.json'); const proposed = load('admizz-8862-phase3-faq-more-pages-map.json');
+  test('only adds faq adapters to existing entries; no page added or removed; faqSchemaOnly pages stay out', () => {
+    const { conflicts, summary, merged } = planProposal(base, clone(base), proposed);
+    assert.deepEqual(conflicts, []);
+    assert.equal(summary.pagesAdded.length, 0);
+    assert.equal(summary.pagesRemoved.length, 0);
+    assert.ok(summary.pagesChanged.length > 0);
+    for (const u of summary.pagesChanged) assert.equal(merged.pages[u].adapters.faq.id, 'page-data-object', u);
+    for (const u of ['/chevening-scholarship-complete-guide-for-nepali-students', '/janakpur', '/birgunj']) assert.ok(!merged.pages[u].adapters?.faq, u);
+  });
+});
+
 describe('checkGuards', () => {
   test('only sites 1 and 8862 are allowed', () => {
-    assert.deepEqual([...ALLOWED_SITES].sort(), [1, 8862]);
-    assert.match(checkGuards({ site: 8864, proposalName: 'zunkiree-1-proposed-map.json' }), /not allowed/);
+    assert.deepEqual([...ALLOWED_SITES].sort((a, b) => a - b), [1, 8862, 8864]);
+    assert.match(checkGuards({ site: 8871, proposalName: 'zunkiree-1-proposed-map.json' }), /not allowed/);
+    assert.match(checkGuards({ site: 8874, proposalName: 'chayce-8864-proposed-map.json' }), /not allowed/);
   });
   test('a proposal cannot be applied to the wrong site (multi-tenant isolation)', () => {
     assert.match(checkGuards({ site: 1, proposalName: 'admizz-8862-phase1-config-only-map.json' }), /does not belong to site 1/);
     assert.match(checkGuards({ site: 8862, proposalName: 'zunkiree-1-proposed-map.json' }), /does not belong to site 8862/);
+  });
+  test('a Chayce proposal only applies to site 8864, and other proposals not to 8864', () => {
+    assert.equal(checkGuards({ site: 8864, proposalName: 'chayce-8864-proposed-map.json' }), null);
+    assert.match(checkGuards({ site: 8864, proposalName: 'zunkiree-1-proposed-map.json' }), /does not belong to site 8864/);
+    assert.match(checkGuards({ site: 1, proposalName: 'chayce-8864-proposed-map.json' }), /does not belong to site 1/);
   });
   test('phase 2 refuses without --engine-deployed', () => {
     assert.match(checkGuards({ site: 8862, proposalName: 'admizz-8862-phase2-needs-engine-map.json', engineDeployed: false }), /engine change deployed/);
