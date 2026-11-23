@@ -172,6 +172,18 @@ function partitionPreDraftBlocked(rows, fileContentFor) {
   return { blocked, stillFatal };
 }
 
+// One line per classifyNginxMarker() status. Built per status on purpose: an object literal of all four would evaluate the
+// `blocked` text (which reads nginx.locations) for every status and throw whenever the marker is present or self-healing.
+function describeNginxMarker(nginx) {
+  switch (nginx.status) {
+    case 'present': return 'present';
+    case 'self-heals': return 'marker missing but self-healing (the implementer inserts it into the serving server block at apply time)';
+    case 'blocked': return `marker missing; a security-headers draft would be REFUSED (${nginx.reason}): ${(nginx.locations || []).slice(0, 4).join(', ')} set their own add_header, so nginx would not inherit server-level headers there. Not a config gap — restructure those locations first, or leave headers as they are if the required headers are already served`;
+    case 'fatal': return `MISSING (fatal: ${nginx.reason} — no serving server { } block to place it in)`;
+    default: return `unknown status ${nginx.status}`;
+  }
+}
+
 function parseArgs(argv) {
   const flags = {};
   for (let i = 0; i < argv.length; i++) {
@@ -679,12 +691,7 @@ export async function auditSite(siteId, { record = true } = {}) {
       // Only a marker the engine genuinely cannot place counts as a gap. `self-heals` is created at apply
       // time; `blocked` is an intentional safety refusal (reported loudly, but nothing to configure).
       nginxMarkerOk = nginx.status === 'fatal' ? false : true;
-      const line = {
-        present: 'present',
-        'self-heals': 'marker missing but self-healing (the implementer inserts it into the serving server block at apply time)',
-        blocked: `marker missing; a security-headers draft would be REFUSED (${nginx.reason}): ${nginx.locations.slice(0, 4).join(', ')} set their own add_header, so nginx would not inherit server-level headers there. Not a config gap — restructure those locations first, or leave headers as they are if the required headers are already served`,
-        fatal: `MISSING (fatal: ${nginx.reason} — no serving server { } block to place it in)`,
-      }[nginx.status];
+      const line = describeNginxMarker(nginx);
       console.log(`\n-- NGINX SECURITY-HEADERS MARKER (${nginxPath}) -- ${line}`);
     } catch (err) {
       console.warn(`\n-- NGINX SECURITY-HEADERS MARKER (${nginxPath}) -- could not check: ${err.message}`);
@@ -817,4 +824,4 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   });
 }
 
-export const __testables = { partitionPreDraftBlocked, targetRendersCode, classifyNginxMarker, summarizeExistingTracking, fileForAction, looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent };
+export const __testables = { describeNginxMarker, partitionPreDraftBlocked, targetRendersCode, classifyNginxMarker, summarizeExistingTracking, fileForAction, looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent };

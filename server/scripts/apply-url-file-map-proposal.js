@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import path from 'path';
-import { merge3 } from '../lib/json-merge3.js';
+import { merge3, stableStringify } from '../lib/json-merge3.js';
 
 // Applies a REVIEWED url_file_map proposal (docs/audits/2026-11-23-six-client-remediation/proposals/) to ONE site,
 // merged onto the map as it is NOW — never by replacing the map with an old snapshot. It is a three-way merge:
@@ -25,7 +25,8 @@ export const PROPOSAL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.
 export const ALLOWED_SITES = new Set([1, 8862]);
 
 const keys = (o) => Object.keys(o || {});
-const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// Key-order independent: the database stores JSON with its own key order, so a plain JSON.stringify compare reports identical entries as changed.
+const same = (a, b) => stableStringify(a) === stableStringify(b);
 
 export function planProposal(base, current, proposed) {
   const { merged, conflicts } = merge3(base, current, proposed);

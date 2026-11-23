@@ -27,6 +27,20 @@ recorded, so they cannot be restored.
 `audit-url-file-map.js --no-record` skips the write. The three later audits on the production server used a copy of the script with the
 write removed (verified before running); no further writes occurred.
 
-## 3. No other production write
-All map changes in `../proposals/` are NOT applied. They are applied only by `server/scripts/apply-url-file-map-proposal.js --apply`,
-after review, one site at a time.
+## 3. url_file_map applies (approved by the owner, after PR #247 was merged and deployed)
+Run from a clean clone of `main` with `server/scripts/apply-url-file-map-proposal.js --apply`, one site and phase at a time, each after a
+dry-run showing 0 conflicts. The merge is three-way onto the map as it was at the moment of the write (row-locked, `patchUrlFileMap`).
+After each write the stored map was read back and compared with the approved proposal (key order and `_rev` ignored): identical.
+
+| order | site | proposal | stored rev before -> after |
+|---|---|---|---|
+| 1 | 1 Zunkiree | `zunkiree-1-proposed-map.json` (12 pages added, 15 removed, 1 changed, 1 pattern added) | 63 -> 64 |
+| 2 | 8862 Admizz | `admizz-8862-phase1-config-only-map.json` (53 pages added, 12 changed) | 46 -> 47 |
+| 3 | 8862 Admizz | `admizz-8862-phase2-needs-engine-map.json` (`{...post}` FAQ adapters, `/answers/*` pattern) | 47 -> 48 |
+
+Full copies of both maps from just before the first write were saved outside git (they hold client configuration), as
+`pre-apply-map-1-rev63.json` and `pre-apply-map-8862-rev46.json`, in the working scratch folder of the 2026-11-23 session. To reverse a
+site, restore its map from that copy (keeping the then-current `_rev`).
+
+## 4. No other production write
+Sites 8864, 8871, 8872 and 8874 were not changed.
