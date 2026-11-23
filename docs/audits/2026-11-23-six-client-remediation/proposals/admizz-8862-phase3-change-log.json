@@ -1,0 +1,63 @@
+{
+  "site": 8862,
+  "baseRev": 48,
+  "faqRowsInAudit": 26,
+  "eligible": [
+    "/study-in-south-korea-from-nepal",
+    "/study-abroad-visa-costs-compared-uk-usa-canada-australia-2026",
+    "/usa-f1-visa-interview-opt-nepali-students-2026",
+    "/uk-graduate-visa-18-months-from-2027-nepali-students",
+    "/australia-student-visa-subclass-500",
+    "/australia-student-visa-cost-funds-2026-27-nepali-students",
+    "/canada-study-costs-gic-pgwp-2026-nepali-students",
+    "/australia-student-visa-changes-october-2026-nepali-students",
+    "/proof-of-funds-study-abroad-nepal-2026",
+    "/us-f1-september-15-deadline-2026",
+    "/post-study-work-options-uk-canada-usa-australia-nepali-students-2026",
+    "/top-education-consultancy-nepal-2026-how-to-compare",
+    "/scholarship-application-tips-essay-resume-mistakes-nepali-students",
+    "/canada-study-permit-cap-2026-nepali-students",
+    "/us-f1-duration-of-status-ended-2026",
+    "/online-application-vs-application-through-direct-consultancy",
+    "/uk-international-student-levy-2028-nepali-students",
+    "/how-to-choose-genuine-education-consultancy-nepal-2026",
+    "/h1b-wage-weighted-lottery-2026-nepali-students-opt"
+  ],
+  "refused": [
+    {
+      "url": "/chevening-scholarship-complete-guide-for-nepali-students",
+      "file": "src/app/chevening-scholarship-complete-guide-for-nepali-students/page.tsx",
+      "why": "faq-schema-only: src/app/chevening-scholarship-complete-guide-for-nepali-students/page.tsx: this page sets \"faqSchemaOnly\": tru"
+    },
+    {
+      "url": "/uk-student-visa-dependants-rules-2027",
+      "file": "src/app/uk-student-visa-dependants-rules-2027/page.tsx",
+      "why": "faq-schema-only: src/app/uk-student-visa-dependants-rules-2027/page.tsx: this page sets \"faqSchemaOnly\": true — its visible FAQ"
+    },
+    {
+      "url": "/janakpur",
+      "file": "src/app/janakpur/page.tsx",
+      "why": "no-insertion-marker: src/app/janakpur/page.tsx: Found \"data={janakpurData}\" but no local \"const janakpurData = {...}\" declaration i"
+    },
+    {
+      "url": "/bank-balance-required-uk-student-visa-2027",
+      "file": "src/app/bank-balance-required-uk-student-visa-2027/page.tsx",
+      "why": "faq-schema-only: src/app/bank-balance-required-uk-student-visa-2027/page.tsx: this page sets \"faqSchemaOnly\": true — its visibl"
+    },
+    {
+      "url": "/germany-scholarships-nepali-students-daad-2027",
+      "file": "src/app/germany-scholarships-nepali-students-daad-2027/page.tsx",
+      "why": "faq-schema-only: src/app/germany-scholarships-nepali-students-daad-2027/page.tsx: this page sets \"faqSchemaOnly\": true — its vi"
+    },
+    {
+      "url": "/birgunj",
+      "file": "src/app/birgunj/page.tsx",
+      "why": "no-insertion-marker: src/app/birgunj/page.tsx: Found \"data={birgunjData}\" but no local \"const birgunjData = {...}\" declaration in t"
+    },
+    {
+      "url": "/uk-scholarships-for-Nepalese-students-2027",
+      "file": "src/app/uk-scholarships-for-Nepalese-students-2027/page.tsx",
+      "why": "faq-schema-only: src/app/uk-scholarships-for-Nepalese-students-2027/page.tsx: this page sets \"faqSchemaOnly\": true — its visibl"
+    }
+  ]
+}

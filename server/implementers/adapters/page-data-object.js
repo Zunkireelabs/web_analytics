@@ -2,7 +2,7 @@ import { getFileContent } from '../../github/client.js';
 import { pushDraftBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from '../lib/github-ops.js';
 import { resolveAdapter, resolveFile } from '../lib/url-file-map.js';
 import {
-  scanBalanced, findArrayFieldRange, spliceMarkedArray, parseManagedFaqItems,
+  scanBalanced, findArrayFieldRange, findObjectFieldRange, spliceMarkedArray, parseManagedFaqItems,
   dedupeAndValidateFaqItems, diffFaqItems,
 } from './lib/js-data-splice.js';
 import { openPrWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer.js';
@@ -39,6 +39,14 @@ import { openPrWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer
 // resolves a real file (this adapter changes HOW the edit is made, not
 // which file).
 
+// A SECOND, explicit mode for pages whose content object is NOT declared in the page file but imported from a data module
+// (Admizz's city pages: `import { birgunjData } from "@/data/cities/birgunj"`, FAQ at `faq.items` as { q, a }). Opt-in per page, nothing
+// is inferred or followed automatically:
+//   { "id": "page-data-object", "dataFile": "src/data/cities/birgunj.ts", "exportName": "birgunjData",
+//     "itemsPath": ["faq", "items"], "itemKeys": { "question": "q", "answer": "a" } }
+// `dataFile` must be a plain repo-relative source path (no `..`, no leading slash), `exportName` and every `itemsPath` segment a plain
+// identifier. The edit is the same AI-managed region as everywhere else, written with the data file's own item key names. Without
+// `dataFile` the adapter behaves exactly as before.
 export const meta = {
   id: 'page-data-object',
   description: 'Writes faq items into a Next.js page\'s own local `const <var> = {...}` data object (the one passed as `data={...}` to a shared template component), for pages whose real content is data-shaped rather than JSX body content.',
@@ -61,6 +69,47 @@ const FAQ_SCHEMA_ONLY_PATTERN = /["']?faqSchemaOnly["']?\s*:\s*true\b/;
 // object" shape findMetadataObjectRange (nextjs-metadata-export.js) uses
 // for `export const metadata`, just starting from a JSX prop instead of an
 // export name.
+const DATA_FILE_RE = /^(?!\/)(?!.*\.\.)[A-Za-z0-9_@./-]+\.(?:ts|tsx|js|jsx|mjs)$/;
+const IDENT_RE = /^[A-Za-z_$][\w$]*$/;
+
+// Validates the explicit dataFile mode config. Returns { mode: 'local' } when there is no dataFile (the original behaviour).
+export function readDataFileConfig(config) {
+  if (!config || config.dataFile === undefined) return { ok: true, mode: 'local' };
+  if (typeof config.dataFile !== 'string' || !DATA_FILE_RE.test(config.dataFile)) return { ok: false, error: `page-data-object "dataFile" must be a plain repo-relative .ts/.tsx/.js/.jsx/.mjs path (no "..", no leading slash); got ${JSON.stringify(config.dataFile)}.` };
+  if (typeof config.exportName !== 'string' || !IDENT_RE.test(config.exportName)) return { ok: false, error: '"exportName" must be the exported object\'s identifier.' };
+  const path = config.itemsPath === undefined ? ['faqItems'] : config.itemsPath;
+  if (!Array.isArray(path) || !path.length || path.length > 4 || !path.every((x) => typeof x === 'string' && IDENT_RE.test(x))) return { ok: false, error: '"itemsPath" must be 1 to 4 plain property names, e.g. ["faq", "items"].' };
+  const keys = config.itemKeys === undefined ? { question: 'question', answer: 'answer' } : config.itemKeys;
+  if (!keys || !IDENT_RE.test(keys.question || '') || !IDENT_RE.test(keys.answer || '') || keys.question === keys.answer) return { ok: false, error: '"itemKeys" must name two different properties, e.g. { "question": "q", "answer": "a" }.' };
+  return { ok: true, mode: 'dataFile', dataFile: config.dataFile, exportName: config.exportName, itemsPath: path, keys: { question: keys.question, answer: keys.answer } };
+}
+
+// Where a draft for this page is written, for the PR/rollback steps that only need the path.
+export function targetFilePath(site, page) {
+  const cfg = readDataFileConfig(resolveAdapter(site, page, 'faq'));
+  if (cfg.ok && cfg.mode === 'dataFile') return cfg.dataFile;
+  return resolveFile(site, page);
+}
+
+// The exported `const <name> = {...}` object in a data module, then the array at `itemsPath` inside it (walking nested objects).
+function findExportedItemsArray(content, cfg) {
+  const decl = new RegExp(`const\\s+${cfg.exportName}\\s*(?::\\s*[\\w.<>[\\], ]+)?\\s*=\\s*\\{`).exec(content);
+  if (!decl) return { error: `no "const ${cfg.exportName} = {...}" declaration in ${cfg.dataFile}.` };
+  const braceStart = decl.index + decl[0].length - 1;
+  const end = scanBalanced(content, braceStart + 1, '{', '}');
+  if (end === -1) return { error: `could not find the closing brace of ${cfg.exportName}.` };
+  let obj = { start: braceStart, end };
+  for (const seg of cfg.itemsPath.slice(0, -1)) {
+    const next = findObjectFieldRange(content, obj, seg);
+    if (!next) return { error: `"${seg}" is not an object property of ${cfg.exportName} (path ${cfg.itemsPath.join('.')}).` };
+    obj = next;
+  }
+  const last = cfg.itemsPath[cfg.itemsPath.length - 1];
+  const arr = findArrayFieldRange(content, obj, last);
+  if (!arr) return { error: `${cfg.exportName}.${cfg.itemsPath.join('.')} is not an existing array in ${cfg.dataFile}.` };
+  return { objRange: { start: braceStart, end }, arrayRange: arr };
+}
+
 function findPageDataObjectRange(content) {
   const propMatch = DATA_PROP_PATTERN.exec(content) || SPREAD_PROP_PATTERN.exec(content);
   if (!propMatch) return { range: null, varName: null, error: 'No JSX element in this file passes a `data={...}` prop (or a `{...obj}` spread) to a template component.' };
@@ -87,7 +136,10 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
   const config = resolveAdapter(site, page, draft.action_type);
   if (!config) return { ok: false, reason: 'no-file-mapping', error: `No page-data-object adapter route configured for ${page} / ${draft.action_type}` };
 
-  const filePath = resolveFile(site, page);
+  const dataCfg = readDataFileConfig(config);
+  if (!dataCfg.ok) return { ok: false, reason: 'invalid-config', error: dataCfg.error };
+
+  const filePath = dataCfg.mode === 'dataFile' ? dataCfg.dataFile : resolveFile(site, page);
   if (!filePath) return { ok: false, reason: 'no-file-mapping', error: `No url_file_map file mapping for ${page}` };
 
   const validated = dedupeAndValidateFaqItems(draft.content?.items);
@@ -95,6 +147,22 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
 
   const file = await fetchFile(site, filePath, beforeRef);
   if (!file) return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${beforeRef}".` };
+
+  if (dataCfg.mode === 'dataFile') {
+    const found = findExportedItemsArray(file.content, dataCfg);
+    if (found.error) return { ok: false, reason: 'no-insertion-marker', error: `${filePath}: ${found.error}` };
+    if (FAQ_SCHEMA_ONLY_PATTERN.test(file.content.slice(found.objRange.start, found.objRange.end))) {
+      return { ok: false, reason: 'faq-schema-only', error: `${filePath}: this data sets "faqSchemaOnly": true — its visible FAQ is hand-written, so a visible-FAQ draft cannot be applied. Edit it by hand.` };
+    }
+    const existingItems = parseManagedFaqItems(file.content.slice(found.arrayRange.start, found.arrayRange.end), 'js-export-array', dataCfg.keys);
+    const newContent = spliceMarkedArray(file.content, found.arrayRange, validated.items, 'js-export-array', dataCfg.keys);
+    return {
+      ok: true, filePath, oldContent: file.content, newContent,
+      changedRegions: [{ field: dataCfg.itemsPath.join('.'), markerName: 'AI-managed', before: '(previously AI-added items)', after: JSON.stringify(validated.items) }],
+      faqDiff: diffFaqItems(existingItems, validated.items),
+      renderMode: 'visible',
+    };
+  }
 
   const { range: objRange, error: objError } = findPageDataObjectRange(file.content);
   if (!objRange) return { ok: false, reason: 'no-insertion-marker', error: `${filePath}: ${objError}` };
@@ -143,14 +211,14 @@ export async function apply(site, draft) {
 
 export async function mergeToStage(site, draft) {
   const page = draft.content?.page || draft.input?.page;
-  const filePath = resolveFile(site, page);
+  const filePath = targetFilePath(site, page);
   return openPrWithSnapshot(site, draft, filePath);
 }
 
 export async function rollback(site, draft) {
   const page = draft.content?.page || draft.input?.page;
-  const filePath = resolveFile(site, page);
+  const filePath = targetFilePath(site, page);
   return rollbackFromSnapshot(site, draft, filePath);
 }
 
-export const __testables = { findPageDataObjectRange };
+export const __testables = { findPageDataObjectRange, findExportedItemsArray, readDataFileConfig, targetFilePath };

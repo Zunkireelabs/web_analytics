@@ -51,6 +51,36 @@ export function templateDrivenBodyBlock(fileContent, generatorId, file) {
   return `${file} contains no page markup of its own — it hands a data object to a shared component, so "${generatorId}" edits (which match HTML in the file) cannot be located. The content lives in that data object or in a content file; this needs a writer for that data, not a markup edit.`;
 }
 
+// A page whose file only hands a data object to a shared component also gets its structured data FROM that component (Admizz's
+// CountryPageTemplate / GeneratedBlogPost emit BlogPosting, Breadcrumb and FAQPage themselves), so a "schema" draft has no anchor in the
+// file and would, at best, duplicate what the template already emits. Same detection as templateDrivenBodyBlock; the apply path already
+// refused these safely, this states it before any draft exists.
+export function templateEmitsSchemaBlock(fileContent, generatorId, file) {
+  if (generatorId !== 'schema' || typeof fileContent !== 'string') return null;
+  const handsDataToComponent = /<[A-Z][\w.]*\s[^>]*(\bdata=\{\w+\}|\{\.\.\.\w+\})/.test(fileContent);
+  const ownMarkup = /<(h[1-6]|p|section|article|ul|ol|table|div)[\s>]/.test(fileContent);
+  if (!handsDataToComponent || ownMarkup) return null;
+  return `${file} contains no page markup of its own — it hands a data object to a shared component, and that component already emits this page's structured data (JSON-LD). A "schema" draft has nowhere to be written and would duplicate what the template renders.`;
+}
+
+// A page that sets `faqSchemaOnly: true` renders NO visible FAQ from its data: its questions are written by hand in the body and the
+// data array only feeds the FAQPage schema. A visible-FAQ draft (faq, qa-content) would publish a second, different FAQ or schema with
+// nothing on the page to match it.
+const FAQ_SCHEMA_ONLY_RE = /["']?faqSchemaOnly["']?\s*:\s*true\b/;
+export function faqSchemaOnlyBlock(fileContent, generatorId, file) {
+  if (!['faq', 'qa-content'].includes(generatorId) || typeof fileContent !== 'string') return null;
+  if (!FAQ_SCHEMA_ONLY_RE.test(fileContent)) return null;
+  return `${file} sets "faqSchemaOnly": true — its visible FAQ is written by hand in the page body and its data only feeds the FAQPage schema, so a "${generatorId}" draft would add a second, different FAQ. Edit that FAQ by hand.`;
+}
+
+// Everything the gate and the audit both know BEFORE any draft exists about a page whose file cannot take this action. One function so
+// the audit's "already blocked" bucket can never drift from what the gate really refuses.
+export function preDraftContentBlock(fileContent, generatorId, file) {
+  return templateDrivenBodyBlock(fileContent, generatorId, file)
+    || templateEmitsSchemaBlock(fileContent, generatorId, file)
+    || faqSchemaOnlyBlock(fileContent, generatorId, file);
+}
+
 export function actionScopeFor(generatorId) {
   return GLOBAL_BY_DESIGN.has(generatorId) ? 'global-by-design' : 'page-specific';
 }

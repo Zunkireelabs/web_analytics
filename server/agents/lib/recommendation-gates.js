@@ -1,7 +1,7 @@
-import { sharedTemplateTargetBlock, templateDrivenBodyBlock } from '../../implementers/lib/action-scope.js';
+import { sharedTemplateTargetBlock, templateDrivenBodyBlock, templateEmitsSchemaBlock, faqSchemaOnlyBlock } from '../../implementers/lib/action-scope.js';
 import { ensureMeasurementId, needsInputMessage, isMeasurementId } from '../../lib/ga4-measurement-id.js';
 import { generatedPageBlockReason } from './page-type.js';
-import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget } from '../../implementers/lib/url-file-map.js';
+import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget, resolveNotApplicable, resolveNewContentNotApplicable } from '../../implementers/lib/url-file-map.js';
 import { hasExistingFaqSchema, INSPECTABLE_ACTION_TYPES } from '../../implementers/lib/render-inspector.js';
 import { templateRendersItemsField } from '../../implementers/lib/faq-render-mode.js';
 import { componentTemplateVerification, componentTemplateActionTypeFor, getDesignProfile } from '../../implementers/lib/design-drift.js';
@@ -416,6 +416,9 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     if (!site) return { drop: null, blockedReason: null };
     const page = params?.page;
 
+    // The site's own map says this action does not apply to this page (its template already provides it). Nothing to draft, nothing to block.
+    if (page && resolveNotApplicable(site, page, generatorId)) return { drop: 'declared-not-applicable', blockedReason: null };
+
     // GA4 install needs the MEASUREMENT id (G-…), which is not the property id a connected analytics account stores. Resolve it
     // here, before anything is drafted: stored, else discovered from the connected property's web data stream. When it cannot be
     // found the recommendation is BLOCKED with the exact thing needed (a "needs input" card, not an endless retry), and it clears
@@ -450,6 +453,8 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     // actionType this pass, see healNewContentTarget) -> re-check. Same
     // "classify, heal, re-check" shape as the page-mapping gate below.
     let mappingBlockedReason = null;
+    // The site says it builds this kind of page by hand and does not create it through SuperRank: nothing to heal, nothing to block.
+    if (FRONTEND_ACTION_TYPES.has(generatorId) && resolveNewContentNotApplicable(site, generatorId)) return { drop: 'declared-not-applicable', blockedReason: null };
     if (FRONTEND_ACTION_TYPES.has(generatorId) && !resolveNewContentTarget(site, generatorId, 'probe')) {
       await healNewContentTarget(generatorId);
     }
@@ -564,8 +569,10 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
         // same dead end at apply time — see store/drafts.js's redraft-churn
         // comment (24 attempts across 6 findings historically for exactly
         // this failure).
-        const templateDriven = file ? templateDrivenBodyBlock(file.content, generatorId, filePath) : null;
+        const templateDriven = file ? (templateDrivenBodyBlock(file.content, generatorId, filePath) || templateEmitsSchemaBlock(file.content, generatorId, filePath)) : null;
         if (templateDriven && !resolveAdapter(site, page, generatorId)) return { drop: null, blockedReason: templateDriven };
+        const schemaOnlyFaq = file ? faqSchemaOnlyBlock(file.content, generatorId, filePath) : null;
+        if (schemaOnlyFaq && !resolveAdapter(site, page, generatorId)) return { drop: 'page-has-own-faq', blockedReason: null };
         if (file && INSPECTABLE_ACTION_TYPES.includes(generatorId) && hasExistingFaqSchema(file.content)) {
           return { drop: 'faq-schema-already-present', blockedReason: null };
         }

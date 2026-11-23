@@ -134,6 +134,11 @@ export function detectMention(rawResponse, companyName, domain) {
   return false;
 }
 
+// Whether a probe PROMPT already names the company or its domain (the same whole-word match detectMention uses on answers).
+export function promptNamesCompany(promptText, companyName, domain) {
+  return detectMention(String(promptText ?? ''), companyName, domain);
+}
+
 // The same deterministic ground-truth discipline detectMention applies to
 // THIS company, applied to the competitor names the extraction LLM reports.
 // competitorsMentioned came straight out of provider.extract() with no check
@@ -276,7 +281,10 @@ export async function run({ siteId, start, end }) {
   await Promise.all(candidates.map((c) => upsertTrackedPrompt(siteId, c.promptText, c.source)
     .catch((err) => console.error('[agents] ai-recommendation: failed to upsert prompt:', err.message))));
 
-  const active = await listActivePrompts(siteId);
+  // A prompt that already names the company ("What is Zunkiree Labs?") is not a visibility test: any answer repeats the name,
+  // so it counts as a "mention" without proving anyone recommends the company to a buyer who does not know it. Only prompts a
+  // stranger would ask are probed, and only those can raise the mention count.
+  const active = (await listActivePrompts(siteId)).filter((p) => !promptNamesCompany(p.prompt_text, site.name, domain));
   if (!active.length) {
     return {
       meta, status: 'insufficient-data', facts: null, narrative: null,

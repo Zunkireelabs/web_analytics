@@ -198,7 +198,7 @@ describe('POST /workspaces/:id/projects', () => {
       userId: ADMIN, params: { id: '7' }, body: { name: '  Acme Blog ', websiteDomain: 'https://Blog.Acme.com/path', workspaceId: 8 },
     });
     assert.equal(res.statusCode, 201);
-    assert.deepEqual(calls.projects[0], { workspaceId: 7, name: 'Acme Blog', websiteDomain: 'blog.acme.com', timezone: undefined });
+    assert.deepEqual(calls.projects[0], { workspaceId: 7, name: 'Acme Blog', websiteDomain: 'blog.acme.com', timezone: undefined, scopeIncludePaths: [], scopeExcludePaths: [] });
   });
 
   test('requires a name', async () => {

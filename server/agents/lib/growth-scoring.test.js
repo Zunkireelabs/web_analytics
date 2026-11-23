@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { scoreRecommendation, demandScore, breadthScore, confidenceScore, buildPageMetrics } from './growth-scoring.js';
+import { scoreRecommendation, demandScore, breadthScore, confidenceScore, buildPageMetrics, visibilityFirstEnabled, visibilityScore, VISIBILITY_BONUS, VISIBILITY_TYPES } from './growth-scoring.js';
 import { SEVERITY_TIER } from './severity-tiers.js';
 
 function rec(overrides = {}) {
@@ -203,5 +203,44 @@ describe('buildPageMetrics — aggregates per-(query,page) rows into per-page me
   test('empty input returns an empty map', () => {
     assert.equal(buildPageMetrics([]).size, 0);
     assert.equal(buildPageMetrics(undefined).size, 0);
+  });
+});
+
+describe('AI visibility first — lifts inside a tier, never across one', () => {
+  test('off unless the caller asks: scores are identical to before', () => {
+    for (const t of VISIBILITY_TYPES) {
+      assert.equal(scoreRecommendation(rec({ recommendation_type: t })).score, scoreRecommendation(rec({ recommendation_type: t }), { visibilityFirst: false }).score);
+    }
+  });
+
+  test('an AI-visibility type beats another type of the SAME tier, and says why', () => {
+    const faq = scoreRecommendation(rec({ recommendation_type: 'faq' }), { visibilityFirst: true });
+    const other = scoreRecommendation(rec({ recommendation_type: 'heading-structure' }), { visibilityFirst: true });
+    assert.equal(faq.tier, other.tier);
+    assert.ok(faq.score > other.score);
+    assert.ok(faq.factors.some((f) => /AI visibility first/.test(f)));
+  });
+
+  test('every critical technical fix still outranks a boosted visibility item', () => {
+    const critical = scoreRecommendation(rec({ recommendation_type: 'canonical' }), { visibilityFirst: true });
+    const boosted = scoreRecommendation(rec({ recommendation_type: 'meta-title', supporting_agents: ['a', 'b', 'c'], finding_ids: ['f1', 'f2', 'f3'] }), {
+      visibilityFirst: true,
+      pageMetrics: new Map([['/p', { impressions: 1_000_000, avgPosition: 11, ctr: 0.001 }]]),
+      learnedMap: new Map([['meta-title', { confidence: 1, impactConfidence: 1 }]]),
+    });
+    assert.ok(critical.score > boosted.score, `critical ${critical.score} must exceed boosted ${boosted.score}`);
+  });
+
+  test('the bonus is far below one tier step and only applies to the listed types', () => {
+    assert.ok(VISIBILITY_BONUS < 1000);
+    assert.equal(visibilityScore(rec({ recommendation_type: 'canonical' }), true).score, 0);
+    assert.equal(visibilityScore(rec({ recommendation_type: 'faq' }), false).score, 0);
+    assert.equal(visibilityScore(rec({ recommendation_type: 'faq' }), true).score, VISIBILITY_BONUS);
+  });
+
+  test('on by default, off with AI_VISIBILITY_FIRST=false', () => {
+    assert.equal(visibilityFirstEnabled({}), true);
+    assert.equal(visibilityFirstEnabled({ AI_VISIBILITY_FIRST: 'false' }), false);
+    assert.equal(visibilityFirstEnabled({ AI_VISIBILITY_FIRST: 'true' }), true);
   });
 });

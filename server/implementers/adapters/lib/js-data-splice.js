@@ -527,12 +527,16 @@ export function insertNewObjectField(content, objRange, fieldName, newValue, for
 const MARKER_START = '/* SEOAI:FAQ:START */';
 const MARKER_END = '/* SEOAI:FAQ:END */';
 
-function renderItemsAsJsObjectLiterals(items, indent) {
-  return items.map((qa) => `${indent}{ question: ${JSON.stringify(qa.question)}, answer: ${JSON.stringify(qa.answer)} },`).join('\n');
+// `keys` renames the two properties written for each item ({ question, answer } by default). A data file that stores its FAQ as
+// { q, a } passes { question: 'q', answer: 'a' } so the new items match the shape its template already reads.
+const DEFAULT_ITEM_KEYS = { question: 'question', answer: 'answer' };
+const mapItemKeys = (items, keys) => (keys === DEFAULT_ITEM_KEYS ? items : items.map((it) => ({ [keys.question]: it.question, [keys.answer]: it.answer })));
+function renderItemsAsJsObjectLiterals(items, indent, keys = DEFAULT_ITEM_KEYS) {
+  return items.map((qa) => `${indent}{ ${keys.question}: ${JSON.stringify(qa.question)}, ${keys.answer}: ${JSON.stringify(qa.answer)} },`).join('\n');
 }
 
-function spliceMarkedArrayComment(content, arrayRange, items) {
-  const itemsSource = renderItemsAsJsObjectLiterals(items, '      ');
+function spliceMarkedArrayComment(content, arrayRange, items, keys) {
+  const itemsSource = renderItemsAsJsObjectLiterals(items, '      ', keys);
   const interior = content.slice(arrayRange.start, arrayRange.end);
   if (interior.includes(MARKER_START)) {
     const blockRe = new RegExp(`${escapeRegExp(MARKER_START)}[\\s\\S]*?${escapeRegExp(MARKER_END)}`);
@@ -547,8 +551,8 @@ function spliceMarkedArrayComment(content, arrayRange, items) {
   return content.slice(0, insertPoint) + insertion + content.slice(arrayRange.end);
 }
 
-function insertNewArrayFieldComment(content, objRange, fieldName, items) {
-  const itemsSource = renderItemsAsJsObjectLiterals(items, '      ');
+function insertNewArrayFieldComment(content, objRange, fieldName, items, keys = DEFAULT_ITEM_KEYS) {
+  const itemsSource = renderItemsAsJsObjectLiterals(items, '      ', keys);
   const interior = content.slice(objRange.start + 1, objRange.end);
   const trimmed = interior.replace(/\s+$/, '');
   const needsComma = trimmed.length > 0 && !trimmed.endsWith(',');
@@ -558,9 +562,9 @@ function insertNewArrayFieldComment(content, objRange, fieldName, items) {
   return content.slice(0, insertPoint) + insertion + content.slice(objRange.end);
 }
 
-function parseManagedFaqItemsComment(arrayInterior) {
+function parseManagedFaqItemsComment(arrayInterior, keys) {
   const m = new RegExp(`${escapeRegExp(MARKER_START)}([\\s\\S]*?)${escapeRegExp(MARKER_END)}`).exec(arrayInterior);
-  return m ? parseExistingFaqItems(m[1], 'js-export-array') : [];
+  return m ? parseExistingFaqItems(m[1], 'js-export-array', keys) : [];
 }
 
 // ---- json-array: sentinel-field-based splice (JSON has no comment syntax to anchor on) ----
@@ -595,10 +599,12 @@ function insertNewArrayFieldJson(content, objRange, fieldName, newAiItems, inden
   return content.slice(0, insertPoint) + insertion + content.slice(objRange.end);
 }
 
-function parseManagedFaqItemsJson(arrayInterior) {
+function parseManagedFaqItemsJson(arrayInterior, keys = DEFAULT_ITEM_KEYS) {
   try {
     const items = JSON.parse(`[${arrayInterior}]`);
-    return items.filter((it) => it && it._aiManaged && typeof it.question === 'string' && typeof it.answer === 'string');
+    return items
+      .filter((it) => it && it._aiManaged && typeof it[keys.question] === 'string' && typeof it[keys.answer] === 'string')
+      .map((it) => (keys === DEFAULT_ITEM_KEYS ? it : { question: it[keys.question], answer: it[keys.answer] }));
   } catch {
     return [];
   }
@@ -637,9 +643,9 @@ export function removeArrayItemByField(content, arrayRange, fieldName, matchValu
 // AI-managed region in place if present, otherwise appends. Hand-authored
 // entries are never removed or reordered by data, in either format (see
 // json-array's own comment above for its formatting caveat).
-export function spliceMarkedArray(content, arrayRange, items, format = 'js-export-array') {
-  if (format === 'json-array') return spliceMarkedArrayJson(content, arrayRange, items, '    ');
-  return spliceMarkedArrayComment(content, arrayRange, items);
+export function spliceMarkedArray(content, arrayRange, items, format = 'js-export-array', keys = DEFAULT_ITEM_KEYS) {
+  if (format === 'json-array') return spliceMarkedArrayJson(content, arrayRange, mapItemKeys(items, keys), '    ');
+  return spliceMarkedArrayComment(content, arrayRange, items, keys);
 }
 
 // Inserts a brand-new `fieldName: [...]` property as the object's last
@@ -647,9 +653,9 @@ export function spliceMarkedArray(content, arrayRange, items, format = 'js-expor
 // only when findArrayFieldRange returned null (the field genuinely doesn't
 // exist yet); once created, later drafts go through findArrayFieldRange +
 // spliceMarkedArray instead.
-export function insertNewArrayField(content, objRange, fieldName, items, format = 'js-export-array') {
-  if (format === 'json-array') return insertNewArrayFieldJson(content, objRange, fieldName, items, '    ');
-  return insertNewArrayFieldComment(content, objRange, fieldName, items);
+export function insertNewArrayField(content, objRange, fieldName, items, format = 'js-export-array', keys = DEFAULT_ITEM_KEYS) {
+  if (format === 'json-array') return insertNewArrayFieldJson(content, objRange, fieldName, mapItemKeys(items, keys), '    ');
+  return insertNewArrayFieldComment(content, objRange, fieldName, items, keys);
 }
 
 // Hard safety net: this always targets a SHARED file imported by every
@@ -696,11 +702,14 @@ export function dedupeAndValidateFaqItems(items) {
 // assertValidContent elsewhere in the same flow, not arbitrary input.
 // Never throws; returns [] on anything unparseable rather than failing the
 // whole preview over a diff-only nicety.
-export function parseExistingFaqItems(arrayInterior, format = 'js-export-array') {
+export function parseExistingFaqItems(arrayInterior, format = 'js-export-array', keys = DEFAULT_ITEM_KEYS) {
+  const norm = (items) => items
+    .filter((it) => it && typeof it[keys.question] === 'string' && typeof it[keys.answer] === 'string')
+    .map((it) => (keys === DEFAULT_ITEM_KEYS ? it : { question: it[keys.question], answer: it[keys.answer] }));
   if (format === 'json-array') {
     try {
       const items = JSON.parse(`[${arrayInterior}]`);
-      return items.filter((it) => it && typeof it.question === 'string' && typeof it.answer === 'string');
+      return norm(items);
     } catch {
       return [];
     }
@@ -709,7 +718,7 @@ export function parseExistingFaqItems(arrayInterior, format = 'js-export-array')
     // eslint-disable-next-line no-new-func
     const items = new Function(`return [${arrayInterior}]`)();
     if (!Array.isArray(items)) return [];
-    return items.filter((it) => it && typeof it.question === 'string' && typeof it.answer === 'string');
+    return norm(items);
   } catch {
     return [];
   }
@@ -722,8 +731,8 @@ export function parseExistingFaqItems(arrayInterior, format = 'js-export-array')
 // hand-authored FAQ would misleadingly show as "removed" despite the real
 // edit leaving it completely untouched. Returns [] when nothing was
 // AI-managed yet (this draft's content is then correctly entirely "added").
-export function parseManagedFaqItems(arrayInterior, format = 'js-export-array') {
-  return format === 'json-array' ? parseManagedFaqItemsJson(arrayInterior) : parseManagedFaqItemsComment(arrayInterior);
+export function parseManagedFaqItems(arrayInterior, format = 'js-export-array', keys = DEFAULT_ITEM_KEYS) {
+  return format === 'json-array' ? parseManagedFaqItemsJson(arrayInterior, keys) : parseManagedFaqItemsComment(arrayInterior, keys);
 }
 
 // Semantic diff for the reviewer's preview — by question text (case-

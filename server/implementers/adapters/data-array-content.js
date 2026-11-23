@@ -483,6 +483,72 @@ async function computeContentIntegrityChange(site, draft, fetchFile, beforeRef, 
   };
 }
 
+const IDENT_KEY_RE = /^[A-Za-z_$][\w$]*$/;
+// `itemKeys` names the two properties each list item carries in the data file ({ question, answer } -> { q, a } for a FAQ,
+// { title, href } for a related-posts list). Validated as plain identifiers; absent means the defaults.
+function readItemKeys(config, first, second) {
+  const given = config?.itemKeys;
+  if (given === undefined) return { keys: first === 'question' ? undefined : { question: first, answer: second } };
+  const a = given?.[first]; const b = given?.[second];
+  if (typeof a !== 'string' || typeof b !== 'string' || !IDENT_KEY_RE.test(a) || !IDENT_KEY_RE.test(b) || a === b) {
+    return { error: `"itemKeys" must name two different plain properties, e.g. { "${first}": "...", "${second}": "..." }.` };
+  }
+  return { keys: { question: a, answer: b } };
+}
+
+function pathOfUrl(u) {
+  if (typeof u !== 'string' || !u.trim()) return null;
+  try { return new URL(u).pathname || null; } catch { return u.startsWith('/') ? u : null; }
+}
+
+// internal-links as a STRUCTURED LIST: the agent's suggestions ({ anchorText, targetUrl, targetTitle }) become `{ title, href }` items in the
+// entry's `itemsField` (e.g. relatedPosts) — never HTML. The site's own template draws every card from each post's own data, so the layout
+// is identical for every page and an href that is not a real post draws nothing. Same AI-managed region as the FAQ path: hand-written
+// items are never touched. Config: { id, dataFile, idField, itemsField, format, itemKeys?: { title, href }, maxItems? (default 3), idPrefix? }.
+async function computeRelatedPostsChange(site, draft, fetchFile, beforeRef, config) {
+  const page = draft.content?.page || draft.input?.page;
+  if (!config.dataFile || !config.idField) return { ok: false, reason: 'invalid-config', error: 'internal-links as a related-posts list needs "dataFile", "idField" and "itemsField".' };
+  if (config.shape === 'flat-array' || config.nestedField || config.itemsParentField) return { ok: false, reason: 'invalid-config', error: 'A related-posts list is written into one entry found by "idField"; flat-array, nestedField and itemsParentField are not supported for it.' };
+  const itemKeys = readItemKeys(config, 'title', 'href');
+  if (itemKeys.error) return { ok: false, reason: 'invalid-config', error: itemKeys.error };
+  const keys = itemKeys.keys;
+  const format = config.format || 'js-export-array';
+  if (format !== 'json-array' && !keys) return { ok: false, reason: 'invalid-config', error: 'For a JS data file a related-posts list needs "itemKeys" (e.g. { "title": "title", "href": "href" }).' };
+
+  const seen = new Set(); const items = [];
+  for (const sug of Array.isArray(draft.content?.suggestions) ? draft.content.suggestions : []) {
+    const href = pathOfUrl(sug?.targetUrl); const title = String(sug?.targetTitle || sug?.anchorText || '').trim();
+    if (!href || !title || seen.has(href)) continue;
+    seen.add(href); items.push({ title, href });
+  }
+  const max = Number.isInteger(config.maxItems) && config.maxItems > 0 ? config.maxItems : 3;
+  const chosen = items.slice(0, max);
+  if (!chosen.length) return { ok: false, reason: 'draft-not-ready', error: 'This internal-links draft has no usable suggestion (each needs a target URL and a title).' };
+
+  const file = await fetchFile(site, config.dataFile, beforeRef);
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${config.dataFile} does not exist on branch "${beforeRef}".` };
+  const id = idFromPageUrl(page, config);
+  if (!id) return { ok: false, reason: 'no-file-mapping', error: `Could not derive an id from ${page}.` };
+  const objRange = findObjectRange(file.content, config.idField, id, format);
+  if (!objRange) return { ok: false, reason: 'no-insertion-marker', error: `Could not find one unambiguous entry for ${config.idField} "${id}" in ${config.dataFile}.` };
+  const arrayRange = findArrayFieldRange(file.content, objRange, config.itemsField, format);
+
+  // Items are carried as { question, answer } through the shared splice and renamed to the data file's own keys on the way out.
+  const carried = chosen.map((i) => ({ question: i.title, answer: i.href }));
+  const k = keys || undefined;
+  const newContent = arrayRange
+    ? spliceMarkedArray(file.content, arrayRange, carried, format, k)
+    : insertNewArrayField(file.content, objRange, config.itemsField, carried, format, k);
+  const check = assertValidContent(newContent, format);
+  if (!check.ok) return { ok: false, reason: 'invalid-edit', error: `Auto-generated edit would break ${config.dataFile}'s syntax (${check.error}) — refused to apply.` };
+
+  return {
+    ok: true, filePath: config.dataFile, oldContent: file.content, newContent,
+    changedRegions: [{ field: config.itemsField, markerName: 'AI-managed', before: arrayRange ? '(previously AI-added items)' : '(none)', after: JSON.stringify(chosen) }],
+    relatedPosts: chosen,
+  };
+}
+
 // `fetchFile` defaults to the real getFileContent — overridable only so
 // tests can supply fixture content without a mocking library.
 export async function computeChange(site, draft, fetchFile = getFileContent, beforeRef = baseBranch(site), analyzePage = analyzePageUrl) {
@@ -497,6 +563,7 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
   }
   if (config?.schemaField) return computeSchemaFieldChange(site, draft, fetchFile, beforeRef, config, analyzePage);
   if (config?.fields) return computeScalarFieldChange(site, draft, fetchFile, beforeRef, config);
+  if (draft.action_type === 'internal-links' && config?.itemsField) return computeRelatedPostsChange(site, draft, fetchFile, beforeRef, config);
   const flatArray = config?.shape === 'flat-array';
   if (!config?.dataFile || (!flatArray && !config?.itemsField)) {
     return { ok: false, reason: 'no-file-mapping', error: `No data-array-content adapter config (dataFile/itemsField) found for "${page || '(no page)'}".` };
@@ -509,6 +576,10 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
 
   const validated = dedupeAndValidateFaqItems(draft.content?.items);
   if (!validated.ok) return { ok: false, reason: 'draft-not-ready', error: validated.error };
+
+  const itemKeys = readItemKeys(config, 'question', 'answer');
+  if (itemKeys.error) return { ok: false, reason: 'invalid-config', error: itemKeys.error };
+  const keys = itemKeys.keys;
 
   const file = await fetchFile(site, config.dataFile, beforeRef);
   if (!file) return { ok: false, reason: 'file-not-found', error: `${config.dataFile} does not exist on branch "${beforeRef}".` };
@@ -544,10 +615,10 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
     arrayRange = findArrayFieldRange(file.content, objRange, config.itemsField, format);
   }
 
-  const existingItems = arrayRange ? parseManagedFaqItems(file.content.slice(arrayRange.start, arrayRange.end), format) : [];
+  const existingItems = arrayRange ? parseManagedFaqItems(file.content.slice(arrayRange.start, arrayRange.end), format, keys) : [];
   const newContent = arrayRange
-    ? spliceMarkedArray(file.content, arrayRange, validated.items, format)
-    : insertNewArrayField(file.content, objRange, config.itemsField, validated.items, format);
+    ? spliceMarkedArray(file.content, arrayRange, validated.items, format, keys)
+    : insertNewArrayField(file.content, objRange, config.itemsField, validated.items, format, keys);
 
   const check = assertValidContent(newContent, format);
   if (!check.ok) {

@@ -15,14 +15,20 @@ import { merge3, stableStringify } from '../lib/json-merge3.js';
 //   node server/scripts/apply-url-file-map-proposal.js --site 1    --proposal zunkiree-1-proposed-map.json
 //   node server/scripts/apply-url-file-map-proposal.js --site 8862 --proposal admizz-8862-phase1-config-only-map.json
 //   node server/scripts/apply-url-file-map-proposal.js --site 8862 --proposal admizz-8862-phase2-needs-engine-map.json --engine-deployed
+//   node server/scripts/apply-url-file-map-proposal.js --site 8864 --proposal chayce-8864-proposed-map.json
+//   node server/scripts/apply-url-file-map-proposal.js --site 8862 --proposal admizz-8862-phase3-faq-more-pages-map.json --base admizz-8862-phase2-needs-engine-map.json
 //   add --apply to write
+//   --base <file>  the map the proposal was written against (default base-<site>.json). Use it when the live map has since moved
+//                  to a known earlier proposal, e.g. phase 3 is written on top of the applied phase 2.
 //
-// Phase 2 (page-data-object on `{...post}` pages) needs the engine change in this PR to be DEPLOYED first, or those
-// adapters would be configured but refuse every draft. It therefore refuses to run without --engine-deployed.
-// Only sites 1 and 8862 are allowed; a proposal can never be applied to another site.
+// Phase 2 (page-data-object on `{...post}` pages), phase 4 (page-data-object `dataFile` mode for the Admizz city pages) and phase 5 (Admizz
+// new-page targets, declared hand-built page types) need the
+// engine change to be DEPLOYED first, or those adapters would be configured but refuse every draft. They therefore refuse to run
+// without --engine-deployed.
+// Only sites 1, 8862 and 8864 are allowed; a proposal can never be applied to another site.
 
 export const PROPOSAL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../docs/audits/2026-11-23-six-client-remediation/proposals');
-export const ALLOWED_SITES = new Set([1, 8862]);
+export const ALLOWED_SITES = new Set([1, 8862, 8864]);
 
 const keys = (o) => Object.keys(o || {});
 // Key-order independent: the database stores JSON with its own key order, so a plain JSON.stringify compare reports identical entries as changed.
@@ -48,22 +54,28 @@ export function planProposal(base, current, proposed) {
 
 export function checkGuards({ site, proposalName, engineDeployed }) {
   if (!ALLOWED_SITES.has(site)) return `site ${site} is not allowed: this proposal covers only sites ${[...ALLOWED_SITES].join(' and ')}`;
-  if (/phase2/i.test(proposalName) && !engineDeployed) return 'phase 2 needs the engine change deployed first: pass --engine-deployed once it is live';
+  if (/phase[245]/i.test(proposalName) && !engineDeployed) return 'phases 2, 4 and 5 need the engine change deployed first: pass --engine-deployed once it is live';
   if (site === 1 && !/^zunkiree-1-/.test(proposalName)) return 'this proposal does not belong to site 1';
   if (site === 8862 && !/^admizz-8862-/.test(proposalName)) return 'this proposal does not belong to site 8862';
+  if (site === 8864 && !/^chayce-8864-/.test(proposalName)) return 'this proposal does not belong to site 8864';
   return null;
 }
 
-function loadJson(f) { return JSON.parse(fs.readFileSync(path.join(PROPOSAL_DIR, f), 'utf8')); }
+// Only files inside the proposals folder can be loaded: a name with a path in it is refused.
+function loadJson(f) {
+  if (path.basename(f) !== f) throw new Error(`refused: ${f} is not a plain file name inside the proposals folder`);
+  return JSON.parse(fs.readFileSync(path.join(PROPOSAL_DIR, f), 'utf8'));
+}
 
 async function main() {
   const args = process.argv.slice(2);
   const flag = (n) => { const i = args.indexOf(`--${n}`); return i < 0 ? null : (args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : true); };
   const site = Number(flag('site')); const proposalName = flag('proposal');
-  if (!site || typeof proposalName !== 'string') { console.error('Usage: apply-url-file-map-proposal.js --site <1|8862> --proposal <file in proposals/> [--engine-deployed] [--apply]'); process.exit(1); }
+  if (!site || typeof proposalName !== 'string') { console.error('Usage: apply-url-file-map-proposal.js --site <1|8862|8864> --proposal <file in proposals/> [--base <file>] [--engine-deployed] [--apply]'); process.exit(1); }
   const guard = checkGuards({ site, proposalName, engineDeployed: flag('engine-deployed') === true });
   if (guard) { console.error('Refused: ' + guard); process.exit(1); }
-  const base = loadJson(`base-${site}.json`); const proposed = loadJson(proposalName);
+  const baseName = typeof flag('base') === 'string' ? flag('base') : `base-${site}.json`;
+  const base = loadJson(baseName); const proposed = loadJson(proposalName);
   const { pool, patchUrlFileMap, query } = await import('../db.js');
   try {
     const current = (await query('SELECT url_file_map FROM sites WHERE id = $1', [site])).rows[0]?.url_file_map;

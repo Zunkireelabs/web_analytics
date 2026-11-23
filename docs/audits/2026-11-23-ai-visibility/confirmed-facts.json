@@ -1,0 +1,27 @@
+{
+  "_note": "Owner-confirmed facts, 2026-11-23, written into each project's canonical business profile (description field) by server/scripts/apply-confirmed-facts.js. Public facts only (all appear on the clients' own sites). Anything not listed here is NOT confirmed and must not be claimed.",
+  "1": {
+    "name": "Zunkiree Labs",
+    "description": "Zunkiree Labs is an AI and software company founded in 2018 and headquartered in Sanepa, Lalitpur, Nepal. It is a small team of 1-10 people. Its booking and operations product for spas, salons and wellness studios is called Zennly (spelled with two n's)."
+  },
+  "8862": {
+    "name": "Admizz Education",
+    "description": "Admizz Education is a study abroad partner for students from Nepal. It is based in Nepal, with its main office at Sita Ram Square, Putalisadak, Kathmandu, and counselling points in Birgunj and Janakpur, plus partner offices in India, Bangladesh, the US and Zambia. It is an ICEF Accredited Study Abroad Agency. It has no UK office: do not claim one."
+  },
+  "8864": {
+    "name": "Chayce Properties",
+    "description": "Chayce Properties is an elderly removals and downsizing company at Unit F2B Barratt House, Kingsthorpe Road, Northampton NN2 6EZ, serving Northampton and Northamptonshire. Phone 07708 925432, Monday to Friday 09:00-17:30. The name stays Chayce Properties."
+  },
+  "8871": {
+    "name": "SuperRank",
+    "description": "SuperRank (often misspelled Suparank, the same product) is an autonomous AI SEO and AI-search visibility agent that finds what holds a site back and opens the fix every day. It runs 40+ checks per page. Plans per its pricing page: Starter $95/mo, Pro $245/mo, Advanced $495/mo, Enterprise custom."
+  },
+  "8872": {
+    "name": "Zennly",
+    "description": "Zennly is booking and operations software for spas, salons and wellness studios in Nepal, built by Zunkiree Labs (Sanepa, Lalitpur). Nuad Thai Spa (Lazimpat, Kathmandu) is a customer and may be named. Branch, therapist and service counts are not confirmed: do not state them."
+  },
+  "8874": {
+    "name": "MOBILISE",
+    "description": "MOBILISE is a global B2B marketing agency headquartered in Bangalore, with teams in Singapore, the Middle East and North America (studios in Seattle, Dubai, Bangalore and Singapore), serving enterprise brands across APAC, EMEA and the Americas. Team size and client names are not stated by the company: do not claim any."
+  }
+}

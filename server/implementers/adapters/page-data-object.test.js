@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeChange, __testables } from './page-data-object.js';
 
-const { findPageDataObjectRange } = __testables;
+const { findPageDataObjectRange, findExportedItemsArray, readDataFileConfig, targetFilePath } = __testables;
 
 // A trimmed, real shape (Admizz Education's src/app/study-in-australia/
 // page.tsx, 2026-09-11) — a local data object passed as `data={...}` to a
@@ -246,5 +246,94 @@ describe('{...post} spread pages (Admizz GeneratedBlogPost / answers)', () => {
   test('a spread on a lower-case DOM element is not a template hand-off', async () => {
     const r = await computeChange(spreadSite, spreadDraft('/lower'), async () => ({ content: LOWERCASE_SPREAD_FIXTURE }));
     assert.equal(r.ok, false);
+  });
+});
+
+// Admizz's city pages: the page imports its content object from a data module and the FAQ lives at faq.items as { q, a } (real shape
+// of src/data/cities/birgunj.ts, trimmed). There is another `items` array earlier in the object that must never be touched.
+const CITY_DATA = `import type { CityLandingData } from "./types";
+
+export const birgunjData: CityLandingData = {
+  meta: { title: "Study abroad from Birgunj", description: "Counselling in Birgunj." },
+  services: {
+    heading: "What we do",
+    items: [
+      { title: "Counselling", body: "One to one." },
+    ],
+  },
+  faq: {
+    eyebrow: "FAQ",
+    heading: "Birgunj questions, answered",
+    items: [
+      {
+        q: "Do I need to travel to Kathmandu to apply?",
+        a: "No. Our Birgunj office handles everything.",
+      },
+    ],
+  },
+};
+`;
+const cityPage = (extra = {}) => ({
+  id: 8862,
+  url_file_map: { pages: { '/birgunj': { file: 'src/app/birgunj/page.tsx', adapters: { faq: {
+    id: 'page-data-object', dataFile: 'src/data/cities/birgunj.ts', exportName: 'birgunjData', itemsPath: ['faq', 'items'], itemKeys: { question: 'q', answer: 'a' }, ...extra,
+  } } } } },
+});
+const cityDraft = { action_type: 'faq', content: { page: 'https://admizzeducation.com/birgunj', items: [{ question: 'Can I apply online?', answer: 'Yes, from home.' }] } };
+const fetchCity = async () => ({ content: CITY_DATA });
+
+describe('page-data-object dataFile mode (imported data module, nested items path, q/a keys)', () => {
+  test('appends inside faq.items with the data file\'s own key names; hand-written items and the other `items` array untouched', async () => {
+    const r = await computeChange(cityPage(), cityDraft, fetchCity);
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.filePath, 'src/data/cities/birgunj.ts');
+    assert.match(r.newContent, /\{ q: "Can I apply online\?", a: "Yes, from home\." \},/);
+    assert.doesNotMatch(r.newContent, /question:/, 'must not write question/answer keys into a q/a file');
+    assert.match(r.newContent, /q: "Do I need to travel to Kathmandu to apply\?"/);
+    const faqStart = r.newContent.indexOf('faq: {');
+    assert.ok(r.newContent.indexOf('SEOAI:FAQ:START') > faqStart, 'inside the faq block');
+    assert.equal(r.newContent.slice(0, r.newContent.indexOf('faq: {')), CITY_DATA.slice(0, CITY_DATA.indexOf('faq: {')), 'everything before faq is byte-identical');
+    assert.equal(r.renderMode, 'visible');
+  });
+  test('re-applying replaces only the AI-managed region, and the diff reads the q/a items back', async () => {
+    const first = await computeChange(cityPage(), cityDraft, fetchCity);
+    const second = await computeChange(cityPage(), { ...cityDraft, content: { ...cityDraft.content, items: [{ question: 'Can I apply online?', answer: 'Yes, from home, any time.' }] } }, async () => ({ content: first.newContent }));
+    assert.equal(second.ok, true);
+    assert.equal((second.newContent.match(/SEOAI:FAQ:START/g) || []).length, 1);
+    assert.deepEqual(second.faqDiff.modified.length, 1);
+    assert.match(second.newContent, /Yes, from home, any time\./);
+  });
+  test('without dataFile the original behaviour is unchanged', () => {
+    assert.deepEqual(readDataFileConfig({ id: 'page-data-object' }), { ok: true, mode: 'local' });
+    assert.equal(targetFilePath({ url_file_map: { pages: { '/x': { file: 'src/app/x/page.tsx', adapters: { faq: { id: 'page-data-object' } } } } } }, 'https://a.com/x'), 'src/app/x/page.tsx');
+  });
+  test('the PR and rollback steps target the data file, not the page file', () => {
+    assert.equal(targetFilePath(cityPage(), 'https://admizzeducation.com/birgunj'), 'src/data/cities/birgunj.ts');
+  });
+  test('refuses a wrong export name, a path that is not an array, and a missing nested object — never guesses', async () => {
+    const a = await computeChange(cityPage({ exportName: 'otherData' }), cityDraft, fetchCity);
+    assert.equal(a.ok, false); assert.equal(a.reason, 'no-insertion-marker');
+    const b = await computeChange(cityPage({ itemsPath: ['faq', 'heading'] }), cityDraft, fetchCity);
+    assert.equal(b.ok, false); assert.equal(b.reason, 'no-insertion-marker');
+    const c = await computeChange(cityPage({ itemsPath: ['nope', 'items'] }), cityDraft, fetchCity);
+    assert.equal(c.ok, false); assert.equal(c.reason, 'no-insertion-marker');
+  });
+  test('a hostile or malformed config is refused before any file is read', async () => {
+    let reads = 0; const fetch = async () => { reads++; return { content: CITY_DATA }; };
+    for (const bad of [{ dataFile: '../../etc/passwd.ts' }, { dataFile: '/abs/path.ts' }, { dataFile: 'src/data/x.json' }, { dataFile: 'src/data/a b.ts' }, { exportName: 'a;b' }, { itemsPath: [] }, { itemsPath: ['faq', 'a.b'] }, { itemKeys: { question: 'q', answer: 'q' } }]) {
+      const r = await computeChange(cityPage(bad), cityDraft, fetch);
+      assert.equal(r.ok, false, JSON.stringify(bad)); assert.equal(r.reason, 'invalid-config', JSON.stringify(bad));
+    }
+    assert.equal(reads, 0);
+  });
+  test('a data object that sets faqSchemaOnly is refused', async () => {
+    const r = await computeChange(cityPage(), cityDraft, async () => ({ content: CITY_DATA.replace('faq: {', 'faqSchemaOnly: true,\n  faq: {') }));
+    assert.equal(r.ok, false); assert.equal(r.reason, 'faq-schema-only');
+  });
+  test('findExportedItemsArray walks the nested path to the right array, not the first `items`', () => {
+    const cfg = readDataFileConfig(cityPage().url_file_map.pages['/birgunj'].adapters.faq);
+    const { arrayRange } = findExportedItemsArray(CITY_DATA, cfg);
+    assert.match(CITY_DATA.slice(arrayRange.start, arrayRange.end), /Kathmandu/);
+    assert.doesNotMatch(CITY_DATA.slice(arrayRange.start, arrayRange.end), /Counselling/);
   });
 });

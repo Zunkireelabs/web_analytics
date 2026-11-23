@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { __testables } from './audit-url-file-map.js';
 
-const { describeNginxMarker, partitionPreDraftBlocked, targetRendersCode, classifyNginxMarker, summarizeExistingTracking, fileForAction, looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent } = __testables;
+const { partitionContentTargets, describeNginxMarker, partitionPreDraftBlocked, targetRendersCode, classifyNginxMarker, summarizeExistingTracking, fileForAction, looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent } = __testables;
 
 describe('extractMetaContent', () => {
   test('reads a real og:title content value', () => {
@@ -224,8 +224,8 @@ describe('partitionPreDraftBlocked (Admizz: wrapper pages whose body actions are
     assert.equal(r.stillFatal.length, 1);
   });
 
-  test('non-body action types (schema, faq, canonical) are NOT swept in — the gate only covers body markup', () => {
-    for (const t of ['schema', 'faq', 'canonical', 'meta-title', 'open-graph']) {
+  test('action types the gate does not refuse for a wrapper page (faq, canonical, meta-title, open-graph) are NOT swept in', () => {
+    for (const t of ['faq', 'canonical', 'meta-title', 'open-graph']) {
       const r = partitionPreDraftBlocked([rows('a/page.tsx', t)], content({ 'a/page.tsx': wrapper }));
       assert.equal(r.stillFatal.length, 1, t);
     }
@@ -255,5 +255,38 @@ describe('describeNginxMarker (the audit crashed with "Cannot read properties of
   });
   test('every status the classifier can return has a description (no silent default)', () => {
     for (const status of ['present', 'self-heals', 'blocked', 'fatal']) assert.doesNotMatch(describeNginxMarker({ status, reason: 'r', locations: [] }), /unknown status/);
+  });
+});
+
+describe('partitionPreDraftBlocked now also covers schema and faqSchemaOnly (Admizz 63 schema + 5 faq rows)', () => {
+  const rows = (filePath, actionType) => ({ page: '/p', actionType, filePath, markerField: 'x', markerName: 'X', gap: 'fatal-no-safe-anchor' });
+  const wrapper = 'return <CountryPageTemplate data={d} />;';
+  const schemaOnly = 'const post = { "faqSchemaOnly": true };\nreturn <GeneratedBlogPost {...post} />;';
+  test('schema on a wrapper and faq on a faqSchemaOnly page are "already blocked", not fatal', () => {
+    const r = partitionPreDraftBlocked([rows('a.tsx', 'schema'), rows('b.tsx', 'faq')], (p) => ({ 'a.tsx': wrapper, 'b.tsx': schemaOnly }[p] ?? null));
+    assert.equal(r.blocked.length, 2);
+    assert.equal(r.stillFatal.length, 0);
+  });
+  test('schema or faq on a page the engine CAN edit stays fatal', () => {
+    const real = 'return <section><p>Body text here</p></section>;';
+    const r = partitionPreDraftBlocked([rows('c.tsx', 'schema'), rows('c.tsx', 'faq')], () => real);
+    assert.equal(r.stillFatal.length, 2);
+  });
+});
+
+describe('partitionContentTargets (Admizz: pages built by hand are declared, not "unconfigured")', () => {
+  const types = ['landing-page', 'blog-outline', 'cookie-policy', 'translation'];
+  const site = { url_file_map: { newContentNotApplicable: { 'landing-page': 'Hand-built.', 'cookie-policy': 'Exists at /cookie-policy.' } } };
+  test('a configured type is neither declared nor missing; a declared one carries its reason; the rest are the real gaps', () => {
+    const r = partitionContentTargets(site, types, { 'blog-outline': { dir: 'src/app' } });
+    assert.deepEqual(r.declared, [{ type: 'landing-page', reason: 'Hand-built.' }, { type: 'cookie-policy', reason: 'Exists at /cookie-policy.' }]);
+    assert.deepEqual(r.missing, ['translation']);
+  });
+  test('a type with a target is never reported as declared even if a declaration also exists', () => {
+    const r = partitionContentTargets(site, types, { 'landing-page': { dir: 'src/app' } });
+    assert.ok(!r.declared.some((d) => d.type === 'landing-page'));
+  });
+  test('with no declarations every unconfigured type is missing, as before', () => {
+    assert.deepEqual(partitionContentTargets({ url_file_map: {} }, types, {}).missing, types);
   });
 });

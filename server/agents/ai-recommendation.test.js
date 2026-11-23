@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeProviderFacts, computeBlendedVisibilityPct, computeVoiceAndGap, verifyExtractedCompetitors } from './ai-recommendation.js';
+import { computeProviderFacts, computeBlendedVisibilityPct, computeVoiceAndGap, verifyExtractedCompetitors, promptNamesCompany } from './ai-recommendation.js';
 
 // These exercise the pure, DB/API-free aggregation math only — the same
 // functions run() itself calls. No real DB, no real provider calls: every
@@ -158,5 +158,18 @@ describe('verifyExtractedCompetitors', () => {
     assert.deepEqual(verifyExtractedCompetitors(raw, null), []);
     assert.deepEqual(verifyExtractedCompetitors(raw, 'Summit Roofing'), []);
     assert.deepEqual(verifyExtractedCompetitors(raw, [null, 42, '', 'x']), []);
+  });
+});
+
+describe('promptNamesCompany — a question that names the brand is not a visibility test', () => {
+  test('names the company or its domain, whole word, any case', () => {
+    assert.equal(promptNamesCompany('What is the focus of Zunkiree Labs in the tech sector?', 'Zunkiree Labs', 'zunkireelabs.com'), true);
+    assert.equal(promptNamesCompany('is zunkireelabs.com legit', 'Zunkiree Labs', 'zunkireelabs.com'), true);
+  });
+
+  test('a stranger\'s question does not', () => {
+    assert.equal(promptNamesCompany('Best AI companies in Kathmandu', 'Zunkiree Labs', 'zunkireelabs.com'), false);
+    assert.equal(promptNamesCompany('', 'Zunkiree Labs', 'zunkireelabs.com'), false);
+    assert.equal(promptNamesCompany(null, 'Zunkiree Labs', null), false);
   });
 });

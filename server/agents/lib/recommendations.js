@@ -147,6 +147,8 @@ export async function buildRecommendations(siteId) {
     'file-missing': 'The file this page was mapped to no longer exists in the repository.',
     'adapter-data-not-ready': 'The configured data source has no entry for this page and none is expected to appear.',
     'faq-schema-already-present': 'This page\'s file already carries an FAQPage schema (often from another query-string variant of the same shared template) — a new FAQ/Q&A draft would have nothing left to publish.',
+    'declared-not-applicable': 'This site\'s url_file_map declares this action not applicable to this page, because the page\'s own template already provides it.',
+    'page-has-own-faq': 'This page writes its FAQ by hand (its data only feeds the FAQPage schema), so a generated FAQ would be a second, different one.',
     'auto-computed-by-layout': 'This page\'s canonical/Open Graph tags are already computed automatically by its shared layout template from the page\'s own title, description, and URL — there is no per-page value to write and no fix needed.',
   };
 
