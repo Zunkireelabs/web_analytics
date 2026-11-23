@@ -1,6 +1,7 @@
 import { sharedTemplateTargetBlock, templateDrivenBodyBlock, templateEmitsSchemaBlock, faqSchemaOnlyBlock } from '../../implementers/lib/action-scope.js';
 import { ensureMeasurementId, needsInputMessage, isMeasurementId } from '../../lib/ga4-measurement-id.js';
 import { generatedPageBlockReason } from './page-type.js';
+import { listAreas, siteForUrl, siteForActionType, areaNameOf } from '../../implementers/lib/site-areas.js';
 import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget, resolveNotApplicable, resolveNewContentNotApplicable } from '../../implementers/lib/url-file-map.js';
 import { hasExistingFaqSchema, INSPECTABLE_ACTION_TYPES } from '../../implementers/lib/render-inspector.js';
 import { templateRendersItemsField } from '../../implementers/lib/faq-render-mode.js';
@@ -88,7 +89,7 @@ export function designContextAvailability(site, generatorId) {
   return verdict;
 }
 
-export function createRecommendationGates(siteId, initialSite, deps = {}) {
+function createGatesForSite(siteId, initialSite, deps = {}) {
   const {
     fetchTree = getRepoTree,
     fetchFile = getFileContent,
@@ -751,4 +752,36 @@ async function pageAnswersLive(pageUrl) {
   } catch {
     return false;
   }
+}
+
+// A site with areas (url_file_map.areas) is judged area by area: each page or new-content type is checked against ITS area's map, so a
+// marketplace page is never reported unmapped for lacking a business-site file, and the reverse. Self-healing is off inside an area, because a
+// heal would save the area's view over the site's real map (db.js refuses that), and a heal on the whole map could land a target at the shared
+// level that an area then shadows; a map for such a site comes from an approved proposal instead.
+// A site without areas gets exactly the gates it always had.
+export function createRecommendationGates(siteId, initialSite, deps = {}) {
+  if (!listAreas(initialSite).length) return createGatesForSite(siteId, initialSite, deps);
+  const noHeal = {
+    ...deps,
+    healFn: async () => null, healContentTargetFn: async () => null, healAdapterFn: async () => null,
+    repairStaleMapping: async (_s, _p, staleFile) => ({ outcome: 'unverifiable', oldFile: staleFile, reason: 'this site has areas: its map is changed by an approved proposal, not self-healed' }),
+  };
+  const core = createGatesForSite(siteId, initialSite, noHeal);
+  const perArea = new Map();
+  const gatesFor = (view) => {
+    const key = areaNameOf(view);
+    if (!perArea.has(key)) perArea.set(key, createGatesForSite(siteId, view, noHeal));
+    return perArea.get(key);
+  };
+  return {
+    async evaluate(generatorId, params) {
+      const view = params?.page ? siteForUrl(initialSite, params.page) : siteForActionType(initialSite, generatorId);
+      return (areaNameOf(view) ? gatesFor(view) : core).evaluate(generatorId, params);
+    },
+    get site() { return core.site; },
+    cachedFetchFile: core.cachedFetchFile,
+    cachedFetchTree: core.cachedFetchTree,
+    isPageSoftNotFound: core.isPageSoftNotFound,
+    paginationRouteFor: core.paginationRouteFor,
+  };
 }

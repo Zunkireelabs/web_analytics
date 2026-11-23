@@ -3,6 +3,7 @@ import { getAdapter } from './adapters/registry.js';
 import { resolveAdapter } from './lib/url-file-map.js';
 import { resolveFaqRenderMode } from './lib/faq-render-mode.js';
 import { CONFIDENCE_THRESHOLD } from './lib/render-inspector.js';
+import { areaAwareImplementer } from './lib/site-areas.js';
 
 // Which implementer actually handles a draft's apply()/mergeToStage() is no
 // longer fixed per action type — a page's adapter config (url_file_map.pages
@@ -48,7 +49,7 @@ import { CONFIDENCE_THRESHOLD } from './lib/render-inspector.js';
 // when present, the fresh inspection below is skipped entirely, same as
 // backend.js's own computeMarkerMerge, so a human's answer is never
 // re-litigated into the same uncertain stop on retry.
-export async function resolveImplementerForApply(site, draft, renderModeOverride) {
+async function resolveImplementerForApplyInner(site, draft, renderModeOverride) {
   const page = draft.content?.page || draft.input?.page;
 
   // 'location-service-bootstrap' (agents/lib/location-service-gap.js) always
@@ -106,7 +107,7 @@ export async function resolveImplementerForApply(site, draft, renderModeOverride
 // push time (see above) instead of re-resolving from the page's current
 // adapter config, so a real branch someone reviews always merges via the
 // same implementer/adapter that actually pushed it.
-export async function resolveImplementerForMerge(draft) {
+async function resolveImplementerForMergeInner(draft) {
   const id = draft.implementer_id || '';
   if (id.startsWith('adapter:')) {
     const adapterId = id.slice('adapter:'.length);
@@ -118,4 +119,15 @@ export async function resolveImplementerForMerge(draft) {
   const implementer = await getImplementerForGenerator(draft.action_type);
   if (!implementer) return { error: `No implementer wired for "${draft.action_type}" yet` };
   return { implementer };
+}
+
+// Every implementer and adapter is handed the area view of its draft (lib/site-areas.js): a Zennly business-site fix is written against the
+// business area's files and layout, a marketplace fix against the marketplace's. Sites without areas are unaffected.
+export async function resolveImplementerForApply(site, draft, renderModeOverride) {
+  const r = await resolveImplementerForApplyInner(site, draft, renderModeOverride);
+  return r?.implementer ? { ...r, implementer: areaAwareImplementer(r.implementer) } : r;
+}
+export async function resolveImplementerForMerge(draft) {
+  const r = await resolveImplementerForMergeInner(draft);
+  return r?.implementer ? { ...r, implementer: areaAwareImplementer(r.implementer) } : r;
 }

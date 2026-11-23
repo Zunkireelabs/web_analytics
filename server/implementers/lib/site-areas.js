@@ -76,3 +76,37 @@ export function siteForArea(site, name) {
 
 export const isAreaView = (siteOrMap) => Boolean((siteOrMap?.url_file_map || siteOrMap)?.[AREA_VIEW]);
 export const areaNameOf = (siteOrMap) => (siteOrMap?.url_file_map || siteOrMap)?.[AREA_VIEW]?.area || null;
+
+/** The public page a draft is about, or null for net-new content that has no page yet. */
+export const pageOfDraft = (draft) => draft?.content?.page || draft?.input?.page || null;
+
+/**
+ * The site as seen for one draft. A draft about a page uses that page's area. Net-new content (no page) uses the area that declares a target
+ * or a "not applicable" for its action type. No areas, or no match, returns the site itself.
+ */
+export function siteForDraft(site, draft) {
+  const areas = listAreas(site);
+  if (!areas.length) return site;
+  const page = pageOfDraft(draft);
+  if (page) return siteForUrl(site, page);
+  return siteForActionType(site, draft?.action_type);
+}
+
+export function siteForActionType(site, actionType) {
+  const owner = listAreas(site).find((a) => a.override?.newContentTargets?.[actionType] || a.override?.newContentNotApplicable?.[actionType]);
+  return owner ? siteForArea(site, owner.name) : site;
+}
+
+const AREA_AWARE_METHODS = ['apply', 'preview', 'mergeToStage', 'rollback'];
+/**
+ * Wraps an implementer or adapter so each call receives the area view for its draft. Every other export (meta, helpers) passes through
+ * untouched, and an implementer for a site without areas behaves exactly as before because siteForDraft returns the same site object.
+ */
+export function areaAwareImplementer(impl) {
+  if (!impl) return impl;
+  const wrapped = { ...impl };
+  for (const m of AREA_AWARE_METHODS) {
+    if (typeof impl[m] === 'function') wrapped[m] = (site, draft, ...rest) => impl[m](siteForDraft(site, draft), draft, ...rest);
+  }
+  return wrapped;
+}

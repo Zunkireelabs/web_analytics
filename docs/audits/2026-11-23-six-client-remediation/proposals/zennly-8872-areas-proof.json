@@ -1,0 +1,117 @@
+{
+  "problems": [],
+  "business": {
+    "pages": 29,
+    "missingFiles": [],
+    "withMarker": 29,
+    "patternDirsMissing": []
+  },
+  "marketplace": {
+    "pages": 2,
+    "missingFiles": [],
+    "sitemapExists": true,
+    "robotsExists": true,
+    "layoutExists": true
+  },
+  "routing": [
+    {
+      "url": "/",
+      "area": "marketplace",
+      "action": "meta-title",
+      "file": "src/app/page.tsx",
+      "fileExists": true,
+      "notApplicable": null,
+      "adapter": "nextjs-metadata-export"
+    },
+    {
+      "url": "/search",
+      "area": "marketplace",
+      "action": "meta-title",
+      "file": "src/app/search/page.tsx",
+      "fileExists": true,
+      "notApplicable": null,
+      "adapter": "nextjs-metadata-export"
+    },
+    {
+      "url": "/providers/some-studio",
+      "area": "marketplace",
+      "action": "meta-title",
+      "file": null,
+      "fileExists": null,
+      "notApplicable": "Their title, description and canonical are built i",
+      "adapter": null
+    },
+    {
+      "url": "/providers/some-studio/book/time",
+      "area": "marketplace",
+      "action": "faq",
+      "file": null,
+      "fileExists": null,
+      "notApplicable": "The booking steps are a checkout flow, not search ",
+      "adapter": null
+    },
+    {
+      "url": "/account/profile",
+      "area": "marketplace",
+      "action": "meta-title",
+      "file": null,
+      "fileExists": null,
+      "notApplicable": "Signed-in and app-internal screens are not search ",
+      "adapter": null
+    },
+    {
+      "url": "/businesses",
+      "area": "business",
+      "action": "meta-title",
+      "file": "marketing/src/index.njk",
+      "fileExists": true,
+      "notApplicable": null,
+      "adapter": null
+    },
+    {
+      "url": "/businesses/faq",
+      "area": "business",
+      "action": "faq",
+      "file": "marketing/src/faq.njk",
+      "fileExists": true,
+      "notApplicable": null,
+      "adapter": null
+    },
+    {
+      "url": "/businesses/pricing",
+      "area": "business",
+      "action": "meta-title",
+      "file": "marketing/src/pricing.njk",
+      "fileExists": true,
+      "notApplicable": null,
+      "adapter": null
+    },
+    {
+      "url": "/businesses/blog/daily-reconciliation",
+      "area": "business",
+      "action": "meta-title",
+      "file": "marketing/src/blog/daily-reconciliation.njk",
+      "fileExists": true,
+      "notApplicable": null,
+      "adapter": null
+    },
+    {
+      "url": "/businesses/features/booking",
+      "area": "business",
+      "action": "meta-title",
+      "file": "marketing/src/features/booking.njk",
+      "fileExists": true,
+      "notApplicable": null,
+      "adapter": null
+    },
+    {
+      "url": "/businesses/unknown-page",
+      "area": "business",
+      "action": "meta-title",
+      "file": null,
+      "fileExists": null,
+      "notApplicable": null,
+      "adapter": null
+    }
+  ]
+}

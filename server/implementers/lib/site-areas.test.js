@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { areaOf, siteForUrl, siteForArea, isAreaView, areaNameOf, listAreas, AREA_VIEW } from './site-areas.js';
+import { areaOf, siteForUrl, siteForArea, isAreaView, areaNameOf, listAreas, AREA_VIEW, siteForDraft, siteForActionType, areaAwareImplementer, pageOfDraft } from './site-areas.js';
 import { resolveFile, resolveNotApplicable } from './url-file-map.js';
 
 const zennly = () => ({
@@ -98,4 +98,42 @@ describe('the view is marked so it can never be saved back', () => {
   test('siteForArea with an unknown name returns the site unchanged', () => {
     const s = zennly(); assert.equal(siteForArea(s, 'nope'), s);
   });
+});
+
+describe('siteForDraft and areaAwareImplementer: every apply/preview/merge/rollback runs against the draft\'s own area', () => {
+  const site = zennly();
+  site.url_file_map.areas[0].override.newContentTargets = { 'blog-outline': { dir: 'marketing/src/blog', extension: '.md' } };
+  site.url_file_map.areas[0].override.newContentNotApplicable = { 'cookie-policy': 'exists' };
+
+  test('a page draft uses its page\'s area (content.page or input.page)', () => {
+    assert.equal(areaNameOf(siteForDraft(site, { action_type: 'faq', content: { page: 'https://zennly.io/businesses/faq' } })), 'business');
+    assert.equal(areaNameOf(siteForDraft(site, { action_type: 'faq', input: { page: 'https://zennly.io/search' } })), 'marketplace');
+    assert.equal(pageOfDraft({}), null);
+  });
+  test('net-new content uses the area that declares a target or declaration for its type', () => {
+    assert.equal(areaNameOf(siteForDraft(site, { action_type: 'blog-outline', content: {} })), 'business');
+    assert.equal(areaNameOf(siteForActionType(site, 'cookie-policy')), 'business');
+    assert.equal(siteForActionType(site, 'direct-answer'), site, 'no area owns it: the site as it is');
+  });
+  test('the wrapper hands each method the draft\'s area view and keeps everything else', async () => {
+    const seen = [];
+    const impl = {
+      meta: { id: 'x' }, helper: () => 'h',
+      apply: async (s, d, o) => { seen.push(['apply', areaNameOf(s), o]); return 'a'; },
+      preview: async (s) => { seen.push(['preview', areaNameOf(s)]); return 'p'; },
+      mergeToStage: async (s) => { seen.push(['merge', areaNameOf(s)]); return 'm'; },
+      rollback: async (s) => { seen.push(['rollback', areaNameOf(s)]); return 'r'; },
+    };
+    const w = areaAwareImplementer(impl);
+    const draft = { action_type: 'faq', content: { page: 'https://zennly.io/businesses/faq' } };
+    assert.deepEqual([await w.apply(site, draft, { renderModeOverride: 'visible' }), await w.preview(site, draft), await w.mergeToStage(site, draft), await w.rollback(site, draft)], ['a', 'p', 'm', 'r']);
+    assert.deepEqual(seen, [['apply', 'business', { renderModeOverride: 'visible' }], ['preview', 'business'], ['merge', 'business'], ['rollback', 'business']]);
+    assert.equal(w.meta.id, 'x'); assert.equal(w.helper(), 'h');
+  });
+  test('for a site without areas the implementer receives the very same site object', async () => {
+    const plain = { id: 1, url_file_map: {} }; let got;
+    await areaAwareImplementer({ apply: async (s) => { got = s; } }).apply(plain, { action_type: 'faq', content: { page: 'https://a.com/x' } });
+    assert.equal(got, plain);
+  });
+  test('a null implementer stays null', () => assert.equal(areaAwareImplementer(null), null));
 });
