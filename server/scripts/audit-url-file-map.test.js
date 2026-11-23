@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { __testables } from './audit-url-file-map.js';
 
-const { describeNginxMarker, partitionPreDraftBlocked, targetRendersCode, classifyNginxMarker, summarizeExistingTracking, fileForAction, looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent } = __testables;
+const { partitionContentTargets, describeNginxMarker, partitionPreDraftBlocked, targetRendersCode, classifyNginxMarker, summarizeExistingTracking, fileForAction, looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent } = __testables;
 
 describe('extractMetaContent', () => {
   test('reads a real og:title content value', () => {
@@ -271,5 +271,22 @@ describe('partitionPreDraftBlocked now also covers schema and faqSchemaOnly (Adm
     const real = 'return <section><p>Body text here</p></section>;';
     const r = partitionPreDraftBlocked([rows('c.tsx', 'schema'), rows('c.tsx', 'faq')], () => real);
     assert.equal(r.stillFatal.length, 2);
+  });
+});
+
+describe('partitionContentTargets (Admizz: pages built by hand are declared, not "unconfigured")', () => {
+  const types = ['landing-page', 'blog-outline', 'cookie-policy', 'translation'];
+  const site = { url_file_map: { newContentNotApplicable: { 'landing-page': 'Hand-built.', 'cookie-policy': 'Exists at /cookie-policy.' } } };
+  test('a configured type is neither declared nor missing; a declared one carries its reason; the rest are the real gaps', () => {
+    const r = partitionContentTargets(site, types, { 'blog-outline': { dir: 'src/app' } });
+    assert.deepEqual(r.declared, [{ type: 'landing-page', reason: 'Hand-built.' }, { type: 'cookie-policy', reason: 'Exists at /cookie-policy.' }]);
+    assert.deepEqual(r.missing, ['translation']);
+  });
+  test('a type with a target is never reported as declared even if a declaration also exists', () => {
+    const r = partitionContentTargets(site, types, { 'landing-page': { dir: 'src/app' } });
+    assert.ok(!r.declared.some((d) => d.type === 'landing-page'));
+  });
+  test('with no declarations every unconfigured type is missing, as before', () => {
+    assert.deepEqual(partitionContentTargets({ url_file_map: {} }, types, {}).missing, types);
   });
 });

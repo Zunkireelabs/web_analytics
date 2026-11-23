@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { pool, recordActionCenterConfigCheck } from '../db.js';
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { listConnectedSites } from '../job.js';
-import { resolveFile, resolveActionFile, resolveMarkers, resolveAdapter, resolveNotApplicable, resolveSiteRootFile, resolveAuthorAvatars } from '../implementers/lib/url-file-map.js';
+import { resolveFile, resolveActionFile, resolveMarkers, resolveAdapter, resolveNotApplicable, resolveNewContentNotApplicable, resolveSiteRootFile, resolveAuthorAvatars } from '../implementers/lib/url-file-map.js';
 import { parseSvgDimensions, classifyAvatarAspectGap } from '../implementers/lib/avatar-aspect-check.js';
 import { hasMarker, classifyMarkerGap, isHeadScopedField } from '../implementers/lib/marker-merge.js';
 import { preDraftContentBlock } from '../implementers/lib/action-scope.js';
@@ -182,6 +182,18 @@ function describeNginxMarker(nginx) {
     case 'fatal': return `MISSING (fatal: ${nginx.reason} — no serving server { } block to place it in)`;
     default: return `unknown status ${nginx.status}`;
   }
+}
+
+// Net-new content types split three ways: configured (has a target), declared not applicable (the site builds that page by hand, with a reason)
+// and genuinely unconfigured. Only the last is a coverage gap.
+function partitionContentTargets(site, types, newContentTargets) {
+  const declared = []; const missing = [];
+  for (const t of types) {
+    if (newContentTargets[t]) continue;
+    const d = resolveNewContentNotApplicable(site, t);
+    if (d) declared.push({ type: t, reason: d.reason }); else missing.push(t);
+  }
+  return { declared, missing };
 }
 
 function parseArgs(argv) {
@@ -640,10 +652,14 @@ export async function auditSite(siteId, { record = true } = {}) {
   // not a gap nobody looked at until a recommendation for it showed up
   // blocked. See NEW_CONTENT_ACTION_TYPES above for the real incident this
   // closes.
-  const missingContentTargets = NEW_CONTENT_ACTION_TYPES.filter((t) => !newContentTargets[t]);
+  const { declared: declaredContentTypes, missing: missingContentTargets } = partitionContentTargets(site, NEW_CONTENT_ACTION_TYPES, newContentTargets);
   console.log(`\n-- NEW CONTENT TARGETS NOT CONFIGURED (${missingContentTargets.length}/${NEW_CONTENT_ACTION_TYPES.length}) -- (not fatal; any recommendation of this type will block until configured)`);
   for (const actionType of missingContentTargets) console.log(`  [${actionType}] no url_file_map.newContentTargets["${actionType}"] entry`);
-  if (!missingContentTargets.length) console.log('  OK — every known net-new content type has a target configured.');
+  if (!missingContentTargets.length) console.log(declaredContentTypes.length ? '  OK — every known net-new content type has a target or a declared reason.' : '  OK — every known net-new content type has a target configured.');
+  if (declaredContentTypes.length) {
+    console.log(`\n-- DECLARED NOT APPLICABLE: net-new content built by hand (${declaredContentTypes.length}) -- (not gaps; each declaration carries its reason)`);
+    for (const d of declaredContentTypes) console.log(`  [${d.type}] ${d.reason}`);
+  }
 
   // Author/org avatar aspect-ratio check (avatar-aspect-check.js) — catches
   // the zunkireelabs-web incident shape (a wide wordmark logo declared as
@@ -835,4 +851,4 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   });
 }
 
-export const __testables = { describeNginxMarker, partitionPreDraftBlocked, targetRendersCode, classifyNginxMarker, summarizeExistingTracking, fileForAction, looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent };
+export const __testables = { partitionContentTargets, describeNginxMarker, partitionPreDraftBlocked, targetRendersCode, classifyNginxMarker, summarizeExistingTracking, fileForAction, looksLikeOgPlaceholder, verifyLiveOpenGraph, verifyLiveCanonical, extractMetaContent };

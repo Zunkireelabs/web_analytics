@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   renderCompliancePageBody, renderLandingPageBody, renderBlogOutlineBody,
   renderDirectAnswerBody, renderTranslationBody,
-  renderDirectAnswerBodyTsx, renderTranslationBodyTsx,
+  renderDirectAnswerBodyTsx, renderTranslationBodyTsx, renderBlogOutlineBodyTsx, absoluteCanonical,
 } from './newpage-render.js';
 import { DESIGN_PROFILE_VERSION } from '../../design-agent/lib/design-profile.js';
 
@@ -535,7 +535,8 @@ describe('renderDirectAnswerBodyTsx / renderTranslationBodyTsx — Next.js App R
   test('renders valid-shaped TSX with props passed through JSON.stringify, not interpolated into JSX', () => {
     const out = renderDirectAnswerBodyTsx(directAnswerContent, {});
     assert.match(out, /import GeneratedDirectAnswer from "@\/components\/GeneratedDirectAnswer";/);
-    assert.match(out, /export const answer = \{/);
+    assert.match(out, /^const answer = \{/m, 'a plain const: a Next page file may only export the names Next knows');
+    assert.doesNotMatch(out, /export const answer/);
     assert.match(out, /export default function Page\(\) \{/);
     assert.match(out, /return <GeneratedDirectAnswer \{\.\.\.answer\} \/>;/);
     // The literal answer text — including its own apostrophe-free punctuation
@@ -550,7 +551,7 @@ describe('renderDirectAnswerBodyTsx / renderTranslationBodyTsx — Next.js App R
       directAnswer: 'Not quite — a "conditional offer" still requires meeting listed conditions.',
     };
     const out = renderDirectAnswerBodyTsx(risky, {});
-    assert.doesNotThrow(() => JSON.parse(out.match(/export const answer = (\{[\s\S]*?\n\});/)[1]));
+    assert.doesNotThrow(() => JSON.parse(out.match(/const answer = (\{[\s\S]*?\n\});/)[1]));
   });
 
   test('includes alternates.canonical only when a canonicalUrl is passed, matching renderBlogOutlineBodyTsx', () => {
@@ -649,4 +650,53 @@ _t('blog TSX: `post` is NOT exported by default (Next rejects extra page exports
   _assert.match(_renderPost(c, {}, {}), /^const post = /m);
   _assert.doesNotMatch(_renderPost(c, {}, {}), /export const post/);
   _assert.match(_renderPost(c, { url_file_map: { newContentTargets: { 'blog-outline': { exportPost: true } } } }, {}), /^export const post = /m);
+});
+
+describe('Next.js page files: no extra exports, and the post carries its real public path', () => {
+  const answerContent = { query: 'What GPA do I need?', directAnswer: 'About 2.5.' };
+  test('direct-answer data is a plain const by default and exported only when the site opts in', () => {
+    assert.doesNotMatch(renderDirectAnswerBodyTsx(answerContent, {}), /export const answer/);
+    const opted = { url_file_map: { newContentTargets: { 'direct-answer': { exportAnswer: true } } } };
+    assert.match(renderDirectAnswerBodyTsx(answerContent, opted), /export const answer = \{/);
+  });
+  test('the generated page file exports only default and metadata', () => {
+    const out = renderDirectAnswerBodyTsx(answerContent, {}, { canonicalUrl: 'https://admizzeducation.com/answers/gpa' });
+    const exports = [...out.matchAll(/^export (?:const|default function) (\w+)/gm)].map((m) => m[1]);
+    assert.deepEqual(exports.sort(), ['Page', 'metadata']);
+  });
+  const post = { title: 'UK Student Visa Cost 2027', sections: [{ heading: 'Costs', body: 'Three costs.' }] };
+  test('a blog post gets path from its canonical URL, so the component never falls back to /blogs/<slug>', () => {
+    const out = renderBlogOutlineBodyTsx(post, {}, { canonicalUrl: 'https://admizzeducation.com/uk-student-visa-cost-2027' });
+    const props = JSON.parse(out.match(/const post = (\{[\s\S]*?\n\});/)[1]);
+    assert.equal(props.path, '/uk-student-visa-cost-2027');
+    assert.ok(!/export const post/.test(out));
+  });
+  test('a trailing slash is dropped from path, and no canonical means no path (the old behaviour)', () => {
+    const slash = renderBlogOutlineBodyTsx(post, {}, { canonicalUrl: 'https://admizzeducation.com/answers/x/' });
+    assert.equal(JSON.parse(slash.match(/const post = (\{[\s\S]*?\n\});/)[1]).path, '/answers/x');
+    const none = renderBlogOutlineBodyTsx(post, {});
+    assert.equal('path' in JSON.parse(none.match(/const post = (\{[\s\S]*?\n\});/)[1]), false);
+  });
+});
+
+describe('canonical is absolute on generated Next.js pages', () => {
+  const site = { website_domain: 'https://admizzeducation.com/' };
+  test('a path is completed from the site domain; an absolute URL is untouched; no domain leaves the path as given', () => {
+    assert.equal(absoluteCanonical('/some-post', site), 'https://admizzeducation.com/some-post');
+    assert.equal(absoluteCanonical('https://other.example/x', site), 'https://other.example/x');
+    assert.equal(absoluteCanonical('/some-post', {}), '/some-post');
+    assert.equal(absoluteCanonical(null, site), null);
+  });
+  test('a bare domain without a scheme still works', () => {
+    assert.equal(absoluteCanonical('/p', { website_domain: 'zennly.io' }), 'https://zennly.io/p');
+  });
+  test('a blog post given only a path gets the full canonical AND its path prop', () => {
+    const out = renderBlogOutlineBodyTsx({ title: 'A Post', sections: [{ heading: 'H', body: 'b' }] }, site, { canonicalUrl: '/a-post' });
+    assert.match(out, /alternates: \{ canonical: "https:\/\/admizzeducation\.com\/a-post" \}/);
+    assert.equal(JSON.parse(out.match(/const post = (\{[\s\S]*?\n\});/)[1]).path, '/a-post');
+  });
+  test('a direct answer given only a path gets the full canonical', () => {
+    const out = renderDirectAnswerBodyTsx({ query: 'Q?', directAnswer: 'A.' }, site, { canonicalUrl: '/answers/q' });
+    assert.match(out, /canonical: "https:\/\/admizzeducation\.com\/answers\/q"/);
+  });
 });

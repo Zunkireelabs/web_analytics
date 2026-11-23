@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isPageMapped, resolveFile, resolveHostScope, resolveNewContentTarget, resolveNewContentUrl, resolveNewContentLayout,
-  resolveMarkers, resolveTranslationTarget, resolveActionFile, resolvePlacement, resolveLineKeys, resolveNotApplicable } from './url-file-map.js';
+  resolveMarkers, resolveTranslationTarget, resolveActionFile, resolvePlacement, resolveLineKeys, resolveNotApplicable, resolveNewContentNotApplicable } from './url-file-map.js';
 
 describe('resolveTranslationTarget', () => {
   test('a normal file gets a language-code suffix sibling, same as any other framework', () => {
@@ -427,5 +427,22 @@ describe('resolveNotApplicable (a site declares, with a reason, that its own tem
     const a = site([rule]); const b = { url_file_map: { pages: {} } };
     assert.ok(resolveNotApplicable(a, 'https://acme.com/products/orca/', 'schema'));
     assert.equal(resolveNotApplicable(b, 'https://acme.com/products/orca/', 'schema'), null);
+  });
+});
+
+describe('resolveNewContentNotApplicable (page types a site builds by hand)', () => {
+  const site = { url_file_map: { newContentNotApplicable: { 'cookie-policy': 'The page exists at /cookie-policy and is maintained by hand.', translation: '  ', 'landing-page': 42 } } };
+  test('returns the reason for a declared type', () => {
+    assert.equal(resolveNewContentNotApplicable(site, 'cookie-policy').reason, 'The page exists at /cookie-policy and is maintained by hand.');
+  });
+  test('an undeclared type, an empty reason and a non-string reason all return null — a declaration must say why', () => {
+    assert.equal(resolveNewContentNotApplicable(site, 'blog-outline'), null);
+    assert.equal(resolveNewContentNotApplicable(site, 'translation'), null);
+    assert.equal(resolveNewContentNotApplicable(site, 'landing-page'), null);
+  });
+  test('no declarations, an array, or no site gives null (per-site isolation)', () => {
+    assert.equal(resolveNewContentNotApplicable({ url_file_map: {} }, 'cookie-policy'), null);
+    assert.equal(resolveNewContentNotApplicable({ url_file_map: { newContentNotApplicable: ['cookie-policy'] } }, 'cookie-policy'), null);
+    assert.equal(resolveNewContentNotApplicable(null, 'cookie-policy'), null);
   });
 });

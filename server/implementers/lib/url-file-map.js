@@ -166,6 +166,19 @@ export function resolveNotApplicable(site, pageUrl, actionType) {
   return null;
 }
 
+// A site's explicit, reasoned statement that it does NOT create a kind of net-new page through SuperRank, because those pages are built and
+// maintained by hand (Admizz's cookie-policy, terms-of-service and privacy-policy pages exist at their own URLs; its landing pages are hand-built
+// and it has no generated-landing-page component; it has no locale routes for translation). Declared in
+//   url_file_map.newContentNotApplicable: { "<action type>": "why" }
+// An entry with an empty reason is ignored. The recommendation gate drops the type (no draft, nothing blocked, nothing to configure) and the
+// config audit lists it under its reason instead of as an unconfigured target.
+export function resolveNewContentNotApplicable(site, actionType) {
+  const decl = site?.url_file_map?.newContentNotApplicable;
+  if (!decl || typeof decl !== 'object' || Array.isArray(decl) || !actionType) return null;
+  const reason = decl[actionType];
+  return typeof reason === 'string' && reason.trim() ? { reason: reason.trim() } : null;
+}
+
 // Existing-page generators (schema, meta-title, faq, internal-links,
 // translation) resolve against `pages` (exact match) then `patterns` (regex
 // with $1-style capture-group substitution, for templated routes like

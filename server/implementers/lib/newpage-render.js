@@ -211,7 +211,19 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
 // rather than a second sidecar/metadata file that could drift from it. See
 // e.g. Admizz's src/app/blogs/page.tsx, which merges these with its Sanity
 // posts.
-export function renderBlogOutlineBodyTsx(content, site, { canonicalUrl = null } = {}) {
+// A canonical must be an absolute address. resolveNewContentUrl returns a site path ("/slug") when the target's urlPattern is a path, so a relative
+// value is completed from the site's own domain. Already-absolute values are returned unchanged; with no usable domain the value is left as given.
+export function absoluteCanonical(url, site) {
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) return url;
+  if (!url.startsWith('/')) return url;
+  const raw = String(site?.website_domain || '').trim();
+  if (!raw) return url;
+  try { return new URL(url, /^https?:\/\//i.test(raw) ? raw : `https://${raw}`).href; } catch { return url; }
+}
+
+export function renderBlogOutlineBodyTsx(content, site, { canonicalUrl: canonicalIn = null } = {}) {
+  const canonicalUrl = absoluteCanonical(canonicalIn, site);
   // A Next.js page file may only export the names Next knows (default, metadata, generateStaticParams, ...). Exporting `post` as well makes
   // `next build` fail its type check on Next 15/16 — found by running Admizz's real build on a generated post. So it is a plain const unless
   // the site's own listing really imports it (newContentTargets['blog-outline'].exportPost === true).
@@ -234,6 +246,9 @@ export function renderBlogOutlineBodyTsx(content, site, { canonicalUrl = null } 
     categories: Array.isArray(content.categories) ? content.categories : [],
     publishedAt: content.publishedAt || new Date().toISOString(),
   };
+  // The post's real public path, taken from its own canonical URL. Without it a component that defaults to "/blogs/<slug>" (Admizz's
+  // GeneratedBlogPost does) builds a canonical and related-post links for a URL that redirects, on a site whose posts live at "/<slug>".
+  if (canonicalUrl) { try { const p = new URL(canonicalUrl, 'https://placeholder.invalid').pathname; if (p && p !== '/') props.path = p.replace(/\/+$/, '') || p; } catch { /* a relative canonical has no origin; leave it */ } }
   // Optional, real fields only — never invented. A client whose build requires them (see frontend.js's postContract check) refuses a
   // draft that lacks them instead of shipping a post its own build rejects.
   if (typeof content.quickAnswer === 'string' && content.quickAnswer.trim()) props.quickAnswer = content.quickAnswer.trim();
@@ -299,7 +314,8 @@ export function renderDirectAnswerBody(content, site, { permalink = null, layout
 // (`GeneratedDirectAnswer`) mirrors GeneratedBlogPost's: written once per
 // site, in the client's own repo, and can be restyled without regenerating
 // any existing answer page.
-export function renderDirectAnswerBodyTsx(content, site, { canonicalUrl = null } = {}) {
+export function renderDirectAnswerBodyTsx(content, site, { canonicalUrl: canonicalIn = null } = {}) {
+  const canonicalUrl = absoluteCanonical(canonicalIn, site);
   const heading = content.title || content.heading || content.query || 'Untitled';
   const props = {
     heading,
@@ -313,11 +329,14 @@ export function renderDirectAnswerBodyTsx(content, site, { canonicalUrl = null }
   };
   const metaTitle = content.title || content.heading || content.query || 'Untitled';
   const metaDescription = content.directAnswer?.slice(0, 155) || '';
+  // A Next.js page file may only export the names Next knows (default, metadata, generateStaticParams, ...); an extra `export const answer`
+  // fails `next build`'s type check. A plain const, unless the site's own code really imports it (newContentTargets['direct-answer'].exportAnswer).
+  const exportAnswer = site?.url_file_map?.newContentTargets?.['direct-answer']?.exportAnswer === true;
   const lines = [
     'import type { Metadata } from "next";',
     'import GeneratedDirectAnswer from "@/components/GeneratedDirectAnswer";',
     '',
-    `export const answer = ${JSON.stringify(props, null, 2)};`,
+    `${exportAnswer ? 'export ' : ''}const answer = ${JSON.stringify(props, null, 2)};`,
     '',
     'export const metadata: Metadata = {',
     `  title: ${JSON.stringify(metaTitle)},`,

@@ -852,3 +852,24 @@ describe('createRecommendationGates — declared not applicable and template-sup
     assert.notEqual((await g2.evaluate('faq', { page: `${O}/post-a` })).drop, 'page-has-own-faq');
   });
 });
+
+describe('createRecommendationGates — net-new page types a site builds by hand', () => {
+  const mk = (url_file_map) => ({ id: 8862, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', url_file_map });
+  test('a declared type is dropped before any repair or draft, with no target configured', async () => {
+    let heals = 0;
+    const gates = createRecommendationGates(1, mk({ newContentNotApplicable: { 'cookie-policy': 'Exists at /cookie-policy, maintained by hand.' } }), { ...neutralDeps(), healContentTargetFn: async () => { heals++; return null; } });
+    const r = await gates.evaluate('cookie-policy', {});
+    assert.equal(r.drop, 'declared-not-applicable');
+    assert.equal(heals, 0);
+  });
+  test('an undeclared type with no target is still blocked with the same reason as before', async () => {
+    const gates = createRecommendationGates(1, mk({ newContentNotApplicable: { 'cookie-policy': 'x.' } }), { ...neutralDeps(), healContentTargetFn: async () => null });
+    const r = await gates.evaluate('landing-page', {});
+    assert.equal(r.drop, null);
+    assert.match(r.blockedReason, /newContentTargets\["landing-page"\]/);
+  });
+  test('a declaration without a reason does not hide the block', async () => {
+    const gates = createRecommendationGates(1, mk({ newContentNotApplicable: { 'cookie-policy': '' } }), { ...neutralDeps(), healContentTargetFn: async () => null });
+    assert.equal((await gates.evaluate('cookie-policy', {})).drop, null);
+  });
+});

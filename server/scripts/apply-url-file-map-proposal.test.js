@@ -171,6 +171,38 @@ describe('planProposal — Zunkiree phase 2 (industries pattern, on top of the a
   });
 });
 
+describe('planProposal — Admizz phase 5 (new-page targets), merged against the applied phase 3', () => {
+  const base = load('admizz-8862-phase3-faq-more-pages-map.json'); const proposed = load('admizz-8862-phase5-targets-map.json');
+  test('moves the blog and answer targets out of /blogs, removes the three stale targets and declares the hand-built types', () => {
+    const { conflicts, merged } = planProposal(base, clone(base), proposed);
+    assert.deepEqual(conflicts, []);
+    const t = merged.newContentTargets;
+    assert.equal(t['blog-outline'].dir, 'src/app');
+    assert.equal(t['blog-outline'].urlPattern, '/{slug}');
+    assert.deepEqual(t['blog-outline'].postContract.requiredContent, ['quickAnswer', 'faqItems', 'sources']);
+    assert.equal(t['direct-answer'].dir, 'src/app/answers');
+    assert.equal(t['direct-answer'].urlPattern, '/answers/{slug}');
+    for (const k of ['landing-page', 'cookie-policy', 'terms-of-service']) assert.equal(k in t, false, k);
+    assert.deepEqual(Object.keys(merged.newContentNotApplicable).sort(), ['cookie-policy', 'landing-page', 'privacy-policy', 'terms-of-service', 'translation']);
+    assert.ok(Object.values(merged.newContentNotApplicable).every((r) => r.length > 20));
+  });
+  test('independent of phase 4: applying phase 4 first and then phase 5 gives both, with no conflict', () => {
+    const p4 = load('admizz-8862-phase4-city-data-faq-map.json');
+    const afterP4 = planProposal(base, clone(base), p4).merged;
+    const { conflicts, merged } = planProposal(base, afterP4, proposed);
+    assert.deepEqual(conflicts, []);
+    assert.equal(merged.pages['/birgunj'].adapters.faq.dataFile, 'src/data/cities/birgunj.ts');
+    assert.equal(merged.newContentTargets['blog-outline'].dir, 'src/app');
+  });
+  test('no page entry changes', () => {
+    const { summary } = planProposal(base, clone(base), proposed);
+    assert.equal(summary.pagesAdded.length + summary.pagesRemoved.length + summary.pagesChanged.length, 0);
+  });
+  test('refuses to run before the engine is deployed', () => {
+    assert.match(checkGuards({ site: 8862, proposalName: 'admizz-8862-phase5-targets-map.json', engineDeployed: false }), /engine change deployed/);
+  });
+});
+
 describe('checkGuards', () => {
   test('only sites 1 and 8862 are allowed', () => {
     assert.deepEqual([...ALLOWED_SITES].sort((a, b) => a - b), [1, 8862, 8864]);

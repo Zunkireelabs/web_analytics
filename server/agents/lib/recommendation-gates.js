@@ -1,7 +1,7 @@
 import { sharedTemplateTargetBlock, templateDrivenBodyBlock, templateEmitsSchemaBlock, faqSchemaOnlyBlock } from '../../implementers/lib/action-scope.js';
 import { ensureMeasurementId, needsInputMessage, isMeasurementId } from '../../lib/ga4-measurement-id.js';
 import { generatedPageBlockReason } from './page-type.js';
-import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget, resolveNotApplicable } from '../../implementers/lib/url-file-map.js';
+import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget, resolveNotApplicable, resolveNewContentNotApplicable } from '../../implementers/lib/url-file-map.js';
 import { hasExistingFaqSchema, INSPECTABLE_ACTION_TYPES } from '../../implementers/lib/render-inspector.js';
 import { templateRendersItemsField } from '../../implementers/lib/faq-render-mode.js';
 import { componentTemplateVerification, componentTemplateActionTypeFor, getDesignProfile } from '../../implementers/lib/design-drift.js';
@@ -453,6 +453,8 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     // actionType this pass, see healNewContentTarget) -> re-check. Same
     // "classify, heal, re-check" shape as the page-mapping gate below.
     let mappingBlockedReason = null;
+    // The site says it builds this kind of page by hand and does not create it through SuperRank: nothing to heal, nothing to block.
+    if (FRONTEND_ACTION_TYPES.has(generatorId) && resolveNewContentNotApplicable(site, generatorId)) return { drop: 'declared-not-applicable', blockedReason: null };
     if (FRONTEND_ACTION_TYPES.has(generatorId) && !resolveNewContentTarget(site, generatorId, 'probe')) {
       await healNewContentTarget(generatorId);
     }
