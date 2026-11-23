@@ -71,6 +71,18 @@ describe('planProposal — Admizz (site 8862)', () => {
   });
 });
 
+describe('planProposal ignores key order (the database re-orders keys inside each entry)', () => {
+  test('an already-applied map whose entries have reordered keys is a noop, not "changed"', () => {
+    const base = load('base-8862.json'); const p1 = load('admizz-8862-phase1-config-only-map.json');
+    const applied = planProposal(base, clone(base), p1).merged;
+    const reordered = clone(applied);
+    for (const e of Object.values(reordered.pages)) if (e.adapters) e.adapters = Object.fromEntries(Object.entries(e.adapters).reverse());
+    const plan = planProposal(base, reordered, p1);
+    assert.deepEqual(plan.summary.pagesChanged, []);
+    assert.equal(plan.summary.noop, true);
+  });
+});
+
 describe('checkGuards', () => {
   test('only sites 1 and 8862 are allowed', () => {
     assert.deepEqual([...ALLOWED_SITES].sort(), [1, 8862]);
