@@ -18,14 +18,21 @@ describe('the standard order is an explicit, frozen rule', () => {
   });
 });
 
-describe('opt-in: a site that has not opted in is untouched (MOBILISE stays as it is)', () => {
-  const on = { url_file_map: { siteRoot: { sectionOrder: 'standard' } } };
-  test('only siteRoot.sectionOrder === "standard" turns it on', () => {
-    assert.equal(usesStandardSectionOrder(on), true);
-    for (const off of [{}, { url_file_map: {} }, { url_file_map: { siteRoot: {} } }, { url_file_map: { siteRoot: { sectionOrder: true } } }, { url_file_map: { siteRoot: { sectionOrder: 'other' } } }, null]) {
-      assert.equal(usesStandardSectionOrder(off), false);
-      assert.equal(standardPlacementFor(off, 'expand-content', 'expandedContent'), null);
+describe('on by default, held back only with sectionOrder "off" (MOBILISE is held until its owner has seen it)', () => {
+  const on = { url_file_map: { siteRoot: {} } };
+  test('every site is on unless it says "off"', () => {
+    for (const site of [on, { url_file_map: {} }, { url_file_map: { siteRoot: { sectionOrder: 'standard' } } }, { url_file_map: { siteRoot: { sectionOrder: true } } }]) {
+      assert.equal(usesStandardSectionOrder(site), true);
     }
+    assert.equal(usesStandardSectionOrder({ url_file_map: { siteRoot: { sectionOrder: 'off' } } }), false);
+  });
+  test('an "off" site gets no placement instruction at all', () => {
+    const off = { url_file_map: { siteRoot: { sectionOrder: 'off' } } };
+    assert.equal(standardPlacementFor(off, 'expand-content', 'expandedContent'), null);
+    assert.equal(standardPlacementFor(off, 'internal-links', 'links'), null);
+  });
+  test('no site at all gives no instruction (nothing to place against)', () => {
+    assert.equal(standardPlacementFor(null, 'expand-content', 'expandedContent'), null);
   });
   test('the instruction per fix type', () => {
     assert.deepEqual(standardPlacementFor(on, 'expand-content', 'expandedContent'), { field: 'expandedContent', mode: 'before-trailing', beforeRoles: ['faq', 'cta'] });
