@@ -21,8 +21,9 @@ import { merge3, stableStringify } from '../lib/json-merge3.js';
 //   --base <file>  the map the proposal was written against (default base-<site>.json). Use it when the live map has since moved
 //                  to a known earlier proposal, e.g. phase 3 is written on top of the applied phase 2.
 //
-// Phase 2 (page-data-object on `{...post}` pages) needs the engine change in this PR to be DEPLOYED first, or those
-// adapters would be configured but refuse every draft. It therefore refuses to run without --engine-deployed.
+// Phase 2 (page-data-object on `{...post}` pages) and phase 4 (page-data-object `dataFile` mode for the Admizz city pages) need the
+// engine change to be DEPLOYED first, or those adapters would be configured but refuse every draft. They therefore refuse to run
+// without --engine-deployed.
 // Only sites 1, 8862 and 8864 are allowed; a proposal can never be applied to another site.
 
 export const PROPOSAL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../docs/audits/2026-11-23-six-client-remediation/proposals');
@@ -52,7 +53,7 @@ export function planProposal(base, current, proposed) {
 
 export function checkGuards({ site, proposalName, engineDeployed }) {
   if (!ALLOWED_SITES.has(site)) return `site ${site} is not allowed: this proposal covers only sites ${[...ALLOWED_SITES].join(' and ')}`;
-  if (/phase2/i.test(proposalName) && !engineDeployed) return 'phase 2 needs the engine change deployed first: pass --engine-deployed once it is live';
+  if (/phase[24]/i.test(proposalName) && !engineDeployed) return 'phases 2 and 4 need the engine change deployed first: pass --engine-deployed once it is live';
   if (site === 1 && !/^zunkiree-1-/.test(proposalName)) return 'this proposal does not belong to site 1';
   if (site === 8862 && !/^admizz-8862-/.test(proposalName)) return 'this proposal does not belong to site 8862';
   if (site === 8864 && !/^chayce-8864-/.test(proposalName)) return 'this proposal does not belong to site 8864';

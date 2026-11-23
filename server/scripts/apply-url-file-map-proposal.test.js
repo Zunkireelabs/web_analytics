@@ -111,6 +111,21 @@ describe('planProposal — Admizz phase 3 on top of the applied phase 2 (--base)
   });
 });
 
+describe('planProposal — Admizz phase 4 (city data FAQ, on top of the applied phase 3)', () => {
+  const base = load('admizz-8862-phase3-faq-more-pages-map.json'); const proposed = load('admizz-8862-phase4-city-data-faq-map.json');
+  test('adds the dataFile FAQ adapter to exactly /birgunj and /janakpur and nothing else', () => {
+    const { conflicts, summary, merged } = planProposal(base, clone(base), proposed);
+    assert.deepEqual(conflicts, []);
+    assert.deepEqual(summary.pagesChanged.sort(), ['/birgunj', '/janakpur']);
+    assert.equal(summary.pagesAdded.length + summary.pagesRemoved.length, 0);
+    for (const [u, c] of [['/birgunj', 'birgunj'], ['/janakpur', 'janakpur']]) {
+      const a = merged.pages[u].adapters.faq;
+      assert.deepEqual([a.id, a.dataFile, a.exportName, a.itemsPath, a.itemKeys.question, a.itemKeys.answer], ['page-data-object', `src/data/cities/${c}.ts`, `${c}Data`, ['faq', 'items'], 'q', 'a']);
+      assert.ok(merged.pages[u].adapters['meta-title'], 'existing adapters are kept');
+    }
+  });
+});
+
 describe('checkGuards', () => {
   test('only sites 1 and 8862 are allowed', () => {
     assert.deepEqual([...ALLOWED_SITES].sort((a, b) => a - b), [1, 8862, 8864]);
@@ -126,7 +141,9 @@ describe('checkGuards', () => {
     assert.match(checkGuards({ site: 8864, proposalName: 'zunkiree-1-proposed-map.json' }), /does not belong to site 8864/);
     assert.match(checkGuards({ site: 1, proposalName: 'chayce-8864-proposed-map.json' }), /does not belong to site 1/);
   });
-  test('phase 2 refuses without --engine-deployed', () => {
+  test('phase 2 and phase 4 refuse without --engine-deployed', () => {
+    assert.match(checkGuards({ site: 8862, proposalName: 'admizz-8862-phase4-city-data-faq-map.json', engineDeployed: false }), /engine change deployed/);
+    assert.equal(checkGuards({ site: 8862, proposalName: 'admizz-8862-phase4-city-data-faq-map.json', engineDeployed: true }), null);
     assert.match(checkGuards({ site: 8862, proposalName: 'admizz-8862-phase2-needs-engine-map.json', engineDeployed: false }), /engine change deployed/);
     assert.equal(checkGuards({ site: 8862, proposalName: 'admizz-8862-phase2-needs-engine-map.json', engineDeployed: true }), null);
   });

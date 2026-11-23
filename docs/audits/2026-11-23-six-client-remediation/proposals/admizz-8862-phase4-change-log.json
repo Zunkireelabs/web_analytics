@@ -1,0 +1,17 @@
+{
+  "site": 8862,
+  "baseRev": 49,
+  "dryRuns": [
+    {
+      "url": "/birgunj",
+      "ok": true,
+      "file": "src/data/cities/birgunj.ts"
+    },
+    {
+      "url": "/janakpur",
+      "ok": true,
+      "file": "src/data/cities/janakpur.ts"
+    }
+  ],
+  "problems": []
+}

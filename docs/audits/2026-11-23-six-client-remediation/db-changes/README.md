@@ -47,5 +47,8 @@ site, restore its map from that copy (keeping the then-current `_rev`).
 ## 4. No other production write
 Sites 8871, 8872 and 8874 were not changed.
 
+Prepared and dry-run, NOT applied (needs the engine in this PR deployed first, then approval): `admizz-8862-phase4-city-data-faq-map.json`, merged with
+`--base admizz-8862-phase3-faq-more-pages-map.json --engine-deployed` (FAQ adapter in `dataFile` mode on `/birgunj` and `/janakpur`).
+
 Copies of the maps from before the writes (outside git, same reason as the others): `pre-apply-map-8864-rev29.json` and
 `pre-apply-map-8862-rev48-before-phase3.json`.
