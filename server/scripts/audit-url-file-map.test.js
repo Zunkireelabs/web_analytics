@@ -290,3 +290,18 @@ describe('partitionContentTargets (Admizz: pages built by hand are declared, not
     assert.deepEqual(partitionContentTargets({ url_file_map: {} }, types, {}).missing, types);
   });
 });
+
+describe('targetRendersCode: targets that never go through the Markdown gate are not render-capability gaps', () => {
+  test('a Next.js page component (tsx) and a hand-written HTML post copied from a sibling (clone-sibling) both render code', () => {
+    assert.equal(targetRendersCode('blog-outline', { filename: 'page.tsx', extension: '.tsx' }), true);
+    assert.equal(targetRendersCode('blog-outline', { mode: 'clone-sibling', filename: 'index.njk', extension: '.njk' }), true);
+  });
+  test('the clone-sibling mode applies to blog posts only: a landing page on the same site is still Markdown and still judged', () => {
+    assert.equal(targetRendersCode('landing-page', { mode: 'clone-sibling', extension: '.njk' }), false);
+    assert.equal(targetRendersCode('direct-answer', { mode: 'clone-sibling', extension: '.njk' }), false);
+  });
+  test('an ordinary .njk or .md blog target is still judged', () => {
+    assert.equal(targetRendersCode('blog-outline', { dir: 'docs', extension: '.md' }), false);
+    assert.equal(targetRendersCode('blog-outline', { filename: 'index.njk', extension: '.njk' }), false);
+  });
+});
