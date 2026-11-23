@@ -189,6 +189,19 @@ export function industryScore(rec, industryItem, learned) {
 // so it breaks ties rather than driving order.
 const LABEL_BONUS = { High: 40, Medium: 20, Low: 0 };
 
+// AI VISIBILITY FIRST. The recommendation types that decide whether an AI assistant can find, understand and quote a site:
+// the answer it can lift (faq, direct-answer, qa-content), the machine-readable facts (schema) and the title/description it
+// reads first (meta-title). They are lifted over the other work in the SAME tier. The bonus is bounded far under STEP, so it can
+// only re-order inside a tier: every critical technical / indexing fix still comes first, and no autonomy or safety gate
+// (which run on the recommendation, not the score) is touched. On by default; AI_VISIBILITY_FIRST=false turns it off.
+export const VISIBILITY_BONUS = 250;
+export const VISIBILITY_TYPES = new Set(['faq', 'direct-answer', 'qa-content', 'schema', 'meta-title']);
+export function visibilityFirstEnabled(env = process.env) { return env.AI_VISIBILITY_FIRST !== 'false'; }
+export function visibilityScore(rec, enabled) {
+  if (!enabled || !VISIBILITY_TYPES.has(rec?.recommendation_type)) return { score: 0, factors: [] };
+  return { score: VISIBILITY_BONUS, factors: [`AI visibility first (+${VISIBILITY_BONUS})`] };
+}
+
 /**
  * @param rec  a recommendations row
  * @param ctx  { pageMetrics: Map<pageUrl, {impressions, clicks, ctr, avgPosition}>,
@@ -226,6 +239,11 @@ export function scoreRecommendation(rec, ctx = {}) {
   const stagePrefers = stageScore(growth, tier, { declining: Boolean(page && declines?.get(page)) });
   score += stagePrefers.score;
   factors.push(...stagePrefers.factors);
+
+  // Opt-in per call (the daily queue passes visibilityFirstEnabled()), so a caller that does not ask scores exactly as before.
+  const visibility = visibilityScore(rec, ctx.visibilityFirst === true);
+  score += visibility.score;
+  factors.push(...visibility.factors);
 
   const label = rec.expected_impact?.label;
   if (LABEL_BONUS[label]) {

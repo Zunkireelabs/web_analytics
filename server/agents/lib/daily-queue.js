@@ -1,4 +1,4 @@
-import { scoreRecommendation } from './growth-scoring.js';
+import { scoreRecommendation, visibilityFirstEnabled } from './growth-scoring.js';
 import { groupSizes, groupKeyFor, capGroupsGlobally, orderByRootCause } from './root-cause-groups.js';
 import { SEVERITY_TIER, TIER_LABEL } from './severity-tiers.js';
 
@@ -78,7 +78,7 @@ export function buildDailyQueue({
   const sizes = groupSizes(candidates);
   const scored = candidates.map((rec) => ({
     rec,
-    ...scoreRecommendation(rec, { pageMetrics, learnedMap, groupSizes: sizes, groupKeyFor, declines, industryMap, growth, ctrCurve: ctrCurve || undefined }),
+    ...scoreRecommendation(rec, { pageMetrics, learnedMap, groupSizes: sizes, groupKeyFor, declines, industryMap, growth, ctrCurve: ctrCurve || undefined, visibilityFirst: visibilityFirstEnabled() }),
   })).sort((a, b) => b.score - a.score);
 
   if (remaining <= 0 || scored.length === 0) {
