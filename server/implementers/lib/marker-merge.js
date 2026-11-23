@@ -1,3 +1,4 @@
+import { renderRelatedGuides, standardRelatedGuides } from './related-guides-card.js';
 import { groupObservedClass } from '../../design-agent/lib/layout-groups.js';
 import { projectComponentTemplate, projectExpandContentCard, pageUsesCardSections, cx, projectTable } from '../../design-agent/lib/design-profile.js';
 import { classifyPageType } from '../../design-agent/live-analysis/schema.js';
@@ -1600,6 +1601,13 @@ function buildMergeValuesUnchecked(actionType, content, mode = 'visible', compon
   if (actionType === 'internal-links') {
     if (mode === 'schema-only') return { ok: false, error: '"internal-links" has no schema-only representation.' };
     if (!content.suggestions?.length) return { ok: false, error: 'This internal-links draft has no suggestions to apply.' };
+    // Cards in the site's own design when it has one saved (componentTemplates.relatedGuidesCard, copied from its own page) or measured tokens for the
+    // platform standard card (componentTemplates.relatedGuidesStandard); otherwise exactly the plain list this has always produced.
+    const items = content.suggestions.map((sg) => ({ url: sg.targetUrl, title: sg.meta?.title || sg.anchorText, description: sg.meta?.description || null, image: sg.meta?.image || null }));
+    const ownCard = componentTemplates.relatedGuidesCard?.card && componentTemplates.relatedGuidesCard?.section ? renderRelatedGuides(componentTemplates.relatedGuidesCard, items) : null;
+    if (ownCard?.ok) return { ok: true, values: { links: ownCard.html }, notes: [] };
+    const standard = componentTemplates.relatedGuidesStandard ? standardRelatedGuides(items, componentTemplates.relatedGuidesStandard) : null;
+    if (standard?.ok) return { ok: true, values: { links: standard.html }, notes: ['This site has no related-guides card of its own, so the platform standard card was built from its measured look. Check how it looks before approving; once approved it is the site\'s saved standard.'] };
     return { ok: true, values: { links: renderLinksHtml(content.suggestions, templateFor('internal-links', componentTemplates.internalLinks, DEFAULT_LINKS_TEMPLATE)) } };
   }
 

@@ -113,3 +113,52 @@ export function tokenRelatedGuides(items, tokens = {}) {
     + (i.description ? `<span style="color:${esc(t.muted)};font-size:.95em;line-height:1.5">${esc(i.description)}</span>` : '') + '</a>').join('');
   return { ok: true, needsReview: true, html: `<section aria-label="Related guides"><h2>Related guides</h2><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px">${cards}</div></section>` };
 }
+
+/**
+ * THE STANDARD CARD, for a site that has no card of its own. Fixed structure (image on top at 16:9, title, short description, a rounded bordered card,
+ * a responsive grid under a section heading); every visual value comes from what the site's own live page measured (RELATED_GUIDES_MEASURE below):
+ * its text and background colours, its heading and body fonts, the typical corner radius of its own buttons and images, its container width and section
+ * padding. Inline styles only, so no stylesheet is added to a client page. Always flagged needsReview: the first time it appears on a site a person
+ * approves how it looks, and that approval makes it the site's saved standard.
+ */
+export function standardRelatedGuides(items, t = {}) {
+  const list = (items || []).filter((i) => i && i.url && i.title);
+  if (!list.length) return { ok: false, reason: 'no-items' };
+  const v = {
+    text: t.bodyColor || 'inherit', bg: t.bodyBg || 'transparent',
+    // The measured radius often comes from pill-shaped buttons (40px+), which would turn a card into a blob: keep it in a range a card can carry.
+    radius: Number.isFinite(t.radius) ? Math.min(Math.max(t.radius, 4), 20) : 12,
+    h2Font: t.h2Font || 'inherit', h2Size: t.h2Size || '1.75rem', h2Weight: t.h2Weight || '700', h2Color: t.h2Color || t.bodyColor || 'inherit', h2Transform: t.h2Transform || 'none',
+    h3Font: t.h3Font || t.h2Font || 'inherit', h3Weight: t.h3Weight || '600', container: Number.isFinite(t.container) ? t.container : 1100, sectionPad: t.sectionPad || '64px',
+  };
+  const rgba = (c, a) => (/^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/.exec(c || '') ? c.replace(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/, `rgba($1, $2, $3, ${a})`) : null);
+  const muted = rgba(v.text, 0.68) || 'inherit';
+  const border = t.border || rgba(v.text, 0.16) || 'rgba(0,0,0,.14)';
+  const cards = list.map((i) => `<a href="${esc(i.url)}" style="display:flex;flex-direction:column;overflow:hidden;border:1px solid ${esc(border)};border-radius:${v.radius}px;background:${esc(v.bg)};color:${esc(v.text)};text-decoration:none;box-shadow:0 1px 2px rgba(0,0,0,.05)">`
+    + (i.image ? `<div style="aspect-ratio:16/9;overflow:hidden"><img src="${esc(i.image)}" alt="${esc(i.title)}" loading="lazy" style="width:100%;height:100%;object-fit:cover;display:block"></div>` : '')
+    + `<div style="padding:20px;display:flex;flex-direction:column;gap:8px"><h3 style="margin:0;font-family:${esc(v.h3Font)};font-weight:${esc(v.h3Weight)};font-size:1.125rem;line-height:1.3;color:${esc(v.h2Color)}">${esc(i.title)}</h3>`
+    + (i.description ? `<p style="margin:0;font-size:.95rem;line-height:1.55;color:${esc(muted)}">${esc(i.description.length > 140 ? `${i.description.slice(0, 137).trimEnd()}...` : i.description)}</p>` : '') + '</div></a>').join('');
+  return {
+    ok: true, needsReview: true, source: 'standard',
+    html: `<section data-seoai-standard-card style="padding:${esc(v.sectionPad)} 0"><div style="max-width:${v.container}px;margin:0 auto;padding:0 24px"><h2 style="margin:0 0 28px;font-family:${esc(v.h2Font)};font-size:${esc(v.h2Size)};font-weight:${esc(v.h2Weight)};text-transform:${esc(v.h2Transform)};color:${esc(v.h2Color)}">Related guides</h2><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:24px">${cards}</div></div></section>`,
+  };
+}
+
+/** Runs in the page: reads the site's own computed look. Shared by the capture script and any caller that already has a browser page. */
+export const RELATED_GUIDES_MEASURE = () => {
+  const cs = (el) => getComputedStyle(el); const px = (v) => parseFloat(v) || 0;
+  const body = cs(document.body); const main = document.querySelector('main, article') || document.body;
+  const h2 = [...main.querySelectorAll('h2')].find((h) => h.offsetParent) || document.querySelector('h2'); const h3 = main.querySelector('h3') || h2;
+  const cands = [...document.querySelectorAll('button, .btn, [class*="card"], img, input, [class*="button"]')].filter((e) => e.offsetParent && px(cs(e).borderTopLeftRadius) > 0);
+  const radii = cands.map((e) => px(cs(e).borderTopLeftRadius)).sort((a, b) => a - b);
+  const bordered = [...document.querySelectorAll('*')].find((e) => e.offsetParent && px(cs(e).borderTopWidth) > 0 && cs(e).borderTopStyle === 'solid' && !/rgba\(0, 0, 0, 0\)/.test(cs(e).borderTopColor));
+  const widths = [...main.querySelectorAll('div, section')].map((e) => cs(e).maxWidth).filter((w) => /px$/.test(w) && px(w) >= 600).map(px).sort((a, b) => b - a);
+  const sec = main.querySelector('section');
+  return {
+    bodyColor: body.color, bodyBg: body.backgroundColor === 'rgba(0, 0, 0, 0)' ? 'rgb(255, 255, 255)' : body.backgroundColor,
+    h2Font: h2 ? cs(h2).fontFamily : null, h2Size: h2 ? cs(h2).fontSize : null, h2Weight: h2 ? cs(h2).fontWeight : null, h2Color: h2 ? cs(h2).color : null, h2Transform: h2 ? cs(h2).textTransform : null,
+    h3Font: h3 ? cs(h3).fontFamily : null, h3Weight: h3 ? cs(h3).fontWeight : null,
+    radius: radii.length ? radii[Math.floor(radii.length / 2)] : 12, border: bordered ? cs(bordered).borderTopColor : null,
+    container: widths.length ? widths[Math.floor(widths.length / 2)] : 1100, sectionPad: sec ? cs(sec).paddingTop : '64px',
+  };
+};
