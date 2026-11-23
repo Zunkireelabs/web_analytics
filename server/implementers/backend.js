@@ -1,3 +1,4 @@
+import { standardPlacementFor } from './lib/section-order.js';
 import { resolveFile, resolveActionFile, resolveLineKeys, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, isPageMapped, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
 import { isTemplatedSitemap } from './lib/sitemap-guard.js';
 import { detectBuildGeneratedSitemap, generatedSitemapMessage } from './lib/sitemap-generator-detect.js';
@@ -1666,9 +1667,10 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   const expandPrior = draft.action_type === 'expand-content'
     ? await loadExpandStructurePrior(site, { actionType: 'expand-content', pageType: classifyPageType(page, { propertyType: site?.property_type }) })
     : null;
-  const placement = expandPrior && componentField
-    ? { field: componentField, beforeRoles: expandPrior.placement.before }
-    : null;
+  // The standard page order (lib/section-order.js) is the site's own opt-in and does not depend on a learned reference. When the site has
+  // not opted in, the learned-reference rule above is used exactly as before.
+  const placement = standardPlacementFor(site, draft.action_type, componentField)
+    || (expandPrior && componentField ? { field: componentField, beforeRoles: expandPrior.placement.before } : null);
   let placedContent = markdownNative
     ? placeMarkdownMarker(file.content, markerMap[MARKER_FIELD_BY_ACTION_TYPE[draft.action_type]], markdownNative.rendered).content
     : file.content;

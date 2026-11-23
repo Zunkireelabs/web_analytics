@@ -133,3 +133,39 @@ export function refineMarkerPlacement(content, filePath, markerName, roles, { ma
 
   return { content: `${without.slice(0, at)}\n${block}\n${without.slice(at)}`, moved: true, reason: 'before-trailing-sections', offset: at };
 }
+
+/**
+ * Where RELATED GUIDES go: after the FAQ and before the final call to action.
+ *  - trailing run has a CTA            -> just before the CTA (so after any FAQ in front of it)
+ *  - trailing run is only an FAQ       -> just after that FAQ
+ *  - no trailing FAQ or CTA            -> null (leave where the engine put it)
+ * `text` is the file WITHOUT the marker; `markerOffset` is where it was. Never invents a position, and gives up when the marker sits inside a block.
+ */
+export function relatedGuidesOffset(text, markerOffset, { markdown = false } = {}) {
+  if (markdown) return null; // a markdown page has no sections to order against; leave the marker where it is
+  const roles = ['faq', 'cta'];
+  const all = topLevel(markupBlocks(text, roles)).filter((b) => b.start < markerOffset);
+  if (all.some((b) => b.close > markerOffset)) return null; // inside a block: placing relative to it would be a guess
+  const run = [];
+  for (let i = all.length - 1; i >= 0 && all[i].role; i--) run.unshift(all[i]);
+  if (!run.length) return null;
+  const cta = run.find((b) => b.role === 'cta');
+  if (cta) return cta.start > 0 ? cta.start : null;
+  const faq = run[run.length - 1]; // only FAQ blocks in the run: go after the last one
+  return Number.isFinite(faq.close) && faq.close > 0 && faq.close <= markerOffset ? faq.close : null;
+}
+
+/** Move a related-guides marker created in THIS call to its place in the standard order. Same safety rules as refineMarkerPlacement. */
+export function refineRelatedGuidesPlacement(content, filePath, markerName, { markerWasPresent = false } = {}) {
+  if (markerWasPresent) return { content, moved: false, reason: 'marker-already-on-page' };
+  const pats = markerPattern(markerName);
+  const found = pats.jsx.exec(content) || pats.html.exec(content);
+  if (!found) return { content, moved: false, reason: 'marker-not-found' };
+  const block = found[0];
+  let cutStart = found.index;
+  if (content[cutStart - 1] === '\n') cutStart -= 1;
+  const without = content.slice(0, cutStart) + content.slice(found.index + block.length).replace(/^\n/, '');
+  const at = relatedGuidesOffset(without, cutStart, { markdown: /\.mdx?$/i.test(filePath || '') });
+  if (at == null) return { content, moved: false, reason: 'no-trailing-faq-or-cta' };
+  return { content: `${without.slice(0, at)}\n${block}\n${without.slice(at)}`, moved: true, reason: 'after-faq-before-cta', offset: at };
+}
