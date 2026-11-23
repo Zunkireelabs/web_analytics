@@ -1,0 +1,110 @@
+
+-- GITHUB CREDENTIALS -- OK, repo reachable.
+(skipped 59 URL(s) that redirect or 404 — not auditable as pages:)
+  308 -> https://zennly.io/businesses/blog/salon-management-software  https://zennly.io/blog/salon-management-software/
+  308 -> https://zennly.io/businesses/blog/how-to-start-a-salon-business-in-nepal  https://zennly.io/blog/how-to-start-a-salon-business-in-nepal/
+  308 -> https://zennly.io/businesses/blog/how-to-start-a-spa-business-in-nepal  https://zennly.io/blog/how-to-start-a-spa-business-in-nepal/
+  308 -> https://zennly.io/businesses/global  https://zennly.io/global/
+  308 -> https://zennly.io/businesses/compare/gym-software-nepal  https://zennly.io/compare/gym-software-nepal/
+  308 -> https://zennly.io/businesses/blog/spa-booking-app-nepal  https://zennly.io/blog/spa-booking-app-nepal/
+  308 -> https://zennly.io/businesses/blog/salon-appointment-app-nepal  https://zennly.io/blog/salon-appointment-app-nepal/
+  308 -> https://zennly.io/businesses/nepal  https://zennly.io/nepal/
+  308 -> https://zennly.io/businesses/solutions/barbershop  https://zennly.io/solutions/barbershop/
+  308 -> https://zennly.io/businesses/solutions/salon  https://zennly.io/solutions/salon/
+  308 -> https://zennly.io/businesses/blog/spa-management-software  https://zennly.io/blog/spa-management-software/
+  308 -> https://zennly.io/businesses/features/discount-management  https://zennly.io/features/discount-management/
+  308 -> https://zennly.io/businesses/case-study  https://zennly.io/case-study/
+  308 -> https://zennly.io/businesses/blog/walk-in-queue-management-salon-barbershop-nepal  https://zennly.io/blog/walk-in-queue-management-salon-barbershop-nepal/
+  308 -> https://zennly.io/businesses/about  https://zennly.io/about/
+  308 -> https://zennly.io/businesses/contact  https://zennly.io/contact/
+  308 -> https://zennly.io/businesses/solutions/cleaning  https://zennly.io/solutions/cleaning/
+  308 -> https://zennly.io/businesses/blog/beauty-clinic-software-nepal  https://zennly.io/blog/beauty-clinic-software-nepal/
+  308 -> https://zennly.io/businesses/blog/ai-receptionist-spa-salon-nepal  https://zennly.io/blog/ai-receptionist-spa-salon-nepal/
+  308 -> https://zennly.io/businesses/demo  https://zennly.io/demo/
+  308 -> https://zennly.io/businesses/glossary  https://zennly.io/glossary/
+  308 -> https://zennly.io/businesses/faq  https://zennly.io/faq/
+  308 -> https://zennly.io/businesses/blog/gym-members-expired-still-training-nepal  https://zennly.io/blog/gym-members-expired-still-training-nepal/
+  308 -> https://zennly.io/businesses/solutions  https://zennly.io/solutions/
+  308 -> https://zennly.io/businesses/blog/how-to-choose-booking-software-nepal  https://zennly.io/blog/how-to-choose-booking-software-nepal/
+  308 -> https://zennly.io/businesses/blog  https://zennly.io/blog/
+  308 -> https://zennly.io/businesses/blog/wellness-center-booking-software-nepal  https://zennly.io/blog/wellness-center-booking-software-nepal/
+  308 -> https://zennly.io/businesses/blog/online-booking-system-nepal  https://zennly.io/blog/online-booking-system-nepal/
+  308 -> https://zennly.io/businesses/solutions/beauty-clinic  https://zennly.io/solutions/beauty-clinic/
+  308 -> https://zennly.io/businesses/blog/how-to-start-a-gym-business-in-nepal  https://zennly.io/blog/how-to-start-a-gym-business-in-nepal/
+  308 -> https://zennly.io/businesses/nepal/kathmandu  https://zennly.io/nepal/kathmandu/
+  308 -> https://zennly.io/businesses/blog/barbershop-booking-app-nepal  https://zennly.io/blog/barbershop-booking-app-nepal/
+  308 -> https://zennly.io/businesses/features  https://zennly.io/features/
+  308 -> https://zennly.io/businesses/blog/dashain-tihar-salon-spa-bookings-nepal  https://zennly.io/blog/dashain-tihar-salon-spa-bookings-nepal/
+  308 -> https://zennly.io/businesses/press  https://zennly.io/press/
+  308 -> https://zennly.io/businesses/blog/therapist-commission-payroll-nepal  https://zennly.io/blog/therapist-commission-payroll-nepal/
+  308 -> https://zennly.io/businesses/pricing  https://zennly.io/pricing/
+  308 -> https://zennly.io/businesses/blog/salon-booking-system-nepal  https://zennly.io/blog/salon-booking-system-nepal/
+  308 -> https://zennly.io/businesses/blog/opening-second-branch-kathmandu-salon-spa  https://zennly.io/blog/opening-second-branch-kathmandu-salon-spa/
+  308 -> https://zennly.io/businesses/blog/bridal-makeup-artist-booking-nepal  https://zennly.io/blog/bridal-makeup-artist-booking-nepal/
+  308 -> https://zennly.io/businesses/solutions/spa  https://zennly.io/solutions/spa/
+  308 -> https://zennly.io/businesses/blog/daily-reconciliation  https://zennly.io/blog/daily-reconciliation/
+  308 -> https://zennly.io/businesses/blog/missed-bookings-after-hours-online-booking-nepal  https://zennly.io/blog/missed-bookings-after-hours-online-booking-nepal/
+  308 -> https://zennly.io/businesses/blog/nail-studio-booking-software-nepal  https://zennly.io/blog/nail-studio-booking-software-nepal/
+  308 -> https://zennly.io/businesses/blog/gift-voucher-package-balance-tracking-spa-nepal  https://zennly.io/blog/gift-voucher-package-balance-tracking-spa-nepal/
+  308 -> https://zennly.io/businesses/blog/tattoo-studio-booking-and-deposits  https://zennly.io/blog/tattoo-studio-booking-and-deposits/
+  308 -> https://zennly.io/businesses/blog/digital-consent-forms-tattoo-piercing-clinic-spa-nepal  https://zennly.io/blog/digital-consent-forms-tattoo-piercing-clinic-spa-nepal/
+  308 -> https://zennly.io/businesses/blog/booking-software-price-nepal  https://zennly.io/blog/booking-software-price-nepal/
+  308 -> https://zennly.io/businesses/blog/how-to-price-spa-and-salon-services-in-nepal  https://zennly.io/blog/how-to-price-spa-and-salon-services-in-nepal/
+  308 -> https://zennly.io/businesses/blog/staff-giving-unauthorised-discounts-approval-control-nepal  https://zennly.io/blog/staff-giving-unauthorised-discounts-approval-control-nepal/
+  308 -> https://zennly.io/businesses/blog/yoga-studio-booking-software-nepal  https://zennly.io/blog/yoga-studio-booking-software-nepal/
+  308 -> https://zennly.io/businesses/nepal/lalitpur  https://zennly.io/nepal/lalitpur/
+  308 -> https://zennly.io/businesses/blog/staff-scheduling-software-salon-spa-nepal  https://zennly.io/blog/staff-scheduling-software-salon-spa-nepal/
+  308 -> https://zennly.io/businesses/blog/clinic-appointment-software-nepal  https://zennly.io/blog/clinic-appointment-software-nepal/
+  308 -> https://zennly.io/businesses/blog/owner-away-run-branches-without-calling-managers-nepal  https://zennly.io/blog/owner-away-run-branches-without-calling-managers-nepal/
+  308 -> https://zennly.io/businesses/blog/spa-memberships-packages-vouchers-nepal  https://zennly.io/blog/spa-memberships-packages-vouchers-nepal/
+  308 -> https://zennly.io/businesses/nepal/biratnagar  https://zennly.io/nepal/biratnagar/
+  308 -> https://zennly.io/businesses/blog/waiting-list-management-spa-salon-nepal  https://zennly.io/blog/waiting-list-management-spa-salon-nepal/
+  308 -> https://zennly.io/businesses/features/payment-tracking  https://zennly.io/features/payment-tracking/
+
+=== Site #8872 "Zennly" (Zunkireelabs/web-zenly) — 1 real candidate pages, 8 action types ===
+
+-- NO FILE MAPPING (0) --
+
+-- UNMAPPED BUT LIVE-VERIFIED OK, not a gap (0) -- (no file mapping, but the live page already renders a correct canonical / og:title+og:description — shared layout handles it)
+
+-- NO MARKERS CONFIGURED (meta-title) (0) --
+
+-- NO MARKERS CONFIGURED (faq) (0) --
+
+-- NO MARKERS CONFIGURED (schema) (0) --
+
+-- NO MARKERS CONFIGURED (internal-links) (0) --
+
+-- NO MARKERS CONFIGURED (canonical) (0) --
+
+-- NO MARKERS CONFIGURED (open-graph) (0) --
+
+-- NO MARKERS CONFIGURED (expand-content) (0) --
+
+-- NO MARKERS CONFIGURED (qa-content) (0) --
+
+-- FILE NOT FOUND IN REPO (0) --
+
+-- MARKERS MISSING BUT SELF-HEALING (ensureMarkers creates these automatically at apply time — no action needed) (1) --
+  [canonical:canonical] https://zennly.io/ -> src/index.njk (will auto-create SEOAI:CANONICAL)
+
+-- OPEN GRAPH LIVE-VERIFIED OK, not fatal (0) -- (no per-page marker exists, but the live page already has correct og:title/og:description — likely auto-derived by the shared layout; nothing to fix)
+
+-- MARKERS MISSING, FATAL (need a one-time human-placed anchor before any draft for this field can apply) (1) --
+  [open-graph:openGraph] https://zennly.io/ -> src/index.njk (expected SEOAI:OPENGRAPH, reason: fatal-no-head-region) — possible head region: front-matter field(s) "extraHead" (verify then place the SEOAI:HEAD marker inside, see onboarding skill §2/§7)
+
+-- ADAPTER-ROUTED, not deep-checked here (0) --
+
+-- RENDER CAPABILITY GAPS (0) -- (net-new pages this site can generate but the gate will block at apply time)
+  OK — every configured newContentTargets extension has a recorded, markdown-safe renderCapabilities entry.
+
+-- NEW CONTENT TARGETS NOT CONFIGURED (0/7) -- (not fatal; any recommendation of this type will block until configured)
+  OK — every known net-new content type has a target configured.
+
+-- AUTHOR AVATAR ASPECT-RATIO GAPS (0) -- (a non-square logo/avatar declared as rendering inside a circular crop frame)
+
+-- NGINX SECURITY-HEADERS MARKER (nginx/static.conf) -- MISSING (fatal — must be hand-placed; see generators/security-headers.js)
+
+-- ANALYTICS-INSTALL (sitewide, src/_includes/base.njk) -- marker missing, FATAL (expected SEOAI:ANALYTICSSCRIPTGA4, reason: fatal-no-head-region).
+
+Site #8872: gaps found — see above.

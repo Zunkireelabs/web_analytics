@@ -1,0 +1,74 @@
+
+-- GITHUB CREDENTIALS -- OK, repo reachable.
+(skipped 9 URL(s) that redirect or 404 — not auditable as pages:)
+  301 -> https://mobilise.agency/inside/  https://mobilise.agency/inside-mobilise/
+  301 -> https://mobilise.agency/blog/death-of-curiosity-in-marketing/  https://mobilise.agency/blog/?post=death-of-curiosity-in-marketing
+  404  https://mobilise.agency/about-us/careers-all/group-account-manager/
+  301 -> https://mobilise.agency/blog/dark-social-attribution/  https://mobilise.agency/blog/?post=dark-social-attribution
+  404  https://mobilise.agency/locations/bangalore/
+  301 -> https://mobilise.agency/blog/all/  https://mobilise.agency/blog/?view=all
+  404  https://mobilise.agency/locations/seattle/
+  404  https://mobilise.agency/blog/b2b-buyers-ai-search-vendor-shortlists/
+  308 -> https://mobilise.agency/  http://mobilise.agency/
+
+=== Site #8874 "MOBILISE" (mobilisecloud-admin/mobilise-website-11ty) — 8 real candidate pages, 8 action types ===
+
+-- NO FILE MAPPING (0) --
+
+-- UNMAPPED BUT LIVE-VERIFIED OK, not a gap (0) -- (no file mapping, but the live page already renders a correct canonical / og:title+og:description — shared layout handles it)
+
+-- NO MARKERS CONFIGURED (meta-title) (0) --
+
+-- NO MARKERS CONFIGURED (faq) (0) --
+
+-- NO MARKERS CONFIGURED (schema) (0) --
+
+-- NO MARKERS CONFIGURED (internal-links) (0) --
+
+-- NO MARKERS CONFIGURED (canonical) (0) --
+
+-- NO MARKERS CONFIGURED (open-graph) (0) --
+
+-- NO MARKERS CONFIGURED (expand-content) (0) --
+
+-- NO MARKERS CONFIGURED (qa-content) (0) --
+
+-- FILE NOT FOUND IN REPO (0) --
+
+-- MARKERS MISSING BUT SELF-HEALING (ensureMarkers creates these automatically at apply time — no action needed) (8) --
+  [canonical:canonical] https://mobilise.agency/ -> src/index.njk (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://mobilise.agency/about-us/ -> src/about-us/index.njk (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://mobilise.agency/careers/ -> src/careers/index.njk (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://mobilise.agency/services/ -> src/services/index.njk (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://mobilise.agency/blog/ai-influencers-brand-marketing/ -> src/blog/ai-influencers-brand-marketing/index.njk (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://mobilise.agency/contact/ -> src/contact/index.njk (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://mobilise.agency/inside/ -> src/inside/index.njk (will auto-create SEOAI:CANONICAL)
+  [canonical:canonical] https://mobilise.agency/blog/dark-social-attribution/ -> src/blog/dark-social-attribution/index.njk (will auto-create SEOAI:CANONICAL)
+
+-- OPEN GRAPH LIVE-VERIFIED OK, not fatal (7) -- (no per-page marker exists, but the live page already has correct og:title/og:description — likely auto-derived by the shared layout; nothing to fix)
+  https://mobilise.agency/ -> src/index.njk
+  https://mobilise.agency/about-us/ -> src/about-us/index.njk
+  https://mobilise.agency/careers/ -> src/careers/index.njk
+  https://mobilise.agency/services/ -> src/services/index.njk
+  https://mobilise.agency/blog/ai-influencers-brand-marketing/ -> src/blog/ai-influencers-brand-marketing/index.njk
+  https://mobilise.agency/inside/ -> src/inside/index.njk
+  https://mobilise.agency/blog/dark-social-attribution/ -> src/blog/dark-social-attribution/index.njk
+
+-- MARKERS MISSING, FATAL (need a one-time human-placed anchor before any draft for this field can apply) (1) --
+  [open-graph:openGraph] https://mobilise.agency/contact/ -> src/contact/index.njk (expected SEOAI:OPENGRAPH, reason: fatal-no-head-region)
+
+-- ADAPTER-ROUTED, not deep-checked here (0) --
+
+-- RENDER CAPABILITY GAPS (0) -- (net-new pages this site can generate but the gate will block at apply time)
+  OK — every configured newContentTargets extension has a recorded, markdown-safe renderCapabilities entry.
+
+-- NEW CONTENT TARGETS NOT CONFIGURED (0/7) -- (not fatal; any recommendation of this type will block until configured)
+  OK — every known net-new content type has a target configured.
+
+-- AUTHOR AVATAR ASPECT-RATIO GAPS (0) -- (a non-square logo/avatar declared as rendering inside a circular crop frame)
+
+-- NGINX SECURITY-HEADERS MARKER (nginx/static.conf) -- MISSING (fatal — must be hand-placed; see generators/security-headers.js)
+
+-- ANALYTICS-INSTALL (sitewide) -- url_file_map.siteRoot.layoutTemplate not configured (fatal — needed before this can ever apply).
+
+Site #8874: gaps found — see above.

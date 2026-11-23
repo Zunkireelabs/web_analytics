@@ -1,0 +1,38 @@
+[
+  {
+    "id": 1,
+    "name": "Zunkiree Labs",
+    "action_center_config_checked_at": "2026-11-23T07:58:56.149Z",
+    "action_center_config_gap_count": 42
+  },
+  {
+    "id": 8862,
+    "name": "Admizz Education",
+    "action_center_config_checked_at": "2026-11-23T08:00:09.928Z",
+    "action_center_config_gap_count": 201
+  },
+  {
+    "id": 8864,
+    "name": "Chayceproperties",
+    "action_center_config_checked_at": "2026-11-23T08:01:12.842Z",
+    "action_center_config_gap_count": 83
+  },
+  {
+    "id": 8871,
+    "name": "Superrank",
+    "action_center_config_checked_at": "2026-11-23T08:01:31.762Z",
+    "action_center_config_gap_count": 0
+  },
+  {
+    "id": 8872,
+    "name": "Zennly",
+    "action_center_config_checked_at": "2026-11-23T08:01:53.094Z",
+    "action_center_config_gap_count": 0
+  },
+  {
+    "id": 8874,
+    "name": "MOBILISE",
+    "action_center_config_checked_at": "2026-11-23T08:02:00.566Z",
+    "action_center_config_gap_count": 1
+  }
+]
