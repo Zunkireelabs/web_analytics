@@ -621,7 +621,11 @@ export function slugifyTitle(title) {
 export function resolveNewContentTargetConfig(site, actionType) {
   const target = site?.url_file_map?.newContentTargets?.[actionType];
   if (!target?.dir || !target?.extension) return {};
-  return { dir: target.dir, extension: target.extension, filename: target.filename || null };
+  return {
+    dir: target.dir, extension: target.extension, filename: target.filename || null,
+    // "clone-sibling": a converted static site whose pages are made by copying a real post (lib/converted-blog-resolve.js). Absent for every other site.
+    ...(target.mode === 'clone-sibling' ? { mode: 'clone-sibling', referencePage: target.referencePage || null, headDir: target.headDir || null, listingPage: target.listingPage || null } : {}),
+  };
 }
 
 export function resolveNewContentLayout(site, actionType) {

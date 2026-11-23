@@ -54,6 +54,7 @@ export function pickReferencePage(profile, role, permalink = null, { pageType = 
 // build, and JSX is not HTML at all — both are skipped, never faked.
 export function renderableBody(rendered, contentFormat = 'markdown') {
   if (contentFormat === 'jsx') return { skip: true, reason: 'jsx-not-renderable' };
+  if (contentFormat === 'html-page') return { skip: true, reason: 'hand-written-html-page' }; // a converted site's full page: not markdown, cannot be rendered from the source alone
   const text = String(rendered ?? '').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
   if (/\{%|\{\{/.test(text)) return { skip: true, reason: 'template-syntax' };
   if (!text.trim()) return { skip: true, reason: 'empty-body' };

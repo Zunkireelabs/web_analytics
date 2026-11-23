@@ -26,7 +26,7 @@ import { merge3, stableStringify } from '../lib/json-merge3.js';
 // engine change to be DEPLOYED first, or those adapters would be configured but refuse every draft. They therefore refuse to run
 // without --engine-deployed.
 // Only sites 1, 8862, 8864 and 8874 are allowed; a proposal can never be applied to another site. 8874 (MOBILISE) is allowed ONLY for the one
-// small hold-back setting prepared for it (mobilise-8874-*), never for a content or page-map change: its pages stay with the client's own review.
+// two small settings prepared for it (mobilise-8874-section-order-off*, mobilise-8874-blog-target*), never for a page-map change: its existing pages are not touched.
 
 export const PROPOSAL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../docs/audits/2026-11-23-six-client-remediation/proposals');
 export const ALLOWED_SITES = new Set([1, 8862, 8864, 8874]);
@@ -55,11 +55,11 @@ export function planProposal(base, current, proposed) {
 
 export function checkGuards({ site, proposalName, engineDeployed }) {
   if (!ALLOWED_SITES.has(site)) return `site ${site} is not allowed: this proposal covers only sites ${[...ALLOWED_SITES].join(' and ')}`;
-  if (/phase[245]/i.test(proposalName) && !engineDeployed) return 'phases 2, 4 and 5 need the engine change deployed first: pass --engine-deployed once it is live';
+  if (/phase[245]|blog-target/i.test(proposalName) && !engineDeployed) return 'phases 2, 4 and 5, and the MOBILISE blog target, need the engine change deployed first: pass --engine-deployed once it is live';
   if (site === 1 && !/^zunkiree-1-/.test(proposalName)) return 'this proposal does not belong to site 1';
   if (site === 8862 && !/^admizz-8862-/.test(proposalName)) return 'this proposal does not belong to site 8862';
   if (site === 8864 && !/^chayce-8864-/.test(proposalName)) return 'this proposal does not belong to site 8864';
-  if (site === 8874 && !/^mobilise-8874-section-order-off/.test(proposalName)) return 'site 8874 accepts only the mobilise-8874-section-order-off hold-back proposal';
+  if (site === 8874 && !/^mobilise-8874-(section-order-off|blog-target)/.test(proposalName)) return 'site 8874 accepts only the mobilise-8874-section-order-off and mobilise-8874-blog-target proposals';
   return null;
 }
 
