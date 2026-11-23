@@ -153,6 +153,9 @@ function classifyNginxMarker(content) {
 // + front matter, so their .tsx findings are real and must stay.
 const CODE_RENDERER_TYPES = new Set(['blog-outline', 'direct-answer', 'translation']);
 function targetRendersCode(actionType, target) {
+  // A converted static site (MOBILISE) writes each new blog post as a hand-written HTML page in an .njk file, by copying a real sibling post
+  // (newContentTargets["blog-outline"].mode = "clone-sibling"). frontend.js tags it contentFormat 'html-page', so the Markdown gate never runs for it either.
+  if (actionType === 'blog-outline' && target?.mode === 'clone-sibling') return true;
   return CODE_RENDERER_TYPES.has(actionType) && !!target?.filename && /^\.(tsx|jsx)$/i.test(String(target.extension || ''));
 }
 
