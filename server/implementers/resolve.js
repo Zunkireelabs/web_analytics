@@ -3,7 +3,7 @@ import { getAdapter } from './adapters/registry.js';
 import { resolveAdapter } from './lib/url-file-map.js';
 import { resolveFaqRenderMode } from './lib/faq-render-mode.js';
 import { CONFIDENCE_THRESHOLD } from './lib/render-inspector.js';
-import { areaAwareImplementer } from './lib/site-areas.js';
+import { areaAwareImplementer, siteForDraft } from './lib/site-areas.js';
 
 // Which implementer actually handles a draft's apply()/mergeToStage() is no
 // longer fixed per action type — a page's adapter config (url_file_map.pages
@@ -124,7 +124,8 @@ async function resolveImplementerForMergeInner(draft) {
 // Every implementer and adapter is handed the area view of its draft (lib/site-areas.js): a Zennly business-site fix is written against the
 // business area's files and layout, a marketplace fix against the marketplace's. Sites without areas are unaffected.
 export async function resolveImplementerForApply(site, draft, renderModeOverride) {
-  const r = await resolveImplementerForApplyInner(site, draft, renderModeOverride);
+  // Which adapter or implementer handles a draft is decided from the page's own map entry, so it is decided against the draft's AREA.
+  const r = await resolveImplementerForApplyInner(siteForDraft(site, draft), draft, renderModeOverride);
   return r?.implementer ? { ...r, implementer: areaAwareImplementer(r.implementer) } : r;
 }
 export async function resolveImplementerForMerge(draft) {
