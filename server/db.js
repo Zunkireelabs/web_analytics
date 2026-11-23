@@ -297,6 +297,11 @@ export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUr
   // untouched.
   if (githubAppId !== undefined) set('github_app_id', githubAppId);
   if (githubAppPrivateKeyEnvVar !== undefined) set('github_app_private_key_env_var', githubAppPrivateKeyEnvVar);
+  // An area VIEW (implementers/lib/site-areas.js) is one area's settings laid over the shared ones. Saving it would overwrite the site's real
+  // map with a single area and drop every other area, so it is refused here, in the one place every map write passes through.
+  if (urlFileMap && urlFileMap[Symbol.for('superrank.areaView')]) {
+    throw new Error('Refusing to save a per-area view of url_file_map: it holds one area only. Save the site\'s full map instead.');
+  }
   if (urlFileMap !== undefined) set('url_file_map', JSON.stringify(urlFileMap));
 
   if (!fields.length) throw new Error('updateSiteRepoConfig: nothing to update.');

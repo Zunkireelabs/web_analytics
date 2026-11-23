@@ -753,6 +753,20 @@ export default function NewProjectModal({ workspace, first = false, project: exi
                 best: Boolean(siteLabel) && r.name.toLowerCase().includes(siteLabel.toLowerCase()), bestLabel: 'Looks like this site',
               }))} />
           )}
+          {Array.isArray(mine.installations) && mine.installations.length > 0 && (
+            <div className="text-xs text-faint leading-[18px]" data-testid="github-sources">
+              <div>This list is read live from GitHub, only from the repositories each installation allows:</div>
+              <ul className="mt-1 space-y-0.5">
+                {mine.installations.map((i) => (
+                  <li key={i.installationId}>
+                    <span className="text-fg">{i.account}</span>{i.app ? <> · {i.app}</> : null} · {i.repositorySelection === 'all' ? 'all repositories' : 'selected repositories only'} · {i.repoCount} shown
+                    {i.manageUrl && <> · <a href={i.manageUrl} target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:text-fg">Change access</a></>}
+                  </li>
+                ))}
+              </ul>
+              <button type="button" className="mt-1 underline underline-offset-2 hover:text-fg" onClick={refreshGithub}>Re-read from GitHub</button>
+            </div>
+          )}
           {repo && (
             <div className="rounded-card bg-white p-3 space-y-3" style={CARD}>
               <div className="text-xs font-medium text-fg">Branches for <span className="font-semibold">{repo}</span></div>

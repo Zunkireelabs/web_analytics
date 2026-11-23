@@ -13,6 +13,7 @@ import { projectAllComponentTemplates } from '../design-agent/lib/design-profile
 import { getSiteById, listSites, getHealthScoreOnOrBefore } from '../store/read.js';
 import { ga4Readiness } from '../lib/ga4-readiness.js';
 import { query as dbQuery } from '../db.js';
+import { isRepoSwitch, applyRepoSwitchReset } from '../lib/repo-switch.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
@@ -637,6 +638,21 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
     }
 
     let site = await updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, githubAppInstallationId: parsedGithubAppInstallationId, urlFileMap: parsedUrlFileMap });
+
+    // A move to a DIFFERENT repository (unless the staff member supplied the new map in this same request, which they then own): the old map, design
+    // profile and templates no longer describe this repo. Keep them under _previousRepo and clear them so the design is re-read and the map rebuilt.
+    if (isRepoSwitch(existing, site) && parsedUrlFileMap === undefined) {
+      try {
+        await applyRepoSwitchReset(siteId, { from: `${existing.repo_owner}/${existing.repo_name}`, to: `${site.repo_owner}/${site.repo_name}` }, { patch: patchUrlFileMap });
+        site = (await getSiteById(siteId)) || site;
+        await recordAuditEvent(req, {
+          action: 'tenant.repo_switched', targetType: 'site', targetId: String(siteId), tenantSiteId: siteId, tenantName: site.name,
+          metadata: { from: `${existing.repo_owner}/${existing.repo_name}`, to: `${site.repo_owner}/${site.repo_name}`, mapKeptUnder: '_previousRepo' }, success: true,
+        });
+      } catch (err) {
+        console.error(`[clients] repo switch cleanup failed for site ${siteId}:`, err.message);
+      }
+    }
 
     // Full onboarding autonomy: a genuinely first-time repo connection
     // automatically grants the same consent the platform_admin-only

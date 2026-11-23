@@ -1,7 +1,7 @@
 import { ensureMarkers, hasMarker, isHeadScopedField, isLineConventionField, isAttrFile, explainAttrGap } from './marker-merge.js';
 import { detectHeadRegion, isJsxFile } from './structural-detect.js';
 import { getOrDetectStrategy } from './strategy-registry.js';
-import { refineMarkerPlacement } from './expand-placement.js';
+import { refineMarkerPlacement, refineRelatedGuidesPlacement } from './expand-placement.js';
 
 // The universal insertion engine's single entry point: "make sure every
 // marker in markerMap exists in fileContent," without the caller
@@ -112,9 +112,10 @@ export async function resolveInsertion(site, fileContent, filePath, markerMap, o
 
   const placement = options.placement;
   if (placement?.field && markerMap[placement.field] && hasMarker(content, markerMap[placement.field])) {
-    const moved = refineMarkerPlacement(content, filePath, markerMap[placement.field], placement.beforeRoles, {
-      markerWasPresent: hasMarker(fileContent, markerMap[placement.field]),
-    });
+    const markerWasPresent = hasMarker(fileContent, markerMap[placement.field]);
+    const moved = placement.mode === 'related-guides'
+      ? refineRelatedGuidesPlacement(content, filePath, markerMap[placement.field], { markerWasPresent })
+      : refineMarkerPlacement(content, filePath, markerMap[placement.field], placement.beforeRoles, { markerWasPresent });
     content = moved.content;
   }
 

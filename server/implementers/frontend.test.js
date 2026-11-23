@@ -450,3 +450,27 @@ describe('resolveTargetAndBody — a new legal page is placed beside the site\'s
     assert.equal(r.reason, 'slug-conflict');
   });
 });
+
+describe('resolveTargetAndBody — a converted static site (newContentTargets["blog-outline"].mode = "clone-sibling")', () => {
+  const REF = `---\n{\n  "layout": "layouts/base.njk",\n  "permalink": "/blog/old-ref/index.html",\n  "headInclude": "heads/blog-old-ref-index.njk",\n  "title": "Old Reference Guide | ACME", # SEOAI:TITLE\n  "documentStart": "<!DOCTYPE html>\\n<html lang=\\"en\\">\\n",\n  "description": "A reference description that must never leak into another post.", # SEOAI:METADESCRIPTION\n  "componentBase": "../../"\n}\n---\n<main class="blog-page"><article class="blog-article"><header class="blog-header"><h1>The reference headline</h1>\n<p>The reference lead sentence about one thing.</p><p class="article-meta"><time datetime="2024-05-22">May 22, 2024</time></p></header>\n<div class="blog-content"><p>Reference body.</p></div></article></main>\n`;
+  const HEAD = '<title>{{ title }}</title><link rel="canonical" href="https://client.example/blog/old-ref/"><meta property="og:url" content="https://client.example/blog/old-ref/">';
+  const FILES = { 'src/blog/old-ref/index.njk': REF, 'src/_includes/heads/blog-old-ref-index.njk': HEAD };
+  const site = { id: 8874, name: 'MOBILISE', website_domain: 'client.example', repo_default_branch: 'main', url_file_map: { newContentTargets: { 'blog-outline': {
+    mode: 'clone-sibling', dir: 'src/blog', filename: 'index.njk', extension: '.njk', urlPattern: '/blog/{slug}/', layout: null, referencePage: 'src/blog/old-ref/index.njk', headDir: 'src/_includes' } } } };
+  const draft = { action_type: 'blog-outline', content: { title: 'Why Teams Stall', metaDescription: 'Why teams stall.', quickAnswer: 'A lead.', sections: [{ heading: 'One', body: 'Text.' }] } };
+  const deps = { getFileContent: async (_s, p) => (p in FILES ? { content: FILES[p] } : null) };
+
+  test('an approved draft becomes the page and its own head file, written as HTML, not as markdown or the Next.js writer', async () => {
+    const r = await resolveTargetAndBody(site, draft, deps);
+    assert.equal(r.ok, true);
+    assert.equal(r.filePath, 'src/blog/why-teams-stall/index.njk');
+    assert.equal(r.contentFormat, 'html-page');
+    assert.match(r.body, /"permalink": "\/blog\/why-teams-stall\/index\.html"/); assert.match(r.body, /<h1>Why Teams Stall<\/h1>/); assert.doesNotMatch(r.body, /reference headline/);
+    assert.deepEqual(r.extraFiles.map((f) => f.path), ['src/_includes/heads/blog-why-teams-stall-index.njk']);
+  });
+  test('the same draft on a site without that mode still takes its old path (nothing else changes)', async () => {
+    const plain = { ...site, url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md' } } } };
+    const r = await resolveTargetAndBody(plain, draft, deps);
+    assert.equal(r.ok, true); assert.equal(r.contentFormat, 'markdown'); assert.equal(r.filePath, 'src/blog/why-teams-stall.md');
+  });
+});

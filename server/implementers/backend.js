@@ -1,3 +1,5 @@
+import { enrichSuggestionsWithMeta } from './lib/target-meta.js';
+import { standardPlacementFor } from './lib/section-order.js';
 import { resolveFile, resolveActionFile, resolveLineKeys, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, isPageMapped, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
 import { isTemplatedSitemap } from './lib/sitemap-guard.js';
 import { detectBuildGeneratedSitemap, generatedSitemapMessage } from './lib/sitemap-generator-detect.js';
@@ -1565,7 +1567,13 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // schema type doesn't already exist before inserting one).
   const suppressSchema = INSPECTABLE_ACTION_TYPES.includes(draft.action_type) && hasExistingFaqSchema(file.content);
   const hasLinkMap = Boolean(site.url_file_map && (Object.keys(site.url_file_map.pages || {}).length || (site.url_file_map.patterns || []).length));
-  const built = markdownNative ? { ok: true, values: { [MARKER_FIELD_BY_ACTION_TYPE[draft.action_type]]: markdownNative.rendered.value } } : buildMergeValues(draft.action_type, draft.content, mode, componentTemplatesForMerge, site.url_file_map?.siteRoot?.designProfile, {
+  // A related-guides CARD (the site's own, or the platform standard built from its measured look) needs each target page's real title, description and
+  // image. Looked up only when the site has such a card, so every other site keeps exactly the plain list and makes no extra requests.
+  let contentForBuild = draft.content;
+  if (draft.action_type === 'internal-links' && (componentTemplatesForMerge?.relatedGuidesCard || componentTemplatesForMerge?.relatedGuidesStandard) && Array.isArray(draft.content?.suggestions)) {
+    contentForBuild = { ...draft.content, suggestions: await enrichSuggestionsWithMeta(site, draft.content.suggestions) };
+  }
+  const built = markdownNative ? { ok: true, values: { [MARKER_FIELD_BY_ACTION_TYPE[draft.action_type]]: markdownNative.rendered.value } } : buildMergeValues(draft.action_type, contentForBuild, mode, componentTemplatesForMerge, site.url_file_map?.siteRoot?.designProfile, {
     suppressSchema, page, fileContent: file.content,
     // A link target must resolve in this site's url_file_map; a site with no
     // page map at all is not judged on it (nothing to resolve against).
@@ -1666,9 +1674,10 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   const expandPrior = draft.action_type === 'expand-content'
     ? await loadExpandStructurePrior(site, { actionType: 'expand-content', pageType: classifyPageType(page, { propertyType: site?.property_type }) })
     : null;
-  const placement = expandPrior && componentField
-    ? { field: componentField, beforeRoles: expandPrior.placement.before }
-    : null;
+  // The standard page order (lib/section-order.js) is the site's own opt-in and does not depend on a learned reference. When the site has
+  // not opted in, the learned-reference rule above is used exactly as before.
+  const placement = standardPlacementFor(site, draft.action_type, componentField)
+    || (expandPrior && componentField ? { field: componentField, beforeRoles: expandPrior.placement.before } : null);
   let placedContent = markdownNative
     ? placeMarkdownMarker(file.content, markerMap[MARKER_FIELD_BY_ACTION_TYPE[draft.action_type]], markdownNative.rendered).content
     : file.content;
@@ -1703,7 +1712,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   if (failure) return failure;
 
   return {
-    ok: true, filePath, oldContent: file.content, newContent: spliced.newContent, changedRegions: spliced.changedRegions,
+    ok: true, filePath, oldContent: file.content, newContent: spliced.newContent, changedRegions: spliced.changedRegions, ...(built.notes?.length ? { notes: built.notes } : {}),
     renderMode: mode, renderModeConfidence: inspection?.confidence ?? null, renderModeReason: inspection?.reason ?? null,
     // Carried through even when not enforced (RESPONSIVE_GATE_ENFORCE unset)
     // so a caller/log can see what the check WOULD have refused, during the

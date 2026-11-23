@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { pool, recordActionCenterConfigCheck } from '../db.js';
+import { listAreas, siteForArea } from '../implementers/lib/site-areas.js';
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { listConnectedSites } from '../job.js';
 import { resolveFile, resolveActionFile, resolveMarkers, resolveAdapter, resolveNotApplicable, resolveNewContentNotApplicable, resolveSiteRootFile, resolveAuthorAvatars } from '../implementers/lib/url-file-map.js';
@@ -376,8 +377,24 @@ function findHeadCandidateFrontMatterFields(fileContent) {
 // a separate `npm run audit-url-file-map` step (the exact class of gap this
 // whole script exists to catch — see the module comment above).
 export async function auditSite(siteId, { record = true } = {}) {
-  const site = await getSiteById(siteId);
-  if (!site) { console.log(`Site #${siteId}: not found — skipping.`); return; }
+  const loaded = await getSiteById(siteId);
+  if (!loaded) { console.log(`Site #${siteId}: not found — skipping.`); return; }
+  const areas = listAreas(loaded);
+  if (!areas.length) return auditSiteObject(loaded, siteId, { record });
+  // A site with areas is audited area by area, each against its own map and files, and the stored gap count is the total across areas.
+  let total = 0;
+  for (const area of areas) {
+    console.log(`\n########## AREA "${area.name}" (${(area.include || []).join(', ') || 'rest of the domain'}${(area.exclude || []).length ? `, excluding ${area.exclude.join(', ')}` : ''}) ##########`);
+    const gaps = await auditSiteObject(siteForArea(loaded, area.name), siteId, { record: false });
+    if (typeof gaps === 'number') total += gaps;
+  }
+  console.log(`\nSite #${siteId} total across ${areas.length} areas: ${total} gap(s).`);
+  if (record) await recordActionCenterConfigCheck(siteId, total);
+  else console.log('(--no-record: the stored action-center gap count and checked-at were NOT updated.)');
+  return total;
+}
+
+async function auditSiteObject(site, siteId, { record = true } = {}) {
   if (!site.repo_owner || !site.repo_name) {
     console.log(`Site #${siteId} "${site.name}": no repo configured yet — skipping (nothing to audit against).`);
     return;
@@ -795,6 +812,7 @@ export async function auditSite(siteId, { record = true } = {}) {
   // credential-less run would otherwise overwrite the last real audit with a misleading number.
   if (record) await recordActionCenterConfigCheck(siteId, gapCount);
   else console.log('(--no-record: the stored action-center gap count and checked-at were NOT updated.)');
+  return gapCount;
 }
 
 async function main() {

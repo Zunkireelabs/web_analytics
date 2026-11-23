@@ -873,3 +873,52 @@ describe('createRecommendationGates — net-new page types a site builds by hand
     assert.equal((await gates.evaluate('cookie-policy', {})).drop, null);
   });
 });
+
+describe('createRecommendationGates — a site with areas is judged area by area', () => {
+  const areaSite = {
+    id: 8872, repo_owner: 'acme', repo_name: 'zennly', repo_default_branch: 'main',
+    url_file_map: {
+      areas: [
+        { name: 'business', include: ['/businesses'], override: { mounts: [{ prefix: '/businesses' }], pages: { '/faq': { file: 'marketing/src/faq.njk', markers: { 'meta-title': 'SEOAI:TITLE' } } } } },
+        { name: 'marketplace', include: [], exclude: ['/businesses'], override: { pages: { '/search': { file: 'src/app/search/page.tsx' } } } },
+      ],
+    },
+  };
+  const calls = { heal: 0 };
+  const deps = () => ({ ...neutralDeps(), healFn: async () => { calls.heal++; return null; }, healContentTargetFn: async () => { calls.heal++; return null; } });
+
+  test('a page mapped in ITS area is not reported unmapped', async () => {
+    const gates = createRecommendationGates(8872, areaSite, deps());
+    const r = await gates.evaluate('meta-title', { page: 'https://zennly.io/search' });
+    assert.doesNotMatch(r.blockedReason || '', /No url_file_map entry/);
+  });
+
+  test('the same path in the OTHER area is unmapped: /businesses/search is not the marketplace /search', async () => {
+    const gates = createRecommendationGates(8872, areaSite, deps());
+    const r = await gates.evaluate('meta-title', { page: 'https://zennly.io/businesses/search' });
+    assert.match(r.blockedReason, /No url_file_map entry resolves https:\/\/zennly\.io\/businesses\/search/);
+  });
+
+  test('inside an area nothing self-heals, so no map write can be attempted', async () => {
+    calls.heal = 0;
+    const gates = createRecommendationGates(8872, areaSite, deps());
+    await gates.evaluate('meta-title', { page: 'https://zennly.io/businesses/pricing' });
+    await gates.evaluate('blog-outline', {});
+    assert.equal(calls.heal, 0);
+  });
+
+  test('a declaration in one area does not drop the same action in the other', async () => {
+    const s = structuredClone(areaSite);
+    s.url_file_map.areas[0].override.notApplicable = [{ match: '/faq', actions: ['faq'], reason: 'FAQ is part of the template.' }];
+    s.url_file_map.areas[1].override.pages['/faq'] = { file: 'src/app/faq/page.tsx' };
+    const gates = createRecommendationGates(8872, s, deps());
+    assert.equal((await gates.evaluate('faq', { page: 'https://zennly.io/businesses/faq' })).drop, 'declared-not-applicable');
+    assert.notEqual((await gates.evaluate('faq', { page: 'https://zennly.io/faq' })).drop, 'declared-not-applicable');
+  });
+
+  test('a site without areas gets the original gates object (behaviour unchanged)', async () => {
+    const gates = createRecommendationGates(1, baseSite, neutralDeps());
+    assert.equal(typeof gates.evaluate, 'function');
+    assert.equal(typeof gates.cachedFetchFile, 'function');
+  });
+});

@@ -813,6 +813,33 @@ export function startCron() {
     console.log(`[cron] proactive design-agent queue scheduled "${designAgentQueue}" (${tz})`);
   }
 
+  // Related guides in each site's own design. Every connected site that has no related-guides template saved yet gets one worked out and saved here
+  // (its own card copied from its live pages, or its measured look for the platform's standard card), so no one has to apply it site by site. A site held
+  // back (siteRoot.sectionOrder "off") is skipped; one that already has one saved is never overwritten; any failure leaves the site as it was.
+  // Switch off with RELATED_GUIDES_AUTODERIVE=off; override the time with RELATED_GUIDES_CRON_SCHEDULE.
+  const relatedGuidesSchedule = process.env.RELATED_GUIDES_CRON_SCHEDULE || '20 6 * * *';
+  if (!cron.validate(relatedGuidesSchedule)) {
+    console.error(`[cron] invalid RELATED_GUIDES_CRON_SCHEDULE "${relatedGuidesSchedule}" — related-guides derivation NOT scheduled.`);
+  } else {
+    cron.schedule(relatedGuidesSchedule, () => locked('related-guides-templates', async () => {
+      try {
+        const [{ ensureRelatedGuidesTemplates }, { patchUrlFileMap }, { listSites }] = await Promise.all([
+          import('./implementers/lib/related-guides-derive.js'), import('./db.js'), import('./store/read.js'),
+        ]);
+        let saved = 0; const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+        for (const site of sites) {
+          const results = await ensureRelatedGuidesTemplates(site, { patch: patchUrlFileMap });
+          for (const r of results) if (/^saved-/.test(r.outcome)) { saved++; console.log(`[cron] related-guides: site ${site.id}${r.area ? ` (${r.area})` : ''} ${r.outcome}`); }
+            else if (/^error:/.test(r.outcome)) console.warn(`[cron] related-guides: site ${site.id}${r.area ? ` (${r.area})` : ''} ${r.outcome}`);
+        }
+        console.log(`[cron] related-guides finished — ${saved} template(s) saved across ${sites.length} site(s)`);
+      } catch (err) {
+        console.error('[cron] related-guides error:', err.message);
+      }
+    }), { timezone: tz });
+    console.log(`[cron] related-guides derivation scheduled "${relatedGuidesSchedule}" (${tz})`);
+  }
+
   // Trend Radar — every two weeks. The cron fires EVERY MORNING at 06:30 and
   // runTrendRadarIfDue decides per site whether a fortnight has passed since
   // its last successful run (agents/lib/trend-cadence.js, judged in the site's

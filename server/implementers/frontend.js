@@ -1,3 +1,4 @@
+import { resolveConvertedBlogPost } from './lib/converted-blog-resolve.js';
 import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget, resolveMissingPageTarget, slugifyTitle } from './lib/url-file-map.js';
 import { deriveNewContentContract, deriveContractFromSourceFile, missingRequiredKeys } from './lib/newcontent-contract.js';
 import { deriveLegalTarget, isPlaceholderDir } from './lib/legal-target.js';
@@ -123,6 +124,11 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     // page component is JSX, never Markdown+front-matter, which would be
     // invalid TypeScript in a .tsx file and fail the client's build outright.
     const targetConfig = resolveNewContentTargetConfig(site, 'blog-outline');
+    // A "converted" static site (every page carries its own front matter and head file) is written by copying a real sibling post. See
+    // lib/converted-blog-resolve.js. Checked first: such a target also names a filename, which would otherwise route it to the Next.js writer below.
+    if (targetConfig.mode === 'clone-sibling') {
+      return resolveConvertedBlogPost(site, content, targetConfig, { filePath, readFile: repoDeps.getFileContent || getFileContent, ref: baseBranch(site) });
+    }
     if (targetConfig.filename) {
       return {
         ok: true,
@@ -557,12 +563,19 @@ export async function preview(site, draft, opts = {}) {
   if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
   const branch = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   const existing = await getFileContent(site, resolved.filePath, branch);
+  // A post that comes with other files (its own head file, a listing card) shows them too: the reviewer approves exactly what will be committed.
+  const extraRegions = [];
+  for (const f of resolved.extraFiles || []) {
+    const before = await getFileContent(site, f.path, branch).catch(() => null);
+    extraRegions.push({ field: `file: ${f.path}`, before: before?.content || '(new file)', after: f.content });
+  }
   return {
     ok: true,
     filePath: resolved.filePath,
     oldContent: existing?.content || '',
     newContent: resolved.body,
     contentFormat: resolved.contentFormat,
-    changedRegions: [{ field: draft.action_type, before: existing?.content || '(new file)', after: resolved.body }],
+    changedRegions: [{ field: draft.action_type, before: existing?.content || '(new file)', after: resolved.body }, ...extraRegions],
+    ...(resolved.notes?.length ? { notes: resolved.notes } : {}),
   };
 }
