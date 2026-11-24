@@ -74,7 +74,7 @@ export async function workerSessionTick({ timezone, now = new Date(), env = proc
     log(`[worker-session] pass finished: ${state.lastAttempted} attempted, ${state.lastShipped} shipped across ${results.length} site(s)`);
     return { ran: true, shipped: state.lastShipped, attempted: state.lastAttempted };
   } catch (err) {
-    log(`[worker-session] pass error: ${err.message}`);
+    log('[worker-session] pass error:', err.message);
     return { ran: true, error: err.message };
   } finally {
     state.running = false; state.lastFinishedAt = now.getTime();
