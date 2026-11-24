@@ -96,6 +96,39 @@ function collectLinksInPage() {
 }
 /* eslint-enable no-undef */
 
+// Runs in-page: the links of a LISTING that are post cards (a link wrapping a picture, in the page's content and not in its header, nav or footer).
+// For a site whose posts live at the site root (admizzeducation.com/<post-name>) the URL shape says nothing, but its list page does: every post is a
+// picture card. Category and tag links carry no picture, so they never show up here.
+/* eslint-disable no-undef */
+function collectPostCardLinksInPage() {
+  const out = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    if (a.closest('header, nav, footer') || !a.querySelector('img')) continue;
+    const href = a.getAttribute('href');
+    if (!href || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:')) continue;
+    out.push(href);
+  }
+  return out;
+}
+/* eslint-enable no-undef */
+
+// Pure. From a listing's post-card links, the first that looks like a post of this site: same origin, ONE path segment of a hyphenated slug (3+ words), and not a
+// folder-style page. Returns an absolute URL or null.
+const NOT_A_POST_SLUG = /^(category|categories|tag|tags|author|page|blog|blogs|news|about|contact|events?|services?)$/i;
+export function pickPostFromCardLinks(links, listingUrl, { isSeen = () => false, inScope = () => true } = {}) {
+  for (const href of links) {
+    let u;
+    try { u = new URL(href, listingUrl); } catch { continue; }
+    if (u.origin !== new URL(listingUrl).origin) continue;
+    const segs = u.pathname.split('/').filter(Boolean);
+    if (segs.length !== 1 || NOT_A_POST_SLUG.test(segs[0]) || segs[0].split('-').length < 3) continue;
+    const abs = u.href.split('#')[0];
+    if (isSeen(abs) || !inScope(abs)) continue;
+    return abs;
+  }
+  return null;
+}
+
 // [listing page type, the detail page type reached FROM it] — see the
 // second-hop block inside discoverPages for why this exists. Kept as a
 // table rather than hardcoding "blog" so a future listing/detail pair
@@ -305,6 +338,20 @@ export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAU
       byType.set(articleType, [abs]);
       total++;
       break;
+    }
+    // Nothing under the blog folder looked like a post: the site may keep its posts at the root (admizzeducation.com/<post-name>), which the URL shape cannot
+    // tell from any other page. The list page itself can: take the first post card on it.
+    if (!byType.has(articleType)) {
+      let cards = [];
+      try { cards = await browserPage.evaluate(collectPostCardLinksInPage); } catch { cards = []; }
+      // `seen` also holds every link the loop above merely looked at, so "already captured" is asked of what was actually chosen.
+      const captured = new Set([...byType.values()].flat());
+      const post = pickPostFromCardLinks(cards, listingUrl, { isSeen: (u) => captured.has(u), inScope });
+      if (post && sameOrigin(post, homepageUrl)) {
+        seen.add(post);
+        byType.set(articleType, [post]);
+        total++;
+      }
     }
   }
 
