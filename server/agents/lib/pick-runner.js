@@ -15,7 +15,9 @@ import { instructionFor } from '../../lib/content-options.js';
 // Called from the daily ship run (job.js) inside the site's ship lock. It never throws: one pick failing must not stop
 // the others or the rest of the day's work.
 const SHIPPED = new Set(['pr_opened', 'implemented', 'merged_to_stage']);
-const RETRY_LATER = /rate.?limit|timed out|timeout|ECONN|ETIMEDOUT|try again|design agent|still being (captured|derived)|temporar/i;
+// A provider that is down, out of credit or has no worker connected is the platform's problem, not the idea's: the pick stays saved and is tried again.
+const RETRY_LATER = /rate.?limit|timed out|timeout|ECONN|ETIMEDOUT|try again|design agent|still being (captured|derived)|temporar|credit balance|billing|worker is not connected|provider is unavailable/i;
+const isRetryable = (err) => err?.designPending === true || err?.llmProvider === true || err?.workerUnavailable === true || RETRY_LATER.test(err?.message ?? '');
 
 export async function buildSavedContentPicks(site, deps = {}) {
   const d = { listSavedPicks, setPickStatus, getRecommendationByFindingId, generateDraft, submitDraftForApproval, approveAndPublishDraftUnattended, ...deps };
@@ -46,7 +48,7 @@ export async function buildSavedContentPicks(site, deps = {}) {
       await d.setPickStatus(site.id, id, 'shipped', ['building']);
       out.built += 1;
     } catch (err) {
-      const retry = err?.designPending === true || RETRY_LATER.test(err?.message ?? '');
+      const retry = isRetryable(err);
       await d.setPickStatus(site.id, id, retry ? 'saved' : 'withdrawn', ['building', 'saved']).catch(() => {});
       if (retry) out.retryLater += 1; else out.withdrawn += 1;
       console.warn(`[pick-runner] site ${site.id} pick ${id}: ${retry ? 'will retry next run' : 'withdrawn'}: ${String(err?.message || err).slice(0, 200)}`);
@@ -83,7 +85,7 @@ export async function buildChosenDesignChoices(site, deps = {}) {
       await d.markDesignChoiceStatus(site.id, id, 'shipped', ['building']);
       out.built += 1;
     } catch (err) {
-      const retry = RETRY_LATER.test(err?.message ?? '');
+      const retry = isRetryable(err);
       await d.markDesignChoiceStatus(site.id, id, retry ? 'chosen' : 'needs_choice', ['building', 'chosen']).catch(() => {});
       if (retry) out.retryLater += 1; else out.backToPerson += 1;
       console.warn(`[pick-runner] site ${site.id} design choice ${id}: ${retry ? 'will retry next run' : 'back to the person'}: ${String(err?.message || err).slice(0, 200)}`);

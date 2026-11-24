@@ -154,3 +154,16 @@ test('a second run the same day (the catch-up guard, say) builds nothing, so an 
   assert.deepEqual(out, { skipped: 'already-built-today', day: '2026-10-30' });
   assert.equal(built, 0, 'nothing is built, so no second commit lands on top of today\'s');
 });
+
+test('an AI provider that is out of credit, or a closed laptop worker, keeps the pick saved for the next run instead of withdrawing it', async () => {
+  const { deps, log } = harness({
+    picks: [pick({ finding_id: 'a' }), pick({ finding_id: 'b' })],
+    generate: async (_s, args) => {
+      if (args.findingId === 'a') throw new Error('LLM provider error: 400 Your credit balance is too low to access the Anthropic API.');
+      throw Object.assign(new Error('The Claude Code worker is not connected, so no fix can be written right now.'), { workerUnavailable: true });
+    },
+  });
+  const out = await buildSavedContentPicks(site, deps);
+  assert.deepEqual([out.withdrawn, out.retryLater], [0, 2]);
+  assert.ok(log.status.every(([, to]) => to !== 'withdrawn'));
+});
