@@ -18,6 +18,8 @@ import { baseBranch } from '../../implementers/lib/github-ops.js';
 import { autoHealFileMapping, buildPermalinkIndex } from '../../implementers/lib/discover-file-mapping.js';
 import { repairStaleFileMapping, staleMappingBlockedReason } from '../../implementers/lib/stale-mapping-repair.js';
 import { autoHealNewContentTarget } from '../../implementers/lib/discover-content-target.js';
+import { autoHealTemplateDataStore } from '../../implementers/lib/discover-template-store.js';
+import { identifyTarget as identifyPostBodyTarget } from '../../implementers/adapters/portable-text-post-body.js';
 import { discoverPaginationRoutes, matchPaginationRoute, paginationBlockedReason, paginationHeadTagAutoHandled } from '../../implementers/lib/pagination-routes.js';
 import { healPaginationAdapter } from '../../implementers/lib/pagination-adapter-discovery.js';
 import { isUnshippablePaginationFix, PAGINATED_BLOCKED_REASON } from './paginated-pages.js';
@@ -95,6 +97,7 @@ function createGatesForSite(siteId, initialSite, deps = {}) {
     fetchFile = getFileContent,
     healFn = autoHealFileMapping,
     healContentTargetFn = autoHealNewContentTarget,
+    healTemplateStoreFn = autoHealTemplateDataStore,
     healAdapterFn = healPaginationAdapter,
     discoverRoutes = discoverPaginationRoutes,
     fetchFingerprint = fetchSoftNotFoundFingerprint,
@@ -595,10 +598,21 @@ function createGatesForSite(siteId, initialSite, deps = {}) {
     // adapter's own apply(), so a recommendation that can never actually apply
     // stops resurfacing every refresh.
     if (pageGated) {
-      const adapterConfig = resolveAdapter(site, page, generatorId);
-      // Shared-template targets are stopped here, before any draft exists (see sharedTemplateTargetBlock).
+      let adapterConfig = resolveAdapter(site, page, generatorId);
+      // Shared-template targets are stopped here, before any draft exists (see sharedTemplateTargetBlock). A shared template is design: this
+      // page's FAQ and title live in keyed data files the template reads. When exactly one such store takes this action, its adapter is saved
+      // for this page and the page goes ahead instead of being blocked (implementers/lib/discover-template-store.js).
       if (!FRONTEND_ACTION_TYPES.has(generatorId)) {
-        const sharedReason = sharedTemplateTargetBlock(site, page, generatorId, { file: resolveFile(site, page), adapterConfig });
+        let sharedReason = sharedTemplateTargetBlock(site, page, generatorId, { file: resolveFile(site, page), adapterConfig });
+        if (sharedReason) {
+          const healedStore = await healTemplateStoreFn(site, page, generatorId, { fetchTree: cachedFetchTree, fetchFile: cachedFetchFile, branch: baseBranch(site) })
+            .catch((err) => { log.warn(`[recommendation-gates] site ${siteId}: could not look for a data store behind ${page}: ${err.message}`); return null; });
+          if (healedStore) {
+            site = healedStore;
+            adapterConfig = resolveAdapter(site, page, generatorId);
+            sharedReason = sharedTemplateTargetBlock(site, page, generatorId, { file: resolveFile(site, page), adapterConfig });
+          }
+        }
         if (sharedReason) return { drop: null, blockedReason: sharedReason };
       }
       // ts-named-export-content (a named TS data export, e.g. post-faqs.ts): same "route exists but is the DATA identified" question,
@@ -611,6 +625,12 @@ function createGatesForSite(siteId, initialSite, deps = {}) {
       if (adapterConfig?.id === 'ts-keyed-record-fields'
         && !(await isTsKeyedRecordReady(site, page, adapterConfig, cachedFetchFile, baseBranch(site), generatorId))) {
         return { drop: 'adapter-data-not-ready', blockedReason: null };
+      }
+      // portable-text-post-body (a post's body in its own JSON file): the post must exist and be an editable block post. A post that is one raw-HTML page
+      // (about a quarter of Admizz's) is blocked ONCE with the reason, instead of spending an AI draft that the adapter would then refuse.
+      if (adapterConfig?.id === 'portable-text-post-body') {
+        const target = await identifyPostBodyTarget(site, page, adapterConfig, cachedFetchFile, baseBranch(site));
+        if (!target.ok) return { drop: null, blockedReason: target.error };
       }
       if (adapterConfig?.id === 'data-array-content'
         && !(await isDataReady(site, page, adapterConfig, cachedFetchFile, baseBranch(site)))) {

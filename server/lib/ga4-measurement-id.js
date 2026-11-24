@@ -16,7 +16,7 @@
 //   permission-denied  the credential cannot read the property's streams: the client must grant access
 //   unavailable        a temporary failure (network, quota): try again later, not a client problem
 import { google } from 'googleapis';
-import { getGoogleAuth } from '../auth/google.js';
+import { getProjectScopedGoogleAuth } from '../auth/google.js';
 import { updateSiteAnalyticsIds } from '../db.js';
 
 export const MEASUREMENT_ID_RE = /^G-[A-Z0-9]{4,}$/i;
@@ -45,7 +45,8 @@ export async function discoverMeasurementId(site, { admin = null } = {}) {
 
   let streams;
   try {
-    const client = admin || google.analyticsadmin({ version: 'v1beta', auth: getGoogleAuth(site) });
+    // The project's own Google connection first (the account that already feeds its GA4 reports); the shared platform account only if it has none.
+    const client = admin || google.analyticsadmin({ version: 'v1beta', auth: await getProjectScopedGoogleAuth(site) });
     const out = [];
     let pageToken;
     do {

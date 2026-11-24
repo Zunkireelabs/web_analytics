@@ -79,6 +79,8 @@ export async function identifyTarget(site, page, config, fetchFile = getFileCont
 
 export async function computeChange(site, draft, fetchFile = getFileContent, ref = baseBranch(site)) {
   const page = draft.content?.page || draft.input?.page;
+  // FAQ section only. A Q&A (qa-content) is question headings woven into the page BODY, not a FAQ box, and is a separate slot: it is written by
+  // portable-text-post-body.js for a post, never into this store.
   if (draft.action_type !== 'faq') return { ok: false, reason: 'unsupported-action', error: `ts-named-export-content only writes faq drafts, not "${draft.action_type}".` };
   const config = resolveAdapter(site, page, draft.action_type);
   if (config?.id !== meta.id) return { ok: false, reason: 'no-file-mapping', error: `No ${meta.id} config resolves for "${page || '(no page)'}".` };

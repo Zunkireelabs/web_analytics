@@ -1592,7 +1592,9 @@ function contentGapChecks(analysis, queryTexts = []) {
   // than fabricating one — so skip the gap here too (same guaranteed-to-fail
   // class as aff6ef5/8115f21: a recommendation shown "SAFE — AUTO-ELIGIBLE"
   // that fails on every approval attempt, for every root page, forever).
-  if (!analysis.isRootPage && !(analysis.schemaTypes || []).includes('BreadcrumbList')) {
+  // A page that tells search engines not to index it (an affiliate dashboard, a thank-you page) has no search listing for a breadcrumb trail
+  // to appear in, so the finding is wrong there, same reasoning as the canonical rule above.
+  if (!analysis.isRootPage && !analysis.isNoindex && !(analysis.schemaTypes || []).includes('BreadcrumbList')) {
     gaps.push({ type: 'Missing breadcrumbs', detail: 'No BreadcrumbList structured data found.' });
   }
   // Detection only — deciding which of two same-@type blocks is the real

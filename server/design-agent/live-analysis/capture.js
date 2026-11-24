@@ -281,8 +281,11 @@ export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAU
   // only up to maxPages overall — this stays a targeted second hop, not a
   // crawl. A listing page that yields no usable article link simply leaves
   // that type unrepresented, exactly as before.
+  //
+  // NOT limited by maxPages (2026-11-24): a site whose 'other' pages already fill the budget (SuperRank: 26 'other' pages against a budget of 20)
+  // never reached this step, so it had a blog list captured and no article, and every blog preview and inline block fell back to a generic look.
+  // The hop is one extra page per missing type at most, so it cannot turn into a crawl.
   for (const [listingType, articleType] of DEEPER_SAMPLE_TYPES) {
-    if (total >= maxPages) break;
     if (byType.has(articleType) || !byType.has(listingType)) continue;
     const [listingUrl] = byType.get(listingType);
     let listingLinks;

@@ -70,3 +70,23 @@ describe('classifyPageType — product sites (propertyType: product)', () => {
     for (const t of PRODUCT_PAGE_TYPES) assert.ok(PAGE_TYPES.includes(t), t);
   });
 });
+
+describe('classifyPageType: a plural /blogs index (Admizz)', () => {
+  test('/blogs is a blog list and /blogs/<post> is a blog article, so the capture can hop from the list to a post', () => {
+    assert.equal(classifyPageType('https://admizzeducation.com/blogs'), 'blog-listing');
+    assert.equal(classifyPageType('https://admizzeducation.com/blogs/'), 'blog-listing');
+    assert.equal(classifyPageType('https://admizzeducation.com/blogs/some-post'), 'blog-article');
+  });
+  test('the singular forms and ordinary pages are unchanged', () => {
+    assert.equal(classifyPageType('https://zunkireelabs.com/blog/'), 'blog-listing');
+    assert.equal(classifyPageType('https://zunkireelabs.com/blog/x/'), 'blog-article');
+    assert.equal(classifyPageType('https://admizzeducation.com/category/medical'), 'other');
+    assert.equal(classifyPageType('https://admizzeducation.com/study-in-uk-from-nepal'), 'other');
+  });
+});
+
+test('a browse page under the blog folder is a list, not an article; a real post still is an article', async () => {
+  const { classifyPageType } = await import('./schema.js');
+  for (const u of ['https://m.agency/blog/all/', 'https://m.agency/blog/page/2/', 'https://m.agency/blog/category/seo', 'https://m.agency/blogs/tag/news/', 'https://m.agency/blog/latest']) assert.equal(classifyPageType(u), 'blog-listing', u);
+  for (const u of ['https://m.agency/blog/how-we-work/', 'https://m.agency/blogs/study-in-the-uk', 'https://m.agency/blog/category-management-guide/']) assert.equal(classifyPageType(u), 'blog-article', u);
+});

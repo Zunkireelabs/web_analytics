@@ -16,6 +16,14 @@ export function rotateForToday(list, now = Date.now()) {
   return [...list.slice(offset), ...list.slice(0, offset)];
 }
 
+// The sites whose open work matters most go first. `urgency` is Map<siteId, number of open high-priority recommendations>. Sites with equal urgency keep the order they
+// came in (the daily rotation), so nobody is permanently last and a site with only lower-priority work still runs, just later in the pass. Pure and stable: a missing
+// or empty map returns the list unchanged.
+export function orderByUrgency(list, urgency) {
+  if (!Array.isArray(list) || list.length < 2 || !(urgency instanceof Map) || urgency.size === 0) return list || [];
+  return list.map((site, i) => ({ site, i, u: Number(urgency.get(site.id)) || 0 })).sort((a, b) => (b.u - a.u) || (a.i - b.i)).map((x) => x.site);
+}
+
 // One client gets 30 minutes for its detection work and 30 for shipping; then the pass moves to the next client.
 export const SITE_RUN_TIMEOUT_MS = Number(process.env.SITE_RUN_TIMEOUT_MS) || 30 * 60 * 1000;
 

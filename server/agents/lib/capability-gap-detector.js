@@ -1,6 +1,7 @@
 import { listDrafts } from '../../store/drafts.js';
 import { classifyAbandonReason, RETRY_POLICY } from '../../lib/attempt-classification.js';
 import { decisionEngine } from './decision-engine.js';
+import { BUILD_STARTED_AT } from '../../lib/build-epoch.js';
 
 // Phase 5 of the "one intelligence" consolidation plan (fix/system) —
 // same-site failure CLUSTERING, which is genuinely new. Confirmed by audit
@@ -94,12 +95,17 @@ export function createCapabilityGapDetector({
   listDraftsFn = listDrafts,
   classifyAbandonReasonFn = classifyAbandonReason,
   decisionEngineFn = decisionEngine,
+  buildStartedAt = BUILD_STARTED_AT,
 } = {}) {
   async function detectCapabilityGaps(siteId, { threshold = CLUSTER_THRESHOLD, investigateUnclassified = true } = {}) {
     const abandoned = await listDraftsFn(siteId, { status: 'abandoned', limit: LOOKBACK_LIMIT });
     const clusters = new Map();
 
     for (const draft of abandoned) {
+      // A failure from before this build was produced by older code. It says nothing about what the current code does, so it cannot keep a gap alive: with
+      // no expiry, three old failures kept a card blocked for days after the defect was fixed (Superrank's FAQ, 2026-11-24: failed 11-21, fixed 11-22).
+      const at = Date.parse(draft.updated_at ?? draft.created_at ?? '');
+      if (Number.isFinite(at) && at < buildStartedAt.getTime()) continue;
       const { failureClass, retryPolicy, summary } = classifyAbandonReasonFn(draft.abandoned_reason);
       if (retryPolicy !== RETRY_POLICY.ITEM_DEFECT) continue;
 

@@ -922,3 +922,69 @@ describe('createRecommendationGates — a site with areas is judged area by area
     assert.equal(typeof gates.cachedFetchFile, 'function');
   });
 });
+
+describe('createRecommendationGates: a shared template is design, the page content lives in a data store', () => {
+  const POST = 'https://example.com/alpha-post';
+  const shared = {
+    id: 8862, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', website_domain: 'example.com',
+    url_file_map: { patterns: [{ match: '^/([^/]+)/?$', file: 'src/app/[slug]/page.tsx' }] },
+  };
+  const withFile = () => ({
+    ...neutralDeps(),
+    fetchFile: async (_s, path) => (path === 'src/app/[slug]/page.tsx' ? { content: 'export default function P() { return null; }' } : null),
+    fetchTree: async () => ({ files: ['src/app/[slug]/page.tsx'], truncated: false }),
+  });
+
+  test('blocked as a shared template when no store is found, exactly as before', async () => {
+    let looked = 0;
+    const gates = createRecommendationGates(8862, shared, { ...withFile(), healTemplateStoreFn: async () => { looked++; return null; } });
+    const r = await gates.evaluate('meta-title', { page: POST });
+    assert.equal(looked, 1, 'it looked for a store before giving up');
+    assert.match(String(r.blockedReason), /shared template/);
+  });
+
+  test('not blocked once the page\'s data store is found and its adapter saved for the page', async () => {
+    const adapter = { id: 'ts-keyed-record-fields', dataFile: 'src/data/post-seo-overrides.ts', exportName: 'postSeoOverrides', urlPattern: '^/([^/]+)/?$' };
+    const healTemplateStoreFn = async (site) => ({ ...site, url_file_map: { ...site.url_file_map, pages: { '/alpha-post': { adapters: { 'meta-title': adapter } } } } });
+    const gates = createRecommendationGates(8862, shared, { ...withFile(), healTemplateStoreFn });
+    const r = await gates.evaluate('meta-title', { page: POST });
+    assert.ok(!/shared template/.test(String(r.blockedReason)), `still blocked as a shared template: ${r.blockedReason}`);
+  });
+
+  test('a failing store lookup never takes the pass down: the page stays blocked with the reason', async () => {
+    const gates = createRecommendationGates(8862, shared, { ...withFile(), healTemplateStoreFn: async () => { throw new Error('GitHub down'); } });
+    const r = await gates.evaluate('meta-title', { page: POST });
+    assert.match(String(r.blockedReason), /shared template/);
+  });
+});
+
+describe('createRecommendationGates: a post body adapter blocks a raw-HTML post once, with the reason', () => {
+  const POST = 'https://example.com/alpha-post';
+  const blk = (t) => ({ _key: 'k', _type: 'block', children: [{ _key: 's', _type: 'span', marks: [], text: t }], markDefs: [], style: 'normal' });
+  const cfg = { id: 'portable-text-post-body', contentFile: 'src/content/blog/posts/{key}.json', urlPattern: '^/([^/]+)/?$' };
+  const site = {
+    id: 8862, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', website_domain: 'example.com',
+    url_file_map: { patterns: [{ match: '^/([^/]+)/?$', file: 'src/app/[slug]/page.tsx' }], pages: { '/alpha-post': { adapters: { 'expand-content': cfg } } } },
+  };
+  const depsFor = (post) => ({
+    ...neutralDeps(),
+    fetchFile: async (_s, path) => {
+      if (path === 'src/app/[slug]/page.tsx') return { content: 'export default function P() { return null; }' };
+      if (path === 'src/content/blog/posts/alpha-post.json') return { content: `${JSON.stringify(post, null, 2)}\n` };
+      return null;
+    },
+    fetchTree: async () => ({ files: ['src/app/[slug]/page.tsx', 'src/content/blog/posts/alpha-post.json'], truncated: false }),
+  });
+
+  test('an editable block post is not blocked by the body check', async () => {
+    const gates = createRecommendationGates(8862, site, depsFor({ title: 'x', content: [blk('A real paragraph of text.')] }));
+    const r = await gates.evaluate('expand-content', { page: POST });
+    assert.ok(!/raw HTML/.test(String(r.blockedReason)), String(r.blockedReason));
+  });
+  test('a post that is one raw-HTML page is blocked with the reason, before any AI draft is spent', async () => {
+    const raw = { title: 'x', content: [{ _key: 'r', _type: 'rawHtml', html: `<section><h2>Guide</h2><p>${'long text '.repeat(300)}</p></section>` }] };
+    const gates = createRecommendationGates(8862, site, depsFor(raw));
+    const r = await gates.evaluate('expand-content', { page: POST });
+    assert.match(String(r.blockedReason), /raw HTML/);
+  });
+});

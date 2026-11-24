@@ -93,3 +93,50 @@ test('a lone header standfirst is not mistaken for the body when measuring parag
   const r = await checkNewPageRender({ referenceUrl: dataUrl(html), newPageHtml: BARE_BODY });
   assert.ok(!(r.deviations || []).some((d) => d.kind === 'paragraph-gap'), JSON.stringify(r.deviations));
 });
+
+// A <main> that holds a hero, the article AND an FAQ (so no single child holds 80% of main's text), whose renderer styles every element with its own
+// class + inline style (no scoped CSS). Before the fix the body region was <main>: injecting wiped the hero/title/container and left bare, unstyled tags.
+test('main with hero + article + FAQ: the draft goes into the article only, wearing the site\'s own per-element styles', async (t) => {
+  let b; try { b = await launchBrowser(); } catch { t.skip('no browser available'); return; }
+  try {
+    const { renderArticlePreview } = await import('../../generators/lib/article-preview.js');
+    const faq = Array.from({ length: 2 }, () => P(1)).join('');
+    const html = `<!doctype html><body style="margin:0"><header><h1>Original title</h1></header><main>
+      <section id="hero"><p>${SENTENCE}</p></section>
+      <article><div class="wrap"><div class="body">
+        <div><h2 class="x" style="font-size:30px;font-weight:700">Real heading</h2><p class="q" style="font-size:17px;line-height:1.85">${SENTENCE.repeat(3)}</p><p class="q" style="font-size:17px;line-height:1.85">${SENTENCE.repeat(3)}</p></div>
+        <div><h2 class="x" style="font-size:30px;font-weight:700">Another</h2><p class="q" style="font-size:17px;line-height:1.85">${SENTENCE.repeat(3)}</p></div>
+      </div></div></article>
+      <section id="faq">${faq}</section></main><footer id="foot">footer</footer></body>`;
+    const r = await renderArticlePreview({ referenceUrl: dataUrl(html), bodyHtml: '<h2>Draft heading</h2><p>Draft text.</p>', title: 'Draft title', fullPage: false });
+    assert.equal(r.ok, true);
+    assert.ok(!r.skip);
+    assert.ok(r.replaced.classesCopied.includes('h2') && r.replaced.classesCopied.includes('p'));
+    // The same render again, inspected: hero + FAQ + footer survive, the h2 wears the site's size.
+    const page = await (await b.newContext()).newPage();
+    await page.goto(dataUrl(html));
+    const { measureBodyInPage } = await import('./body-measure.js');
+    await page.evaluate(measureBodyInPage, true);
+    const region = await page.evaluate(() => { const e = document.querySelector('[data-gate-region]'); return { tag: e.tagName, hasHero: !!e.querySelector('#hero'), hasFaq: !!e.querySelector('#faq'), cls: e.className }; });
+    assert.notEqual(region.tag, 'MAIN');
+    assert.equal(region.hasHero, false);
+    assert.equal(region.hasFaq, false);
+    assert.equal(r.deviations.length, 0, JSON.stringify(r.deviations));
+  } finally { await b.close(); }
+});
+
+// chayceproperties.com: its article body sits in plain wrappers (no article, main, prose, post-content). The detector found nothing, so every preview and
+// length check silently did nothing for that site. The element that directly holds the paragraphs is the body.
+test('plain-wrapper article (no article/main/prose): the element holding the paragraphs is found as the body region', async (t) => {
+  let browser;
+  try { browser = await launchBrowser(); } catch { t.skip('no browser'); return; }
+  try {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 900 } })).newPage();
+    const html = `<!doctype html><body><div class="site-header"><p>Short nav text.</p></div><div class="page"><div class="post-wrap"><h1>Title</h1><div class="copy"><h2>Heading</h2>${P()}${P()}${P()}<h3>Sub</h3>${P()}</div></div></div></body>`;
+    await page.goto(dataUrl(html));
+    const { measureBodyInPage } = await import('./body-measure.js');
+    const m = await page.evaluate(measureBodyInPage, true);
+    assert.equal(m.found, true);
+    assert.equal(await page.evaluate(() => document.querySelector('[data-gate-region]')?.className), 'copy');
+  } finally { await browser.close().catch(() => {}); }
+});

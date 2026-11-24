@@ -174,3 +174,68 @@ export function applyScopeRenames(fileContent, edits) {
   }
   return content;
 }
+
+// ---- Second shape: an id the PAGE's own file repeats from a shared component ---------------------------------------------------------------------------
+//
+// Superrank, /use-cases/small-business: `<div class="ref-wrap" id="start">` in the page's own file and `<section class="cta-sec" id="start">` in the shared
+// CtaSection component, so the live page has two ids "start". The fix is to drop the id from the element the PAGE owns and keep the shared component's.
+// That is provable by reading the repo, not by guessing:
+//   - the page's own file defines the id exactly once, and exactly one other file defines it too (the remaining element), so the live page really gets it twice
+//   - nothing in any file mentions the id other than as a plain link target (href="#id"): no CSS selector, no script lookup, no aria-/label reference
+// What it cannot prove is intent for the links: until the fix, a link to #id goes to the FIRST element with that id (the page's), and afterwards to the shared one.
+// That is a visible behaviour change, so it is said plainly in the plan and this stays a human-approved fix (duplicate-id-fix is a manual-tier generator).
+
+/** Pure. How one file mentions `id`: how many elements define it, how many plain links point at it, and any use that makes removing it unsafe. */
+export function classifyIdMentions(content, id) {
+  const e = escapeRegExp(id);
+  const text = String(content ?? '');
+  const definitions = [...text.matchAll(new RegExp(`\\sid=(["'])${e}\\1`, 'g'))].length;
+  const anchors = [...text.matchAll(new RegExp(`href\\s*[=:]\\s*(["'])#${e}\\1`, 'g'))].length;
+  const hashMentions = [...text.matchAll(new RegExp(`#${e}(?![\\w-])`, 'g'))].length;
+  const dangerous = [];
+  if (hashMentions > anchors) dangerous.push(`#${id} is used other than as a plain link (a CSS selector or another use)`);
+  if (new RegExp(`(?:getElementById|querySelector(?:All)?)\\(\\s*["']#?${e}["']`).test(text)) dangerous.push('a script looks the element up by this id');
+  if (new RegExp(`\\[id\\s*=\\s*["']?${e}["']?\\]`).test(text)) dangerous.push('a selector targets [id="..."]');
+  if (new RegExp(`aria-(?:labelledby|controls|describedby|owns|activedescendant)\\s*=\\s*(["'])[^"']*(?<![\\w-])${e}(?![\\w-])`).test(text)) dangerous.push('an aria attribute points at this id');
+  if (new RegExp(`\\sfor\\s*=\\s*(["'])${e}\\1`).test(text)) dangerous.push('a label points at this id');
+  return { definitions, anchors, dangerous };
+}
+
+/**
+ * Pure. Decides whether the page-owned occurrence of a duplicated id can be removed, and writes the edit.
+ * @param {object} o
+ * @param {string} o.id
+ * @param {number} o.occurrenceCount  how many times the LIVE page has the id (must be exactly 2)
+ * @param {string} o.ownFilePath      the page's own file
+ * @param {string} o.ownContent
+ * @param {{path:string, content:string}[]} o.otherFiles  every OTHER file in the repo that mentions the id at all
+ * @returns {{ok:true, newContent:string, region:{before:string, after:string}, behaviourNote:string|null, sharedIn:string[]} | {ok:false, reason:string, error:string}}
+ */
+export function planOwnedIdRemoval({ id, occurrenceCount, ownFilePath, ownContent, otherFiles = [] }) {
+  const refuse = (error) => ({ ok: false, reason: 'not-provably-safe', error });
+  if (occurrenceCount !== 2) return refuse(`id="${id}" appears ${occurrenceCount} times on the page, and this only handles exactly one repeated pair.`);
+  const own = classifyIdMentions(ownContent, id);
+  if (own.definitions !== 1) return refuse(`id="${id}" is defined ${own.definitions} times in ${ownFilePath}, not exactly once, so which element to change cannot be proven.`);
+  if (own.dangerous.length) return refuse(`In ${ownFilePath}, ${own.dangerous.join('; ')}, so removing the id could break it.`);
+
+  const sharedIn = [];
+  let anchors = own.anchors;
+  for (const f of otherFiles) {
+    const c = classifyIdMentions(f.content, id);
+    if (c.dangerous.length) return refuse(`In ${f.path}, ${c.dangerous.join('; ')}, so removing the id from ${ownFilePath} could break it.`);
+    if (c.definitions > 0) sharedIn.push(f.path);
+    anchors += c.anchors;
+  }
+  if (!sharedIn.length) return refuse(`No other file in the repo defines id="${id}", so the second element on the live page cannot be found and which one to keep cannot be proven.`);
+
+  const attr = new RegExp(`\\sid=(["'])${escapeRegExp(id)}\\1`);
+  const m = attr.exec(ownContent);
+  const newContent = ownContent.slice(0, m.index) + ownContent.slice(m.index + m[0].length);
+  const tagStart = ownContent.lastIndexOf('<', m.index);
+  const tagEnd = ownContent.indexOf('>', m.index);
+  const region = { before: ownContent.slice(tagStart, tagEnd + 1), after: newContent.slice(tagStart, tagEnd + 1 - m[0].length) };
+  const behaviourNote = anchors > 0
+    ? `${anchors} link(s) to #${id} currently scroll to the first element with that id, the one in ${ownFilePath}. After this change they scroll to the remaining one in ${sharedIn.join(', ')}.`
+    : null;
+  return { ok: true, newContent, region, behaviourNote, sharedIn };
+}

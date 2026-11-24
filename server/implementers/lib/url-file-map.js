@@ -128,7 +128,7 @@ function getPageEntry(site, pageUrl) {
 // correct hostname scope — same matching logic resolveFile uses for file
 // paths, shared here so pattern-level placement config (resolvePlacement
 // below) can reuse it instead of a second regex-matching implementation.
-function getMatchingPattern(site, pageUrl) {
+export function getMatchingPattern(site, pageUrl) {
   if (!pageUrl) return null;
   if (resolveOwnership(site, pageUrl).owner === 'other') return null;
   if (!urlInScope(site, pageUrl)) return null;

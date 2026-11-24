@@ -59,8 +59,13 @@ export const PAGE_TYPES = Object.freeze([
 // /resources/ai-search-stack-guide/ rendered with full section-headline-scale
 // heading classes and no card structure because this page type wasn't
 // recognized as inline prose).
-const BLOG_LISTING_RE = /\/(blog|articles?|news|resources?|guides?|insights?|learn)\/?$/;
-const BLOG_ARTICLE_RE = /\/(blog|articles?|news|resources?|guides?|insights?|learn)\/.+/;
+// `blogs?`: Admizz's blog index is /blogs (plural). Not matched, it was 'other', so the capture never took its second hop from a blog list to a
+// post and the site had no blog-article in its design baseline at all (2026-11-24: 39 pages captured, none a blog article).
+const BLOG_LISTING_RE = /\/(blogs?|articles?|news|resources?|guides?|insights?|learn)\/?$/;
+const BLOG_ARTICLE_RE = /\/(blogs?|articles?|news|resources?|guides?|insights?|learn)\/.+/;
+// A browse page UNDER the blog folder is a list, not a post: MOBILISE's /blog/all/ was captured as its "blog article", so every blog preview drew the
+// site's list page (header, footer and a huge heading) instead of an article.
+const BLOG_BROWSE_RE = /\/(blogs?|articles?|news|resources?|guides?|insights?|learn)\/(all|latest|archive|page\/\d+|categor(y|ies)(\/[^/]+)?|tags?(\/[^/]+)?)\/?$/;
 // Product-site URL shapes, checked ONLY for propertyType === 'product' and
 // BEFORE the blog/article rules below: a product site files its case studies
 // under /resources/ or /case-studies/, which BLOG_ARTICLE_RE would otherwise
@@ -84,7 +89,7 @@ export function classifyPageType(url, { propertyType } = {}) {
   if (propertyType === 'product') {
     for (const [type, re] of PRODUCT_PAGE_RULES) if (re.test(path)) return type;
   }
-  if (BLOG_LISTING_RE.test(path)) return 'blog-listing';
+  if (BLOG_LISTING_RE.test(path) || BLOG_BROWSE_RE.test(path)) return 'blog-listing';
   if (BLOG_ARTICLE_RE.test(path)) return 'blog-article';
   if (/\/(faq|faqs|help|support)\b/.test(path)) return 'faq';
   if (/\/(terms|privacy|cookies?|legal)\b/.test(path)) return 'legal';

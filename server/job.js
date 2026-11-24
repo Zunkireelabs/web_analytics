@@ -37,7 +37,7 @@ import { sanitizeForCustomer } from './lib/errors.js';
 import { buildApprovedForToday } from './agents/lib/pick-runner.js';
 import { runWorkArbiter } from './agents/lib/work-arbiter.js';
 import { withJobLock, jobKeyFor } from './lib/job-lock.js';
-import { rotateForToday, runSiteWithDeadline, windowClosed } from './lib/site-run.js';
+import { rotateForToday, orderByUrgency, runSiteWithDeadline, windowClosed } from './lib/site-run.js';
 import { getGoogleConnection } from './store/project-google.js';
 
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
@@ -1719,7 +1719,11 @@ export async function recordSkippedShipRun(site, reason, detail = null, { drainO
 // pipeline's 11:00 run, where new fixes come only from the PREPARE stage.
 export async function runAutoRemediationForAllSites({ windowEndsAt = null, drainOnly = false } = {}) {
   await resumeDueAutoRemediationPauses().catch((err) => console.error('[job] resumeDueAutoRemediationPauses failed:', err.message));
-  const sites = rotateForToday((await listSites()).filter(isShippable));
+  // Most important open work first (open high-priority recommendations per site), the daily rotation breaking ties. If the count cannot be read the order is
+  // simply today's rotation, as before.
+  const urgency = await query(`SELECT site_id, count(*)::int AS n FROM recommendations WHERE status = 'open' AND priority = 'high' GROUP BY site_id`)
+    .then((r) => new Map(r.rows.map((row) => [row.site_id, row.n]))).catch(() => new Map());
+  const sites = orderByUrgency(rotateForToday((await listSites()).filter(isShippable)), urgency);
   const results = [];
   let globalRemaining = await globalRemainingSeed();
   const unreachable = [];

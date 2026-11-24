@@ -75,6 +75,15 @@ export async function getSearchConsole(site) {
   return google.searchconsole({ version: 'v1', auth: own || getGoogleAuth(site) });
 }
 
+// The auth for any Google API read made on behalf of ONE project, in the same order as getSearchConsole above: the site's own
+// credentials file, else the Google account that connected this project ("Connect with Google"), else the shared platform credentials.
+// Callers that used getGoogleAuth directly ignored the project's own connection, so a read the project's account is allowed to make
+// (a GA4 property's data streams) was attempted with the platform account and refused as "permission denied".
+export async function getProjectScopedGoogleAuth(site) {
+  const own = getSiteCredentialsPath(site) ? null : await getProjectGoogleAuth(site).catch(() => null);
+  return own || getGoogleAuth(site);
+}
+
 // Google Docs API client, scoped to `site`'s own credentials if it has any.
 export function getDocs(site) {
   const auth = getGoogleAuth(site);

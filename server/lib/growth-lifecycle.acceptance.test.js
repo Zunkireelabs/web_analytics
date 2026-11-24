@@ -107,11 +107,13 @@ describe('the four layers are connected to the work', () => {
 
   const rec = (id, type, page = `/p${id}`) => ({ id, recommendation_type: type, finding_ids: [id], params: { page } });
 
+  // Two types of the SAME severity tier, neither with the visibility-first boost (qa-content has it, and it outweighs what learning can add), so the order
+  // can only come from what was learned.
   test('verified outcomes change the order of the next day\'s work', () => {
-    const a = rec(1, 'expand-content'); const b = rec(2, 'qa-content');
+    const a = rec(1, 'analytics-install'); const b = rec(2, 'internal-links');
     const order = (learnedMap) => buildDailyQueue({ candidates: [a, b], remaining: 5, learnedMap }).queue.map((q) => q.rec.id);
-    const aWins = order(new Map([['expand-content', { confidence: 0.9, impactConfidence: 0.9, attempts: 10 }], ['qa-content', { confidence: 0.3, impactConfidence: 0.2, attempts: 10 }]]));
-    const bWins = order(new Map([['expand-content', { confidence: 0.3, impactConfidence: 0.2, attempts: 10 }], ['qa-content', { confidence: 0.9, impactConfidence: 0.9, attempts: 10 }]]));
+    const aWins = order(new Map([['analytics-install', { confidence: 0.9, impactConfidence: 0.9, attempts: 10 }], ['internal-links', { confidence: 0.3, impactConfidence: 0.2, attempts: 10 }]]));
+    const bWins = order(new Map([['analytics-install', { confidence: 0.3, impactConfidence: 0.2, attempts: 10 }], ['internal-links', { confidence: 0.9, impactConfidence: 0.9, attempts: 10 }]]));
     assert.equal(aWins[0], 1);
     assert.equal(bWins[0], 2);
   });

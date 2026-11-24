@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { hasDangerousReference, findIdScopesInOrder, classifyScopeCountMismatch, applyScopeRenames } from './duplicate-id-inject.js';
+import { hasDangerousReference, findIdScopesInOrder, classifyScopeCountMismatch, applyScopeRenames, classifyIdMentions, planOwnedIdRemoval } from './duplicate-id-inject.js';
 
 const twoIdenticalIcons = `
 <div class="icon-wrap">
@@ -119,5 +119,71 @@ describe('isAutoFixableDuplicateId', () => {
   test('refuses a mixed or empty entry', () => {
     assert.equal(isAutoFixableDuplicateId({ occurrences: [{ tag: 'mask' }, { tag: 'div' }] }), false);
     assert.equal(isAutoFixableDuplicateId({ occurrences: [] }), false);
+  });
+});
+
+// The real Superrank case (superrank-web, /use-cases/small-business), reduced: the page's own file repeats the id of the shared CTA section.
+const PAGE = `---
+const cards = [
+  { name: 'Solo founders', text: 'One site.', href: '#start' },
+  { name: 'Small businesses', text: 'Local shops.', href: '#start' },
+];
+---
+<Layout>
+  <div class="ref-wrap" id="start"><h2 class="sb-h2">One agent</h2>{cards.map((c) => <a class="sb-card" href={c.href}>{c.name}</a>)}</div>
+  <CtaSection />
+</Layout>
+`;
+const CTA = `<section class="cta-sec" id="start"><div class="container cta" id="demo"><h2>Get your website found</h2></div></section>`;
+const INDEX = `<div class="side__cta"><a href="#start" class="btn btn--dark">Ship a fix like this</a></div>`;
+const plan = (over = {}) => planOwnedIdRemoval({ id: 'start', occurrenceCount: 2, ownFilePath: 'src/pages/use-cases/small-business.astro', ownContent: PAGE, otherFiles: [{ path: 'src/components/CtaSection.astro', content: CTA }, { path: 'src/pages/index.astro', content: INDEX }], ...over });
+
+describe('classifyIdMentions', () => {
+  test('counts definitions and plain links, in HTML attributes and in data written as href: "#id"', () => {
+    assert.deepEqual(classifyIdMentions(PAGE, 'start'), { definitions: 1, anchors: 2, dangerous: [] });
+    assert.deepEqual(classifyIdMentions(CTA, 'start'), { definitions: 1, anchors: 0, dangerous: [] });
+    assert.deepEqual(classifyIdMentions(INDEX, 'start'), { definitions: 0, anchors: 1, dangerous: [] });
+  });
+  test('an id that only shares a prefix is not this id', () => {
+    assert.deepEqual(classifyIdMentions('<a href="#start-here" id="start-here">', 'start'), { definitions: 0, anchors: 0, dangerous: [] });
+  });
+  test('every other kind of use is dangerous: CSS, scripts, selectors, aria, labels', () => {
+    for (const [what, text] of [
+      ['css', '#start { color: red }'], ['getElementById', "document.getElementById('start')"], ['querySelector', 'document.querySelector("#start .x")'],
+      ['attribute selector', '[id="start"] { x: y }'], ['aria', '<div aria-labelledby="a start b">'], ['label', '<label for="start">'],
+    ]) assert.ok(classifyIdMentions(text, 'start').dangerous.length > 0, what);
+  });
+});
+
+describe('planOwnedIdRemoval: an id the page\'s own file repeats from a shared component', () => {
+  test('the real Superrank case: the id is dropped from the page\'s own element only, and the behaviour change is stated', () => {
+    const r = plan();
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.newContent, PAGE.replace('<div class="ref-wrap" id="start">', '<div class="ref-wrap">'));
+    assert.deepEqual(r.region, { before: '<div class="ref-wrap" id="start">', after: '<div class="ref-wrap">' });
+    assert.deepEqual(r.sharedIn, ['src/components/CtaSection.astro']);
+    assert.match(r.behaviourNote, /3 link\(s\) to #start currently scroll to the first element with that id, the one in src\/pages\/use-cases\/small-business\.astro/);
+    assert.match(r.behaviourNote, /remaining one in src\/components\/CtaSection\.astro/);
+  });
+  test('only the id attribute changes: nothing else in the file, byte for byte', () => {
+    const r = plan();
+    assert.equal(PAGE.length - r.newContent.length, ' id="start"'.length);
+  });
+  test('no link to the id anywhere: no behaviour note', () => {
+    const r = plan({ ownContent: PAGE.replace(/href: '#start'/g, "href: '/x'"), otherFiles: [{ path: 'src/components/CtaSection.astro', content: CTA }] });
+    assert.equal(r.ok, true); assert.equal(r.behaviourNote, null);
+  });
+  test('refused when anything but a plain link refers to the id, in this file or any other', () => {
+    for (const bad of ['#start { margin: 0 }', "document.getElementById('start')", '<div aria-labelledby="start">']) {
+      assert.equal(plan({ otherFiles: [{ path: 'a.astro', content: CTA }, { path: 'x.css', content: bad }] }).ok, false, bad);
+      assert.equal(plan({ ownContent: `${PAGE}\n<style>${bad}</style>` }).ok, false, `own: ${bad}`);
+    }
+  });
+  test('refused when it cannot be proven which element to change or that the other one exists', () => {
+    assert.match(plan({ occurrenceCount: 3 }).error, /exactly one repeated pair/);
+    assert.match(plan({ ownContent: PAGE.replace('<CtaSection />', '<p id="start"></p>') }).error, /defined 2 times/);
+    assert.match(plan({ ownContent: '<p>no id here</p>' }).error, /defined 0 times/);
+    assert.match(plan({ otherFiles: [{ path: 'src/pages/index.astro', content: INDEX }] }).error, /No other file in the repo defines/);
+    assert.equal(plan({ otherFiles: [] }).reason, 'not-provably-safe');
   });
 });

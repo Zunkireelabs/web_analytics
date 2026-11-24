@@ -60,6 +60,7 @@ function normalize(text) {
 }
 
 let stallSelectSql = null;
+let staleGapBlocks = [];
 
 function fakeQuery(text, params = []) {
   const sql = normalize(text);
@@ -155,6 +156,14 @@ function fakeQuery(text, params = []) {
   if (sql.startsWith('UPDATE recommendations SET execution_job_id = NULL')) {
     return { rows: [] };
   }
+  // refreshRecommendationBlockState writing the unblock (blocked_reason = NULL, risk tier restored).
+  if (sql.startsWith('UPDATE recommendations SET blocked_reason = $2, blocked_kind = $4')) {
+    const [id, reason, tier] = params;
+    const rec = recs.find((r) => r.id === id);
+    if (!rec) return { rows: [] };
+    rec.blocked_reason = reason; rec.risk_tier = tier;
+    return { rows: [{ ...rec }] };
+  }
   if (sql.startsWith('UPDATE recommendations SET blocked_reason')) {
     const [id, reason, kind] = params;
     const rec = recs.find((r) => r.id === id);
@@ -183,6 +192,10 @@ function fakeQuery(text, params = []) {
     const ids = params[1];
     const findingIds = [...new Set(drafts.filter((d) => ids.includes(d.id) && d.finding_id).map((d) => d.finding_id))];
     return { rows: findingIds.map((finding_id) => ({ finding_id })) };
+  }
+  // liftStaleCapabilityGapBlocks: open recommendations carrying a capability-gap block made before this build. The test says which ones with `staleGapBlocks`.
+  if (sql.startsWith('SELECT id, recommendation_type, blocked_reason FROM recommendations WHERE site_id = $1')) {
+    return { rows: staleGapBlocks.map((r) => ({ id: r.id, recommendation_type: r.recommendation_type, blocked_reason: r.blocked_reason })) };
   }
   // setDecisionOutcome (store/decisions.js) — surfaceCapabilityGaps' new call
   // site closing the decision-engine experience-memory loop.
@@ -273,6 +286,7 @@ beforeEach(() => {
   mergeImpl = async () => { throw new Error('computeBrokenLinkFixMerge must not be called for this test'); };
   recheckImpl = async () => { throw new Error('recheckRecommendation must not be called for this test'); };
   gapsImpl = async () => [];
+  staleGapBlocks = [];
   decisionOutcomes = [];
 });
 
@@ -793,5 +807,44 @@ describe('pass 2 (reclaimStalledDrafts) — person-driven sites', () => {
     assert.match(stallSelectSql, /auto_remediation_enabled = false/);
     assert.match(stallSelectSql, /auto_remediation_resume_at IS NULL/);
     assert.match(stallSelectSql, /NOT EXISTS/);
+  });
+});
+
+describe('a capability-gap block is lifted when the build changed and the gap no longer shows (Superrank\'s FAQ stayed blocked for a defect fixed days earlier)', () => {
+  const GAP = (g) => `Part of a shared capability gap on "${g}" affecting 3 item(s): This fix could not be applied automatically.`;
+  const stale = (id, type, gen) => ({ id, recommendation_type: type, blocked_reason: GAP(gen) });
+
+  test('the block is cleared and the generator\'s own risk tier is restored, so the item is retried normally', async () => {
+    recs = [{ id: 12876, status: 'open', recommendation_type: 'faq', blocked_reason: GAP('faq'), risk_tier: 'manual' }];
+    staleGapBlocks = [stale(12876, 'faq', 'faq')];
+    gapsImpl = async () => [];
+    const result = await reconcileSite(SITE_ID, { apply: true });
+    assert.equal(result.capabilityGaps.blocksLifted, 1);
+    assert.equal(recs[0].blocked_reason, null);
+    assert.equal(recs[0].risk_tier, 'safe', 'faq is an auto-eligible generator again');
+  });
+  test('a gap that still shows in this build\'s failures keeps its block: a real defect is not retried on a timer', async () => {
+    recs = [{ id: 1, status: 'open', recommendation_type: 'faq', blocked_reason: GAP('faq'), risk_tier: 'manual' }];
+    staleGapBlocks = [stale(1, 'faq', 'faq')];
+    gapsImpl = async () => [{ generatorId: 'faq', summary: 'x', affectedIds: [], affectedCount: 3, status: 'detected' }];
+    const result = await reconcileSite(SITE_ID, { apply: true });
+    assert.equal(result.capabilityGaps.blocksLifted, 0);
+    assert.match(recs[0].blocked_reason, /shared capability gap on "faq"/);
+  });
+  test('only the generators whose gap is gone are lifted', async () => {
+    recs = [{ id: 1, status: 'open', recommendation_type: 'faq', blocked_reason: GAP('faq'), risk_tier: 'manual' }, { id: 2, status: 'open', recommendation_type: 'expand-content', blocked_reason: GAP('expand-content'), risk_tier: 'manual' }];
+    staleGapBlocks = [stale(1, 'faq', 'faq'), stale(2, 'expand-content', 'expand-content')];
+    gapsImpl = async () => [{ generatorId: 'expand-content', summary: 'x', affectedIds: [], affectedCount: 3, status: 'detected' }];
+    const result = await reconcileSite(SITE_ID, { apply: true });
+    assert.equal(result.capabilityGaps.blocksLifted, 1);
+    assert.equal(recs.find((r) => r.id === 1).blocked_reason, null);
+    assert.ok(recs.find((r) => r.id === 2).blocked_reason);
+  });
+  test('a dry run lifts nothing', async () => {
+    recs = [{ id: 1, status: 'open', recommendation_type: 'faq', blocked_reason: GAP('faq'), risk_tier: 'manual' }];
+    staleGapBlocks = [stale(1, 'faq', 'faq')];
+    const result = await reconcileSite(SITE_ID, { apply: false });
+    assert.equal(result.capabilityGaps.blocksLifted, 0);
+    assert.ok(recs[0].blocked_reason);
   });
 });

@@ -31,6 +31,15 @@ export function measureBodyInPage(mark) {
       const score = scoreOf(c);
       if (score > bestScore) { best = c; bestScore = score; }
     }
+    // A site whose article sits in plain wrappers (no article/main/prose/post-content: chayceproperties.com has 23 long paragraphs and none of those)
+    // found no body region, so its previews and its length checks silently did nothing. The element that directly holds the most paragraph text is it.
+    if (!best) {
+      const holders = new Set([...document.querySelectorAll('p')].filter((p) => (p.textContent || '').trim().length > 40).map((p) => p.parentElement).filter((el) => el && el !== document.body && el !== document.documentElement));
+      for (const c of holders) {
+        const score = [...c.children].filter((k) => k.tagName === 'P').reduce((n, p) => n + (p.textContent || '').trim().length, 0);
+        if (score > bestScore) { best = c; bestScore = score; }
+      }
+    }
     // INNERMOST container that still holds the body, not the outermost.
     // `main` always contains `article`, so it always scored at least as high
     // and won — but a site's typography is routinely scoped to an inner
@@ -41,6 +50,13 @@ export function measureBodyInPage(mark) {
     // failure of the check, not of the draft. Walk down while exactly one child
     // still holds nearly all of the body text; that is where the site's own
     // template puts body copy, with every wrapper above it left intact.
+    // `main` can also hold a hero, related-article cards and an FAQ beside the article (so no single child holds 80% of its text and the walk
+    // below stops at `main`). Injecting there wipes the title, hero and container. When a more specific candidate inside it (an `article`, a
+    // prose block) holds at least half of the text, that candidate IS the body: switch to the deepest such one before walking down.
+    if (best) {
+      const inner = candidates.filter((c) => c !== best && best.contains(c) && scoreOf(c) >= bestScore * 0.5);
+      if (inner.length) { inner.sort((a, b) => scoreOf(b) - scoreOf(a)); const top = scoreOf(inner[0]); best = inner.filter((c) => scoreOf(c) >= top * 0.95).pop(); bestScore = scoreOf(best); }
+    }
     if (best) {
       const topScore = bestScore;
       for (let guard = 0; guard < 12; guard++) {

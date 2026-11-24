@@ -50,7 +50,9 @@
 //     be the thing that exhausts it.
 import { query } from '../db.js';
 import { markDraftAbandoned, countFailedAttemptsByFinding, getDraftByFindingId } from '../store/drafts.js';
-import { reopenRecommendation, blockRecommendation, closeRecommendation, listOpenRecommendations } from '../store/recommendations.js';
+import { reopenRecommendation, blockRecommendation, closeRecommendation, listOpenRecommendations, refreshRecommendationBlockState } from '../store/recommendations.js';
+import { riskTierForGenerator } from '../agents/lib/risk-tiers.js';
+import { BUILD_STARTED_AT } from './build-epoch.js';
 import { recordAttempt, countRecoveryCyclesByFinding, countRefusalRecoveryCyclesByRecommendation } from '../store/recommendation-attempts.js';
 import { countRefusalsByRecommendation } from '../agents/lib/generator-learning.js';
 import { getSiteById } from '../store/read.js';
@@ -379,9 +381,31 @@ async function classifyUnrecordedFailures(siteId, { apply, log }) {
 // Runs after classifyUnrecordedFailures (which only ever blocks on
 // NEEDS_HUMAN, never on ITEM_DEFECT) and before driveAutonomousRecovery, so
 // the block lands before recovery would otherwise burn a cycle on it.
+// A capability-gap block is a diagnosis about the GENERATOR, so a gate cannot clear it (that flapped: unblocked, retried, failed identically, blocked again, forever;
+// see recommendation-coordinator.js). What can change the diagnosis is the platform's own code, so the block is lifted when it was made BEFORE this build and the
+// gap does not show in the current build's failures. If the defect is still there it re-forms after a few new failures and blocks again, once per build: no timer.
+const GAP_BLOCK_GENERATOR = /^Part of a shared capability gap on "([^"]+)"/;
+export async function liftStaleCapabilityGapBlocks(siteId, activeGeneratorIds, { buildStartedAt = BUILD_STARTED_AT, log } = {}) {
+  const { rows } = await query(
+    `SELECT id, recommendation_type, blocked_reason FROM recommendations
+      WHERE site_id = $1 AND status = 'open' AND blocked_reason LIKE $2 AND blocked_since < $3`,
+    [siteId, `${CAPABILITY_GAP_BLOCK_PREFIX}%`, buildStartedAt],
+  );
+  let lifted = 0;
+  for (const rec of rows) {
+    const generatorId = GAP_BLOCK_GENERATOR.exec(rec.blocked_reason || '')?.[1];
+    if (!generatorId || activeGeneratorIds.has(generatorId)) continue;
+    const updated = await refreshRecommendationBlockState(rec.id, { blockedReason: null, riskTier: riskTierForGenerator(rec.recommendation_type) });
+    if (updated) lifted += 1;
+  }
+  if (lifted) log?.(`[reconciler] site ${siteId}: lifted ${lifted} capability-gap block(s) made before this build whose gap no longer shows`);
+  return lifted;
+}
+
 async function surfaceCapabilityGaps(siteId, { apply, log }) {
-  const result = { gapsDetected: 0, recommendationsBlocked: 0, gaps: [] };
+  const result = { gapsDetected: 0, recommendationsBlocked: 0, blocksLifted: 0, gaps: [] };
   const gaps = await capabilityGapDetector.detectCapabilityGaps(siteId);
+  if (apply) result.blocksLifted = await liftStaleCapabilityGapBlocks(siteId, new Set(gaps.map((g) => g.generatorId)), { log });
   if (!gaps.length) return result;
   result.gapsDetected = gaps.length;
 
