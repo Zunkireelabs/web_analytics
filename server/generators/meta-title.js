@@ -133,8 +133,42 @@ export async function generate({ siteId, params }) {
       throw Object.assign(new Error(`Meta title generation failed: the model kept using a phrase this site does not allow (${titleBans.join(', ')}). Try again or write the title by hand.`), { status: 400 });
     }
   }
+  // A title identical to the one the page already has changes nothing, and for a duplicate-title finding it IS the problem. Options equal
+  // to the current title are dropped; if that leaves none, one retry says so, and a draft that still has none is refused (not shipped).
+  const currentTitle = normTitle(previous?.title);
+  const differs = (r) => ({ ...r, titles: r.titles.filter((t) => !currentTitle || normTitle(t) !== currentTitle) });
+  const hadTitles = result.titles.length > 0;
+  result = differs(result);
+  if (hadTitles && !result.titles.length) {
+    result = differs(await attempt(' Every title you wrote was identical to the page\'s current title. Write titles that are clearly different from it.'));
+    if (!result.titles.length) {
+      throw Object.assign(new Error('Meta title generation failed: every option matched the title the page already has, so nothing would change. Try again or write the title by hand.'), { status: 400 });
+    }
+  }
   const { titles, metaDescription } = result;
 
   const content = { query, page: page || null, titles, metaDescription, ...(previous ? { previous } : {}) };
   return { content, summary: `${content.titles.length} title option(s) + meta description for "${query}"${pageTypeUnknown ? ' — page type could not be identified, so words this site does not allow were avoided' : ''}` };
+}
+
+// ---- Pre-draft check (generators/lib/verification-layer.js) ------------------------------------------------------------------------
+// "Is this still true?", asked BEFORE a model call is spent. The one meta-title claim that can be re-checked without extra context is the
+// duplicate-title finding: `"X" is used as the title on 2 different pages`. If the page's title is no longer X, a change (an earlier
+// draft, a person) already answered it and drafting again would only change a title that is no longer the problem. The nightly
+// technical-seo run re-detects the duplicate if it is still there under a different title.
+const normTitle = (t) => String(t ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+export const flaggedDuplicateTitle = (reason) => /^"([\s\S]+?)" is used as the title on \d+ different pages/i.exec(String(reason ?? '').trim())?.[1] ?? null;
+
+export async function verifyCurrentState(rec, { site } = {}) {
+  const target = rec.params?.page || rec.page;
+  const flagged = flaggedDuplicateTitle(rec.reason);
+  if (!target || !flagged) return { decision: 'still_valid', reason: 'not-a-duplicate-title-finding', evidence: null };
+  const fetched = await analyzePageUrl(target);
+  if (!fetched.ok) return { decision: 'still_valid', reason: 'unreachable', evidence: { target, error: fetched.error } };
+  const live = fetched.analysis.title;
+  if (!live) return { decision: 'still_valid', reason: 'no-live-title', evidence: { target } };
+  if (normTitle(live) !== normTitle(flagged)) {
+    return { decision: 'already_resolved', reason: 'duplicate-title-already-changed', evidence: { target, flaggedTitle: flagged, liveTitle: live } };
+  }
+  return { decision: 'still_valid', reason: 'duplicate-title-still-live', evidence: { target, title: live } };
 }
