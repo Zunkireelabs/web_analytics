@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { discoverCardHeavyPages, discoverPages, layoutGroupKey, pickLayoutGroupSamples } from './capture.js';
+import { discoverCardHeavyPages, discoverPages, layoutGroupKey, pickLayoutGroupSamples, pickPostFromCardLinks } from './capture.js';
 
 // A fake Playwright Page — goto/evaluate are the only two methods
 // discoverCardHeavyPages and the capturePage() it calls internally use.
@@ -224,7 +224,7 @@ describe('captureSite — responsive pass', () => {
 // A fake Page whose collectLinksInPage result depends on which URL was last
 // navigated to — discoverPages' second hop visits the listing page and reads
 // ITS links, so a single fixed link list can't exercise that path.
-function fakePagePerUrl(linksByUrl, { failOn = [] } = {}) {
+function fakePagePerUrl(linksByUrl, { failOn = [], cardsByUrl = null } = {}) {
   let currentUrl = null;
   return {
     navigations: [],
@@ -234,6 +234,7 @@ function fakePagePerUrl(linksByUrl, { failOn = [] } = {}) {
       this.navigations.push(url);
     },
     async evaluate(fn) {
+      if (fn.name === 'collectPostCardLinksInPage') return (cardsByUrl || {})[currentUrl] || [];
       if (fn.name !== 'collectLinksInPage') throw new Error(`unexpected evaluate(): ${fn.name}`);
       return linksByUrl[currentUrl] || [];
     },
@@ -273,6 +274,17 @@ describe('discoverPages — second hop for blog-article', () => {
     });
     const pages = await discoverPages(page, HOME, { maxPages: 5 });
     assert.equal(Object.fromEntries(pages.map((p) => [p.pageType, p.url]))['blog-article'], 'https://example.com/blog/a-real-post/');
+  });
+
+  test('a site that keeps its posts at the site root: the first post card on the list page is the article (admizzeducation.com)', async () => {
+    const page = fakePagePerUrl(
+      { [HOME]: ['/blogs'], 'https://example.com/blogs': ['/category/medical', '/study-abroad-after-12th-nepal-guide-2027'] },
+      { cardsByUrl: { 'https://example.com/blogs': ['/category/medical', '/study-abroad-after-12th-nepal-guide-2027', '/student-visa-refusal-reasons-nepali-students-2027'] } },
+    );
+    const pages = await discoverPages(page, HOME);
+    const byType = Object.fromEntries(pages.map((p) => [p.pageType, p.url]));
+    assert.equal(byType['blog-listing'], 'https://example.com/blogs');
+    assert.equal(byType['blog-article'], 'https://example.com/study-abroad-after-12th-nepal-guide-2027');
   });
 
   test('a site with no blog listing at all is untouched', async () => {
@@ -461,5 +473,18 @@ describe('discoverPages — uses the survey groups when given', () => {
     assert.ok(urls.includes(`${H}/odd-one`));
     assert.ok(urls.includes(`${H}/blog/p1`));
     assert.equal(urls.includes(`${H}/a2/`), false, 'g1 is already represented by /a/');
+  });
+});
+
+
+describe('pickPostFromCardLinks', () => {
+  const L = 'https://example.com/blogs';
+  test('takes a one-segment hyphenated slug on the same site; skips categories, other folders, other sites and short names', () => {
+    assert.equal(pickPostFromCardLinks(['/category/uk', '/contact', '/a-b', 'https://other.com/some-long-post-name', '/blog/some-long-post-name', '/real-post-about-visas'], L), 'https://example.com/real-post-about-visas');
+  });
+  test('nothing suitable gives null; a page already captured or out of scope is skipped', () => {
+    assert.equal(pickPostFromCardLinks(['/category/uk', '/x'], L), null);
+    assert.equal(pickPostFromCardLinks(['/post-one-two-three', '/post-two-three-four'], L, { isSeen: (u) => u.endsWith('one-two-three') }), 'https://example.com/post-two-three-four');
+    assert.equal(pickPostFromCardLinks(['/post-one-two-three'], L, { inScope: () => false }), null);
   });
 });
