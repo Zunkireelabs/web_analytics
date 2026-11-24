@@ -54,6 +54,9 @@ const ALLOWED_PATH_PATTERNS = [
   // billed-but-failed call can be matched to the invoice. Its callers branch on the result's `reason` and never show `error` to a
   // customer (rank-tracking.js, competitor-footprint-collector.js, dataforseo-ai.js).
   /^server\/providers\/dataforseo\/client\.js$/,
+  // In-memory counter of AI provider failures (lib/provider-health.js). `lastMessage` is read only by an operator through the llm.js re-export;
+  // no route, draft, recommendation or finding field is built from it, so raw provider text here never reaches a customer.
+  /^server\/lib\/provider-health\.js$/,
 ];
 
 // console.error/console.warn calls are logs, not customer content — the
