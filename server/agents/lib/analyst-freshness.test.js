@@ -116,3 +116,21 @@ describe('checkAnalystFreshness — data-driven, not transport-driven', () => {
     assert.equal(gate(freshness).allowAutonomous, false, 'a real, unrecovered gap must still veto autonomous action');
   });
 });
+
+describe('search data is collected before the app\'s morning pull, so it is normally 4 days old', () => {
+  const now = new Date('2026-11-24T04:35:00Z');
+  const row = (d) => ({ as_of: d, rows_total: 500 });
+  const recent = { gscPage: row('2026-11-21'), gscQueryPage: row('2026-11-21'), metricObservations: row('2026-11-23'), forecastRuns: row('2026-11-24'), anomalies: row('2026-11-23') };
+  test('a newest search day 4 days old is fresh (it used to read stale and switch the analyst off for every project)', async () => {
+    scenario = { ...recent, pageQueryObservations: { as_of: '2026-11-20', rows_total: 500 } };
+    const f = await checkAnalystFreshness(1, { now });
+    assert.equal(f.sources.pageQueryObservations.stale, false);
+    assert.notEqual(f.verdict, 'stale');
+  });
+  test('7 days old is still stale: a real collection outage is still caught', async () => {
+    scenario = { ...recent, pageQueryObservations: { as_of: '2026-11-17', rows_total: 500 } };
+    const f = await checkAnalystFreshness(1, { now });
+    assert.equal(f.sources.pageQueryObservations.stale, true);
+    assert.equal(f.verdict, 'stale');
+  });
+});

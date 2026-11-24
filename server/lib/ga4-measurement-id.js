@@ -16,7 +16,7 @@
 //   permission-denied  the credential cannot read the property's streams: the client must grant access
 //   unavailable        a temporary failure (network, quota): try again later, not a client problem
 import { google } from 'googleapis';
-import { getGoogleAuth } from '../auth/google.js';
+import { getProjectScopedGoogleAuth } from '../auth/google.js';
 import { updateSiteAnalyticsIds } from '../db.js';
 
 export const MEASUREMENT_ID_RE = /^G-[A-Z0-9]{4,}$/i;
@@ -45,7 +45,8 @@ export async function discoverMeasurementId(site, { admin = null } = {}) {
 
   let streams;
   try {
-    const client = admin || google.analyticsadmin({ version: 'v1beta', auth: getGoogleAuth(site) });
+    // The project's own Google connection first (the account that already feeds its GA4 reports); the shared platform account only if it has none.
+    const client = admin || google.analyticsadmin({ version: 'v1beta', auth: await getProjectScopedGoogleAuth(site) });
     const out = [];
     let pageToken;
     do {
@@ -86,11 +87,14 @@ export async function ensureMeasurementId(site, { admin = null, save = true, sav
 
 // What a person should be told, per status. One place, so the dashboard card, the run summary and the refusal all say the same thing.
 export function needsInputMessage(status) {
+  // The most common confusion is that a connected property seems to mean the tag can be installed. It does not: the connection lets
+  // SuperRank READ reports (property ID); installing the tag needs the website's own tag ID (the G-… measurement ID), which lives in the
+  // property's web data stream. Each message says which of the two is missing and what to do, in the order a person would do it.
   switch (status) {
-    case 'no-property': return 'Needs input: connect this project\'s Google Analytics (GA4) property so its measurement ID can be found.';
-    case 'no-web-stream': return 'Needs input: the connected GA4 property has no web data stream. Create one for this website in Google Analytics (or send us the G-… measurement ID).';
-    case 'ambiguous': return 'Needs input: could not tell which GA4 web data stream belongs to this website. Send us the G-… measurement ID to use.';
-    case 'permission-denied': return 'Needs input: the connected Google account cannot read this GA4 property\'s data streams. Grant it access (or send us the G-… measurement ID).';
+    case 'no-property': return 'Needs input: connect this project\'s Google Analytics (GA4) property. Without it neither reports nor the website\'s tracking tag (the G-… measurement ID) can be set up.';
+    case 'no-web-stream': return 'Needs input: reports are connected, but the GA4 property has no web data stream, so there is no tag ID (G-…) to put on the website. In Google Analytics go to Admin > Data streams > Add stream > Web for this website (or send us the G-… measurement ID).';
+    case 'ambiguous': return 'Needs input: reports are connected, but the property has web data streams and none is clearly this website\'s. Send us the G-… measurement ID of this website\'s stream and we will use that one.';
+    case 'permission-denied': return 'Needs input: reports are connected, but the connected Google account is not allowed to read this property\'s web data stream, which holds the tag ID (G-…) the website needs. In Google Analytics go to Admin > Property access management and give that account at least Viewer access (or send us the G-… measurement ID). It is picked up automatically on the next check.';
     default: return null; // 'unavailable' is temporary, never a client request
   }
 }

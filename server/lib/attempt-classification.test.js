@@ -416,3 +416,9 @@ test('an unreadable live page during the FAQ visibility check is transient', () 
   assert.equal(retryPolicy, RETRY_POLICY.RETRY);
   assert.equal(isAutoRetryable(retryPolicy), true);
 });
+
+test('"could not be pushed to GitHub right now" is a retryable outage, never an item defect', () => {
+  const c = classifyAbandonReason('This batch of changes could not be pushed to GitHub right now — our team has been notified. (ref: 1a2b3c)');
+  assert.equal(c.retryPolicy, RETRY_POLICY.RETRY);
+  assert.equal(c.failureClass, FAILURE_CLASS.EXTERNAL_SERVICE);
+});

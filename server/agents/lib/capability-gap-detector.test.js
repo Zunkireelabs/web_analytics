@@ -159,3 +159,32 @@ describe('detectCapabilityGaps — investigating the generic fallback bucket', (
     assert.equal(gaps[0].investigation, undefined);
   });
 });
+
+describe('detectCapabilityGaps — failures from before this build do not keep a gap alive', () => {
+  const BOOT = new Date('2026-11-23T17:07:00Z');
+  const at = (id, iso) => ({ id, action_type: 'faq', abandoned_reason: 'x', updated_at: iso });
+  const base = (drafts) => createCapabilityGapDetector({
+    listDraftsFn: async () => drafts,
+    classifyAbandonReasonFn: () => ({ failureClass: 'FAILED_BECAUSE_AGENT_LOGIC_IS_WRONG', retryPolicy: 'item_defect', summary: 'Undersized tap target' }),
+    decisionEngineFn: neverCalledDecisionEngine(),
+    buildStartedAt: BOOT,
+  });
+
+  test('three failures all from before the build (the code was fixed since): no gap', async () => {
+    const gaps = await base([at(1, '2026-11-20T06:00:00Z'), at(2, '2026-11-21T07:00:00Z'), at(3, '2026-11-21T07:10:00Z')]).detectCapabilityGaps(1);
+    assert.deepEqual(gaps, []);
+  });
+  test('three failures from this build: a gap, as before', async () => {
+    const gaps = await base([at(1, '2026-11-24T02:00:00Z'), at(2, '2026-11-24T02:05:00Z'), at(3, '2026-11-24T02:10:00Z')]).detectCapabilityGaps(1);
+    assert.equal(gaps.length, 1);
+    assert.deepEqual(gaps[0].affectedIds, [1, 2, 3]);
+  });
+  test('old and new failures together: only the new ones count, so two new ones are still below the threshold', async () => {
+    const gaps = await base([at(1, '2026-11-20T06:00:00Z'), at(2, '2026-11-21T07:00:00Z'), at(3, '2026-11-24T02:00:00Z'), at(4, '2026-11-24T02:05:00Z')]).detectCapabilityGaps(1);
+    assert.deepEqual(gaps, []);
+  });
+  test('a draft with no date is still counted (nothing is dropped on missing data)', async () => {
+    const gaps = await base([{ id: 1, action_type: 'faq', abandoned_reason: 'x' }, { id: 2, action_type: 'faq', abandoned_reason: 'x' }, { id: 3, action_type: 'faq', abandoned_reason: 'x' }]).detectCapabilityGaps(1);
+    assert.equal(gaps.length, 1);
+  });
+});

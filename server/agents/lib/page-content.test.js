@@ -283,6 +283,11 @@ describe('contentGapsFor — Missing breadcrumbs gap', () => {
     assert.ok(!gaps.includes('Missing breadcrumbs'));
   });
 
+  test('does not flag missing breadcrumbs on a noindex page: it has no search listing for a trail to appear in', () => {
+    const gaps = contentGapsFor({ ...baseAnalysis, isRootPage: false, isNoindex: true }, []).map((g) => g.type);
+    assert.ok(!gaps.includes('Missing breadcrumbs'));
+  });
+
   test('does not flag missing breadcrumbs when BreadcrumbList schema is already present', () => {
     const gaps = contentGapsFor({ ...baseAnalysis, isRootPage: false, schemaTypes: ['BreadcrumbList'] }, []).map((g) => g.type);
     assert.ok(!gaps.includes('Missing breadcrumbs'));

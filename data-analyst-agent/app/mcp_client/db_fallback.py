@@ -100,6 +100,23 @@ _GSC_BREAKDOWN_RANGE = text("""
      LIMIT :limit
 """)
 
+# Real monthly DataForSEO-backed snapshots (server/store/authority.js getAuthorityScoreSeries). Honestly empty when none was taken.
+_AUTHORITY_SCORE_SERIES = text("""
+    SELECT snapshot_date, authority_score, referring_domains, total_backlinks
+      FROM authority_snapshots
+     WHERE site_id = :site_id AND snapshot_date BETWEEN :start AND :end
+     ORDER BY snapshot_date ASC
+""")
+
+# One own-score value per real run (server/store/competitor-profiles.js getOwnStructuralScoreSeries): the score is repeated on every
+# competitor row of a run, so DISTINCT by calendar day. snapshot_at is a timestamp; compared by its date so a DATE bound binds cleanly.
+_OWN_STRUCTURAL_SCORE_SERIES = text("""
+    SELECT DISTINCT snapshot_at::date AS snapshot_date, own_score
+      FROM competitor_structural_snapshots
+     WHERE site_id = :site_id AND snapshot_at::date BETWEEN :start AND :end AND own_score IS NOT NULL
+     ORDER BY snapshot_date ASC
+""")
+
 _DATA_RANGE = text("""
     SELECT (SELECT MIN(date) FROM gsc_daily WHERE site_id = :site_id) AS earliest,
            (SELECT MAX(date) FROM gsc_daily WHERE site_id = :site_id) AS freshest,
@@ -175,6 +192,16 @@ async def get_gsc_breakdown_daily_top_n(
     return [{**row, "date": _iso(row["date"])} for row in _rows(result)]
 
 
+async def get_authority_score_series(session: AsyncSession, site_id: int, start: str, end: str) -> list[dict]:
+    result = await session.execute(_AUTHORITY_SCORE_SERIES, _window(site_id, start, end))
+    return [{**row, "snapshot_date": _iso(row["snapshot_date"])} for row in _rows(result)]
+
+
+async def get_competitor_structural_score_series(session: AsyncSession, site_id: int, start: str, end: str) -> list[dict]:
+    result = await session.execute(_OWN_STRUCTURAL_SCORE_SERIES, _window(site_id, start, end))
+    return [{**row, "snapshot_date": _iso(row["snapshot_date"])} for row in _rows(result)]
+
+
 async def get_gsc_breakdown(
     session: AsyncSession, site_id: int, start: str, end: str, dim: str, limit: int = 10,
 ) -> list[dict]:
@@ -218,5 +245,7 @@ FALLBACKS = {
     "get_gsc_breakdown_daily_top_n": get_gsc_breakdown_daily_top_n,
     "get_gsc_breakdown": get_gsc_breakdown,
     "get_data_range": get_data_range,
+    "get_authority_score_series": get_authority_score_series,
+    "get_competitor_structural_score_series": get_competitor_structural_score_series,
     "get_ai_recommendation_visibility_weekly_series": get_ai_recommendation_visibility_weekly_series,
 }

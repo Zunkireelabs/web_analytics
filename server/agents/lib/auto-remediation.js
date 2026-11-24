@@ -1,3 +1,4 @@
+import { applyBlogDay, blogDayMode } from '../../lib/blog-day.js';
 import { makePageSourceResolver } from '../../implementers/lib/page-source-resolver.js';
 import { listOpenRecommendations, closeRecommendation, blockRecommendation } from '../../store/recommendations.js';
 import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, markDraftAbandoned, recordMergeFailure, requeueUnpushedBatchDraft } from '../../store/drafts.js';
@@ -476,7 +477,7 @@ export async function selectRemediationCandidates(site, siteId, { globalRemainin
   const industryMap = await loadIndustryMap(siteId);
   // Where this project is in its 30 / 30 / ongoing growth programme; null (unchanged ranking) if the clock cannot be read.
   const growth = await loadGrowthStage(siteId);
-  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, ctrCurve, learnedMap, industryMap, growth, declines, analystBudget, analystFindingIds, baselineBudget: Math.max(0, analyticsBudget - spentToday) });
+  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates: applyBlogDay(candidates, blogDayMode()), remaining, pageMetrics, ctrCurve, learnedMap, industryMap, growth, declines, analystBudget, analystFindingIds, baselineBudget: Math.max(0, analyticsBudget - spentToday) });
   const budgeted = queue.map((item) => item.rec);
   const scoreById = new Map(queue.map((item) => [item.rec.id, item]));
   for (const note of selection.groupNotes) console.log(`[auto-remediation] ${clientLabel}: ${note}`);

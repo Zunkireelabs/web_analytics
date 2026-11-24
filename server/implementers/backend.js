@@ -38,7 +38,7 @@ import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination
 import { checkSharedTemplateWrite } from './lib/action-scope.js';
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
 import { safeMessage } from '../lib/errors.js';
-import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, classifyScopeCountMismatch, applyScopeRenames, SVG_PAINT_DEF_TAGS } from './lib/duplicate-id-inject.js';
+import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, classifyScopeCountMismatch, applyScopeRenames, planOwnedIdRemoval, SVG_PAINT_DEF_TAGS } from './lib/duplicate-id-inject.js';
 import { computeSchemaRepairMerge, pushSchemaRepairBranch, previewLiveSchemaRepair } from './lib/schema-repair-inject.js';
 import { computeContentIntegrityMerge, pushContentIntegrityBranch, previewLiveContentIntegrity } from './lib/content-integrity-inject.js';
 import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './lib/alt-text-inject.js';
@@ -689,6 +689,22 @@ async function previewLiveRedirectFix(site, draft) {
 // draft: if any one occurrence in the plan isn't safe, none of them are
 // applied, so a reviewer never has to reason about a half-renamed page.
 
+// The second provably-safe shape (lib/duplicate-id-inject.js planOwnedIdRemoval): the id is repeated by the PAGE's own file from a shared component. Reads every OTHER
+// file that mentions the id (searched by specific needles, never the bare word, which would match half the repo) and lets the pure planner decide.
+async function planOwnedIdRemovalForPage(site, entry, occurrenceCount, filePath, content, ref) {
+  let search;
+  try { search = await searchRepoLocalForStrings(site, ref, [`id="${entry.id}"`, `id='${entry.id}'`, `#${entry.id}`]); } catch { return { ok: false, reason: 'not-provably-safe', error: 'the repo could not be searched for other uses of the id.' }; }
+  const paths = (search.matches || []).filter((path) => path !== filePath);
+  if (paths.length > 12) return { ok: false, reason: 'not-provably-safe', error: `the id appears in ${paths.length} other files, too many to check.` };
+  const otherFiles = [];
+  for (const path of paths) {
+    const f = await getFileContent(site, path, ref);
+    if (!f) return { ok: false, reason: 'not-provably-safe', error: `${path} could not be read.` };
+    otherFiles.push({ path, content: f.content });
+  }
+  return planOwnedIdRemoval({ id: entry.id, occurrenceCount, ownFilePath: filePath, ownContent: content, otherFiles });
+}
+
 export async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
   const page = draft.content?.page;
   const filePath = resolveFile(site, page);
@@ -721,6 +737,8 @@ export async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
   const alreadyResolved = [];
   const edits = [];
   const changedRegions = [];
+  let ownedContent = file.content; // the file as the page-owned-id removals leave it (see planOwnedIdRemovalForPage)
+  let ownedRemovals = 0;
   for (const entry of entries) {
     const occurrences = entry.occurrences || [];
     const renamable = occurrences.filter((occ) => !occ.keep);
@@ -728,7 +746,16 @@ export async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
 
     const nonGradientTag = occurrences.find((occ) => !SVG_PAINT_DEF_TAGS.has(String(occ.tag).toLowerCase()));
     if (nonGradientTag) {
-      unsafe.push(`id="${entry.id}" is on a <${nonGradientTag.tag}> element, not a gradient/clipPath/mask def — renaming it could affect a CSS selector, JS lookup, or anchor link this fix can't see.`);
+      // Not an SVG paint def. The one other shape that can be proven safe from the repo: the page's own file repeats an id of a shared component.
+      const owned = await planOwnedIdRemovalForPage(site, entry, occurrences.length, filePath, ownedContent, beforeRef);
+      if (owned.ok) {
+        ownedContent = owned.newContent;
+        ownedRemovals += 1;
+        changedRegions.push({ field: 'id', markerName: entry.id, before: owned.region.before, after: owned.region.after });
+        if (owned.behaviourNote) changedRegions.push({ field: 'note', markerName: 'behaviour', before: '', after: owned.behaviourNote });
+        continue;
+      }
+      unsafe.push(`id="${entry.id}" is on a <${nonGradientTag.tag}> element, not a gradient/clipPath/mask def, and it could not be proven safe to remove from this page's file: ${owned.error}`);
       continue;
     }
     if (hasDangerousReference(file.content, entry.id)) {
@@ -765,6 +792,12 @@ export async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
 
   if (unsafe.length) {
     return { ok: false, reason: 'not-provably-safe', error: `Can't safely auto-apply this duplicate-id fix: ${unsafe.join(' ')} Apply the fix plan by hand instead.` };
+  }
+  if (ownedRemovals && edits.length) {
+    return { ok: false, reason: 'not-provably-safe', error: 'This plan mixes a page-owned id removal with SVG renames; they are applied one kind at a time, so apply this plan by hand.' };
+  }
+  if (ownedRemovals) {
+    return { ok: true, filePath, oldContent: file.content, newContent: ownedContent, changedRegions };
   }
   if (!edits.length && alreadyResolved.length) {
     return { ok: false, reason: 'already-resolved', error: `Nothing left to apply: ${alreadyResolved.join(' ')}` };

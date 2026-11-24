@@ -265,6 +265,16 @@ describe('discoverPages — second hop for blog-article', () => {
       'the listing must not be re-visited when blog-article already has a representative');
   });
 
+  test('still takes the hop when the page budget is already spent on other pages (SuperRank: blog list captured, no article)', async () => {
+    const others = Array.from({ length: 30 }, (_, i) => `/page-${i}/`);
+    const page = fakePagePerUrl({
+      [HOME]: ['/blog/', ...others],
+      'https://example.com/blog/': ['/blog/a-real-post/'],
+    });
+    const pages = await discoverPages(page, HOME, { maxPages: 5 });
+    assert.equal(Object.fromEntries(pages.map((p) => [p.pageType, p.url]))['blog-article'], 'https://example.com/blog/a-real-post/');
+  });
+
   test('a site with no blog listing at all is untouched', async () => {
     const page = fakePagePerUrl({ [HOME]: ['/services/web/', '/contact/'] });
     const pages = await discoverPages(page, HOME);

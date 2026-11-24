@@ -37,9 +37,13 @@ export async function rollbackFromSnapshot(site, draft, filePath, format = 'js-e
   }
   // A TypeScript data file cannot be executed to validate it (assertValidContent would always reject it). The snapshot is the verbatim
   // file that was live on the default branch right before the merge, so for 'ts-named-export' only require that it is non-empty text.
+  // 'portable-text-body': a post stored as JSON (portable-text-post-body.js). The verbatim snapshot must at least parse as a JSON object.
+  const jsonObject = (text) => { try { const v = JSON.parse(text); return v && typeof v === 'object' && !Array.isArray(v) ? { ok: true } : { ok: false, error: 'not a JSON object' }; } catch { return { ok: false, error: 'not valid JSON' }; } };
   const check = format === 'ts-named-export'
     ? (typeof snapshot.content === 'string' && snapshot.content.trim() ? { ok: true } : { ok: false, error: 'empty snapshot' })
-    : assertValidContent(snapshot.content, format);
+    : format === 'portable-text-body'
+      ? jsonObject(snapshot.content)
+      : assertValidContent(snapshot.content, format);
   if (!check.ok) {
     return { ok: false, reason: 'invalid-edit', error: `Stored rollback snapshot is not valid content (${check.error}) — refusing to restore it.` };
   }

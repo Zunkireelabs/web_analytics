@@ -5,6 +5,7 @@ import { safeMessage } from '../lib/errors.js';
 import { getSiteById } from '../store/read.js';
 import { hasRequiredCapabilities } from '../lib/site-capabilities.js';
 import { runAsDryRun } from './lib/dry-run-context.js';
+import { providerFailureCount } from '../lib/provider-health.js';
 
 // The one place that invokes an agent, times it, and persists the result —
 // agents themselves never touch agent_runs. Set persist:false for in-process
@@ -49,6 +50,7 @@ export async function runAgent(id, input, { persist = true, dryRun = false } = {
   }
 
   const startedAt = Date.now();
+  const providerFailuresBefore = providerFailureCount();
   emitAgentStart(input.siteId, agent.meta.id);
   let output;
   try {
@@ -80,6 +82,14 @@ export async function runAgent(id, input, { persist = true, dryRun = false } = {
   }
 
   const tookMs = Date.now() - startedAt;
+  // A model call failed because the provider was unavailable while this agent ran. The run still says "ok", but whatever the agent asks
+  // the model for may be missing from its findings. Recorded on the run so the issue auto-close (store/recommendations.js
+  // closeStaleRecommendations) never reads that silence as "fixed". Concurrent runs can mark this one too, which only errs toward
+  // keeping an issue open one more day.
+  const providerFailures = providerFailureCount() - providerFailuresBefore;
+  if (providerFailures > 0 && output?.facts && typeof output.facts === 'object') {
+    output.facts.degraded = { reason: 'ai-provider-unavailable', providerFailures };
+  }
   emitAgentDone(input.siteId, agent.meta.id, {
     status: output.status || 'ok',
     findingsCount: Array.isArray(output.facts?.findings) ? output.facts.findings.length : 0,

@@ -212,7 +212,7 @@ export default function Content() {
       {idea && (() => {
         const t = TYPES.find((x) => x.generatorId === idea.item.generatorId) || TYPES[0];
         const id = findingOf(idea.item);
-        return <IdeaPanel idea={{ item: idea.item, startKey: idea.startKey, title: titleOf(idea.item), url: urlOf(idea.item), options: catalog[t.generatorId]?.options || [], previews: previews[t.generatorId] || {},
+        return <IdeaPanel idea={{ item: idea.item, startKey: idea.startKey, generatorId: t.generatorId, siteId, title: titleOf(idea.item), url: urlOf(idea.item), options: catalog[t.generatorId]?.options || [], previews: previews[t.generatorId] || {},
           selectedKey: selected[id]?.optionKey || (picks[id] && picks[id].status !== 'withdrawn' ? picks[id].optionKey : null), locked: Boolean(picks[id] && picks[id].status !== 'saved' && picks[id].status !== 'withdrawn') }}
           onClose={() => setIdea(null)} onPick={(key) => select(idea.item, key)} />;
       })()}

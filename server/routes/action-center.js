@@ -3,6 +3,9 @@ import { previewsFor, draftPreviewFor } from '../lib/content-preview.js';
 import { shipStep, mergeStagePr } from '../lib/ship-flow.js';
 import { promoteMergedStageBatches } from '../lib/stage-promotion.js';
 import { classify } from '../agents/lib/recommendation-taxonomy.js';
+import { describeSession, sessionState, workerSessionTimezone } from '../lib/worker-session.js';
+import { previewDraftInSiteArticle, previewOptionInSiteTemplate } from '../lib/draft-article-preview.js';
+import { workerOnline } from '../store/llm-requests.js';
 import { requireAuth } from './login.js';
 import { runOrchestration } from '../agents/orchestrator.js';
 import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
@@ -884,6 +887,15 @@ router.get('/action-center/drafts', async (req, res, next) => {
 // Exact tab-badge counts, independent of listDraftsForBoard's own cap —
 // see countDraftsByLifecycle's own comment for why these must never be
 // derived from a possibly-capped list.
+// Where the day's fix-writing stands: the laptop worker (connected or not, 10:30 to 14:00 window) for the dashboard banner.
+router.get('/action-center/worker-status', async (req, res, next) => {
+  try {
+    const site = await getSiteById(req.siteId).catch(() => null);
+    const online = await workerOnline().catch(() => false);
+    res.json(describeSession({ timezone: workerSessionTimezone(), workerOnline: online, last: sessionState() }));
+  } catch (err) { next(err); }
+});
+
 router.get('/action-center/drafts/counts', async (req, res, next) => {
   try {
     res.json(await countDraftsByLifecycle(req.siteId));
@@ -2548,6 +2560,19 @@ router.get('/action-center/drafts/:id/design-preview', async (req, res, next) =>
   } catch (e) { next(e); }
 });
 
+// A blog draft placed into a real article page of the client's site and photographed (desktop and phone). Reads only. 422 when the draft is not an article
+// or the site has no captured article yet; 502 when the browser could not draw it.
+router.get('/action-center/drafts/:id/article-preview', async (req, res, next) => {
+  try {
+    const draft = await getDraft(req.siteId, req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    const site = await getSiteById(req.siteId);
+    const r = await previewDraftInSiteArticle(site, draft);
+    if (r.ok) return res.json(r);
+    res.status(['not-an-article', 'no-reference-article'].includes(r.reason) ? 422 : 502).json({ error: r.error, reason: r.reason });
+  } catch (e) { next(e); }
+});
+
 router.get('/action-center/drafts/:id/preview', async (req, res, next) => {
   try {
     const draft = await getDraft(req.siteId, req.params.id);
@@ -3084,6 +3109,16 @@ async function builtTodayFor(siteId) {
 // Content picks: the one-click approval on a content idea the agent found. Saving a pick builds nothing; the next
 // scheduled run reads the saved picks and builds them, so a pick can be changed or cleared until then.
 // GET also returns the option catalog, so the Content page never carries its own copy of the choices.
+// A blog, landing-page or translation option drawn in a real captured page of the site's own template (screenshots), for the approval panel. On demand: each drawing opens a real browser.
+router.get('/action-center/content-picks/blog-preview', async (req, res, next) => {
+  try {
+    const site = await getSiteById(req.siteId);
+    const r = await previewOptionInSiteTemplate(site, { generatorId: String(req.query.generatorId || 'blog-outline'), optionKey: String(req.query.option || ''), title: String(req.query.title || ''), pageUrl: req.query.url ? String(req.query.url) : null });
+    if (r.ok) return res.json(r);
+    res.status(['not-an-article', 'no-reference-article'].includes(r.reason) ? 422 : 502).json({ error: r.error, reason: r.reason });
+  } catch (e) { next(e); }
+});
+
 router.get('/action-center/content-picks', async (req, res, next) => {
   try {
     // `previews`: each option drawn in this site's own look (lib/content-preview.js); a failure just means sketches.

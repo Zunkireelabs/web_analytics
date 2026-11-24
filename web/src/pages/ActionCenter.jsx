@@ -403,6 +403,17 @@ export default function ActionCenter({ scope }) {
   // page's drafts too. A scoped page counts its own (already filtered) list instead.
   const loadDraftCounts = () => (scope ? Promise.resolve() : api.actionCenter.draftCounts(siteId).then(setDraftCounts).catch(() => {}));
 
+  // Where the day's fix-writing stands (laptop worker connected or not). Null when the platform writes fixes through the API.
+  const [workerStatus, setWorkerStatus] = useState(null);
+  useEffect(() => {
+    if (scope) return undefined;
+    let alive = true;
+    const load = () => api.actionCenter.workerStatus(siteId).then((s) => { if (alive) setWorkerStatus(s?.mode === 'worker' ? s : null); }).catch(() => {});
+    load();
+    const t = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(t); };
+  }, [siteId, scope]);
+
   const [todayStats, setTodayStats] = useState(null); // null | { shipped, failed, batchLimit }
   // The server's real cap (routes/action-center.js's SAFE_FIX_BATCH_LIMIT),
   // not a copy of it. Null until the mount fetch lands, which is why the
@@ -1426,6 +1437,11 @@ export default function ActionCenter({ scope }) {
     <div className="max-w-[1360px] mx-auto px-4 md:px-6 pt-6 pb-12">
 
       <PageIntro title={introTitle} subtitle={(tab === 'recommendations' ? recs !== null : drafts !== null) ? introSubtitle : null} />
+      {workerStatus && (
+        <p role="status" style={{ margin: '0 0 12px', fontSize: 13, color: workerStatus.state === 'waiting' ? 'var(--warning, #b45309)' : 'var(--text-muted, #6b7280)' }}>
+          {workerStatus.message}
+        </p>
+      )}
 
       {banners}
 

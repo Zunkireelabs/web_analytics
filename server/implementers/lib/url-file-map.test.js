@@ -85,6 +85,22 @@ describe('resolveMarkers — every marker-merge action type has a built-in platf
   });
 });
 
+describe('resolveMarkers — a meta-title config that names only the title keeps the description marker', () => {
+  const url = 'https://example.com/blog/a/';
+  test('site defaults with only a title marker still write the description', () => {
+    const site = { url_file_map: { defaults: { placements: { 'meta-title': { markers: { title: 'TITLE' } } } } } };
+    assert.deepEqual(resolveMarkers(site, url, 'meta-title'), { title: 'TITLE', description: 'METADESCRIPTION' });
+  });
+  test('a configured description marker is never overwritten', () => {
+    const site = { url_file_map: { defaults: { placements: { 'meta-title': { markers: { title: 'T', description: 'D' } } } } } };
+    assert.deepEqual(resolveMarkers(site, url, 'meta-title'), { title: 'T', description: 'D' });
+  });
+  test('other action types are untouched', () => {
+    const site = { url_file_map: { defaults: { placements: { faq: { markers: { faq: 'FAQ2' } } } } } };
+    assert.deepEqual(resolveMarkers(site, url, 'faq'), { faq: 'FAQ2' });
+  });
+});
+
 describe('isPageMapped', () => {
   const site = {
     url_file_map: {

@@ -49,7 +49,7 @@ mock.module(resolve('../agents/lib/page-content.js'), {
   },
 });
 
-const { generate, meta } = await import('./meta-title.js');
+const { generate, meta, verifyCurrentState, flaggedDuplicateTitle } = await import('./meta-title.js');
 
 // Exactly 55 / 155 chars — inside the generator's 50-60 and 150-160 windows,
 // so a candidate built from these must never trigger a rewrite call.
@@ -259,5 +259,52 @@ describe('meta-title generator — per-site titleClaimBans', () => {
     const { content } = await generate({ siteId: 1, params: { query: 'q' } });
     assert.match(content.titles[0], /consultancy/);
     assert.equal(jsonCalls.length, 1);
+  });
+});
+
+describe('meta-title generator — a new title must differ from the one the page has', () => {
+  const current = inRangeTitle; // in range, so no length rewrite changes it
+  const other = 'D'.repeat(55);
+  beforeEach(() => { pageAnalysis = { ok: true, analysis: { title: current, metaDescription: 'old', bodyText: 'x' } }; });
+
+  test('an option identical to the current title is dropped, the others are kept', async () => {
+    jsonResponse = { titles: [current, other], metaDescription: inRangeDescription };
+    const { content } = await generate({ siteId: 1, params: { query: 'q', page: 'https://x.test/p/' } });
+    assert.deepEqual(content.titles, [other]);
+  });
+  test('when every option is the current title the model gets one corrective retry', async () => {
+    jsonQueue = [{ titles: [current], metaDescription: inRangeDescription }, { titles: [other], metaDescription: inRangeDescription }];
+    const { content } = await generate({ siteId: 1, params: { query: 'q', page: 'https://x.test/p/' } });
+    assert.deepEqual(content.titles, [other]);
+    assert.equal(jsonCalls.length, 2);
+    assert.match(jsonCalls[1], /identical to the page's current title/);
+  });
+  test('still identical after the retry: refused, never shipped as a no-op', async () => {
+    jsonQueue = [{ titles: [current], metaDescription: inRangeDescription }, { titles: [current], metaDescription: inRangeDescription }];
+    await assert.rejects(() => generate({ siteId: 1, params: { query: 'q', page: 'https://x.test/p/' } }), /matched the title the page already has/);
+  });
+});
+
+describe('meta-title verifyCurrentState — the duplicate-title finding', () => {
+  const reason = '"Gemma 4: Was ein offenes Modell" is used as the title on 2 different pages — search engines can\'t tell them apart';
+  const rec = { reason, params: { page: 'https://x.test/p/' } };
+  test('reads the flagged title out of the finding', () => assert.equal(flaggedDuplicateTitle(reason), 'Gemma 4: Was ein offenes Modell'));
+  test('a CTR/growth finding is not a duplicate-title finding', () => assert.equal(flaggedDuplicateTitle('Ranks #8.5 with 231 impressions'), null));
+  test('the live title is no longer the flagged one: already resolved', async () => {
+    pageAnalysis = { ok: true, analysis: { title: 'A different, unique title' } };
+    const v = await verifyCurrentState(rec, {});
+    assert.equal(v.decision, 'already_resolved');
+    assert.equal(v.reason, 'duplicate-title-already-changed');
+  });
+  test('the live title is still the flagged one (case and spacing aside): still valid', async () => {
+    pageAnalysis = { ok: true, analysis: { title: '  gemma 4:  was ein offenes   modell ' } };
+    assert.equal((await verifyCurrentState(rec, {})).decision, 'still_valid');
+  });
+  test('page unreachable: says nothing, stays valid', async () => {
+    pageAnalysis = { ok: false, error: 'timeout' };
+    assert.equal((await verifyCurrentState(rec, {})).reason, 'unreachable');
+  });
+  test('a finding that is not about a duplicate title is left to the generator', async () => {
+    assert.equal((await verifyCurrentState({ reason: 'low CTR', params: { page: 'https://x.test/' } }, {})).decision, 'still_valid');
   });
 });

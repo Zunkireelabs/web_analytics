@@ -6,6 +6,7 @@ import { categoryByAgentId } from './command-center.js';
 import { classify } from './recommendation-taxonomy.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
 import { createRecommendationGates } from './recommendation-gates.js';
+import { paginatedListDisposition } from './paginated-pages.js';
 import { listActiveGoals } from '../../store/site-goals.js';
 import { pickBestGoalAlignment } from './goal-alignment.js';
 import { isAssertable } from './verdict.js';
@@ -130,6 +131,7 @@ export async function buildRecommendations(siteId) {
   // close it — the mechanism that kept 6 /docs/* rows open on site 1
   // indefinitely.
   const droppedRecommendations = [];
+  const listingFixSeen = new Set(); // listing fixes already produced this pass (one per listing, see paginatedListDisposition)
   // Candidates for the scoped Decision Engine integration (default-bucket-
   // decision.js) — only ever populated for the actionable (generatorId)
   // push path below, classified DEFAULT_CLASSIFICATION. Applied once, after
@@ -147,11 +149,15 @@ export async function buildRecommendations(siteId) {
     'file-missing': 'The file this page was mapped to no longer exists in the repository.',
     'adapter-data-not-ready': 'The configured data source has no entry for this page and none is expected to appear.',
     'faq-schema-already-present': 'This page\'s file already carries an FAQPage schema (often from another query-string variant of the same shared template) — a new FAQ/Q&A draft would have nothing left to publish.',
+    'paginated-list-not-applicable': 'A numbered page of a list (page 2, 3 and so on) is the listing template showing the next posts: there is no prose to add an FAQ, Q&A, expansion or link to, so this finding does not apply. Real defects of the listing itself are fixed once, on the listing.',
     'declared-not-applicable': 'This site\'s url_file_map declares this action not applicable to this page, because the page\'s own template already provides it.',
     'page-has-own-faq': 'This page writes its FAQ by hand (its data only feeds the FAQPage schema), so a generated FAQ would be a second, different one.',
     'auto-computed-by-layout': 'This page\'s canonical/Open Graph tags are already computed automatically by its shared layout template from the page\'s own title, description, and URL — there is no per-page value to write and no fix needed.',
   };
 
+  // Agents whose latest run finished while the AI provider was failing: their findings may be incomplete, so nothing they did not
+  // report this time may be closed as fixed (closeStaleRecommendations skips every row one of them detected).
+  const degradedAgentIds = new Set(runs.filter((r) => r.degraded).map((r) => r.agentId));
   for (const run of runs) {
     lastAnalyzedAt[run.agentId] = run.createdAt;
     if (run.checkedPages) {
@@ -171,7 +177,7 @@ export async function buildRecommendations(siteId) {
         unassertedFindings.push({ agentId: run.agentId, findingId: f.id, verdict: f.verification.verdict, reason: f.verification.reason });
         continue;
       }
-      const action = f.recommendedAction;
+      let action = f.recommendedAction;
       if (!action?.generatorId) {
         // A finding with no generator is usually evidence, not a defect
         // (query-intelligence's "your top query moved", device-intelligence's
@@ -225,6 +231,21 @@ export async function buildRecommendations(siteId) {
           goalAlignment: goalAlignment ? { level: goalAlignment.level, rationale: goalAlignment.rationale } : null,
         });
         continue;
+      }
+      // A finding on a numbered list page (/blog/articles/page/3/) is about the listing template that produces every page number. Schema is
+      // fixed once at the listing; FAQ-style fixes do not belong on a list of post cards (paginated-pages.js). Decided before any gate, so
+      // 14 findings do not become 14 refused cards.
+      const onList = paginatedListDisposition(action.generatorId, action.params?.page);
+      if (onList?.kind === 'not-applicable') {
+        droppedRecommendations.push({ generatorId: action.generatorId, page: recommendationPageKey({ generatorId: action.generatorId, params: action.params }), reason: DROP_REASONS['paginated-list-not-applicable'] });
+        continue;
+      }
+      if (onList?.kind === 'fix-at-listing') {
+        action = { ...action, params: { ...action.params, page: onList.listingUrl, fromNumberedPages: true } };
+        const listingKey = `${action.generatorId}::${recommendationPageKey({ generatorId: action.generatorId, params: action.params })}`;
+        detectedKeys.add(listingKey); // the listing is still flagged: its open row must not be closed as "fixed"
+        if (listingFixSeen.has(listingKey)) continue; // one item per listing, however many page numbers flagged it
+        listingFixSeen.add(listingKey);
       }
       // Every gate — net-new target, url_file_map (with healing), soft-404,
       // file-exists, adapter-data, design verification — in one call, shared
@@ -293,5 +314,5 @@ export async function buildRecommendations(siteId) {
   // default-bucket-decision.js. With the flag off this returns `items`
   // unchanged, same array reference, zero decide() calls.
   const finalItems = await applyDefaultBucketDecisions(siteId, items, defaultBucketCandidates, { site: loadedSite });
-  return { items: finalItems, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, droppedRecommendations, evidenceOnlyFindings, unassertedFindings };
+  return { items: finalItems, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, degradedAgentIds, droppedRecommendations, evidenceOnlyFindings, unassertedFindings };
 }

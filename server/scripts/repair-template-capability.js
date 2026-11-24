@@ -47,6 +47,7 @@ import {
 import { isOnboardingAnalysisPending } from '../implementers/lib/onboarding-readiness.js';
 import { createDesignAgentJob, getDesignAgentJobById } from '../store/execution-jobs.js';
 import { recordCapabilityRepair } from '../store/capability-repairs.js';
+import * as githubClient from '../github/client.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
 import { autoHealNewContentTarget } from '../implementers/lib/discover-content-target.js';
 import { resolveFile, resolveNewContentTarget } from '../implementers/lib/url-file-map.js';
@@ -368,9 +369,19 @@ export async function repairTemplateCapabilitiesForSite(siteId, {
   const pageMappingsHealed = [];
   const pageMappingsStillGap = [];
   if (distinctUnmappedPages.length && !dryRun) {
+    let rateLimited = false;
     for (const pageUrl of distinctUnmappedPages) {
+      // One GitHub call per page. Once the budget is gone (or low) every further page fails the same way and burns the
+      // hourly budget the shipping run needs, so stop and leave the rest as gaps for the next pass.
+      if (rateLimited || githubClient.getLastKnownRateLimit?.(site)?.low) {
+        if (!rateLimited) console.warn(`[repair-template-capability] GitHub budget low for site ${siteId}; skipping the remaining page-mapping auto-heals this pass.`);
+        rateLimited = true;
+        pageMappingsStillGap.push(pageUrl);
+        continue;
+      }
       const actionType = recs.find((r) => pageUrlOf(r) === pageUrl)?.recommendation_type;
       const healedConfig = await autoHealFileMapping(site, pageUrl, actionType).catch((err) => {
+        if (err?.rateLimited) rateLimited = true;
         console.warn(`[repair-template-capability] auto-heal threw for ${pageUrl}: ${err.message}`);
         return null;
       });

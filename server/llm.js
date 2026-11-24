@@ -4,6 +4,9 @@ import OpenAI from 'openai';
 import { withAgentMemory } from './agent-memory.js';
 import { withDesignContext } from './implementers/lib/design-drift.js';
 import { withCompetitorContext } from './agents/lib/competitor-policy.js';
+import { isProviderFault } from './generators/lib/llm-error.js';
+import { noteProviderFailure, providerFailureCount, lastProviderFailure } from './lib/provider-health.js';
+export { providerFailureCount, lastProviderFailure };
 
 // Shared LLM helper used by both the daily narrative and the weekly doc report.
 // Provider is chosen automatically: a real OPENAI_API_KEY → OpenAI, else Anthropic.
@@ -148,6 +151,18 @@ export async function withRetry(fn) {
 // world-knowledge matters more than per-call cost (e.g. weekly competitor
 // discovery, where a cheap model reliably misses real, niche local
 // companies), pass tier: 'monthly' to use the stronger default.
+
+async function trackProviderFailures(run) {
+  try {
+    return await run();
+  } catch (err) {
+    if (isProviderFault(err)) noteProviderFailure(err);
+    throw err;
+  }
+}
+export const callLLM = (system, user, options = {}) => trackProviderFailures(() => callLLMUntracked(system, user, options));
+export const callLLMWithImages = (system, user, images, options = {}) => trackProviderFailures(() => callLLMWithImagesUntracked(system, user, images, options));
+
 export const MODEL_DEFAULTS = {
   openai: { daily: 'gpt-4o-mini', monthly: 'gpt-4o' },
   anthropic: { daily: 'claude-haiku-4-5', monthly: 'claude-opus-4-8' },
@@ -161,7 +176,7 @@ export const MODEL_DEFAULTS = {
 // calling generator's own meta.id. This is the automatic RETRIEVE step of
 // the platform-wide learning loop: every generator gets it for free just by
 // passing its own id, with no separate opt-in per generator.
-export async function callLLM(system, user, { model, maxTokens = 500, tier = 'daily', generatorId, siteId, pageUrl, modelRole, task } = {}) {
+async function callLLMUntracked(system, user, { model, maxTokens = 500, tier = 'daily', generatorId, siteId, pageUrl, modelRole, task } = {}) {
   system = await withAgentMemory(system, generatorId, siteId);
   // Shared design-intelligence layer (server/implementers/lib/design-drift.js) —
   // real site design/voice grounding for every website-facing generator, the
@@ -174,6 +189,11 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
   // or when this site has no active competitor data. See
   // agents/lib/competitor-policy.js.
   system = await withCompetitorContext(system, generatorId, siteId);
+  // A call from a fix generator goes to the Claude Code worker when LLM_WORKER_MODE=on (lib/claude-worker-provider.js); everything else, and every call while
+  // the mode is off, uses the API providers below exactly as before.
+  // Loaded on demand: the worker module reaches the database layer, whose import loads .env, and llm.js must not do that at import time.
+  const { workerMode, routeCall, callViaWorker } = generatorId && String(process.env.LLM_WORKER_MODE || '').toLowerCase() === 'on' ? await import('./lib/claude-worker-provider.js') : {};
+  if (workerMode && await routeCall({ generatorId }) === 'worker') return callViaWorker({ system, user, generatorId, siteId, maxTokens, tier, pageUrl });
   // A model promoted through the evaluated registry for this call's ROLE (only decision-engine calls pass one; a model tuned to
   // decide is never used to write page content). Used only when it belongs to the provider in use and no model was forced.
   const promoted = !model && modelRole ? await activeModelFor(modelRole) : null;
@@ -248,7 +268,7 @@ function warnIfTruncated(msg, model, maxTokens) {
 // codebase makes, so a caller here is expected to defensively re-parse with
 // extractJson() itself and treat a parse failure as "zero findings this
 // run" rather than pay for a second full vision round-trip.
-export async function callLLMWithImages(system, user, images, { model, maxTokens = 1500, tier = 'daily', generatorId, siteId, task } = {}) {
+async function callLLMWithImagesUntracked(system, user, images, { model, maxTokens = 1500, tier = 'daily', generatorId, siteId, task } = {}) {
   system = await withAgentMemory(system, generatorId, siteId);
   system = await withDesignContext(system, generatorId, siteId);
   const { provider, model: resolvedModel } = resolveProviderAndModel({ task, tier, model });

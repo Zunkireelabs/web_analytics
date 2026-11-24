@@ -36,6 +36,7 @@ import aiCrawlersRouter, { crawlerDashboardRouter } from './routes/ai-crawlers.j
 import { apiBridgeRouter, rootBridgeRouter } from './routes/mcp-bridge.js';
 import webhooksRouter from './routes/webhooks.js';
 import crmWebhookRouter from './routes/crm-webhook.js';
+import claudeWorkerRouter from './routes/claude-worker.js';
 import trialSignupRouter from './routes/trial-signup.js';
 import oauthConsentRouter from './routes/oauth-consent.js';
 import usersRouter from './routes/users.js';
@@ -158,6 +159,9 @@ app.use('/api', trialSignupRouter);
 // Public, per-project-bearer-token-authenticated (the hourly access-log shipping script, deploy/ai-crawler-shipper/). The project
 // comes from the token only. Same mount-order hazard as crmWebhookRouter above.
 app.use('/api', aiCrawlersRouter);
+// Public, one-bearer-token-authenticated (LLM_WORKER_TOKEN): the Claude Code worker on a laptop claims AI writing requests and returns the text. 404 until a
+// token is configured. Same mount-order hazard as the routers above.
+app.use('/api', claudeWorkerRouter);
 app.use(rootBridgeRouter);
 // Reverse-proxies data-analyst-agent/ under this app's own domain — /data-agent
 // is a root path, not under /api (see routes/data-agent.js), and must be

@@ -200,9 +200,11 @@ describe('ts-named-export-content — stops safely when the target cannot be ide
     const r = await run(postSite(), '/a', fn);
     assert.equal(r.ok, false);
   });
-  test('non-faq action types are not written by this adapter', async () => {
-    const r = await run(postSite(), '/existing-post', fetchFile, draft('/existing-post', items, 'qa-content'));
-    assert.equal(r.reason, 'unsupported-action');
+  test('non-faq action types are not written by this adapter, a Q&A (qa-content) included: it is body text, not the FAQ box', async () => {
+    for (const a of ['qa-content', 'meta-title']) {
+      const r = await run(postSite(), '/existing-post', fetchFile, draft('/existing-post', items, a));
+      assert.equal(r.reason, 'unsupported-action', a);
+    }
   });
   test('malformed / empty items never reach the file', async () => {
     assert.equal((await run(postSite(), '/existing-post', fetchFile, draft('/existing-post', []))).reason, 'draft-not-ready');

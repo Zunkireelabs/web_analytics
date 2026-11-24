@@ -1,3 +1,4 @@
+import { blogDayMode, blogDayMax } from '../../lib/blog-day.js';
 import { listSavedPicks, setPickStatus, claimPickDay, releaseStuckBuilding } from '../../store/content-picks.js';
 import { todayInTz } from '../../util/dates.js';
 import { getRecommendationByFindingId } from '../../store/recommendations.js';
@@ -15,14 +16,35 @@ import { instructionFor } from '../../lib/content-options.js';
 // Called from the daily ship run (job.js) inside the site's ship lock. It never throws: one pick failing must not stop
 // the others or the rest of the day's work.
 const SHIPPED = new Set(['pr_opened', 'implemented', 'merged_to_stage']);
-const RETRY_LATER = /rate.?limit|timed out|timeout|ECONN|ETIMEDOUT|try again|design agent|still being (captured|derived)|temporar/i;
+// A provider that is down, out of credit or has no worker connected is the platform's problem, not the idea's: the pick stays saved and is tried again.
+const RETRY_LATER = /rate.?limit|timed out|timeout|ECONN|ETIMEDOUT|try again|design agent|still being (captured|derived)|temporar|credit balance|billing|worker is not connected|provider is unavailable/i;
+const isRetryable = (err) => err?.designPending === true || err?.llmProvider === true || err?.workerUnavailable === true || RETRY_LATER.test(err?.message ?? '');
+
+
+// BLOG PICKS FOLLOW THE BLOG DAY (owner's rule, 2026-11-24). Approved blogs are built in a batch of up to blogMax on a blog day, highest priority first, and wait on every other
+// day; the rest of the saved picks (landing pages, translations) are not affected. With the blog-day rule off, every pick is built as before.
+const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
+async function picksForToday(siteId, picks, d) {
+  if (d.blogMode === 'off') return picks;
+  const blogs = picks.filter((p) => p.generator_id === 'blog-outline');
+  const others = picks.filter((p) => p.generator_id !== 'blog-outline');
+  if (d.blogMode !== 'blog') return others;
+  const ranked = [];
+  for (const [i, p] of blogs.entries()) {
+    const rec = await d.getRecommendationByFindingId(siteId, p.finding_id).catch(() => null);
+    ranked.push({ p, i, rank: PRIORITY_RANK[rec?.priority] ?? 1 });
+  }
+  ranked.sort((a, b) => a.rank - b.rank || a.i - b.i);
+  const chosen = new Set(ranked.slice(0, d.blogMax).map((x) => x.p.finding_id));
+  return picks.filter((p) => p.generator_id !== 'blog-outline' || chosen.has(p.finding_id));
+}
 
 export async function buildSavedContentPicks(site, deps = {}) {
-  const d = { listSavedPicks, setPickStatus, getRecommendationByFindingId, generateDraft, submitDraftForApproval, approveAndPublishDraftUnattended, ...deps };
+  const d = { listSavedPicks, setPickStatus, getRecommendationByFindingId, generateDraft, submitDraftForApproval, approveAndPublishDraftUnattended, blogMode: blogDayMode(), blogMax: blogDayMax(), ...deps };
   const out = { built: 0, withdrawn: 0, retryLater: 0, left: 0, skipped: null };
   if (!site?.repo_owner || !site?.repo_name) return { ...out, skipped: 'no-repository' };
 
-  const picks = await d.listSavedPicks(site.id);
+  const picks = await picksForToday(site.id, await d.listSavedPicks(site.id), d);
   for (const pick of picks) {
     const id = pick.finding_id;
     try {
@@ -46,7 +68,7 @@ export async function buildSavedContentPicks(site, deps = {}) {
       await d.setPickStatus(site.id, id, 'shipped', ['building']);
       out.built += 1;
     } catch (err) {
-      const retry = err?.designPending === true || RETRY_LATER.test(err?.message ?? '');
+      const retry = isRetryable(err);
       await d.setPickStatus(site.id, id, retry ? 'saved' : 'withdrawn', ['building', 'saved']).catch(() => {});
       if (retry) out.retryLater += 1; else out.withdrawn += 1;
       console.warn(`[pick-runner] site ${site.id} pick ${id}: ${retry ? 'will retry next run' : 'withdrawn'}: ${String(err?.message || err).slice(0, 200)}`);
@@ -83,7 +105,7 @@ export async function buildChosenDesignChoices(site, deps = {}) {
       await d.markDesignChoiceStatus(site.id, id, 'shipped', ['building']);
       out.built += 1;
     } catch (err) {
-      const retry = RETRY_LATER.test(err?.message ?? '');
+      const retry = isRetryable(err);
       await d.markDesignChoiceStatus(site.id, id, retry ? 'chosen' : 'needs_choice', ['building', 'chosen']).catch(() => {});
       if (retry) out.retryLater += 1; else out.backToPerson += 1;
       console.warn(`[pick-runner] site ${site.id} design choice ${id}: ${retry ? 'will retry next run' : 'back to the person'}: ${String(err?.message || err).slice(0, 200)}`);

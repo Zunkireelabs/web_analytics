@@ -28,20 +28,27 @@ export function isInvalidJsonError(err) {
  * @returns an Error to throw. A provider fault keeps the provider's own text and is
  *          tagged llmQuota / llmAuth / llmProvider; an output fault keeps the old shape.
  */
-export function llmFailure(err, message, extra = { status: 400 }) {
-  const text = typeof err?.message === 'string' && err.message ? err.message : '';
-  const providerStatus = err?.status ?? err?.response?.status ?? null;
-  const networkCode = ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN', 'ENOTFOUND'].includes(err?.code);
+/** True when `err` is the AI provider or the network failing (out of credit, bad key, 5xx, timeout), not the model's own output. */
+export function isProviderFault(err) {
+  if (!err) return false;
+  const text = typeof err.message === 'string' && err.message ? err.message : '';
+  const providerStatus = err.status ?? err.response?.status ?? null;
+  const networkCode = ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN', 'ENOTFOUND'].includes(err.code);
   // Provider/network fault = a real HTTP status other than our own 400, a
   // network error code, or text that names quota/auth. A plain Error with no
   // status (a generator's own "not an array" check inside the same try) and
   // callLLMForJson's own 400 are output faults and keep the old message.
-  const isProviderFault = !isInvalidJsonError(err) && !!err && (
+  return !isInvalidJsonError(err) && (
     networkCode
     || (Number.isInteger(providerStatus) && providerStatus !== 400)
     || QUOTA_PATTERN.test(text) || AUTH_PATTERN.test(text)
   );
-  if (!isProviderFault) {
+}
+
+export function llmFailure(err, message, extra = { status: 400 }) {
+  const text = typeof err?.message === 'string' && err.message ? err.message : '';
+  const providerStatus = err?.status ?? err?.response?.status ?? null;
+  if (!isProviderFault(err)) {
     return Object.assign(new Error(message), extra);
   }
   const out = new Error(`LLM provider error: ${text || err.code || 'call failed'}`.slice(0, 400));

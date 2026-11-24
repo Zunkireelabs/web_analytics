@@ -18,6 +18,7 @@ import { llmFailure } from './lib/llm-error.js';
 import { getFileContent } from '../github/client.js';
 import { acceptQuickAnswer, acceptFaqItems } from './lib/blog-contract-fields.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
+import { verifyBlogTopic } from './lib/blog-topic-verifier.js';
 import { fetchSerp } from '../lib/serp.js';
 import { listPageInventory } from '../store/page-inventory.js';
 import { buildSerpBrief, mergeQuestions } from './lib/serp-brief.js';
@@ -428,4 +429,10 @@ export async function generate({ siteId, params }) {
     groundingContext: [context, groundingExcerpt].filter(Boolean).join('\n\n'),
   };
   return { content, summary: `Blog post draft for "${topic}" (${totalWords(sections)} words, ${sections.length} section(s))${serpBrief && serpBrief.format.key !== 'mixed' ? `, written as ${serpBrief.format.label} to match what ranks` : ''}` };
+}
+
+// ---- Pre-draft check (generators/lib/verification-layer.js) ------------------------------------------------------------------------
+// "Does the site already cover this topic?", asked BEFORE a model call and a pull request are spent on a post the site already has.
+export async function verifyCurrentState(rec, ctx = {}) {
+  return verifyBlogTopic(rec, ctx);
 }

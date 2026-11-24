@@ -5,6 +5,8 @@ import { RUN_WINDOW_MS } from './lib/site-run.js';
 import { runCompetitorGrowthCycleForAllSites, runCompetitorOutcomeLearningForAllSites, runRankTrackingForAllSites, runPosthogIngestForAllSites, runGscScreenRefreshForAllSites } from './job.js';
 import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runSitemapSyncForAllSites, runFixVerificationsForAllSites, runNightlyIssueRecheckForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runKeywordScheduleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, runAiVisibilityShipForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, checkDesignChangesForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites, runTrendRadarIfDueForAllSites, runNewsPostsIfDueForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
+import { deferToWorker, workerSessionTick, workerSessionTimezone } from './lib/worker-session.js';
+import { workerOnline } from './store/llm-requests.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
 import { reapStaleAuditRuns } from './store/audit-runs.js';
@@ -195,7 +197,9 @@ export function startCron() {
       // Deliberately outside the try above — a detection failure for one site
       // must not cost every OTHER site its PRs, which is the same per-tenant
       // isolation runAutoRemediationForAllSites already applies internally.
-      if (!process.env.SHIP_CRON_SCHEDULE) {
+      if (!process.env.SHIP_CRON_SCHEDULE && deferToWorker()) {
+        console.log('[cron] fix writing is the laptop worker\'s job (10:30-14:00): no generation in the morning run');
+      } else if (!process.env.SHIP_CRON_SCHEDULE) {
         // No lock taken here: runAutoRemediationForAllSites takes a PER-SITE
         // shipping lock around each tenant's own run (job.js). A platform-wide
         // key here would undo that — one slow tenant would again stall every
@@ -527,6 +531,7 @@ export function startCron() {
   } else {
     cron.schedule(shipSchedule, () => locked('autonomous-shipping-run', async () => {
       if (pipelineOwnsMorning()) return; // the pipeline's 11:00 run is the only shipper
+      if (deferToWorker()) return; // the laptop worker's session runs the pass
       // Per-site locking lives in runAutoRemediationForAllSites — see the
       // chained call above for why there is no platform-wide key here.
       console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
@@ -560,6 +565,7 @@ export function startCron() {
     console.error(`[cron] invalid SHIP_CATCHUP_CRON_SCHEDULE "${shipCatchupSchedule}" — autonomous shipping catch-up NOT scheduled.`);
   } else {
     cron.schedule(shipCatchupSchedule, async () => {
+      if (deferToWorker()) return; // the laptop worker's session runs the pass
       try {
         // Takes the same per-site shipping lock the scheduled run takes, inside
         // its own loop — so this guard can never open a second batch alongside
@@ -574,9 +580,21 @@ export function startCron() {
   }
 
 
-  // Nightly issue re-check: the agent re-reads the live page behind every open issue and closes what is fixed, so tomorrow's
-  // list holds only new problems. Default 04:30 (site time), well before the 07:00 detection and 11:00 shipping.
-  const recheckSchedule = process.env.NIGHTLY_RECHECK_CRON_SCHEDULE || '30 4 * * *';
+  // THE LAPTOP WORKER'S SESSION: every 5 minutes between 10:00 and 14:00 (site time), start the day's fix pass if a worker is connected. The pass itself
+  // ends at 14:00 (worker-session.js); anything left is picked up on the next tick or tomorrow. Does nothing unless LLM_WORKER_MODE=on.
+  if (deferToWorker()) {
+    cron.schedule('*/5 10-13 * * *', () => locked('worker-session', async () => {
+      await workerSessionTick({ timezone: workerSessionTimezone(), isOnline: workerOnline, runPass: ({ windowEndsAt }) => runAutoRemediationForAllSites({ windowEndsAt }) });
+    }), { timezone: workerSessionTimezone() });
+    console.log(`[cron] laptop worker session scheduled every 5 min, 10:30-14:00 (${workerSessionTimezone()})`);
+  }
+
+  // Issue re-check: the agent re-reads the live page behind every open issue and closes what is fixed, so the list holds only
+  // problems that are still there. Default 09:30 (site time): AFTER the 07:00 detection and the repair runs that follow it (done by
+  // about 08:35), and before the 11:00 shipping, so shipping starts from a list that has just been verified against the live pages.
+  // It used to run at 04:30, before detection, on the previous day's picture; a run that finished its checks while the AI provider was
+  // down then closed issues that the 07:00 run created again as new. (That is also guarded in nightly-recheck.js now.)
+  const recheckSchedule = process.env.NIGHTLY_RECHECK_CRON_SCHEDULE || '30 9 * * *';
   if (!cron.validate(recheckSchedule)) {
     console.error(`[cron] invalid NIGHTLY_RECHECK_CRON_SCHEDULE "${recheckSchedule}" — nightly issue re-check NOT scheduled.`);
   } else {

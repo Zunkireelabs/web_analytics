@@ -52,6 +52,8 @@ const CLASSIFIED = {
   return_requests: { cls: 'D', via: 'users' }, signup_resume_links: { cls: 'D', via: 'users' }, signup_requests: { cls: 'D', via: 'users' },
   free_audit_leads: { cls: 'D', via: 'free_audit_reports' },
   // D: platform tables, no tenant data
+  // llm_workers: which laptop workers are connected (id + last heartbeat). Platform-wide; llm_requests carries site_id and is already tenant-keyed.
+  llm_workers: { cls: 'D' },
   alembic_version: { cls: 'D' }, schema_migrations: { cls: 'D' }, session: { cls: 'D' }, job_locks: { cls: 'D' }, rate_limits: { cls: 'D' },
   platform_activations: { cls: 'D' }, signup_recovery_settings: { cls: 'D' }, contact_requests: { cls: 'D' }, free_audit_reports: { cls: 'D' },
   platform_settings: { cls: 'D' }, platform_setting_changes: { cls: 'D' }, model_registry: { cls: 'D' }, model_registry_log: { cls: 'D', via: 'model_registry' }, training_datasets: { cls: 'D' }, login_codes: { cls: 'D' },

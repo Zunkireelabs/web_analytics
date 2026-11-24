@@ -105,6 +105,21 @@ jobs:
             # so a Claude key alone never starts paid probe calls.
             AI_RECOMMENDATION_ANTHROPIC_ENABLED=true
 
+            # ── Claude Code worker (SRANK-48) ─────────────────────────────
+            # Fix generators write through the laptop worker (tools/claude-code-worker) between 10:30 and 14:00 Nepal time. This block rewrites
+            # .env on every deploy, so the switch has to live here. LLM_WORKER_TOKEN is a GitHub secret created by a person with deploy access;
+            # until it exists every worker endpoint answers 404 and nothing is written (the calls are retried on the next pass, nothing is lost).
+            # LLM_WORKER_FALLBACK is deliberately not set: with the laptop closed, the call waits for tomorrow instead of going to the paid API.
+            LLM_WORKER_MODE=on
+            LLM_WORKER_TOKEN=${{ secrets.LLM_WORKER_TOKEN }}
+
+            # ── Blog day (owner's rule, 2026-11-24) ───────────────────────
+            # Every 3rd day, starting 2026-11-25, is a blog day for every project: it ships a batch of up to 6 blogs per project (highest priority
+            # first) with the high-priority fixes; the other days ship no blogs. Approved blog picks follow the same days (agents/lib/pick-runner.js).
+            BLOG_DAY_EVERY_N_DAYS=3
+            BLOG_DAY_START=2026-11-25
+            BLOG_DAY_MAX_BLOGS=6
+
             # ── DataForSEO (keywords, backlinks, real AI answers) ───────────
             # Was only in deploy-staging.yml, and this block rewrites .env on every deploy, so production had no DataForSEO
             # at all. Every call goes through the per-project monthly budget (providers/dataforseo/client.js, migration 231).

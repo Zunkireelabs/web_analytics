@@ -606,6 +606,7 @@ export const api = {
     // Content picks: the one-click approval on a content idea. GET returns { picks, catalog } (the options come from the
     // server, so this page carries no copy of them). Saving builds nothing; the next scheduled run builds the picks.
     contentPicks: (siteId) => req(withSite('/action-center/content-picks', siteId)),
+    blogOptionPreview: (option, title, siteId, generatorId = 'blog-outline', url = '') => req(withSite(`/action-center/content-picks/blog-preview?option=${encodeURIComponent(option)}&title=${encodeURIComponent(title || '')}&generatorId=${encodeURIComponent(generatorId)}&url=${encodeURIComponent(url || '')}`, siteId)),
     saveContentPick: (findingId, body, siteId) => req(withSite(`/action-center/content-picks/${encodeURIComponent(findingId)}`, siteId), { method: 'PUT', body: JSON.stringify(body) }),
     clearContentPick: (findingId, siteId) => req(withSite(`/action-center/content-picks/${encodeURIComponent(findingId)}`, siteId), { method: 'DELETE' }),
     // Design choices: fixes the agent could not fit into the client's design. Picking builds nothing now; the next run builds it.
@@ -620,6 +621,8 @@ export const api = {
     // own cap on the unfiltered board load, so a badge is never wrong just
     // because the list underneath it was capped.
     draftCounts: (siteId) => req(withSite('/action-center/drafts/counts', siteId)),
+    workerStatus: (siteId) => req(withSite('/action-center/worker-status', siteId)),
+    articlePreview: (id, siteId) => req(withSite(`/action-center/drafts/${id}/article-preview`, siteId)),
     draft: (id, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId)),
     saveDraft: (id, content, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId), { method: 'PUT', body: JSON.stringify({ content }) }),
     deleteDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId), { method: 'DELETE' }),

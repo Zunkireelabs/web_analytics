@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api.js';
 import DraftPreview from './DraftPreview.jsx';
+import ArticlePreview from './ArticlePreview.jsx';
 import Button from './Button.jsx';
 import Badge from './Badge.jsx';
 import {
@@ -632,6 +633,7 @@ export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted 
               <>
                 <DraftPreview actionType={draft.action_type} content={draft.content}
                   onSelectTitle={draft.action_type === 'meta-title' && draft.status !== 'implemented' ? selectTitle : undefined} />
+                {draft.action_type === 'blog-outline' && <ArticlePreview draftId={draft.id} siteId={siteId} />}
 
                 {/* GitHub File Diff Preview Section — for an implemented draft
                     this shows the real, currently-live content instead of a

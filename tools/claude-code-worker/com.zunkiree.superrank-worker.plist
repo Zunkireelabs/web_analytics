@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Starts the Claude Code worker every day at 09:55; run-worker.sh stops it at 14:10. Install: cp to ~/Library/LaunchAgents/ then
+       launchctl load ~/Library/LaunchAgents/com.zunkiree.superrank-worker.plist . Remove: launchctl unload it and delete the file. -->
+  <key>Label</key><string>com.zunkiree.superrank-worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/yukta/Projects/web_analytics/tools/claude-code-worker/run-worker.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/yukta/.nvm/versions/node/v20.19.4/bin:/Users/yukta/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>55</integer></dict>
+  <key>StandardOutPath</key><string>/Users/yukta/.superrank-worker/worker.log</string>
+  <key>StandardErrorPath</key><string>/Users/yukta/.superrank-worker/worker.log</string>
+</dict>
+</plist>

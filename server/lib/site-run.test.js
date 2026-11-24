@@ -63,3 +63,27 @@ test('the morning window is open until its end, closed from then on, and never c
   assert.equal(windowClosed(end, end + 5), true);
   assert.equal(windowClosed(null, end + 5), false);
 });
+
+import { describe } from 'node:test';
+import { orderByUrgency } from './site-run.js';
+describe('orderByUrgency', () => {
+  const sites = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+  test('the site with the most open high-priority work goes first', () => {
+    assert.deepEqual(orderByUrgency(sites, new Map([[3, 9], [2, 4]])).map((s) => s.id), [3, 2, 1, 4]);
+  });
+  test('equal urgency keeps the incoming (rotated) order, so nobody is permanently last', () => {
+    assert.deepEqual(orderByUrgency(sites, new Map([[1, 2], [2, 2], [3, 2], [4, 2]])).map((s) => s.id), [1, 2, 3, 4]);
+    assert.deepEqual(orderByUrgency([sites[2], sites[3], sites[0], sites[1]], new Map()).map((s) => s.id), [3, 4, 1, 2]);
+  });
+  test('a site with only lower-priority work is still in the list, just later', () => {
+    const out = orderByUrgency(sites, new Map([[4, 1]])).map((s) => s.id);
+    assert.equal(out.length, 4);
+    assert.equal(out[0], 4);
+  });
+  test('no data returns the list unchanged and never mutates it', () => {
+    const copy = [...sites];
+    assert.equal(orderByUrgency(sites, null), sites);
+    orderByUrgency(sites, new Map([[4, 5]]));
+    assert.deepEqual(sites, copy);
+  });
+});
