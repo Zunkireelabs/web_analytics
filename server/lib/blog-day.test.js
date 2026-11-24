@@ -34,3 +34,15 @@ test('a blog day with no blog candidate still runs the high-priority fixes', () 
 test('the input list is never mutated', () => {
   const copy = [...pool]; applyBlogDay(pool, 'blog'); assert.deepEqual(pool, copy);
 });
+
+test('BLOG_DAY_START makes that date the first blog day, then every Nth day; 2026-11-25 starts the owner\'s rule', async () => {
+  const { blogDayMax } = await import('./blog-day.js');
+  const env = { BLOG_DAY_EVERY_N_DAYS: '3', BLOG_DAY_START: '2026-11-25' };
+  const at = (iso) => blogDayMode({ now: Date.parse(`${iso}T06:00:00Z`), env });
+  assert.deepEqual(['2026-11-25', '2026-11-26', '2026-11-27', '2026-11-28', '2026-12-01'].map(at), ['blog', 'normal', 'normal', 'blog', 'blog']);
+  assert.equal(at('2026-11-22'), 'blog', 'counting back from the start keeps the same rhythm');
+  assert.equal(blogDayMax({}), 6);
+  assert.equal(blogDayMax({ BLOG_DAY_MAX_BLOGS: '5' }), 5);
+  assert.equal(blogDayMax({ BLOG_DAY_MAX_BLOGS: '99' }), 12);
+  assert.equal(blogDayMax({ BLOG_DAY_MAX_BLOGS: 'x' }), 6);
+});

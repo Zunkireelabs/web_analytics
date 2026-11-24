@@ -1,4 +1,5 @@
-import { hasRecentDraftOfType, countFailedAttemptsByFinding } from '../../store/drafts.js';
+import { hasRecentDraftOfType, countFailedAttemptsByFinding, countDraftsOfTypeToday } from '../../store/drafts.js';
+import { blogDayMode, blogDayMax } from '../../lib/blog-day.js';
 import { countRecoveryCyclesByFinding, countRefusalRecoveryCyclesByRecommendation } from '../../store/recommendation-attempts.js';
 import { countRefusalsByRecommendation } from './generator-learning.js';
 
@@ -109,7 +110,7 @@ export function effectiveConvergenceCap(recoveryCycles) {
 // to one each. Returns the candidates in their original priority order, plus
 // the human-readable notes the caller logs — deferrals are never silent, the
 // same rule the daily budget's truncation already follows.
-export async function applyPacing(site, candidates, { recentDraftCheck = hasRecentDraftOfType } = {}) {
+export async function applyPacing(site, candidates, { recentDraftCheck = hasRecentDraftOfType, countToday = countDraftsOfTypeToday, blogMode = blogDayMode(), blogMax = blogDayMax() } = {}) {
   const timezone = site.timezone || 'UTC';
   const notes = [];
   const dropped = new Set();
@@ -151,7 +152,19 @@ export async function applyPacing(site, candidates, { recentDraftCheck = hasRece
     // A blog with no booked day (the booking job not yet run, or beyond its horizon) is paced by the gap as before.
     const ordinaryGap = site[gapColumn] ?? defaultGapDays;
     let lanes;
-    if (generatorId === 'blog-outline') {
+    if (generatorId === 'blog-outline' && blogMode === 'blog') {
+      // A BLOG DAY ships a batch (owner's rule, 2026-11-24): up to blogMax blogs for the project in total today, whatever their booked day, so 5 to 6 go out
+      // together every third day. Booked-and-due first (earliest day), then hand-added topics, then the rest in priority order. Blogs already drafted today
+      // count, so the passes the worker's window runs cannot exceed the batch. The gap rule does not apply: the blog day IS the gap.
+      const doneToday = await countToday(site.id, generatorId, timezone);
+      const room = Math.max(0, blogMax - doneToday);
+      const today = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      const rank = (r) => (r.params?.scheduledFor && r.params.scheduledFor <= today ? 0 : r.params?.clientRequested === true ? 1 : 2);
+      const ordered = all.map((r, i) => ({ r, i })).sort((a, b) => rank(a.r) - rank(b.r) || (rank(a.r) === 0 ? String(a.r.params.scheduledFor).localeCompare(String(b.r.params.scheduledFor)) : 0) || a.i - b.i).map((x) => x.r);
+      for (const r of ordered.slice(room)) dropped.add(r.id);
+      notes.push(`blog-outline: blog day, taking ${Math.min(room, ordered.length)} of ${ordered.length} open blog(s) (${doneToday} already today, batch of ${blogMax}); the rest wait for the next blog day.`);
+      lanes = [];
+    } else if (generatorId === 'blog-outline') {
       const today = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
       const booked = all.filter((r) => r.params?.scheduledFor);
       const unbooked = all.filter((r) => !r.params?.scheduledFor);

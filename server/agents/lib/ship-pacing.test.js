@@ -264,3 +264,31 @@ describe('applyPacing — one blog lane with booked days (owner decision 2026-11
     assert.deepEqual(slots, [0, 3, 6, 9, 12]);
   });
 });
+
+describe('applyPacing on a blog day', () => {
+  const site = { id: 7, timezone: 'UTC' };
+  const blogs = Array.from({ length: 9 }, (_, i) => ({ id: i + 1, recommendation_type: 'blog-outline', priority: 'medium', params: {} }));
+  const fix = { id: 100, recommendation_type: 'meta-title', params: {} };
+  test('takes a batch of up to 6, whatever the gap rule says, and leaves other kinds alone', async () => {
+    const { paced, notes } = await applyPacing(site, [...blogs, fix], { recentDraftCheck: async () => true, countToday: async () => 0, blogMode: 'blog', blogMax: 6 });
+    assert.deepEqual(paced.filter((r) => r.recommendation_type === 'blog-outline').map((r) => r.id), [1, 2, 3, 4, 5, 6]);
+    assert.ok(paced.some((r) => r.id === 100));
+    assert.match(notes.join(' '), /blog day, taking 6 of 9/);
+  });
+  test('blogs already drafted today count, so repeated passes cannot exceed the batch', async () => {
+    const { paced } = await applyPacing(site, blogs, { countToday: async () => 4, blogMode: 'blog', blogMax: 6 });
+    assert.deepEqual(paced.map((r) => r.id), [1, 2]);
+    const none = await applyPacing(site, blogs, { countToday: async () => 6, blogMode: 'blog', blogMax: 6 });
+    assert.equal(none.paced.length, 0);
+  });
+  test('booked-and-due blogs go first (earliest day), then hand-added topics, then the rest', async () => {
+    const mix = [
+      { id: 1, recommendation_type: 'blog-outline', params: {} },
+      { id: 2, recommendation_type: 'blog-outline', params: { clientRequested: true } },
+      { id: 3, recommendation_type: 'blog-outline', params: { scheduledFor: '2000-01-02' } },
+      { id: 4, recommendation_type: 'blog-outline', params: { scheduledFor: '2000-01-01' } },
+    ];
+    const { paced } = await applyPacing(site, mix, { countToday: async () => 0, blogMode: 'blog', blogMax: 3 });
+    assert.deepEqual(paced.map((r) => r.id).sort(), [2, 3, 4]);
+  });
+});

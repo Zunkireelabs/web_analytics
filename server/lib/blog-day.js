@@ -10,11 +10,25 @@ export function blogDayEvery(env = process.env) {
   return Number.isInteger(n) && n > 1 ? n : 0;
 }
 
+// BLOG_DAY_START (YYYY-MM-DD, UTC) makes that date the first blog day, then every Nth day after it. Unset: the days are counted from 1970-01-01, which is arbitrary
+// but the same for every project. The owner starts the rule on a chosen day (2026-11-25), so it is set in the deploy.
+const startDay = (env) => {
+  const t = /^\d{4}-\d{2}-\d{2}$/.test(String(env.BLOG_DAY_START || '')) ? Date.parse(`${env.BLOG_DAY_START}T00:00:00Z`) : NaN;
+  return Number.isFinite(t) ? Math.floor(t / DAY_MS) : 0;
+};
+
 /** @returns {'off'|'blog'|'normal'} deterministic for a given calendar day (UTC), the same for every project. */
 export function blogDayMode({ now = Date.now(), env = process.env } = {}) {
   const n = blogDayEvery(env);
   if (!n) return 'off';
-  return Math.floor(now / DAY_MS) % n === 0 ? 'blog' : 'normal';
+  const since = Math.floor(now / DAY_MS) - startDay(env);
+  return ((since % n) + n) % n === 0 ? 'blog' : 'normal';
+}
+
+// How many blogs one project ships on a blog day (owner's rule, 2026-11-24: 5 to 6). BLOG_DAY_MAX_BLOGS, default 6, at most 12.
+export function blogDayMax(env = process.env) {
+  const n = Number(env.BLOG_DAY_MAX_BLOGS ?? 6);
+  return Number.isInteger(n) && n >= 1 ? Math.min(n, 12) : 6;
 }
 
 export function applyBlogDay(candidates, mode) {

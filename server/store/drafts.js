@@ -1224,3 +1224,14 @@ export async function clearApplyErrorForPushedDraft(siteId, id) {
   );
   return rows[0] || null;
 }
+
+// How many drafts of one kind this project already has today (site time zone), abandoned ones not counted. A blog day ships up to N blogs in total, however many
+// passes the worker's window runs, so each pass reads what is already done.
+export async function countDraftsOfTypeToday(siteId, actionType, timezone = 'UTC') {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS n FROM drafts WHERE site_id = $1 AND action_type = $2 AND status != 'abandoned'
+       AND (created_at AT TIME ZONE $3)::date = (now() AT TIME ZONE $3)::date`,
+    [siteId, actionType, timezone]
+  );
+  return rows[0]?.n || 0;
+}

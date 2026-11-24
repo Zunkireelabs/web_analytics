@@ -167,3 +167,32 @@ test('an AI provider that is out of credit, or a closed laptop worker, keeps the
   assert.deepEqual([out.withdrawn, out.retryLater], [0, 2]);
   assert.ok(log.status.every(([, to]) => to !== 'withdrawn'));
 });
+
+describe_blog_day_picks();
+function describe_blog_day_picks() {
+  const blogPick = (id) => pick({ finding_id: id, generator_id: 'blog-outline' });
+  const prio = { b1: 'low', b2: 'high', b3: 'medium', b4: 'high', b5: 'low' };
+  const mk = (mode, max) => {
+    const built = [];
+    const { deps } = harness({ picks: [blogPick('b1'), blogPick('b2'), blogPick('b3'), blogPick('b4'), blogPick('b5'), pick({ finding_id: 'lp', generator_id: 'landing-page' })], generate: async (_s, a) => { built.push(a.findingId); return { id: 1, status: 'draft' }; } });
+    deps.blogMode = mode; deps.blogMax = max;
+    deps.getRecommendationByFindingId = async (_s, id) => ({ id, params: {}, priority: prio[id] || 'medium' });
+    return { deps, built };
+  };
+  test('on a blog day the approved blogs are built in a batch, highest priority first, and other kinds are untouched', async () => {
+    const { deps, built } = mk('blog', 3);
+    await buildSavedContentPicks(site, deps);
+    assert.deepEqual(built.filter((x) => x !== 'lp').sort(), ['b2', 'b3', 'b4']);
+    assert.ok(built.includes('lp'));
+  });
+  test('on any other day the blogs wait, saved, and the other kinds still build', async () => {
+    const { deps, built } = mk('normal', 3);
+    await buildSavedContentPicks(site, deps);
+    assert.deepEqual(built, ['lp']);
+  });
+  test('with the blog-day rule off, every pick is built as before', async () => {
+    const { deps, built } = mk('off', 3);
+    await buildSavedContentPicks(site, deps);
+    assert.equal(built.length, 6);
+  });
+}
