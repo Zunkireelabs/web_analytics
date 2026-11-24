@@ -55,6 +55,24 @@ const {
 
 beforeEach(() => { issued = []; rows = []; updated = null; });
 
+describe('closeStaleRecommendations — an agent that ran while the AI provider failed is never trusted', () => {
+  const content = (over = {}) => ({ id: 77, page: 'topic::Financial aid', recommendation_type: 'blog-outline', detecting_agents: ['content-gap'], ...over });
+  test('its silence does not close the issue', async () => {
+    rows = [content()]; updated = null;
+    const n = await closeStaleRecommendations(1, new Set(), { degradedAgentIds: new Set(['content-gap']) });
+    assert.equal(n, 0); assert.equal(updated, null);
+  });
+  test('a healthy run still closes an issue it no longer reports', async () => {
+    rows = [content()]; updated = null;
+    const n = await closeStaleRecommendations(1, new Set(), { degradedAgentIds: new Set(['geo-signals']) });
+    assert.equal(n, 1); assert.deepEqual(updated, [77]);
+  });
+  test('no degraded agents at all behaves exactly as before', async () => {
+    rows = [content()]; updated = null;
+    assert.equal(await closeStaleRecommendations(1, new Set(), {}), 1);
+  });
+});
+
 describe('closeStaleRecommendations — broken-link-fix key matching', () => {
   test('supersedes a broken-link-fix row once its source page is re-crawled and the link is gone', async () => {
     rows = [{

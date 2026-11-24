@@ -152,6 +152,9 @@ export async function buildRecommendations(siteId) {
     'auto-computed-by-layout': 'This page\'s canonical/Open Graph tags are already computed automatically by its shared layout template from the page\'s own title, description, and URL — there is no per-page value to write and no fix needed.',
   };
 
+  // Agents whose latest run finished while the AI provider was failing: their findings may be incomplete, so nothing they did not
+  // report this time may be closed as fixed (closeStaleRecommendations skips every row one of them detected).
+  const degradedAgentIds = new Set(runs.filter((r) => r.degraded).map((r) => r.agentId));
   for (const run of runs) {
     lastAnalyzedAt[run.agentId] = run.createdAt;
     if (run.checkedPages) {
@@ -293,5 +296,5 @@ export async function buildRecommendations(siteId) {
   // default-bucket-decision.js. With the flag off this returns `items`
   // unchanged, same array reference, zero decide() calls.
   const finalItems = await applyDefaultBucketDecisions(siteId, items, defaultBucketCandidates, { site: loadedSite });
-  return { items: finalItems, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, droppedRecommendations, evidenceOnlyFindings, unassertedFindings };
+  return { items: finalItems, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, degradedAgentIds, droppedRecommendations, evidenceOnlyFindings, unassertedFindings };
 }

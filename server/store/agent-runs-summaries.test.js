@@ -69,9 +69,19 @@ describe('getLatestFindings reads only the fields it maps', () => {
     assert.match(selectList, /facts->'findings'/);
     assert.match(selectList, /facts->'checkedPages'/);
     assert.match(selectList, /facts->'linkCrawl'->'checkedPages'/);
+    assert.match(selectList, /facts->'degraded'/);
     assert.match(selectList, /input->'start'/);
     assert.match(selectList, /input->'end'/);
     assert.deepEqual(params, [3, ['security-headers']]);
+  });
+
+  test('a run that finished while the AI provider was failing comes back marked degraded', async () => {
+    rowsToReturn = [
+      { agent_id: 'content-gap', agent_version: 1, status: 'ok', narrative: null, created_at: 'T', input: {}, facts: { findings: [], degraded: { reason: 'ai-provider-unavailable', providerFailures: 3 } } },
+      { agent_id: 'sitemap', agent_version: 1, status: 'ok', narrative: null, created_at: 'T', input: {}, facts: { findings: [], degraded: null } },
+    ];
+    const out = await getLatestFindings(1, ['content-gap', 'sitemap']);
+    assert.deepEqual(out.map((r) => [r.agentId, r.degraded]), [['content-gap', true], ['sitemap', false]]);
   });
 
   test('maps rows exactly as before, including the null/empty fallbacks', async () => {
@@ -87,8 +97,8 @@ describe('getLatestFindings reads only the fields it maps', () => {
     ];
     const out = await getLatestFindings(1, ['technical-seo', 'sitemap', 'broken']);
     assert.deepEqual(out, [
-      { agentId: 'technical-seo', agentVersion: 2, summary: 'n', findings: [{ id: 'f1' }], checkedPages: ['/a'], linkCrawlCheckedPages: ['/b'], start: '2026-09-01', end: '2026-09-28', createdAt: 'T' },
-      { agentId: 'sitemap', agentVersion: 1, summary: null, findings: [], checkedPages: null, linkCrawlCheckedPages: null, start: null, end: null, createdAt: 'T2' },
+      { agentId: 'technical-seo', agentVersion: 2, summary: 'n', findings: [{ id: 'f1' }], checkedPages: ['/a'], linkCrawlCheckedPages: ['/b'], degraded: false, start: '2026-09-01', end: '2026-09-28', createdAt: 'T' },
+      { agentId: 'sitemap', agentVersion: 1, summary: null, findings: [], checkedPages: null, linkCrawlCheckedPages: null, degraded: false, start: null, end: null, createdAt: 'T2' },
     ], 'non-ok runs are still dropped');
   });
 });

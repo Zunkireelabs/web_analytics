@@ -78,6 +78,7 @@ export async function getLatestFindings(siteId, agentIds) {
             jsonb_build_object(
               'findings', facts->'findings',
               'checkedPages', facts->'checkedPages',
+              'degraded', facts->'degraded',
               'linkCrawl', jsonb_build_object('checkedPages', facts->'linkCrawl'->'checkedPages')
             ) AS facts
        FROM agent_runs
@@ -93,6 +94,9 @@ export async function getLatestFindings(siteId, agentIds) {
       summary: r.narrative,
       createdAt: r.created_at,
       findings: r.facts?.findings || [],
+      // Set by runner.js when a model call failed because the AI provider was unavailable during this run: its findings may be
+      // incomplete, so its silence about an open issue must never close that issue.
+      degraded: Boolean(r.facts?.degraded),
       // Every batch-rotated agent's facts carries checkedPages (this run's
       // rotation batch) — lets recommendation auto-close tell "fixed" apart
       // from "page just wasn't in today's batch" (see security-headers.js

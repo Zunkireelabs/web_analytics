@@ -275,6 +275,15 @@ const RULES = [
     summary: 'GitHub’s API rate limit was reached.',
   },
   {
+    // github-ops.js endBatchPush turns ANY failure of the batch's one push into this fixed sentence (the real cause is logged and
+    // alerted separately). It is an outage on GitHub's side or ours, never a verdict on the item, and it used to be classed as a
+    // generator defect, which counted against every draft in the batch and could create a false "capability gap" block.
+    match: (r) => /could not be pushed to GitHub right now/i.test(r),
+    failureClass: FAILURE_CLASS.EXTERNAL_SERVICE,
+    policy: RETRY_POLICY.RETRY,
+    summary: 'The batch could not be pushed to GitHub; this is retried and says nothing about the item.',
+  },
+  {
     // The batch's ONE shared push/PR failed, which fails every pending item
     // at once regardless of content — 54 drafts in a single call on
     // 2026-09-01. Its text is sanitized, so it does NOT match the rate-limit

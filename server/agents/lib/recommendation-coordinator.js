@@ -475,6 +475,7 @@ export async function syncFromGrounded(siteId, grounded) {
       agentCheckedKeys: grounded.agentCheckedKeys,
       linkCrawlCheckedKeys: grounded.linkCrawlCheckedKeys,
       batchRotatedAgentIds: grounded.batchRotatedAgentIds,
+      degradedAgentIds: grounded.degradedAgentIds,
       // This pass only ever re-detects findings from Node's own grounded
       // agent roster — a row sourced entirely from analyst-insights,
       // analyst-keyword-gaps, or growth-opportunities (none of which run as

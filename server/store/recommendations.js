@@ -94,7 +94,16 @@ export async function insertRecommendation(siteId, {
   const { rows } = await query(
     `INSERT INTO recommendations
        (site_id, page, recommendation_type, issue, reason, params, finding_ids, detecting_agents, priority, expected_impact, risk_tier, blocked_reason, blocked_kind, blocked_since, confidence, goal_id, goal_alignment, decision_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CASE WHEN $12::text IS NOT NULL THEN now() ELSE NULL END, $14, $15, $16, $17)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+       -- blocked_since is when the page FIRST became blocked. A row that is closed and re-created (the nightly re-check, a failed agent run)
+       -- inherits it from the most recent closed row for the same page and fix that was blocked, so a standing block is not reported as new
+       -- every morning. Only a block seen within the last 14 days is inherited; an older one starts fresh.
+       CASE WHEN $12::text IS NOT NULL THEN COALESCE(
+         (SELECT p.blocked_since FROM recommendations p
+           WHERE p.site_id = $1 AND p.page IS NOT DISTINCT FROM $2 AND p.recommendation_type = $3
+             AND p.status = 'superseded' AND p.blocked_since IS NOT NULL AND p.updated_at > now() - interval '14 days'
+           ORDER BY p.id DESC LIMIT 1), now()) ELSE NULL END,
+       $14, $15, $16, $17)
      RETURNING *`,
     [
       siteId, page, recommendationType, issue, reason || null, JSON.stringify(params || {}),
@@ -535,7 +544,7 @@ export async function setRecommendationExecutionState(id, { executionJobId, exec
 //     isn't rotation-batched (checks everything every run, so its silence is
 //     already trustworthy) or did re-check this exact page this run
 export async function closeStaleRecommendations(siteId, stillDetectedKeys, checked = {}) {
-  const { agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, authoritativeAgentIds } = checked;
+  const { agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, authoritativeAgentIds, degradedAgentIds } = checked;
   const { rows } = await query(
     `SELECT id, page, recommendation_type, detecting_agents FROM recommendations WHERE site_id = $1 AND status = 'open'`,
     [siteId]
@@ -544,6 +553,9 @@ export async function closeStaleRecommendations(siteId, stillDetectedKeys, check
     .filter((r) => {
       const key = `${r.recommendation_type}::${r.page}`;
       if (stillDetectedKeys.has(key)) return false;
+      // An agent that ran while the AI provider was failing may simply have lost the findings it needed the model for. Its silence about
+      // this row is not evidence that the issue is fixed: the row stays open until a healthy run re-checks it.
+      if (degradedAgentIds?.size && (r.detecting_agents || []).some((agentId) => degradedAgentIds.has(agentId))) return false;
       // A row this call has no authority over — none of its detecting_agents
       // belong to the roster this sync pass actually re-checks (see
       // authoritativeAgentIds' own comment below) — must never be touched.

@@ -56,6 +56,37 @@ describe('one project, end to end with stand-ins', () => {
   });
 });
 
+describe('a failed or degraded agent run never closes an issue', () => {
+  const keyOf = (f) => f.recommendedAction.params.page;
+  for (const status of ['insufficient-data', 'skipped', 'error']) {
+    test(`agent status "${status}" with no findings: unverified, not fixed`, () => {
+      assert.equal(decideRecheck(rec(1, '/a'), { status, facts: { findings: [], checkedPages: ['/a'] } }, keyOf), 'unverified');
+    });
+  }
+  test('agent status "ok" still closes a page it re-read and no longer reports', () => {
+    assert.equal(decideRecheck(rec(1, '/a'), { status: 'ok', facts: { findings: [], checkedPages: ['/a'] } }, keyOf), 'fixed');
+  });
+  const deps = (rows, closed, failures) => ({
+    query: async (sql) => (/^\s*SELECT/i.test(sql) ? { rows } : { rows: [] }),
+    getSiteById: async () => ({ timezone: 'UTC' }), coord: { recommendationPageKey: ({ params }) => params.page },
+    recheckLink: async () => ({ broken: false }), close: async (id) => closed.push(id),
+    providerFailureCount: () => failures.n,
+    runAgent: async () => { failures.n += failures.during; return { status: 'ok', facts: { findings: [], checkedPages: ['/a', '/b'] } }; },
+  });
+  test('the AI provider failed while the agent ran: nothing is closed, and the count says so', async () => {
+    const closed = []; const failures = { n: 5, during: 2 };
+    const out = await recheckOpenIssuesForSite(9, { deps: deps([rec(1, '/a'), rec(2, '/b')], closed, failures) });
+    assert.deepEqual(closed, []);
+    assert.deepEqual([out.fixed, out.unverified, out.degraded], [0, 2, 2]);
+  });
+  test('the provider stayed healthy: the same issues close as before', async () => {
+    const closed = []; const failures = { n: 5, during: 0 };
+    const out = await recheckOpenIssuesForSite(9, { deps: deps([rec(1, '/a'), rec(2, '/b')], closed, failures) });
+    assert.deepEqual(closed.sort(), [1, 2]);
+    assert.equal(out.degraded, 0);
+  });
+});
+
 describe('site-wide issues', () => {
   test('a site-wide issue is checked by running its agent over the whole site once', () => {
     const rows = [rec(1, '', { detecting_agents: ['trust-compliance'], recommendation_type: 'privacy-policy' }), rec(2, '', { detecting_agents: ['trust-compliance'], recommendation_type: 'cookie-policy' })];

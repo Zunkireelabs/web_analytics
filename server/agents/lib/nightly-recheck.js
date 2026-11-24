@@ -20,6 +20,9 @@ export const MAX_RECHECKS_PER_SITE = 200;
  * Returns 'still-present' | 'fixed' | 'unverified'.
  */
 export function decideRecheck(rec, output, keyOf) {
+  // An agent that did not complete normally ('insufficient-data', 'skipped', 'error') has no findings because it found nothing out,
+  // not because there is nothing to find. Its silence is never evidence that an issue is fixed.
+  if (output?.status && output.status !== 'ok') return 'unverified';
   const findings = output?.facts?.findings;
   if (!Array.isArray(findings)) return 'unverified';
   const present = findings.some((f) => f.recommendedAction?.generatorId === rec.recommendation_type && keyOf(f) === rec.page);
@@ -89,12 +92,20 @@ export async function recheckOpenIssuesForSite(siteId, { deps = {} } = {}) {
       await touch([r.id]);
     } catch { out.errors++; }
   }
+  const providerFailures = deps.providerFailureCount || (await import('../../lib/provider-health.js')).providerFailureCount;
+  out.degraded = 0;
   for (const g of groups) {
     try {
+      const failuresBefore = providerFailures();
       const output = await runAgent(g.agent, { siteId, start: daysAgoInTz(tz, 28), end: daysAgoInTz(tz, 0), ...(g.siteWide ? {} : { params: { pages: g.recs.map((r) => r.page) } }) }, { persist: false });
+      // A model call failed because the provider was unavailable while this agent ran (out of credit, outage). Part of what the agent
+      // would have reported (anything it asks the model for) may be missing, so "no finding" proves nothing tonight: keep every
+      // issue it covers open and look again tomorrow. Issues it still sees are still counted as still present.
+      const degraded = providerFailures() > failuresBefore;
       const touched = [];
       for (const r of g.recs) {
-        const verdict = decideRecheck(r, output, keyOf);
+        let verdict = decideRecheck(r, output, keyOf);
+        if (verdict === 'fixed' && degraded) { verdict = 'unverified'; out.degraded++; }
         if (verdict === 'fixed') { await close(r.id); out.fixed++; out.checked++; }
         else if (verdict === 'still-present') { out.stillOpen++; out.checked++; touched.push(r.id); }
         else out.unverified++;

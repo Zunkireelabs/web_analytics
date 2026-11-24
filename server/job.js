@@ -2138,7 +2138,7 @@ export async function runNightlyIssueRecheckForAllSites() {
       const r = await recheckOpenIssuesForSite(site.id);
       const ideas = await (await import('./agents/lib/nightly-recheck.js')).closeSatisfiedIdeasForSite(site.id).catch(() => ({ closed: 0 }));
       r.ideasClosed = ideas.closed;
-      console.log(`[nightly-recheck] site ${site.id}: ${r.fixed} fixed, ${r.stillOpen} still open, ${r.unverified} not verified, ${r.ideasClosed} idea(s) already covered, ${r.errors} error(s)`);
+      console.log(`[nightly-recheck] site ${site.id}: ${r.fixed} fixed, ${r.stillOpen} still open, ${r.unverified} not verified (${r.degraded ?? 0} held because the AI provider failed during the check), ${r.ideasClosed} idea(s) already covered, ${r.errors} error(s)`);
       results.push(r);
     } catch (err) {
       console.error(`[nightly-recheck] site ${site.id} failed:`, err.message);
