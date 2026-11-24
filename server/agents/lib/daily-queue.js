@@ -169,6 +169,7 @@ export function buildDailyQueue({
       if (placed >= cap || selected.length >= analyticsLimit) break;
       if (takenIds.has(item.rec.id) || item.tier !== Number(tier)) continue;
       take(item);
+      item.reservedByFloor = true; // see CONTENT_EXECUTION_HEAD below
       placed++;
       floorBudgetLeft--;
     }
@@ -198,12 +199,33 @@ export function buildDailyQueue({
   // expected to be empty; kept only so a future change to either module
   // can't silently regress this without a signal.
   const { ordered, deferred: groupDeferred, notes: consecutiveNotes } = orderByRootCause(selected);
-  const queue = ordered;
+  const queue = placeReservedContentEarly(ordered);
   const queuedIds = new Set(queue.map((i) => i.rec.id));
   const deferred = [...groupDeferred, ...scored.filter((i) => !queuedIds.has(i.rec.id) && !groupDeferred.includes(i))];
   const groupNotes = [...groupCapNotes, ...consecutiveNotes];
 
   return { queue, deferred, report: buildReport({ scored, queue, deferred, remaining, generatorCap, groupNotes }) };
+}
+
+// WHERE IN THE DAY A RESERVED BLOG RUNS.
+//
+// The floor above guarantees a blog is SELECTED. It never guaranteed it RUNS: the queue is executed in score order, a blog is a tier-4
+// item, so it sat at position 45-52 of a 52-item day. A shipping run ends when GitHub's hourly budget is low or after 30 minutes
+// (about 5 items at roughly 5 minutes each), so on every recent run for Zunkiree the blog was selected and never attempted (no
+// attempt row, no outcome, 2026-11-19 onward). A selected blog that cannot run is the same as no blog.
+//
+// A floor-reserved CONTENT item therefore goes right after the first few items, at a boundary between co-located fix groups (two fixes to
+// the same file must stay consecutive, see root-cause-groups.js). Only floor-reserved content moves, and only this far: urgent technical
+// work still runs first and everything else keeps its order.
+export const CONTENT_EXECUTION_HEAD = 3;
+export function placeReservedContentEarly(ordered, { head = CONTENT_EXECUTION_HEAD } = {}) {
+  const isReserved = (i) => i.reservedByFloor === true && i.tier === SEVERITY_TIER.CONTENT;
+  const reserved = ordered.filter(isReserved);
+  if (!reserved.length) return ordered;
+  const rest = ordered.filter((i) => !isReserved(i));
+  let at = Math.min(head, rest.length);
+  while (at > 0 && at < rest.length && groupKeyFor(rest[at - 1].rec) === groupKeyFor(rest[at].rec)) at++;
+  return [...rest.slice(0, at), ...reserved, ...rest.slice(at)];
 }
 
 function distribution(items, keyFn) {

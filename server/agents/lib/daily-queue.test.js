@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDailyQueue, GENERATOR_SHARE_CAP } from './daily-queue.js';
+import { buildDailyQueue, GENERATOR_SHARE_CAP, placeReservedContentEarly, CONTENT_EXECUTION_HEAD } from './daily-queue.js';
 
 function rec(id, { type = 'meta-title', page = `/p${id}` } = {}) {
   return { id, recommendation_type: type, params: { page }, finding_ids: [`f${id}`], supporting_agents: [] };
@@ -95,5 +95,35 @@ describe('buildDailyQueue', () => {
     assert.ok(Object.keys(report.skipReasons).length > 0);
     assert.equal(report.topSelected[0].id, 1);
     assert.ok(Array.isArray(report.topSelected[0].factors) && report.topSelected[0].factors.length > 0);
+  });
+});
+
+describe('a reserved blog actually runs: it is placed near the front of the day, not at position 50', () => {
+  const many = Array.from({ length: 12 }, (_, i) => rec(i + 1, { type: 'canonical', page: `/c${i + 1}` }));
+  test('on a long day the floor-reserved blog is executed within the first few items', () => {
+    const { queue } = buildDailyQueue({ candidates: [...many, rec(99, { type: 'blog-outline', page: 'topic::x' })], remaining: 30 });
+    const at = queue.findIndex((i) => i.rec.id === 99);
+    assert.ok(at >= 0, 'the blog was selected');
+    assert.equal(at, CONTENT_EXECUTION_HEAD, 'and it sits right after the first urgent items');
+  });
+  test('urgent technical work still runs first', () => {
+    const { queue } = buildDailyQueue({ candidates: [...many, rec(99, { type: 'blog-outline', page: 'topic::x' })], remaining: 30 });
+    assert.deepEqual(queue.slice(0, CONTENT_EXECUTION_HEAD).map((i) => i.tier), Array(CONTENT_EXECUTION_HEAD).fill(1));
+  });
+  test('a blog that was not floor-reserved keeps its place', () => {
+    const items = [1, 2, 3, 4, 5].map((n) => ({ rec: rec(n), tier: 2 }));
+    const blog = { rec: rec(9, { type: 'blog-outline' }), tier: 4, reservedByFloor: false };
+    assert.deepEqual(placeReservedContentEarly([...items, blog]).map((i) => i.rec.id), [1, 2, 3, 4, 5, 9]);
+  });
+  test('never splits two fixes to the same file', () => {
+    const same = (n) => ({ rec: rec(n, { type: 'faq', page: '/same' }), tier: 2 });
+    const items = [same(1), same(2), same(3), same(4)];
+    const blog = { rec: rec(9, { type: 'blog-outline', page: 'topic::y' }), tier: 4, reservedByFloor: true };
+    const out = placeReservedContentEarly([...items, blog], { head: 1 }).map((i) => i.rec.id);
+    assert.deepEqual(out, [1, 2, 3, 4, 9], 'the whole co-located group stays together; the blog follows it');
+  });
+  test('with nothing reserved the order is untouched', () => {
+    const items = [1, 2, 3].map((n) => ({ rec: rec(n), tier: 2 }));
+    assert.equal(placeReservedContentEarly(items), items);
   });
 });
