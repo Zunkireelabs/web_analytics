@@ -35,7 +35,7 @@ async def get_health_score_series(mcp: McpClient, start: str, end: str) -> list[
 async def get_authority_score_series(mcp: McpClient, start: str, end: str) -> list[dict]:
     """[{snapshot_date, authority_score, referring_domains, total_backlinks}] —
     real monthly DataForSEO-backed snapshots. Empty if not configured for this site."""
-    return await _call(mcp, "get_authority_score_series", {"start": start, "end": end})
+    return await _call(mcp, "get_authority_score_series", {"start": start, "end": end}, start=start, end=end)
 
 
 async def get_ai_recommendation_visibility_series(mcp: McpClient, start: str, end: str) -> list[dict]:
@@ -58,7 +58,7 @@ async def get_ai_recommendation_visibility_weekly_series(mcp: McpClient, start: 
 async def get_competitor_structural_score_series(mcp: McpClient, start: str, end: str) -> list[dict]:
     """[{snapshot_date, own_score}] — this site's own structural-readiness score,
     one value per real run, deduped across the competitor rows written in that run."""
-    return await _call(mcp, "get_competitor_structural_score_series", {"start": start, "end": end})
+    return await _call(mcp, "get_competitor_structural_score_series", {"start": start, "end": end}, start=start, end=end)
 
 
 async def get_channels_daily_series(mcp: McpClient, start: str, end: str) -> list[dict]:

@@ -17,7 +17,9 @@ import pytest
 
 from app.mcp_client.client import McpAuthError, McpToolError
 from app.mcp_client.datasource import DIRECT_DB, MCP, DataSource
-from app.mcp_client.tools import get_daily_series, get_site_profile
+from app.mcp_client.tools import (
+    get_authority_score_series, get_competitor_structural_score_series, get_daily_series, get_site_profile,
+)
 
 
 class _FakeMcp:
@@ -145,3 +147,28 @@ def test_a_bare_mcp_client_still_works_unchanged():
     rows = asyncio.run(get_daily_series(mcp, "2026-09-01", "2026-09-02"))
     assert rows == MCP_ROWS
     assert mcp.calls == [("get_daily_series", {"start": "2026-09-01", "end": "2026-09-02"})]
+
+
+def test_monthly_metric_reads_fall_back_to_the_database_when_a_client_has_no_mcp_token():
+    """A client registered without an MCP token decrypts to an empty bearer token, and httpx rejects the header
+    ("Illegal header value b'Bearer '") before any request is sent. monthly_metrics was MCP-only, so for those clients it failed
+    every night even though the rows it reads are in the shared database."""
+    rows = [{"snapshot_date": "2026-10-01", "authority_score": 12, "referring_domains": 30, "total_backlinks": 90}]
+    session = _FakeSession(rows)
+    ds = DataSource(client_id=8862, session=session, mcp=_FakeMcp(httpx.LocalProtocolError("Illegal header value b'Bearer '")))
+    out = asyncio.run(get_authority_score_series(ds, "2026-01-01", "2026-11-23"))
+    assert out == rows
+    assert ds.provenance == DIRECT_DB
+    assert session.executed[0]["site_id"] == 8862, "reads are scoped to this client only"
+
+    session2 = _FakeSession([{"snapshot_date": "2026-10-02", "own_score": 61}])
+    ds2 = DataSource(client_id=8864, session=session2, mcp=_FakeMcp(httpx.LocalProtocolError("Illegal header value b'Bearer '")))
+    assert asyncio.run(get_competitor_structural_score_series(ds2, "2026-01-01", "2026-11-23")) == [{"snapshot_date": "2026-10-02", "own_score": 61}]
+    assert session2.executed[0]["site_id"] == 8864
+
+
+def test_a_real_mcp_answer_is_still_preferred_for_the_monthly_reads():
+    mcp = _FakeMcp([{"snapshot_date": "2026-10-01", "authority_score": 99}])
+    ds = DataSource(client_id=1, session=_FakeSession([]), mcp=mcp)
+    assert asyncio.run(get_authority_score_series(ds, "2026-01-01", "2026-11-23"))[0]["authority_score"] == 99
+    assert ds.provenance == MCP

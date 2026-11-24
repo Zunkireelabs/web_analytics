@@ -28,7 +28,10 @@ app.set('trust proxy', 1); // behind Traefik — req.ip (requireMcpToken's rate
                             // limiter) and req.protocol/req.get('host')
                             // (oauth.js's well-known discovery docs) must
                             // reflect the real client, not Traefik's own IP.
-app.use(express.json());
+// Express's default JSON body limit is 100kb. The analyst's keyword clustering sends one save per run (clusters for a site with 38k search
+// queries), which exceeded it: the server answered 500 "request entity too large" every night for Zunkiree (2026-11-23). 5mb is well
+// above any real tool call and still bounded; MCP_JSON_LIMIT overrides it.
+app.use(express.json({ limit: process.env.MCP_JSON_LIMIT || '5mb' }));
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
@@ -37,6 +40,10 @@ app.use(oauthRouter);        // /oauth/*, /.well-known/oauth-* (root-mounted, sa
 
 app.use((err, req, res, _next) => {
   console.error('[mcp-server] error:', err);
+  // A body the client sent too large (or malformed) is the client's error, and saying so lets the caller see what to change instead
+  // of a generic 500 that looked like an outage.
+  if (err?.type === 'entity.too.large') return res.status(413).json({ error: 'Request body too large' });
+  if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'Malformed JSON body' });
   res.status(500).json({ error: 'Internal server error' });
 });
 
