@@ -370,6 +370,14 @@ const PLATFORM_DEFAULT_MARKERS = {
 // Marker NAMES are fixed strings, not $1-substituted like resolveFile's
 // file paths — a shared marker convention (e.g. "TITLE") is exactly the
 // point of configuring it once at the pattern level.
+// A meta-title placement that names only `title` (site 1's defaults did) used to drop the description marker entirely, so every draft's
+// meta description was silently never written and its own pre-ship check then refused it ("descriptionFound":false). The description marker
+// is part of a meta-title change; a config that overrides the title marker's name keeps the platform's description marker.
+function withDefaultDescriptionMarker(actionType, markers) {
+  if (actionType !== 'meta-title' || !markers || typeof markers !== 'object' || 'description' in markers) return markers;
+  return { ...markers, description: PLATFORM_DEFAULT_MARKERS['meta-title'].description };
+}
+
 export function resolvePlacement(site, pageUrl, actionType) {
   const defaultSlot = DEFAULT_SLOT_BY_ACTION_TYPE[actionType] || null;
   const entry = getPageEntry(site, pageUrl);
@@ -380,7 +388,7 @@ export function resolvePlacement(site, pageUrl, actionType) {
   // project that sets none behaves exactly as before. A placement that names a file or keys but no markers gets the platform's default marker names.
   const fromConfigured = (c) => ({
     slot: c.slot || defaultSlot,
-    markers: c.markers || ((c.file || c.lineKeys) ? (PLATFORM_DEFAULT_MARKERS[actionType] || null) : null),
+    markers: withDefaultDescriptionMarker(actionType, c.markers || ((c.file || c.lineKeys) ? (PLATFORM_DEFAULT_MARKERS[actionType] || null) : null)),
     file: c.file || null,
     lineKeys: c.lineKeys || null,
   });
