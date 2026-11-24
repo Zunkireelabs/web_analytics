@@ -30,7 +30,10 @@ const THRESHOLDS_DAYS = {
   gscPage: 5,
   gscQueryPage: 5,
   metricObservations: 3,
-  pageQueryObservations: 3,
+  // Search Console data is published about 3 days late (GSC_LAG_DAYS) and the analyst collects it before the app's own morning pull,
+  // so on a normal night its newest day is already 4 days old. 3 days made every project read "stale" every morning, which switched
+  // autonomous analyst work off for all of them. Same allowance as gscPage / gscQueryPage above, which read the same source.
+  pageQueryObservations: 5,
   forecastRuns: 7,
   anomalies: 7,
 };

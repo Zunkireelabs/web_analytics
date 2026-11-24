@@ -574,9 +574,12 @@ export function startCron() {
   }
 
 
-  // Nightly issue re-check: the agent re-reads the live page behind every open issue and closes what is fixed, so tomorrow's
-  // list holds only new problems. Default 04:30 (site time), well before the 07:00 detection and 11:00 shipping.
-  const recheckSchedule = process.env.NIGHTLY_RECHECK_CRON_SCHEDULE || '30 4 * * *';
+  // Issue re-check: the agent re-reads the live page behind every open issue and closes what is fixed, so the list holds only
+  // problems that are still there. Default 09:30 (site time): AFTER the 07:00 detection and the repair runs that follow it (done by
+  // about 08:35), and before the 11:00 shipping, so shipping starts from a list that has just been verified against the live pages.
+  // It used to run at 04:30, before detection, on the previous day's picture; a run that finished its checks while the AI provider was
+  // down then closed issues that the 07:00 run created again as new. (That is also guarded in nightly-recheck.js now.)
+  const recheckSchedule = process.env.NIGHTLY_RECHECK_CRON_SCHEDULE || '30 9 * * *';
   if (!cron.validate(recheckSchedule)) {
     console.error(`[cron] invalid NIGHTLY_RECHECK_CRON_SCHEDULE "${recheckSchedule}" — nightly issue re-check NOT scheduled.`);
   } else {
