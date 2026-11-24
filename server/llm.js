@@ -189,6 +189,11 @@ async function callLLMUntracked(system, user, { model, maxTokens = 500, tier = '
   // or when this site has no active competitor data. See
   // agents/lib/competitor-policy.js.
   system = await withCompetitorContext(system, generatorId, siteId);
+  // A call from a fix generator goes to the Claude Code worker when LLM_WORKER_MODE=on (lib/claude-worker-provider.js); everything else, and every call while
+  // the mode is off, uses the API providers below exactly as before.
+  // Loaded on demand: the worker module reaches the database layer, whose import loads .env, and llm.js must not do that at import time.
+  const { workerMode, routeCall, callViaWorker } = generatorId && String(process.env.LLM_WORKER_MODE || '').toLowerCase() === 'on' ? await import('./lib/claude-worker-provider.js') : {};
+  if (workerMode && await routeCall({ generatorId }) === 'worker') return callViaWorker({ system, user, generatorId, siteId, maxTokens, tier, pageUrl });
   // A model promoted through the evaluated registry for this call's ROLE (only decision-engine calls pass one; a model tuned to
   // decide is never used to write page content). Used only when it belongs to the provider in use and no model was forced.
   const promoted = !model && modelRole ? await activeModelFor(modelRole) : null;
