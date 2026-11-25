@@ -134,6 +134,7 @@ mock.module(resolve('../../store/drafts.js'), {
     countDraftsBySourceToday: async () => spentToday,
     countDraftsBySourcesToday: async () => spentToday,
     hasRecentDraftOfType: async (siteId, actionType, days) => days > 0 && recentDraftTypes.has(actionType),
+    countDraftsOfTypeToday: async () => 0, // added with the blog-day batch cap (ship-pacing.js imports it)
     submitDraftForApproval: async (siteId, draftId) => (stuckDraftStatus ? null : { id: draftId }),
     getDraft: async (siteId, draftId) => ({ id: draftId, status: stuckDraftStatus || 'draft', branch_name: stuckDraftBranch }),
     updateDraft: async () => null,
@@ -765,7 +766,9 @@ describe('auto-remediation — circuit breaker', () => {
   // default branch" for what is really a one-hour wait — the exact
   // misreading behind 2026-09-01's abandoned drafts.
   test('a rate limit stops the run WITHOUT counting as a failure or tripping the breaker', async () => {
-    recommendations = [rec(1, { type: 'limited' }), rec(2), rec(3)];
+    // All three are the limited type: meta-title items now rank ahead of an unboosted type (+250 AI-visibility boost), so a mixed list would
+    // attempt the others first and only then hit the limit. Whichever is attempted first must be the one that trips it.
+    recommendations = [rec(1, { type: 'limited' }), rec(2, { type: 'limited' }), rec(3, { type: 'limited' })];
     rateLimitOn = (type) => type === 'limited';
 
     const result = await autoRemediateSafeRecommendations(1);

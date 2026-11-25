@@ -124,7 +124,7 @@ export function renderLandingPageBody(content, site, { permalink = null, layout 
   return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'landing-page' })}\n`;
 }
 
-export function renderBlogOutlineBody(content, site, { permalink = null, layout = null, fieldNames = {}, frontMatterDefaults = null } = {}) {
+export function renderBlogOutlineBody(content, site, { permalink = null, layout = null, fieldNames = {}, frontMatterDefaults = null, sourcesInFrontMatter = false } = {}) {
   // `fieldNames` maps a canonical field onto whatever THIS directory's
   // existing posts call it (newcontent-contract.js). The defaults below are
   // only what gets used when no sibling could be read — they are not a
@@ -139,7 +139,7 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
   const imageKey = fieldNames.featuredImage || 'featuredImage';
   const altKey = fieldNames.featuredImageAlt || 'featuredImageAlt';
   const creditKey = fieldNames.featuredImageCredit || 'featuredImageCredit';
-  const front = frontMatter([
+  let front = frontMatter([
     ['layout', layout],
     ['permalink', permalink],
     ['title', content.title || content.topic],
@@ -165,6 +165,14 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
   for (const s of content.sections || []) {
     if (!s?.heading) continue;
     parts.push(`## ${s.heading}\n\n${s.body || ''}`);
+  }
+  // Verified sources only (generators/lib/verified-sources.js). A site whose existing posts declare a `sources:` front-matter list gets one in the same
+  // `- name / url` shape; every other site gets a visible "Sources" section at the end. Never both, never from anything the model merely said.
+  const sources = (content.sources || []).filter((x) => x?.label && /^https:\/\//.test(x.url || ''));
+  if (sources.length && sourcesInFrontMatter) {
+    front = front.replace(/---\n$/, `sources:\n${sources.map((x) => `  - name: ${JSON.stringify(x.label)}\n    url: ${JSON.stringify(x.url)}`).join('\n')}\n---\n`);
+  } else if (sources.length) {
+    parts.push(`## Sources\n\n${sources.map((x) => `- [${x.label.replace(/[\[\]]/g, '')}](${x.url})`).join('\n')}`);
   }
   // content.suggestedFaqTopics and content.suggestedInternalLinks are
   // deliberately NOT rendered. They are instructions ABOUT the article, aimed at

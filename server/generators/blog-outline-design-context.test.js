@@ -1,5 +1,7 @@
 import { test, describe, mock, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+// The verified-sources step makes its own model call and page fetches; these tests count model calls for other behaviour, so it is switched off here (it has its own tests: lib/verified-sources.test.js).
+process.env.BLOG_SOURCES = 'off';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
@@ -66,7 +68,7 @@ beforeEach(() => {
   // 800+ words so no expand pass is triggered — keeps this test about the
   // prompt content, not the expand-retry loop (already covered elsewhere).
   const longBody = Array(820).fill('word').join(' ');
-  llmResponse = { title: 'T', metaDescription: 'D', sections: [{ heading: 'H', body: longBody }], suggestedFaqTopics: [], suggestedInternalLinks: [] };
+  llmResponse = { title: 'T', metaDescription: 'D', sections: ['H1', 'H2', 'H3', 'H4'].map((heading) => ({ heading, body: longBody })), suggestedFaqTopics: [], suggestedInternalLinks: [] };
 });
 
 describe('blog-outline generator — design context reaches generation', () => {

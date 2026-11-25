@@ -1,7 +1,9 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { generate, meta } from './blog-outline.js';
+import { generate, meta , internalLinkCount, keepIfMoreLinks } from './blog-outline.js';
 import { query, pool } from '../db.js';
+// The verified-sources step makes its own model call and page fetches; these tests count model calls for other behaviour, so it is switched off here (it has its own tests: lib/verified-sources.test.js).
+process.env.BLOG_SOURCES = 'off';
 
 // This file is about the expand-retry loop and stubs the global fetch for the model. The SERP lookup (lib/serp.js) is not part of that, and
 // must never run against a stubbed fetch or a developer's real search credentials.
@@ -40,19 +42,20 @@ describe('blog-outline generator — multi-attempt expansion', () => {
     const original = globalThis.fetch;
     let llmCalls = 0;
     const shortSection = (words) => ({ heading: 'Section', body: Array(words).fill('word').join(' ') });
+    const four = (total) => Array.from({ length: 4 }, () => shortSection(Math.ceil(total / 4)));
 
     globalThis.fetch = async () => {
       llmCalls += 1;
       let sections;
       if (llmCalls === 1) {
         // Initial draft: well under the floor.
-        sections = [shortSection(300)];
+        sections = four(300);
       } else if (llmCalls === 2) {
         // First expand pass: still short (mirrors the real 740/800 report).
-        sections = [shortSection(740)];
+        sections = four(740);
       } else {
         // Second expand pass: clears MIN_TOTAL_WORDS.
-        sections = [shortSection(850)];
+        sections = four(852);
       }
       const text = llmCalls === 1
         ? JSON.stringify({ title: 'T', metaDescription: 'D', sections, suggestedFaqTopics: [], suggestedInternalLinks: [] })
@@ -82,16 +85,16 @@ describe('blog-outline generator — multi-attempt expansion', () => {
       const { content, summary } = await generate({ siteId: site.id, params: { topic: 'A test blog topic' } });
       // 1 initial call + 2 expand-pass calls (bounded at MAX_EXPAND_ATTEMPTS).
       assert.equal(llmCalls, 3);
-      assert.ok(content.sections[0].body.split(/\s+/).length >= 800);
+      assert.ok(content.sections.slice(0, 4).reduce((n, s) => n + s.body.split(/\s+/).length, 0) >= 800);
       // +6 words over the mocked 850-word draft: the deterministic
       // Zunkireelabs agency-credit section (zunkireelabs-growth-policy.js's
       // agencyCreditLine) is appended as its own section on every site that
       // doesn't opt out — this test's fixture site has no client_number set
       // (so it isn't Zunkireelabs's own site 1) and no allow_agency_credit
       // override, so it gets the default-on credit line.
-      assert.match(summary, /856 words/);
-      assert.equal(content.sections.length, 2);
-      assert.match(content.sections[1].body, /Zunkireelabs/);
+      assert.match(summary, /858 words/);
+      assert.equal(content.sections.length, 5);
+      assert.match(content.sections[4].body, /Zunkireelabs/);
     } finally {
       globalThis.fetch = original;
       if (originalProvider === undefined) delete process.env.REPORT_PROVIDER;
@@ -135,6 +138,49 @@ describe('blog-outline generator — multi-attempt expansion', () => {
       if (originalKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = originalKey;
     }
+  });
+
+  // BLOG STANDARD: a post long enough but with fewer than 4 headed sections gets ONE split pass; a pass that returns less is never kept.
+  async function runWithResponses(responses) {
+    const original = globalThis.fetch;
+    const saved = { p: process.env.REPORT_PROVIDER, k: process.env.ANTHROPIC_API_KEY, px: process.env.PEXELS_API_KEY, bi: process.env.BLOG_IMAGES_ENABLED };
+    let calls = 0;
+    globalThis.fetch = async () => {
+      const r = responses[Math.min(calls, responses.length - 1)];
+      calls += 1;
+      const text = calls === 1 ? JSON.stringify({ title: 'T', metaDescription: 'D', sections: r, suggestedFaqTopics: [], suggestedInternalLinks: [] }) : JSON.stringify(r);
+      const body = { id: 'msg', type: 'message', role: 'assistant', content: [{ type: 'text', text }], model: 'claude-haiku-4-5', stop_reason: 'end_turn', usage: {} };
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    process.env.REPORT_PROVIDER = 'anthropic'; process.env.ANTHROPIC_API_KEY = 'test-key';
+    delete process.env.PEXELS_API_KEY; delete process.env.BLOG_IMAGES_ENABLED;
+    try {
+      const out = await generate({ siteId: site.id, params: { topic: 'A test blog topic' } });
+      return { ...out, calls };
+    } finally {
+      globalThis.fetch = original;
+      for (const [k, v] of [['REPORT_PROVIDER', saved.p], ['ANTHROPIC_API_KEY', saved.k], ['PEXELS_API_KEY', saved.px], ['BLOG_IMAGES_ENABLED', saved.bi]]) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+    }
+  }
+  const sec = (words, n = 1) => Array.from({ length: n }, (_, i) => ({ heading: `Part ${i + 1}`, body: Array(Math.ceil(words / n)).fill('word').join(' ') }));
+
+  test('900 words in 2 sections: exactly one extra pass splits it into 4 headed sections', async () => {
+    const { calls, content } = await runWithResponses([sec(900, 2), sec(900, 4)]);
+    assert.equal(calls, 2);
+    assert.equal(content.sections.filter((s) => s.heading.startsWith('Part')).length, 4);
+  });
+
+  test('a split pass that comes back shorter than the draft is discarded, the post keeps its original sections', async () => {
+    const { calls, content } = await runWithResponses([sec(900, 2), sec(300, 4)]);
+    assert.equal(calls, 2);
+    assert.equal(content.sections.filter((s) => s.heading.startsWith('Part')).length, 2);
+  });
+
+  test('a post already at 4+ sections and over the floor makes no extra model call', async () => {
+    const { calls } = await runWithResponses([sec(900, 4)]);
+    assert.equal(calls, 1);
   });
 });
 
@@ -315,5 +361,28 @@ describe('blog-outline generator — inline-link sanitization', () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+});
+
+describe('blog standard: internal links to real pages', () => {
+  const cand = new Set(['https://x.test/a', 'https://x.test/b', 'https://x.test/c']);
+  const sec = (body) => [{ heading: 'H', body }];
+  test('internalLinkCount counts different real pages only; an invented URL and repeats do not count', () => {
+    const s = sec('See [a](https://x.test/a), again [a2](https://x.test/a), [b](https://x.test/b) and [z](https://x.test/zzz).');
+    assert.equal(internalLinkCount(s, cand), 2);
+  });
+  test('keepIfMoreLinks keeps a pass that added real links without shortening the post', () => {
+    const before = sec('one two three four');
+    const after = sec('one two three four [a](https://x.test/a) five');
+    const kept = keepIfMoreLinks(before, after, cand);
+    assert.notEqual(kept, before);
+    assert.equal(internalLinkCount(kept, cand), 1);
+  });
+  test('keepIfMoreLinks drops a pass that shortened the post, added no links, or linked an invented URL', () => {
+    const before = sec('one two three four five six');
+    assert.equal(keepIfMoreLinks(before, sec('one two [a](https://x.test/a)'), cand), before);
+    assert.equal(keepIfMoreLinks(before, sec('one two three four five six'), cand), before);
+    assert.equal(keepIfMoreLinks(before, sec('one two three four five six [z](https://x.test/zzz)'), cand), before);
+    assert.equal(keepIfMoreLinks(before, null, cand), before);
   });
 });

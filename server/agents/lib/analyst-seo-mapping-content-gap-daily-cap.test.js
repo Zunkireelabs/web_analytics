@@ -47,6 +47,7 @@ mock.module(resolve('../../store/drafts.js'), {
     getPendingDraftFilePaths: async () => new Set(),
     countFailedAttemptsByFinding: async () => new Map(),
     hasRecentDraftOfType: async () => hasRecentDraft,
+    countDraftsOfTypeToday: async () => 0, // added with the blog-day batch cap (ship-pacing.js imports it)
   },
 });
 const realRead = await import(resolve('../../store/read.js'));
