@@ -1,12 +1,12 @@
 #!/bin/sh
 # Runs the Claude Code worker for the day's fix window, then stops it cleanly (SIGTERM: it finishes what it is writing and gives back anything unfinished).
 # Token comes from the macOS keychain (service superrank-worker). Uses your own Claude Code login (WORKER_CLAUDE_CONFIG_DIR=default).
-# Usage: run-worker.sh            (runs until 14:10 local time; override with WORKER_RUN_UNTIL=HH:MM)
+# Usage: run-worker.sh            (runs until 16:10 local time; override with WORKER_RUN_UNTIL=HH:MM)
 set -eu
 DIR="$(cd "$(dirname "$0")" && pwd)"
 export SUPERRANK_URL="${SUPERRANK_URL:-https://app.superrank.si}"
 export WORKER_CLAUDE_CONFIG_DIR="${WORKER_CLAUDE_CONFIG_DIR:-default}"
-UNTIL="${WORKER_RUN_UNTIL:-14:10}"
+UNTIL="${WORKER_RUN_UNTIL:-16:10}"
 NODE="${NODE_BIN:-$(command -v node)}"
 
 now=$(date +%s)

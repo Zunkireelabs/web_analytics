@@ -1,6 +1,6 @@
 import { resolveConvertedBlogPost } from './lib/converted-blog-resolve.js';
 import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget, resolveMissingPageTarget, slugifyTitle } from './lib/url-file-map.js';
-import { deriveNewContentContract, deriveContractFromSourceFile, missingRequiredKeys } from './lib/newcontent-contract.js';
+import { deriveNewContentContract, deriveContractFromSourceFile, missingRequiredKeys, findBetterBlogDirectory } from './lib/newcontent-contract.js';
 import { deriveLegalTarget, isPlaceholderDir } from './lib/legal-target.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, resolveBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
@@ -142,6 +142,15 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     // whether a post declares its own layout and what it calls its hero image.
     // resolveNewContentLayout stays as the fallback for a directory with no
     // readable siblings. See newcontent-contract.js for why.
+    // BLOG STANDARD: a post is only ever written into the folder the site's real posts live in. A configured folder that is not it (a notes/docs
+    // folder) gets no blog layout, so the draft is refused with the folder to use, not shipped looking wrong.
+    const betterDir = await findBetterBlogDirectory(site, targetConfig, repoDeps);
+    if (betterDir) {
+      return {
+        ok: false, reason: 'blog-target-wrong-folder',
+        error: `This site's blog target is "${targetConfig.dir}", but its blog posts live in "${betterDir.dir}" (${betterDir.files} files). A post written to "${targetConfig.dir}" would not get the blog layout. Nothing was written. Set newContentTargets["blog-outline"].dir to "${betterDir.dir}" and this can ship.`,
+      };
+    }
     const contract = await deriveNewContentContract(site, targetConfig, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'blog-outline') : contract.layout;
     // Opt-in generated gradient cover: an SVG committed next to the post in the
@@ -150,7 +159,7 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     // draft that already carries an image (an Insights post's Pexels photo under
     // `featuredImage: 'insights-only'`) keeps it: the cover is for posts without one.
     const cover = content.featuredImage ? null : buildGradientCover(site, { slug: filePath.split('/').pop().replace(/\.[^.]+$/, '') });
-    const boBody = renderBlogOutlineBody(cover ? { ...content, featuredImage: cover.featuredImage } : content, site, { permalink, layout, fieldNames: contract.fieldNames, frontMatterDefaults: frontMatterDefaultsFor(site, 'blog-outline') });
+    const boBody = renderBlogOutlineBody(cover ? { ...content, featuredImage: cover.featuredImage } : content, site, { permalink, layout, fieldNames: contract.fieldNames, frontMatterDefaults: { ...(contract.siblingConstants || {}), ...(frontMatterDefaultsFor(site, 'blog-outline') || {}) }, sourcesInFrontMatter: Boolean(contract.declaresSources) });
     const boIncomplete = incompleteFrontMatter(boBody, contract, 'blog-outline');
     if (boIncomplete) return boIncomplete;
     return {

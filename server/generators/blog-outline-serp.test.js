@@ -1,5 +1,7 @@
 import { test, describe, mock, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+// The verified-sources step makes its own model call and page fetches; these tests count model calls for other behaviour, so it is switched off here (it has its own tests: lib/verified-sources.test.js).
+process.env.BLOG_SOURCES = 'off';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
@@ -30,7 +32,7 @@ beforeEach(() => {
   site = { id: 1 }; llmCalls = []; serpCalls = []; serpImpl = async () => okSerp;
   gscPages = [{ dim_value: 'https://example.com/top-traffic/' }];
   inventory = inv('/', '/services/crm-setup/', '/services/ai-chatbots/', '/pricing/', '/blog/crm-for-plumbers/');
-  llmResponse = { title: 'T', metaDescription: 'D', sections: [{ heading: 'H', body: LONG }], suggestedFaqTopics: ['Own FAQ?'], suggestedInternalLinks: [] };
+  llmResponse = { title: 'T', metaDescription: 'D', sections: ['H1', 'H2', 'H3', 'H4'].map((heading, i) => ({ heading, body: i === 0 ? `${LONG} See [top](https://example.com/top-traffic/), [setup](https://example.com/services/crm-setup/) and [pricing](https://example.com/pricing/).` : LONG })), suggestedFaqTopics: ['Own FAQ?'], suggestedInternalLinks: [] };
 });
 afterEach(() => { if (savedEnv === undefined) delete process.env.BLOG_SERP_BRIEF; else process.env.BLOG_SERP_BRIEF = savedEnv; });
 
@@ -91,7 +93,7 @@ describe('the site\'s real structure', () => {
   });
 
   test('a link to an on-topic inventory page is kept; a link to a page that exists nowhere is still stripped', async () => {
-    llmResponse.sections = [{ heading: 'H', body: `${LONG} See [our CRM setup](https://example.com/services/crm-setup/) and [made up](https://example.com/invented/).` }];
+    llmResponse.sections = [{ heading: 'H', body: `${LONG} See [our CRM setup](https://example.com/services/crm-setup/) and [made up](https://example.com/invented/).` }, ...['H2', 'H3', 'H4'].map((heading) => ({ heading, body: LONG }))];
     llmResponse.suggestedInternalLinks = [{ anchorText: 'CRM setup', targetUrl: 'https://example.com/services/crm-setup/' }, { anchorText: 'invented', targetUrl: 'https://example.com/invented/' }];
     const { content } = await generate({ siteId: 1, params: { topic: 'CRM setup for plumbers' } });
     assert.match(content.sections[0].body, /\[our CRM setup\]\(https:\/\/example\.com\/services\/crm-setup\/\)/);

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { previewsFor, draftPreviewFor } from '../lib/content-preview.js';
+import { previewsFor, draftPreviewFor, stylesheetsPending } from '../lib/content-preview.js';
 import { shipStep, mergeStagePr } from '../lib/ship-flow.js';
 import { promoteMergedStageBatches } from '../lib/stage-promotion.js';
 import { classify } from '../agents/lib/recommendation-taxonomy.js';
@@ -3119,11 +3119,33 @@ router.get('/action-center/content-picks/blog-preview', async (req, res, next) =
   } catch (e) { next(e); }
 });
 
+// The kinds a caller asked previews for (comma-separated generator ids), limited to kinds that exist; none given = all of them.
+const contentKindsFor = (raw) => {
+  const want = String(raw || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const kinds = want.length ? want.filter((g) => CONTENT_OPTIONS[g]) : Object.keys(CONTENT_OPTIONS);
+  return Object.fromEntries(kinds.map((g) => [g, CONTENT_OPTIONS[g]]));
+};
+
+// Pictures for some kinds only, so the screen can open on the picks and fill the pictures in. Never waits on the client's own site (lib/content-preview.js).
+router.get('/action-center/content-previews', async (req, res, next) => {
+  try {
+    const site = await getSiteById(req.siteId).catch(() => null);
+    const previews = site ? await previewsFor(site, contentKindsFor(req.query.generatorId), { wait: false }).catch(() => ({})) : {};
+    res.json({ previews, settling: site ? stylesheetsPending(site) : false }); // settling: the site's fonts are still loading, ask once more in a moment
+  } catch (e) { next(e); }
+});
+
 router.get('/action-center/content-picks', async (req, res, next) => {
   try {
-    // `previews`: each option drawn in this site's own look (lib/content-preview.js); a failure just means sketches.
-    const previews = await getSiteById(req.siteId).then((site) => previewsFor(site, CONTENT_OPTIONS)).catch(() => ({}));
-    res.json({ picks: await listContentPicks(req.siteId), catalog: CONTENT_OPTIONS, previews, builtToday: await builtTodayFor(req.siteId) });
+    // `previews`: each option drawn in this site's own look (lib/content-preview.js); a failure just means sketches. `?previews=none` leaves them out
+    // (the screen then asks for them per kind from /content-previews); no value keeps the old all-in-one answer.
+    const withPreviews = String(req.query.previews || '') !== 'none';
+    const [previews, picks, builtToday] = await Promise.all([
+      withPreviews ? getSiteById(req.siteId).then((site) => previewsFor(site, CONTENT_OPTIONS, { wait: false })).catch(() => ({})) : {},
+      listContentPicks(req.siteId),
+      builtTodayFor(req.siteId),
+    ]);
+    res.json({ picks, catalog: CONTENT_OPTIONS, previews, builtToday });
   } catch (e) { next(e); }
 });
 

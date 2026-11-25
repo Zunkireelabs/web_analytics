@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { designKitFor, renderOption, previewsFor, getSiteStylesheets, renderDraft, draftPreviewFor } from './content-preview.js';
+import { designKitFor, renderOption, previewsFor, getSiteStylesheets, stylesheetsPending, renderDraft, draftPreviewFor } from './content-preview.js';
 import { CONTENT_OPTIONS } from './content-options.js';
 
 const site = {
@@ -67,4 +67,28 @@ test('draft words are escaped, and an unreachable site still gets a document', a
   const doc = await draftPreviewFor(site, { action_type: 'blog-outline', content: { title: '<script>alert(1)</script>', sections: [] } }, { fetchImpl: noNet });
   assert.doesNotMatch(doc, /<script>alert/);
   assert.match(doc, /&lt;script&gt;/);
+});
+
+test('wait:false never holds the caller on a cold site: no stylesheets this time, the fetch still runs, and the next ask has them', async () => {
+  const cold = { ...site, website_domain: 'cold-fonts-test.example' };
+  let release; const gate = new Promise((r) => { release = r; });
+  const slow = async () => { await gate; return { ok: true, text: async () => '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans">' }; };
+  const t0 = Date.now();
+  const first = await getSiteStylesheets(cold, slow, { wait: false });
+  assert.deepEqual(first.hrefs, []);
+  assert.ok(Date.now() - t0 < 500);
+  assert.equal(stylesheetsPending(cold), true);
+  release();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(stylesheetsPending(cold), false);
+  assert.equal((await getSiteStylesheets(cold, noNet, { wait: false })).hrefs.length, 1);
+});
+
+test('the same site and design return the stored pictures; a different set of kinds is built separately', async () => {
+  const a = await previewsFor(site, CONTENT_OPTIONS, { fetchImpl: noNet });
+  const b = await previewsFor(site, CONTENT_OPTIONS, { fetchImpl: noNet });
+  assert.equal(a, b);
+  const only = await previewsFor(site, { 'landing-page': CONTENT_OPTIONS['landing-page'] }, { fetchImpl: noNet });
+  assert.deepEqual(Object.keys(only), ['landing-page']);
+  assert.notEqual(only, a);
 });

@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fetchRepoCategories } from './blog-outline.js';
+// The verified-sources step makes its own model call and page fetches; these tests count model calls for other behaviour, so it is switched off here (it has its own tests: lib/verified-sources.test.js).
+process.env.BLOG_SOURCES = 'off';
 
 const site = { id: 1, repo_default_branch: 'main' };
 const src = { file: 'src/content/blog/categories.json', slugPath: 'slug.current', titlePath: 'title' };

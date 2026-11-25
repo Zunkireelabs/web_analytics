@@ -3,10 +3,15 @@
 // computed style the site's design profile recorded for its real headings, body text and buttons (font, size, weight,
 // colour, line height), with the site's own web fonts loaded and its brand colour on the buttons. Only the arrangement
 // (grids, gaps) is ours, and the copy is sample wording. Shown in a script-less sandboxed frame; nothing here runs.
+import { createHash } from 'node:crypto';
 import { accentOf, normalizeHex, onColor } from '../report/brand.js';
 
 const ORIGIN_TTL = 6 * 3600 * 1000;
 const cache = new Map(); // origin -> { at, hrefs }
+const inflight = new Map(); // origin -> Promise<hrefs>: one fetch at a time per site, however many screens ask
+const PREVIEW_TTL = 3600 * 1000;
+const PREVIEW_MAX = 200;
+const previewCache = new Map(); // key -> { at, out }: built previews, per site + design + stylesheets + which kinds
 
 const originOf = (site) => {
   const raw = String(site?.website_domain || '').trim();
@@ -16,25 +21,36 @@ const originOf = (site) => {
 
 // The site's stylesheet links, read from its public home page. Cached; a slow or failing site just means an unstyled
 // preview, never an error.
-export async function getSiteStylesheets(site, fetchImpl = fetch) {
-  const origin = originOf(site);
-  if (!origin) return { origin: null, hrefs: [] };
-  const hit = cache.get(origin);
-  if (hit && Date.now() - hit.at < ORIGIN_TTL) return { origin, hrefs: hit.hrefs };
-  let hrefs = [];
+async function fetchHrefs(origin, fetchImpl) {
   try {
     const res = await fetchImpl(origin, { signal: AbortSignal.timeout(4000), redirect: 'follow', headers: { 'user-agent': 'SuperRank-preview' } });
     const html = res.ok ? await res.text() : '';
-    hrefs = [...html.matchAll(/<link\b[^>]*>/gi)].map((m) => m[0])
+    return [...html.matchAll(/<link\b[^>]*>/gi)].map((m) => m[0])
       .filter((tag) => /rel=["']?stylesheet/i.test(tag))
       .map((tag) => /href=["']([^"']+)["']/i.exec(tag)?.[1])
       .filter(Boolean)
       .filter((h) => /fonts\.googleapis\.com/.test(h)) // the site's web fonts; its utility CSS is not served as a file
       .map((h) => { try { return new URL(h, origin).href; } catch { return null; } })
       .filter((h) => h && h.startsWith('http'));
-  } catch { hrefs = []; }
-  cache.set(origin, { at: Date.now(), hrefs });
-  return { origin, hrefs };
+  } catch { return []; }
+}
+function refreshHrefs(origin, fetchImpl) {
+  if (!inflight.has(origin)) {
+    inflight.set(origin, fetchHrefs(origin, fetchImpl).then((hrefs) => { cache.set(origin, { at: Date.now(), hrefs }); return hrefs; }).finally(() => inflight.delete(origin)));
+  }
+  return inflight.get(origin);
+}
+// `wait: false` never holds the caller on the site: a stale answer is served while a fresh one is fetched behind it, and a cold cache answers with no
+// stylesheets this time (the fetch still runs, so the next screen has them). The default waits, as before.
+export async function getSiteStylesheets(site, fetchImpl = fetch, { wait = true } = {}) {
+  const origin = originOf(site);
+  if (!origin) return { origin: null, hrefs: [] };
+  const hit = cache.get(origin);
+  if (hit && Date.now() - hit.at < ORIGIN_TTL) return { origin, hrefs: hit.hrefs };
+  const pending = refreshHrefs(origin, fetchImpl);
+  if (hit) { pending.catch(() => {}); return { origin, hrefs: hit.hrefs }; }
+  if (!wait) { pending.catch(() => {}); return { origin, hrefs: [] }; }
+  return { origin, hrefs: await pending };
 }
 
 const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
@@ -104,10 +120,17 @@ export function renderOption(generatorId, optionKey, k, name = 'Your business') 
   return body ? `<div class="pv">${body}</div>` : null;
 }
 
+// True while the site's fonts are still being read for the first time, so pictures drawn right now lack them and a second ask in a moment will have them.
+export const stylesheetsPending = (site) => { const o = originOf(site); return Boolean(o && inflight.has(o)); };
+
 // { [generatorId]: { [optionKey]: '<html>' } } for one site, or {} when there is nothing to draw.
+// Built once per site and design: the same design, stylesheets and kinds return the stored pictures. `catalog` may be just the kinds on screen.
 export async function previewsFor(site, catalog, deps = {}) {
-  const { origin, hrefs } = await getSiteStylesheets(site, deps.fetchImpl);
+  const { origin, hrefs } = await getSiteStylesheets(site, deps.fetchImpl, { wait: deps.wait !== false });
   const kit = designKitFor(site);
+  const key = createHash('sha1').update(JSON.stringify([site?.id ?? origin, site?.name, kit, hrefs, Object.keys(catalog)])).digest('hex');
+  const hit = previewCache.get(key);
+  if (hit && Date.now() - hit.at < PREVIEW_TTL) return hit.out;
   const head = `<!doctype html><meta charset="utf-8">${origin ? `<base href="${esc(origin)}/">` : ''}${hrefs.slice(0, 4).map((h) => `<link rel="stylesheet" href="${esc(h)}">`).join('')}<style>${LAYOUT_CSS}</style>`;
   const out = {};
   for (const [generatorId, def] of Object.entries(catalog)) {
@@ -116,6 +139,8 @@ export async function previewsFor(site, catalog, deps = {}) {
       if (html) (out[generatorId] ||= {})[o.key] = head + html;
     }
   }
+  if (previewCache.size >= PREVIEW_MAX) previewCache.delete(previewCache.keys().next().value);
+  previewCache.set(key, { at: Date.now(), out });
   return out;
 }
 

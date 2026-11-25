@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Check, LayoutTemplate, Languages, PenLine } from 'lucide-react';
 import { api } from '../api.js';
@@ -55,15 +55,35 @@ export default function Content() {
   useEffect(() => {
     let alive = true;
     api.actionCenter.recommendations(siteId).then((all) => { if (alive) setRecs((all?.items || []).filter((i) => GENERATOR_IDS.has(i.generatorId) && findingOf(i))); }).catch(() => { if (alive) setRecs([]); });
-    api.actionCenter.contentPicks(siteId).then((r) => {
+    // The picks and the options come first; the option pictures follow per kind (below), so the page is usable before any picture is drawn.
+    api.actionCenter.contentPicks(siteId, { previews: false }).then((r) => {
       if (!alive) return;
       setCatalog(r?.catalog || {});
-      setPreviews(r?.previews || {});
       setBuiltToday(!!r?.builtToday);
       setPicks(Object.fromEntries((r?.picks || []).map((p) => [p.finding_id, { optionKey: p.option_key, status: p.status }])));
     }).catch(() => { if (alive) setError('Your picks could not be loaded just now.'); });
     return () => { alive = false; };
   }, [siteId]);
+
+  // The pictures for the kinds on screen, asked for once each. Until one arrives the card shows its sketch; if the site's fonts were still loading, ask once more.
+  const wantedKinds = type === 'all' ? TYPES.map((t) => t.generatorId) : [TYPES.find((t) => t.type === type)?.generatorId].filter(Boolean);
+  const kindsKey = wantedKinds.join(',');
+  const askedKinds = useRef(new Set());
+  useEffect(() => { askedKinds.current = new Set(); setPreviews({}); }, [siteId]);
+  useEffect(() => {
+    if (!Object.keys(catalog).length) return undefined;
+    const todo = wantedKinds.filter((g) => !askedKinds.current.has(g));
+    if (!todo.length) return undefined;
+    todo.forEach((g) => askedKinds.current.add(g));
+    let alive = true; let timer;
+    const ask = (again) => api.actionCenter.contentPreviews(todo, siteId).then((r) => {
+      if (!alive) return;
+      setPreviews((p) => ({ ...p, ...(r?.previews || {}) }));
+      if (r?.settling && !again) timer = setTimeout(() => ask(true), 3000);
+    }).catch(() => { todo.forEach((g) => askedKinds.current.delete(g)); });
+    ask(false);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [kindsKey, catalog, siteId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const byType = useMemo(() => Object.fromEntries(TYPES.map((t) => [t.type, (recs || []).filter((i) => i.generatorId === t.generatorId)])), [recs]);
   const waitingIn = (t) => byType[t.type].filter((i) => !picks[findingOf(i)] && !selected[findingOf(i)]).length;

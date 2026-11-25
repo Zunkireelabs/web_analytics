@@ -6,8 +6,9 @@ import { enqueueRequest, waitForRequest, workerOnline } from '../store/llm-reque
 // (store/llm-requests.js) and answered by Claude Code running on a person's laptop, instead of by a paid AI API. Everything else is unchanged: the server's
 // quality and design checks, the repo write and the pull request.
 //
-// Only calls that name a generator go to the worker. Agents' own analysis and narration (no generatorId), AI-visibility probes and image calls keep using the
-// API providers, as before.
+// A call that names a generator MUST go to the worker. Agents' own analysis, narration and synthesis (no generatorId) go to the worker whenever one is connected,
+// and use the API providers only when none is, because they run on timers all day and must not sit waiting for a laptop. AI-visibility probes (they must ask the
+// real provider) and image calls never come here.
 //
 // Off unless LLM_WORKER_MODE=on, so deploying this changes nothing by itself. When on and no worker is connected:
 //   LLM_WORKER_FALLBACK=none (default)  the call fails as "the AI provider is unavailable", which the platform already treats as an outage: it is retried
@@ -28,7 +29,8 @@ export function workerUnavailable(message, extra = {}) {
  * @returns {Promise<'worker' | 'api'>}  or throws workerUnavailable when it must go to the worker and none is connected
  */
 export async function routeCall({ generatorId } = {}, { env = process.env, online = workerOnline } = {}) {
-  if (!workerMode(env) || !generatorId) return 'api';
+  if (!workerMode(env)) return 'api';
+  if (!generatorId) return (await online()) ? 'worker' : 'api'; // analysis/narration: worker when the laptop is open, otherwise as before
   if (await online()) return 'worker';
   if (workerFallback(env) === 'api') return 'api';
   throw workerUnavailable('The Claude Code worker is not connected, so no fix can be written right now. It runs when the laptop is open; this is retried on the next pass.', { workerOffline: true });

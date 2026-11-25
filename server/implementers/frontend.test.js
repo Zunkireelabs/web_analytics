@@ -388,11 +388,13 @@ describe('resolveTargetAndBody — a new post must satisfy the site\'s content s
   const mkSite = (extra = {}) => ({ id: 9, repo_owner: 'o', repo_name: 'r', repo_default_branch: 'main', url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/content/blog', extension: '.md', ...extra } } } });
   const draft = { action_type: 'blog-outline', content: { title: 'A New Guide', metaDescription: 'A summary.', sections: [{ heading: 'One', body: 'Text.' }] } };
 
-  test('without defaults the post is refused and the reason names every missing key and where to set them', async () => {
+  test('without defaults the post is refused for what the siblings do not agree on, naming the key and where to set it', async () => {
+    // author and category are the same in every sibling, so the post reuses them (blog standard); the cover varies per post, so only it is missing.
     const r = await resolveTargetAndBody(mkSite(), draft, repoDeps(ASTRO_REPO));
     assert.equal(r.ok, false);
     assert.equal(r.reason, 'front-matter-incomplete');
-    assert.match(r.error, /"author", "category", "cover"/);
+    assert.match(r.error, /declares "cover",/);
+    assert.doesNotMatch(r.error, /"author"/);
     assert.match(r.error, /newContentTargets\["blog-outline"\]\.frontMatterDefaults/);
   });
 
@@ -472,5 +474,23 @@ describe('resolveTargetAndBody — a converted static site (newContentTargets["b
     const plain = { ...site, url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md' } } } };
     const r = await resolveTargetAndBody(plain, draft, deps);
     assert.equal(r.ok, true); assert.equal(r.contentFormat, 'markdown'); assert.equal(r.filePath, 'src/blog/why-teams-stall.md');
+  });
+});
+
+describe('resolveTargetAndBody — blog target in the wrong folder is refused (blog standard)', () => {
+  const draft = { action_type: 'blog-outline', content: { title: 'Why Teams Stall', metaDescription: 'Why teams stall.', quickAnswer: 'A lead.', sections: [{ heading: 'One', body: 'Text.' }] } };
+  const mkSite = (dir) => ({ id: 8864, name: 'Chayce', repo_owner: 'o', repo_name: 'r', repo_default_branch: 'main', url_file_map: { newContentTargets: { 'blog-outline': { dir, extension: '.md' } } } });
+  const files = [...Array.from({ length: 9 }, (_, i) => `docs/note-${i}.md`), ...Array.from({ length: 30 }, (_, i) => `src/blog/post-${i}.md`)];
+  const deps = { cache: null, getRepoTree: async () => ({ files }), getFileContent: async () => null };
+  test('"docs" with the real posts in src/blog: refused, naming the folder to use, nothing written', async () => {
+    const r = await resolveTargetAndBody(mkSite('docs'), draft, deps);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'blog-target-wrong-folder');
+    assert.match(r.error, /src\/blog/);
+  });
+  test('the real blog folder passes the guard and the draft resolves', async () => {
+    const r = await resolveTargetAndBody(mkSite('src/blog'), draft, deps);
+    assert.equal(r.ok, true);
+    assert.equal(r.filePath, 'src/blog/why-teams-stall.md');
   });
 });

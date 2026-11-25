@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveNewContentContract, deriveContractFromSourceFile, frontMatterKeys, makeContractCache, missingRequiredKeys } from './newcontent-contract.js';
+import { deriveNewContentContract, deriveContractFromSourceFile, frontMatterKeys, makeContractCache, missingRequiredKeys, betterBlogDirectory } from './newcontent-contract.js';
 
 // Shaped like a real site row: the branch column is `repo_default_branch`.
 // There is no `default_branch` column, and the module used to read that name —
@@ -341,6 +341,14 @@ describe('deriveNewContentContract — a schema-validated (Astro content collect
     assert.equal(c.schemaValidated, true);
     assert.deepEqual(c.requiredKeys, ['author', 'category', 'cover', 'date', 'excerpt', 'title']);
   });
+  test('a required key with the SAME value in every sibling is reused (author, category); titles, summaries and a cover that varies are not', async () => {
+    const c = await deriveNewContentContract(SITE, dir, depsFor(ASTRO_DIR));
+    assert.deepEqual(c.siblingConstants, { author: 'team', category: 'News' });
+  });
+  test('a key whose value differs between siblings is never defaulted', async () => {
+    const files = { ...ASTRO_DIR, 'src/content/blog/c.md': ASTRO_DIR['src/content/blog/c.md'].replace('author: team', 'author: Jo') };
+    assert.deepEqual((await deriveNewContentContract(SITE, dir, depsFor(files))).siblingConstants, { category: 'News' });
+  });
   test('missingRequiredKeys names what a generated file lacks', async () => {
     const c = await deriveNewContentContract(SITE, dir, depsFor(ASTRO_DIR));
     assert.deepEqual(missingRequiredKeys('---\ntitle: "T"\ndescription: "D"\ndate: 2026-11-22\n---\nBody', c), ['author', 'category', 'cover', 'excerpt']);
@@ -359,5 +367,40 @@ describe('deriveNewContentContract — a site WITHOUT a build-time schema is nev
     assert.equal(c.schemaValidated, false);
     assert.deepEqual(c.requiredKeys, []);
     assert.deepEqual(missingRequiredKeys('---\ntitle: "x"\n---\n', c), []);
+  });
+});
+
+describe('betterBlogDirectory (blog target must be the folder the real posts live in)', () => {
+  const posts = (dir, n, ext = '.md') => Array.from({ length: n }, (_, i) => `${dir}/post-${i}${ext}`);
+  test('Chayce shape: configured "docs" but 68 posts in src/blog -> points at src/blog', () => {
+    const files = [...posts('docs', 9), ...posts('src/blog', 68), 'src/blog/blog.json', 'src/_includes/blog-post.njk'];
+    assert.deepEqual(betterBlogDirectory(files, { dir: 'docs', extension: '.md' }), { dir: 'src/blog', files: 68, extension: '.md' });
+  });
+  test('a configured folder already named like a blog is never second-guessed', () => {
+    const files = [...posts('src/blog', 5), ...posts('src/articles', 40)];
+    assert.equal(betterBlogDirectory(files, { dir: 'src/blog', extension: '.md' }), null);
+  });
+  test('a blog-named folder with fewer than 3 files, or fewer than the configured folder, is not proposed', () => {
+    assert.equal(betterBlogDirectory([...posts('docs', 9), ...posts('src/blog', 2)], { dir: 'docs', extension: '.md' }), null);
+    assert.equal(betterBlogDirectory([...posts('content', 20), ...posts('src/blog', 5)], { dir: 'content', extension: '.md' }), null);
+  });
+  test('two equally likely blog folders is ambiguous: no objection', () => {
+    assert.equal(betterBlogDirectory([...posts('docs', 2), ...posts('src/blog', 6), ...posts('src/news', 6)], { dir: 'docs', extension: '.md' }), null);
+  });
+  test('plumbing folders and index files never count; no evidence means no objection', () => {
+    assert.equal(betterBlogDirectory([...posts('docs', 1), ...posts('src/_blog', 9), ...posts('.github/blog', 9)], { dir: 'docs', extension: '.md' }), null);
+    assert.equal(betterBlogDirectory(['docs/a.md'], { dir: 'docs', extension: '.md' }), null);
+    assert.equal(betterBlogDirectory(null, { dir: 'docs' }), null);
+  });
+});
+
+describe('deriveNewContentContract — declaresSources', () => {
+  test('true when the siblings carry a `sources:` key (Chayce shape), false when they do not', async () => {
+    const mk = (extra) => ['---', 'title: "T"', 'date: "2026-01-01"', ...extra, '---', 'Body'].join('\n');
+    const withSrc = Object.fromEntries(['a', 'b', 'c'].map((n) => [`src/blog/${n}.md`, mk(['sources:', '  - name: "X"', '    url: "https://www.gov.uk/x"'])]));
+    const without = Object.fromEntries(['a', 'b', 'c'].map((n) => [`src/blog/${n}.md`, mk([])]));
+    const dir = { dir: 'src/blog', extension: '.md' };
+    assert.equal((await deriveNewContentContract(SITE, dir, depsFor(withSrc))).declaresSources, true);
+    assert.equal((await deriveNewContentContract(SITE, dir, depsFor(without))).declaresSources, false);
   });
 });

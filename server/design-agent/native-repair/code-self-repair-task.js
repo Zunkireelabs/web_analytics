@@ -79,9 +79,9 @@ function isForbiddenPath(path) {
 // _validate_code_self_repair: node --check every changed file, then
 // node --test on testFileHint or any changed *.test.js file; a fix with no
 // test target at all is not validated, same as today.
-// The TAP summary node:test prints: "# tests N", "# pass N", "# skipped N".
+// The summary node:test prints: "# tests N", "# pass N", "# skipped N" (TAP, Node 20 on a pipe) or "ℹ tests N" (spec, Node 22+).
 export function testCounts(output) {
-  const n = (label) => { const m = String(output || '').match(new RegExp(`^# ${label} (\\d+)`, 'm')); return m ? Number(m[1]) : 0; };
+  const n = (label) => { const m = String(output || '').match(new RegExp(`^(?:#|ℹ) ${label} (\\d+)`, 'm')); return m ? Number(m[1]) : 0; };
   return { tests: n('tests'), pass: n('pass'), skipped: n('skipped') };
 }
 

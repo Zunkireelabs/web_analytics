@@ -63,6 +63,7 @@ const FIELD_ALIASES = {
 // An Astro content collection's schema file: the build rejects a content file whose front matter does not satisfy it.
 const CONTENT_SCHEMA_FILE = /^src\/content(\/config|\.config)\.(ts|mts|js|mjs)$/;
 
+const GENERATOR_OWNED_KEYS = new Set(['title', 'description', 'excerpt', 'summary', 'date', 'dateModified', 'datePublished', 'publishedAt', 'slug', 'permalink']);
 const OPTIONAL_BY_NATURE = new Set(['updated', 'lastmod', 'modified', 'featured', 'draft', 'tags', 'seoTitle', 'slug', 'permalink', 'layout', 'templateEngineOverride', 'eleventyExcludeFromCollections']);
 
 // Front-matter KEYS only. Deliberately not a YAML parser: the values are
@@ -134,7 +135,13 @@ async function readFrontMatter(readFile, site, path, ref) {
   if (!keys.length) return null;
   const block = (raw.match(/^---\r?\n([\s\S]*?)\r?\n---/) || [])[1] || '';
   const declared = /^layout\s*:\s*"?([^"\n]*)"?\s*$/m.exec(block);
-  return { keys, layout: declared ? declared[1].trim() : null };
+  // Top-level `key: simple value` lines only (a nested block or list has no one value): lets a key that EVERY sibling spells identically be reused.
+  const values = {};
+  for (const m of block.matchAll(/^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.+?)\s*(?:#.*)?$/gm)) {
+    const v = m[2].replace(/^(["'])(.*)\1$/, '$2');
+    if (v && !/^[\[{|>]/.test(m[2])) values[m[1]] = v;
+  }
+  return { keys, layout: declared ? declared[1].trim() : null, values };
 }
 
 // Turns a set of real files' front matter into the contract a new file in
@@ -172,7 +179,17 @@ function contractFromSamples(samples, { schemaValidated = false } = {}) {
     ? [...samples[0].keys].filter((k) => samples.every((s) => s.keys.includes(k)) && !OPTIONAL_BY_NATURE.has(k)).sort()
     : [];
 
-  return { layout, unknown: false, fieldNames, requiredKeys, schemaValidated, sampled: samples.length };
+  // A required key whose value is the SAME in every sibling (a single-author blog's `author: "Team"`) is the site's own constant, not an invention, so a
+  // new post may carry it. A key with differing values is never defaulted: a person chooses it (the platform cannot invent an author or a cover).
+  const siblingConstants = {};
+  for (const k of requiredKeys) {
+    if (GENERATOR_OWNED_KEYS.has(k) || Object.values(fieldNames).includes(k)) continue; // the post's own title, summary and dates are never copied from a sibling
+    const vals = samples.map((s) => s.values?.[k]);
+    if (vals.every((v) => v !== undefined && v === vals[0])) siblingConstants[k] = vals[0];
+  }
+
+  // True when the site's existing posts carry a `sources:` front-matter key (Chayce): verified sources then go there, in the same shape, not in the body.
+  return { layout, unknown: false, fieldNames, requiredKeys, siblingConstants, declaresSources: observed.has('sources'), schemaValidated, sampled: samples.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +312,53 @@ export async function deriveNewContentContract(site, { dir, extension, ref } = {
     }
     return contractFromSamples(samples, { schemaValidated });
   });
+}
+
+// A blog target pointing at a folder that is NOT where the site's published posts live (Chayce: configured "docs", real posts in "src/blog"). A post
+// written there never gets the blog layout, so it is refused instead of shipped. Pure: decided from the repo's file list alone.
+const BLOG_DIR_NAME = /(^|\/)(blog|blogs|posts?|articles?|news|insights)(\/|$)/i;
+const CONTENT_FILE = /\.(md|mdx|njk|html|liquid|astro|tsx|jsx|vue)$/i;
+export function betterBlogDirectory(files, { dir, extension } = {}) {
+  if (!dir || !Array.isArray(files)) return null;
+  const norm = (d) => String(d).replace(/\/+$/, '');
+  const configured = norm(dir);
+  if (BLOG_DIR_NAME.test(`${configured}/`)) return null; // already named like a blog folder: never second-guessed
+  const counts = new Map();
+  for (const f of files) {
+    if (!CONTENT_FILE.test(f)) continue;
+    const i = f.lastIndexOf('/');
+    if (i < 0) continue;
+    const d = f.slice(0, i);
+    if (/(^|\/)[_.]/.test(`/${d}/`)) continue; // plumbing/dot folders are never a content home
+    const base = f.slice(i + 1);
+    if (/^index\./i.test(base)) continue;
+    counts.set(d, (counts.get(d) || 0) + 1);
+  }
+  const here = counts.get(configured) || 0;
+  const candidates = [...counts.entries()]
+    .filter(([d, n]) => d !== configured && BLOG_DIR_NAME.test(`${d}/`) && n >= 3 && n > here)
+    .sort((a, b) => b[1] - a[1]);
+  if (!candidates.length) return null;
+  // Two equally likely blog folders is ambiguous: say nothing rather than point at the wrong one.
+  if (candidates.length > 1 && candidates[0][1] === candidates[1][1]) return null;
+  const [better, count] = candidates[0];
+  const ext = extension && files.some((f) => f.startsWith(`${better}/`) && f.endsWith(extension)) ? extension : null;
+  return { dir: better, files: count, extension: ext };
+}
+
+/** Cached lookup of betterBlogDirectory for a site's configured blog target. Never throws: no evidence means no objection. */
+export async function findBetterBlogDirectory(site, { dir, extension, ref } = {}, deps = {}) {
+  const tree = deps.getRepoTree || getRepoTree;
+  if (!site || !dir) return null;
+  const branch = refFor(site, ref);
+  // memoized() wants an object with `unknown` (a failed lookup is not remembered), so the answer is wrapped.
+  const r = await memoized(cacheFor(deps), cacheKey(site, branch, `blogdir|${dir}`), deps.now, async () => {
+    try {
+      const { files } = await tree(site, branch);
+      return { unknown: false, better: betterBlogDirectory(files || [], { dir, extension }) };
+    } catch { return { unknown: true, better: null }; }
+  });
+  return r.better;
 }
 
 /**

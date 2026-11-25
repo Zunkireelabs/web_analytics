@@ -700,3 +700,24 @@ describe('canonical is absolute on generated Next.js pages', () => {
     assert.match(out, /canonical: "https:\/\/admizzeducation\.com\/answers\/q"/);
   });
 });
+
+describe('renderBlogOutlineBody — verified sources (blog standard)', () => {
+  const content = { title: 'Cost of moving', sections: [{ heading: 'Costs', body: 'Text.' }],
+    sources: [{ label: 'Stamp Duty Land Tax: residential rates', url: 'https://www.gov.uk/stamp-duty-land-tax/residential-property-rates' }, { label: 'Bad', url: 'http://insecure.example/x' }, { label: '', url: 'https://www.gov.uk/y' }] };
+  test('a site whose posts declare `sources:` gets it in front matter in the name/url shape, and no body section', () => {
+    const out = renderBlogOutlineBody(content, {}, { sourcesInFrontMatter: true });
+    assert.match(out, /sources:\n  - name: "Stamp Duty Land Tax: residential rates"\n    url: "https:\/\/www\.gov\.uk\/stamp-duty-land-tax\/residential-property-rates"\n---/);
+    assert.doesNotMatch(out, /## Sources/);
+    assert.doesNotMatch(out, /insecure\.example/);
+  });
+  test('every other site gets a visible Sources section at the end; only https links with a label are written', () => {
+    const out = renderBlogOutlineBody(content, {});
+    assert.match(out, /## Sources\n\n- \[Stamp Duty Land Tax: residential rates\]\(https:\/\/www\.gov\.uk\/stamp-duty-land-tax\/residential-property-rates\)/);
+    assert.doesNotMatch(out, /^sources:/m);
+    assert.doesNotMatch(out, /insecure\.example/);
+  });
+  test('a draft with no verified sources renders exactly as before: no Sources anywhere', () => {
+    const out = renderBlogOutlineBody({ title: 'T', sections: [{ heading: 'H', body: 'B.' }] }, {}, { sourcesInFrontMatter: true });
+    assert.doesNotMatch(out, /sources|Sources/);
+  });
+});

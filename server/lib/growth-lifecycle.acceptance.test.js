@@ -186,7 +186,11 @@ describe('configuration and safety boundaries', () => {
   });
   test('a forgotten design-gate variable fails closed', () => assert.equal(designGateMode({}), 'enforce'));
 
-  test('no code in the server merges a pull request: human merge cannot be bypassed', () => {
+  // Merging into STAGE is a deliberate, reviewed feature, never main: lib/ship-flow.js mergeStagePr (a signed-in person asked, the PR targets stage, checks
+  // passed) and agents/lib/platform-staging-merge.js (the platform's own self-repair PRs into stage, only while ENABLE_PLATFORM_STAGING_AUTOMERGE=true).
+  // github/client.js mergePullRequest is the ONE merge call. Any other file that merges a PR is a new way to merge and must be reviewed, so it fails here.
+  const MERGE_ALLOWED = new Set(['/github/client.js', '/lib/ship-flow.js', '/agents/lib/platform-staging-merge.js']);
+  test('only the reviewed stage-merge code merges a pull request, and nothing merges into main', () => {
     const root = fileURLToPath(new URL('..', import.meta.url));
     const hits = [];
     const walk = (dir) => {
@@ -195,10 +199,21 @@ describe('configuration and safety boundaries', () => {
         const p = join(dir, name);
         if (statSync(p).isDirectory()) { walk(p); continue; }
         if (!p.endsWith('.js') || p.endsWith('.test.js')) continue;
-        if (/pulls\.merge|pulls\/[^'"`]*\/merge|mergePullRequest|enableAutoMerge|auto_merge|merge_method/.test(readFileSync(p, 'utf8'))) hits.push(p.replace(root, ''));
+        if (/pulls\.merge|pulls\/[^'"`]*\/merge|mergePullRequest|enableAutoMerge|auto_merge|merge_method/.test(readFileSync(p, 'utf8'))) hits.push(p.replace(root, '').replace(/^\/?/, '/'));
       }
     };
     walk(root);
-    assert.deepEqual(hits, []);
+    assert.deepEqual(hits.filter((h) => !MERGE_ALLOWED.has(h)), []);
+  });
+
+  test('the stage merge refuses without a person and refuses a PR that targets main', async () => {
+    const { mergeStagePr } = await import('./ship-flow.js');
+    const site = { id: 1, repo_default_branch: 'main', pr_target_branch: 'stage' };
+    let merged = false;
+    const deps = { merge: async () => { merged = true; return { merged: true, sha: 'x' }; }, getChecks: async () => [{ status: 'completed', conclusion: 'success' }],
+      getPr: async () => ({ state: 'open', merged: false, base: 'main', mergeable: true, headSha: 'abc' }) };
+    assert.equal((await mergeStagePr(site, 5, {}, deps)).reason, 'no-person');
+    assert.equal((await mergeStagePr(site, 5, { userId: 7 }, deps)).reason, 'not-stage');
+    assert.equal(merged, false);
   });
 });
