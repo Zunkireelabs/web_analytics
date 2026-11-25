@@ -16,9 +16,13 @@ describe('where an AI call goes', () => {
   test('on: a call that names a generator goes to the worker when one is connected', async () => {
     assert.equal(await routeCall({ generatorId: 'expand-content' }, { env: on, online: async () => true }), 'worker');
   });
-  test('on: agents\' own analysis and anything without a generator keeps using the API', async () => {
-    assert.equal(await routeCall({}, { env: on, online: async () => { throw new Error('must not be asked'); } }), 'api');
-    assert.equal(await routeCall({ generatorId: null }, { env: on, online: async () => true }), 'api');
+  test('on: analysis and narration (no generator) go to the worker when one is connected, and to the API when none is', async () => {
+    assert.equal(await routeCall({}, { env: on, online: async () => true }), 'worker');
+    assert.equal(await routeCall({ generatorId: null }, { env: on, online: async () => true }), 'worker');
+    assert.equal(await routeCall({}, { env: on, online: async () => false }), 'api');
+  });
+  test('off: a call without a generator never asks whether a worker is online', async () => {
+    assert.equal(await routeCall({}, { env: {}, online: async () => { throw new Error('must not be asked'); } }), 'api');
   });
   test('on with no worker connected: the call fails as an outage by default, never silently going to the paid API', async () => {
     await assert.rejects(() => routeCall({ generatorId: 'faq' }, { env: on, online: async () => false }), (e) => e.workerOffline === true && e.llmProvider === true && e.status === 502);

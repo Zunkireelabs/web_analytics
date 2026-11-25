@@ -1,6 +1,6 @@
 // THE WORKER'S DAY. Fixes are written by Claude Code on a laptop (claude-worker-provider.js), so they can only be written while that laptop is open.
 // This decides WHEN the day's generation pass runs:
-//   - not before 10:30 (site time), and never after 14:00: the day's PR must be ready by then, and an approval after the cut-off waits for tomorrow's PR
+//   - not before 10:30 (site time), and never after 16:00: the day's PR must be ready by then, and an approval after the cut-off waits for tomorrow's PR
 //   - only while a worker is connected: the pass starts when the laptop's worker reports in, and stops at the cut-off or when the worker goes away
 //   - what is left over is not "failed": the next tick, or tomorrow, picks it up, because the pass reads the same open list each time
 // With the worker off (LLM_WORKER_MODE not "on") none of this applies and the cron runs behave as before.
@@ -8,11 +8,11 @@ import { workerMode, workerFallback } from './claude-worker-provider.js';
 import { hourInTimezone } from './ship-window.js';
 
 // The window is counted in the laptop's own time zone (Nepal), NOT the server's: the server runs on India time (+05:30, TZ=Asia/Kolkata), which would make
-// "14:00" 2:15 PM in Nepal. Override with WORKER_SESSION_TZ.
+// "16:00" 4:15 PM in Nepal. Override with WORKER_SESSION_TZ.
 export const workerSessionTimezone = (env = process.env) => env.WORKER_SESSION_TZ || 'Asia/Kathmandu';
 
 export const SESSION_START_MINUTE = 10 * 60 + 30; // 10:30
-export const SESSION_CUTOFF_MINUTE = 14 * 60;     // 14:00
+export const SESSION_CUTOFF_MINUTE = 16 * 60;     // 16:00 (was 14:00 until 2026-11-25; the worker has more to write than fits before 2 PM)
 export const MIN_GAP_MS = 20 * 60_000;            // a pass that found nothing to do is not repeated for this long
 
 export function minuteOfDay(timezone, now = new Date()) {
@@ -37,9 +37,9 @@ export function deferToWorker(env = process.env) {
 export function describeSession({ timezone, now = new Date(), workerOnline, last, env = process.env }) {
   if (!workerMode(env)) return { mode: 'api', message: 'Fixes are written by the AI provider API.' };
   const w = sessionWindow(timezone, now);
-  if (workerOnline && w.open) return { mode: 'worker', state: last?.running ? 'writing' : 'connected', message: last?.running ? 'The laptop worker is writing today\'s fixes.' : `The laptop worker is connected. Today\'s fixes are written until 14:00 (${w.minutesLeft} min left).` };
-  if (workerOnline) return { mode: 'worker', state: 'connected-outside-window', message: 'The laptop worker is connected. Fixes are written between 10:30 and 14:00; anything left is picked up then.' };
-  if (w.open) return { mode: 'worker', state: 'waiting', message: `Waiting for the laptop worker. Open the laptop and start it: the day's fixes are written until 14:00 (${w.minutesLeft} min left).` };
+  if (workerOnline && w.open) return { mode: 'worker', state: last?.running ? 'writing' : 'connected', message: last?.running ? 'The laptop worker is writing today\'s fixes.' : `The laptop worker is connected. Today\'s fixes are written until 16:00 (${w.minutesLeft} min left).` };
+  if (workerOnline) return { mode: 'worker', state: 'connected-outside-window', message: 'The laptop worker is connected. Fixes are written between 10:30 and 16:00; anything left is picked up then.' };
+  if (w.open) return { mode: 'worker', state: 'waiting', message: `Waiting for the laptop worker. Open the laptop and start it: the day's fixes are written until 16:00 (${w.minutesLeft} min left).` };
   return { mode: 'worker', state: 'idle', message: 'The laptop worker is not connected. It is next needed from 10:30.' };
 }
 
