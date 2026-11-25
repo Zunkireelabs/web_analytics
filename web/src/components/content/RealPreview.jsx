@@ -14,7 +14,7 @@ export default function RealPreview({ html, title, height = 420 }) {
   }, []);
   return (
     <div ref={box} className="w-full overflow-hidden" style={{ height: height * scale }}>
-      <iframe title={title} sandbox="" srcDoc={html} tabIndex={-1} style={{ width: 1000, height, border: 0, transformOrigin: '0 0', transform: `scale(${scale})`, pointerEvents: 'none', background: '#fff' }} />
+      <iframe title={title} loading="lazy" sandbox="" srcDoc={html} tabIndex={-1} style={{ width: 1000, height, border: 0, transformOrigin: '0 0', transform: `scale(${scale})`, pointerEvents: 'none', background: '#fff' }} />
     </div>
   );
 }

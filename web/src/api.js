@@ -605,7 +605,9 @@ export const api = {
     drafts: (filters = {}, siteId) => req(withSite(`/action-center/drafts?${new URLSearchParams(filters)}`, siteId)),
     // Content picks: the one-click approval on a content idea. GET returns { picks, catalog } (the options come from the
     // server, so this page carries no copy of them). Saving builds nothing; the next scheduled run builds the picks.
-    contentPicks: (siteId) => req(withSite('/action-center/content-picks', siteId)),
+    contentPicks: (siteId, { previews = true } = {}) => req(withSite(`/action-center/content-picks${previews ? '' : '?previews=none'}`, siteId)),
+    // The option pictures for some kinds (generator ids), so the Content page opens on the picks and fills these in. `settling` = the site's fonts are still loading.
+    contentPreviews: (generatorIds, siteId) => req(withSite(`/action-center/content-previews?generatorId=${encodeURIComponent([].concat(generatorIds).join(','))}`, siteId)),
     blogOptionPreview: (option, title, siteId, generatorId = 'blog-outline', url = '') => req(withSite(`/action-center/content-picks/blog-preview?option=${encodeURIComponent(option)}&title=${encodeURIComponent(title || '')}&generatorId=${encodeURIComponent(generatorId)}&url=${encodeURIComponent(url || '')}`, siteId)),
     saveContentPick: (findingId, body, siteId) => req(withSite(`/action-center/content-picks/${encodeURIComponent(findingId)}`, siteId), { method: 'PUT', body: JSON.stringify(body) }),
     clearContentPick: (findingId, siteId) => req(withSite(`/action-center/content-picks/${encodeURIComponent(findingId)}`, siteId), { method: 'DELETE' }),
