@@ -36,12 +36,6 @@ export const deliveryCloseCron = () => `${CLOSE_RETRY_MIN.map((x) => (SESSION_CU
 /** True on the close run that must close everything left (the last of the retries). */
 export const closeIsForced = (timezone, now = new Date()) => minuteOfDay(timezone, now) >= SESSION_CUTOFF_MINUTE + CLOSE_FORCE_AFTER_MIN;
 
-// "16:00" 4:15 PM in Nepal. Override with WORKER_SESSION_TZ.
-export const workerSessionTimezone = (env = process.env) => env.WORKER_SESSION_TZ || 'Asia/Kathmandu';
-
-export const SESSION_START_MINUTE = 10 * 60 + 30; // 10:30
-export const SESSION_CUTOFF_MINUTE = 16 * 60;     // 16:00 (was 14:00 until 2026-11-25; the worker has more to write than fits before 2 PM)
-
 export const MIN_GAP_MS = 20 * 60_000;            // a pass that found nothing to do is not repeated for this long
 
 export function minuteOfDay(timezone, now = new Date()) {
@@ -82,10 +76,6 @@ export function describeSession({ timezone, now = new Date(), workerOnline, last
   if (workerOnline && w.open) return { mode: 'worker', state: last?.running ? 'writing' : 'connected', message: last?.running ? 'The laptop worker is writing today\'s fixes.' : `The laptop worker is connected. Today\'s fixes are written until 17:00 (${w.minutesLeft} min left).` };
   if (workerOnline) return { mode: 'worker', state: 'connected-outside-window', message: 'The laptop worker is connected. Fixes are written between 10:30 and 17:00; anything left is picked up then.' };
   if (w.open) return { mode: 'worker', state: 'waiting', message: `Waiting for the laptop worker. Open the laptop and start it: the day's fixes are written until 17:00 (${w.minutesLeft} min left).` };
-
-  if (workerOnline && w.open) return { mode: 'worker', state: last?.running ? 'writing' : 'connected', message: last?.running ? 'The laptop worker is writing today\'s fixes.' : `The laptop worker is connected. Today\'s fixes are written until 16:00 (${w.minutesLeft} min left).` };
-  if (workerOnline) return { mode: 'worker', state: 'connected-outside-window', message: 'The laptop worker is connected. Fixes are written between 10:30 and 16:00; anything left is picked up then.' };
-  if (w.open) return { mode: 'worker', state: 'waiting', message: `Waiting for the laptop worker. Open the laptop and start it: the day's fixes are written until 16:00 (${w.minutesLeft} min left).` };
 
   return { mode: 'worker', state: 'idle', message: 'The laptop worker is not connected. It is next needed from 10:30.' };
 }

@@ -7,7 +7,6 @@ const at = (hhmm) => new Date(`2026-11-24T${hhmm}:00Z`); // timezone UTC in thes
 beforeEach(() => resetSessionStateForTests());
 
 describe('the window', () => {
-
   test('closed before 10:30, open from 10:30 until 17:00, closed from 17:00', () => {
     assert.equal(sessionWindow('UTC', at('10:29')).open, false);
     assert.equal(sessionWindow('UTC', at('10:30')).open, true);
@@ -18,18 +17,6 @@ describe('the window', () => {
     const now = at('14:30'); const w = sessionWindow('UTC', now);
     assert.equal(w.minutesLeft, 150);
     assert.equal(w.endsAt, now.getTime() + 150 * 60_000);
-
-  test('closed before 10:30, open from 10:30 until 16:00, closed from 16:00', () => {
-    assert.equal(sessionWindow('UTC', at('10:29')).open, false);
-    assert.equal(sessionWindow('UTC', at('10:30')).open, true);
-    assert.equal(sessionWindow('UTC', at('15:59')).open, true);
-    assert.equal(sessionWindow('UTC', at('16:00')).open, false);
-  });
-  test('it ends at 16:00 sharp and counts minutes left', () => {
-    const now = at('14:30'); const w = sessionWindow('UTC', now);
-    assert.equal(w.minutesLeft, 90);
-    assert.equal(w.endsAt, now.getTime() + 90 * 60_000);
-
   });
   test('uses the site\'s time zone', () => {
     assert.equal(minuteOfDay('Asia/Kathmandu', at('05:00')), 10 * 60 + 45); // UTC+5:45
@@ -47,7 +34,6 @@ describe('deferToWorker', () => {
 
 describe('workerSessionTick', () => {
   const mk = (over = {}) => { const calls = []; return { calls, args: { timezone: 'UTC', now: at('11:00'), env: ON, isOnline: async () => true, runPass: async (o) => { calls.push(o); return [{ shipped: 2, attempted: 3 }]; }, log: () => {}, ...over } }; };
-
   test('runs a pass when the worker is online inside the window, with the 17:00 end', async () => {
     const { args, calls } = mk(); const r = await workerSessionTick(args);
     assert.deepEqual(r, { ran: true, shipped: 2, attempted: 3 });
@@ -56,16 +42,6 @@ describe('workerSessionTick', () => {
   test('does nothing with the worker off, outside the window, or with no worker connected', async () => {
     assert.equal((await workerSessionTick(mk({ env: {} }).args)).why, 'worker-off');
     assert.equal((await workerSessionTick(mk({ now: at('17:05') }).args)).why, 'outside-window');
-
-  test('runs a pass when the worker is online inside the window, with the 16:00 end', async () => {
-    const { args, calls } = mk(); const r = await workerSessionTick(args);
-    assert.deepEqual(r, { ran: true, shipped: 2, attempted: 3 });
-    assert.equal(calls[0].windowEndsAt, at('16:00').getTime());
-  });
-  test('does nothing with the worker off, outside the window, or with no worker connected', async () => {
-    assert.equal((await workerSessionTick(mk({ env: {} }).args)).why, 'worker-off');
-    assert.equal((await workerSessionTick(mk({ now: at('16:05') }).args)).why, 'outside-window');
-
     assert.equal((await workerSessionTick(mk({ now: at('09:00') }).args)).why, 'outside-window');
     const { args, calls } = mk({ isOnline: async () => false });
     assert.equal((await workerSessionTick(args)).why, 'worker-offline');
@@ -105,21 +81,12 @@ describe('describeSession (what the dashboard says)', () => {
   });
 });
 
-
 test('the window is counted in Nepal time by default, so it closes at 5 PM Nepal, not 5:15 PM', () => {
   assert.equal(workerSessionTimezone({}), 'Asia/Kathmandu');
   assert.equal(workerSessionTimezone({ WORKER_SESSION_TZ: 'Asia/Kolkata' }), 'Asia/Kolkata');
   // 16:55 Nepal = 11:10 UTC: still open with 5 minutes left; 17:00 Nepal = 11:15 UTC: closed. In India time that second moment would still read 16:45 (open).
   assert.deepEqual([sessionWindow('Asia/Kathmandu', new Date('2026-11-24T11:10:00Z')).open, sessionWindow('Asia/Kathmandu', new Date('2026-11-24T11:10:00Z')).minutesLeft], [true, 5]);
   assert.equal(sessionWindow('Asia/Kathmandu', new Date('2026-11-24T11:15:00Z')).open, false);
-
-test('the window is counted in Nepal time by default, so it closes at 4 PM Nepal, not 4:15 PM', () => {
-  assert.equal(workerSessionTimezone({}), 'Asia/Kathmandu');
-  assert.equal(workerSessionTimezone({ WORKER_SESSION_TZ: 'Asia/Kolkata' }), 'Asia/Kolkata');
-  // 15:55 Nepal = 10:10 UTC: still open with 5 minutes left; 16:00 Nepal = 10:15 UTC: closed. In India time that second moment would still read 15:45 (open).
-  assert.deepEqual([sessionWindow('Asia/Kathmandu', new Date('2026-11-24T10:10:00Z')).open, sessionWindow('Asia/Kathmandu', new Date('2026-11-24T10:10:00Z')).minutesLeft], [true, 5]);
-  assert.equal(sessionWindow('Asia/Kathmandu', new Date('2026-11-24T10:15:00Z')).open, false);
-
   assert.equal(sessionWindow('Asia/Kathmandu', new Date('2026-11-24T05:00:00Z')).open, true);  // 10:45 Nepal, open (opens 10:30)
   assert.equal(sessionWindow('Asia/Kathmandu', new Date('2026-11-24T04:40:00Z')).open, false); // 10:25 Nepal, not yet
 });
