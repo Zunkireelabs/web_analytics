@@ -10,8 +10,9 @@ from app.collectors.registry import get_enabled_collectors
 from app.config import settings
 from app.db.models import Client, IngestionRun, MetricObservation
 from app.db.session import SessionLocal
-from app.mcp_client.client import McpAuthError, McpClient, McpToolError
+from app.mcp_client.client import McpAuthError, McpToolError, NoMcpTokenError
 from app.mcp_client.datasource import DataSource
+from app.mcp_client.token import build_mcp_client
 
 
 async def run_nightly(today: date | None = None) -> None:
@@ -46,6 +47,9 @@ def _describe(exc: BaseException) -> str:
     names itself, which is the difference between a bad night and a fortnight
     of nobody noticing.
     """
+    if isinstance(exc, NoMcpTokenError):
+        # Already starts with its reason code ("no_mcp_token: ..."), which is what a reader and a query look for.
+        return str(exc).strip()
     message = str(exc).strip()
     if message:
         return f"{type(exc).__name__}: {message}"
@@ -73,11 +77,10 @@ async def _run_one(client: Client, collector, window_start: date, window_end: da
             # inside the collector's own transaction.
             mcp = None
             if collector.requires_mcp:
-                mcp = DataSource(
-                    client_id=client.id,
-                    session=session,
-                    mcp=McpClient(client.mcp_token_ciphertext),
-                )
+                # Never an McpClient from the "(none)" placeholder: a project without a token runs database-only, and a
+                # collector with no database equivalent records no_mcp_token (see app/mcp_client/token.py).
+                mcp_client, mcp_reason = build_mcp_client(client)
+                mcp = DataSource(client_id=client.id, session=session, mcp=mcp_client, mcp_reason=mcp_reason)
             observations = await collector.collect(
                 session=session, client=client, mcp=mcp,
                 window_start=window_start, window_end=window_end,

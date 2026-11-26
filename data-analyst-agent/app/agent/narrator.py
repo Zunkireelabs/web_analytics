@@ -10,10 +10,11 @@ import asyncio
 import json
 from dataclasses import dataclass
 
-import openai
+import openai  # noqa: F401
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.llm.controls import controls
 
 SYSTEM_PROMPT = (
     "You are a data analyst assistant for an internal, admin-only SEO/growth analytics tool. "
@@ -68,15 +69,9 @@ async def call_llm(
         kwargs["tools"] = [_to_openai_tool(t) for t in tools]
         kwargs["tool_choice"] = _to_openai_tool_choice(tool_choice) if tool_choice is not None else "auto"
 
-    last_error = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            response = await _client.chat.completions.create(**kwargs)
-            return _from_openai_response(response)
-        except (openai.RateLimitError, openai.APIConnectionError, openai.InternalServerError) as e:
-            last_error = e
-            await asyncio.sleep(2 ** attempt)
-    raise last_error
+    # Retry/backoff, the quota circuit breaker, logging and counters live in app/llm/controls.py, shared with keyword clustering.
+    response = await controls.run("narrator", lambda: _client.chat.completions.create(**kwargs))
+    return _from_openai_response(response)
 
 
 def _to_openai_tool(tool: dict) -> dict:

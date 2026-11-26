@@ -18,6 +18,14 @@ class McpAuthError(Exception):
     ingestion run as insufficient-data, never retry-loop on this."""
 
 
+class NoMcpTokenError(McpAuthError):
+    """This client has no usable MCP token (the "(none)" database-only placeholder, or an empty token), so no request can be
+    made for it. A subclass of McpAuthError so existing handlers still treat it as "MCP unavailable for this client", but it
+    carries its own code so a run records no_mcp_token rather than a vague auth failure."""
+
+    code = "no_mcp_token"
+
+
 class McpClient:
     """Thin client for the existing Node app's POST /api/mcp endpoint.
     One instance per client (per-client bearer token) — never shares a token
@@ -25,7 +33,11 @@ class McpClient:
     production data; it never touches the Node app's Postgres directly."""
 
     def __init__(self, mcp_token_ciphertext: bytes):
-        self._token = decrypt_token(mcp_token_ciphertext)
+        token = decrypt_token(mcp_token_ciphertext)
+        if not token.strip():
+            # Never build a client that would send `Authorization: Bearer ` with nothing after it.
+            raise NoMcpTokenError("no_mcp_token: this client has no MCP token (database-only mode)")
+        self._token = token
 
     async def call_tool(self, tool_name: str, arguments: dict | None = None) -> dict:
         payload = {

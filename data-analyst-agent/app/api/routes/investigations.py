@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_active_client
 from app.db.models import ApprovalHistory, Client, Investigation, InvestigationEvent
 from app.db.session import get_session
+from app.investigations.outlook import current_outlook
 
 router = APIRouter()
 
@@ -43,7 +44,8 @@ def _serialize(inv: Investigation) -> dict:
         "dimension_value": inv.dimension_value, "insight_type": inv.insight_type,
         "severity": inv.severity, "priority": inv.priority, "status": inv.status,
         "affected_metrics": inv.affected_metrics, "summary": inv.summary, "evidence": inv.evidence,
-        "forecast_outlook": inv.forecast_outlook, "root_cause_text": inv.root_cause_text,
+        # Served as of today (a stored outlook's days_until_drop is frozen at creation): see app/investigations/outlook.py
+        "forecast_outlook": current_outlook(inv.forecast_outlook), "root_cause_text": inv.root_cause_text,
         "confidence": _f(inv.confidence), "owner": inv.owner,
         "executive_summary": inv.executive_summary, "technical_summary": inv.technical_summary,
         "business_summary": inv.business_summary, "risk_assessment": inv.risk_assessment,

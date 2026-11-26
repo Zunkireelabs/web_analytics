@@ -160,6 +160,22 @@ export async function analystPredictionAccuracyByGenerator(siteId) {
   return rows;
 }
 
+// Per generator (the kind of fix), for ONE site: how many measured fixes, and how many really improved clicks. Rows whose measurement
+// had no readable direction (outcome.improved is null) are left out: an unknown is not a miss. Feeds analyst-track-record.js.
+export async function getGeneratorTrackRecord(siteId) {
+  const { rows } = await query(
+    `SELECT r.recommendation_type AS generator_id,
+            count(*)::int AS measured,
+            count(*) FILTER (WHERE (ae.outcome->>'improved')::boolean)::int AS improved
+       FROM analyst_evidence ae
+       JOIN recommendations r ON r.id = ae.recommendation_id AND r.site_id = ae.site_id
+      WHERE ae.site_id = $1 AND ae.outcome IS NOT NULL AND (ae.outcome->>'improved') IS NOT NULL
+      GROUP BY 1`,
+    [siteId]
+  );
+  return rows;
+}
+
 export async function analystOutcomeSummary(siteId) {
   const { rows } = await query(
     `SELECT ae.direction,

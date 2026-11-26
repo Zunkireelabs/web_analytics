@@ -33,7 +33,7 @@ describe('familiesForDecliningPage', () => {
     };
     const insights = [
       { page: '/p', insight_type: 'anomaly', evidence: { direction: 'low', method: 'iqr', score: 2.1 } },
-      { page: '/p', insight_type: 'forecast_risk', evidence: { confidence: 0.72, pct_projected_change: -22 } },
+      { page: '/p', insight_type: 'forecast_risk', forecastSkill: 'proven', evidence: { confidence: 0.72, pct_projected_change: -22 } },
     ];
     const { families } = familiesForDecliningPage(decline, insights);
     assert.equal(families.size, 4);
@@ -46,12 +46,25 @@ describe('familiesForDecliningPage', () => {
 
   test('a page-decline THRESHOLD warning is worded as "at least N% below the recent average", not as a projected change', () => {
     const decline = { reasons: ['position 4.0 -> 6.2 (slipped 2.2 places)'], impressionsLost: 0, impressionsAtRisk: 500 };
-    const threshold = { page: '/p', insight_type: 'forecast_risk', evidence: { confidence: 0.7, projection_basis: 'decline_threshold_of_the_model_label', decline_threshold_pct: 20, pct_projected_change: -20 } };
-    const ordinary = { page: '/p', insight_type: 'forecast_risk', evidence: { confidence: 0.7, pct_projected_change: -22 } };
+    const threshold = { page: '/p', insight_type: 'forecast_risk', forecastSkill: 'proven', evidence: { confidence: 0.7, projection_basis: 'decline_threshold_of_the_model_label', decline_threshold_pct: 20, pct_projected_change: -20 } };
+    const ordinary = { page: '/p', insight_type: 'forecast_risk', forecastSkill: 'proven', evidence: { confidence: 0.7, pct_projected_change: -22 } };
     const detailOf = (insight) => familiesForDecliningPage(decline, [insight]).signals.find((x) => x.family === 'forecast_risk').detail;
     assert.match(detailOf(threshold), /at least 20% below the recent average/);
     assert.doesNotMatch(detailOf(threshold), /projected change/);
     assert.match(detailOf(ordinary), /-22% projected change/);                 // a real point forecast keeps its wording
+  });
+
+  test('a forecast that is not PROVEN never counts as a corroborating family, so it cannot tip a page to act', () => {
+    const decline = { reasons: ['position 4.0 -> 6.2 (slipped 2.2 places)'], impressionsLost: 0, impressionsAtRisk: 500 };
+    for (const forecastSkill of ['unproven', 'worse', undefined]) {
+      const insights = [{ page: '/p', metric_key: 'gsc_clicks', insight_type: 'forecast_risk', forecastSkill, evidence: { confidence: 0.9, pct_projected_change: -40 } }];
+      const { families, signals, forecastConfidence, withheldForecasts } = familiesForDecliningPage(decline, insights);
+      assert.equal(families.has('forecast_risk'), false, `skill=${forecastSkill}`);
+      assert.ok(families.size < MIN_CORROBORATION_TO_ACT, 'position erosion alone stays below the act bar');
+      assert.equal(signals.some((x) => x.family === 'forecast_risk'), false);
+      assert.equal(forecastConfidence, null, 'a withheld forecast must not lend its confidence to the conclusion');
+      assert.equal(withheldForecasts.length, 1);
+    }
   });
 
   test('a POSITIVE anomaly (direction high) is never counted as decline evidence', () => {

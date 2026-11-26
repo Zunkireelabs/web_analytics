@@ -22,8 +22,10 @@ reachable and answered, and the tool itself objected (bad arguments, missing
 permission). Re-running the same question against the database would paper
 over a real defect rather than route around an outage.
 """
-from app.mcp_client.client import McpAuthError, McpClient, McpToolError
+from app.mcp_client.client import McpAuthError, McpClient, McpToolError, NoMcpTokenError
 from app.mcp_client.db_fallback import FALLBACKS
+
+NO_MCP_TOKEN = "no_mcp_token"
 
 MCP = "mcp"
 DIRECT_DB = "direct-db"
@@ -34,10 +36,14 @@ class DataSource:
     it holds that client's MCP token and that client's id, the same one-token-
     one-client rule McpClient already enforces."""
 
-    def __init__(self, *, client_id: int, session, mcp: McpClient | None = None):
+    def __init__(self, *, client_id: int, session, mcp: McpClient | None = None, mcp_reason: str | None = None):
         self.client_id = client_id
         self._session = session
         self._mcp = mcp
+        # Why there is no MCP client (no_mcp_token / mcp_token_unreadable), when there is none. Database-only mode is an
+        # explicit, expected state for a project registered without a token, so reads served from the database in it are
+        # not "fallbacks" and do not add a fallback note every night.
+        self._mcp_reason = mcp_reason
         # Every source actually used this run, in use order. A run that only
         # ever hit one source reports exactly that source; a run that started
         # on MCP and fell back reports both, so "mixed" is visible rather than
@@ -82,7 +88,17 @@ class DataSource:
                 reason = str(e).strip() or type(e).__name__
                 self.fallback_reasons.append(f"{tool_name}: MCP unavailable ({reason}) — read from database instead")
         elif fallback is None:
-            raise McpAuthError(f"{tool_name}: no MCP token for this client and no database fallback for this tool")
+            # Database-only mode (no MCP token) and this tool has no database equivalent: the evidence is genuinely
+            # unavailable. Say so with the reason code, never a half-built request.
+            raise NoMcpTokenError(
+                f"{self._mcp_reason or NO_MCP_TOKEN}: {tool_name} needs MCP and this client has no MCP token "
+                "(database-only mode), and there is no database fallback for this tool"
+            )
+
+        if self._mcp is None and self._mcp_reason == "mcp_token_unreadable":
+            # Database-only because the stored token cannot be decrypted is a configuration fault, not a registered
+            # database-only project: keep it as visible as a fallback.
+            self.fallback_reasons.append(f"{tool_name}: mcp_token_unreadable — read from database instead")
 
         result = await fallback(self._session, self.client_id, **db_kwargs)
         self._record(DIRECT_DB)

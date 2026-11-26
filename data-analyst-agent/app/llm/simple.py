@@ -16,6 +16,7 @@ import re
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.llm.controls import LlmUnavailable, controls
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +37,16 @@ def _parse_json_response(raw: str | None) -> dict | None:
 
 async def call_json(system: str, user: str, max_tokens: int = 800) -> dict | None:
     try:
-        resp = await _client.chat.completions.create(
+        resp = await controls.run("json_completion", lambda: _client.chat.completions.create(
             model=MODEL, max_tokens=max_tokens,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        )
+        ))
         raw = (resp.choices[0].message.content or "").strip()
-    except Exception:  # noqa: BLE001 — any SDK/network failure reports honestly, never fabricates a result
+    except LlmUnavailable as e:
+        # Quota breaker open: not attempted, already logged and counted by the controls. None keeps this helper's contract.
+        logger.warning("keyword-clustering LLM call skipped: %s", e)
+        return None
+    except Exception:  # noqa: BLE001 — any SDK/network failure reports honestly, never fabricates a result (controls logged and counted it)
         logger.exception("keyword-clustering LLM call failed")
         return None
     return _parse_json_response(raw)

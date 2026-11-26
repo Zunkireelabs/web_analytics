@@ -76,7 +76,8 @@ async def get_outlook(client: Client = Depends(get_active_client), session: Asyn
             PredictionLog.abs_pct_error.is_not(None),
         ).order_by(PredictionLog.target_week.desc()).limit(ACCURACY_WEEKS)
     )).scalars().all()
-    forecast["accuracy"] = {"withinPct": round(sum(float(e) for e in errs) / len(errs) * 100, 1), "weeksChecked": len(errs)} if errs else None
+    # abs_pct_error is already a percent (app/forecast/error.py)
+    forecast["accuracy"] = {"withinPct": round(sum(float(e) for e in errs) / len(errs), 1), "weeksChecked": len(errs)} if errs else None
 
     # Last week: what was predicted vs what happened.
     last_week = clicks.index[-1].date()
@@ -87,7 +88,7 @@ async def get_outlook(client: Client = Depends(get_active_client), session: Asyn
                                         PredictionLog.horizon == 1, PredictionLog.actual.is_not(None)).order_by(PredictionLog.made_on.desc()).limit(1)
         )).scalars().first()
         if row:
-            last_rows.append({"label": label, "predicted": _num(row.predicted), "actual": _num(row.actual), "errorPct": round(float(row.abs_pct_error) * 100, 1)})
+            last_rows.append({"label": label, "predicted": _num(row.predicted), "actual": _num(row.actual), "errorPct": round(float(row.abs_pct_error), 1) if row.abs_pct_error is not None else None})
     issues_last = (await session.execute(
         select(PredictedIssue).where(PredictedIssue.client_id == client.id, PredictedIssue.target_week == last_week)
     )).scalars().all()
@@ -141,7 +142,7 @@ async def get_learning(session: AsyncSession = Depends(get_session), _admin: Non
     return {
         "trainedAt": m.trained_at.isoformat() if m else None, "samples": m.samples if m else 0, "projects": m.projects if m else 0,
         "champion": m.champion if m else None, "models": models, "needsRows": MIN_TRAIN_ROWS,
-        "forecastMissPct": round(float(forecast_err) * 100, 1) if forecast_err is not None else None,
+        "forecastMissPct": round(float(forecast_err), 1) if forecast_err is not None else None,
     }
 
 

@@ -20,6 +20,7 @@ from app.db.models import Anomaly, Client, Insight, MetricCatalog, MetricObserva
 CONTENT_DECAY_METRICS = ("gsc_clicks", "gsc_impressions")
 from app.db.session import SessionLocal
 from app.metrics.direction import forecast_breaches
+from app.analysis.scope import active_clients
 
 TREND_SHIFT_THRESHOLD_PCT = {"wow": 15.0, "mom": 20.0}
 FORECAST_RISK_DECLINE_PCT = 10.0
@@ -29,7 +30,7 @@ MAX_CORRELATED_ANOMALIES = 5
 
 async def run_insight_engine() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         async with SessionLocal() as session:

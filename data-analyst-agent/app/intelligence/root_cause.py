@@ -33,6 +33,7 @@ from app.db.models import Client, Insight, MetricCatalog, MetricPeriodStats, Roo
 from app.db.session import SessionLocal
 from app.insights.engine import TREND_SHIFT_THRESHOLD_PCT
 from app.scoring.confidence import compute_confidence
+from app.analysis.scope import active_clients
 
 METHOD = "independent_dimension_share"
 TRIGGER_INSIGHT_TYPES = ("anomaly", "trend_shift")
@@ -41,7 +42,7 @@ GSC_METRIC_KEYS = ("gsc_clicks", "gsc_impressions", "gsc_ctr", "gsc_position")
 
 async def run_root_cause_analysis() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         async with SessionLocal() as session:

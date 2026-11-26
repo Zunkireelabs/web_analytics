@@ -15,8 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Client
 from app.db.session import SessionLocal
 from app.insights.engine import _replace_insight
-from app.mcp_client.client import McpAuthError, McpClient, McpToolError
+from app.mcp_client.client import McpAuthError, McpToolError
+from app.mcp_client.token import require_mcp
 from app.mcp_client.tools import get_cannibalized_queries
+from app.analysis.scope import active_clients, note_client_failure
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,7 @@ async def run_cannibalization_detection() -> None:
     """Per-client isolation, same pattern as run_draft_trigger — one
     client's MCP failure must never abort the run for every other client."""
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         try:
@@ -44,11 +46,14 @@ async def run_cannibalization_detection() -> None:
                 await _detect_for_client(session, client)
                 await session.commit()
         except Exception:
+            note_client_failure(client.id)
             logger.exception("run_cannibalization_detection: client %s raised — skipping this client only", client.id)
 
 
 async def _detect_for_client(session: AsyncSession, client: Client) -> None:
-    mcp = McpClient(client.mcp_token_ciphertext)
+    mcp = require_mcp(client, "run_cannibalization_detection")
+    if mcp is None:
+        return
     end = date.today()
     recent_start = end - timedelta(days=WINDOW_DAYS)
     prior_end = recent_start - timedelta(days=1)

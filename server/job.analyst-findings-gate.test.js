@@ -55,3 +55,34 @@ describe('findings gate on the analyst jobs', () => {
     assert.equal(totals.blocked, 2);
   });
 });
+
+// The forecast skill gate on the plain nightly sync (agents/lib/analyst-forecast-skill.js).
+describe('forecast skill gate on the nightly sync', () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const mk = (insight_type, metric_key) => ({ insight_type, metric_key, dimension_type: 'page', dimension_value: `/${metric_key}`, period_start: today, generated_at: new Date().toISOString(), evidence: {} });
+  const insights = [mk('forecast_risk', 'bad'), mk('forecast_risk', 'good'), mk('anomaly', 'bad')];
+  const skill = { available: true, byMetric: { bad: { verdict: 'worse', reason: 'r' }, good: { verdict: 'proven', reason: 'r' } } };
+
+  test('a forecast that loses to the baseline is withheld before sync; the rest pass, annotated', async () => {
+    let received;
+    const totals = await runAnalystSyncForAllSites({
+      listSites: async () => [{ id: 1, name: 'Zunkiree' }],
+      gate: null, loadSkill: async () => skill, fetchInsights: async () => insights,
+      sync: async (id, list) => { received = list; return { created: list.length, skipped: 0, ineligible: 0 }; },
+    });
+    assert.equal(totals.forecastsWithheld, 1);
+    assert.deepEqual(received.map((i) => `${i.insight_type}:${i.metric_key}`), ['forecast_risk:good', 'anomaly:bad']);
+    assert.equal(received[0].forecastSkill, 'proven');
+  });
+
+  test('an unreachable scorecard does not stop the sync: forecasts pass as unproven', async () => {
+    let received;
+    await runAnalystSyncForAllSites({
+      listSites: async () => [{ id: 1, name: 'Zunkiree' }],
+      gate: null, loadSkill: async () => ({ available: false, byMetric: {} }), fetchInsights: async () => [mk('forecast_risk', 'good')],
+      sync: async (id, list) => { received = list; return { created: 1, skipped: 0, ineligible: 0 }; },
+    });
+    assert.equal(received[0].forecastSkill, 'unproven');
+  });
+});
+

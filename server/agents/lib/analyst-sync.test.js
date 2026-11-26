@@ -31,6 +31,13 @@ mock.module(resolve('../../store/recommendations.js'), {
   },
 });
 
+// The real gates would block every row here (the fixture site has no url_file_map entry), which forces riskTier 'manual' for
+// everything and would make any tier assertion pass for the wrong reason. These tests are about the sync's own decisions, so the
+// gate is stubbed OPEN, with the same shape the sync already falls back to when a gate throws.
+mock.module(resolve('./recommendation-gates.js'), {
+  namedExports: { createRecommendationGates: () => ({ evaluate: async () => ({ drop: null, blockedReason: null }) }) },
+});
+
 mock.module(resolve('./recommendation-coordinator.js'), {
   namedExports: {
     // Mirrors the real key for the page-based generators these tests use.
@@ -63,6 +70,7 @@ mock.module(resolve('../../llm.js'), {
 });
 
 const { syncAnalystInsightsToActionCenter, seoDraftEligibility } = await import('./analyst-seo-mapping.js');
+const { riskTierForGenerator } = await import('./risk-tiers.js');
 
 const SITE = { id: 7, website_domain: 'client.example', url_file_map: {} };
 
@@ -141,10 +149,28 @@ describe('syncAnalystInsightsToActionCenter', () => {
   test('a predicted (forecast_risk) issue is labelled as predicted, not observed', async () => {
     // A human reading the Action Center needs to know whether this already
     // happened or is about to.
-    await syncAnalystInsightsToActionCenter(7, [insight({ insight_type: 'forecast_risk' })], { site: SITE });
+    await syncAnalystInsightsToActionCenter(7, [insight({ insight_type: 'forecast_risk', forecastSkill: 'proven' })], { site: SITE });
     assert.match(inserted[0].issue, /^Predicted/);
     assert.match(inserted[0].reason, /forecast projects/i);
     assert.equal(inserted[0].priority, 'medium', 'a prediction ranks below an observed decline');
+  });
+
+  test('a forecast whose accuracy is NOT proven is shown for review: lowest priority, manual tier, and says why', async () => {
+    for (const forecastSkill of ['unproven', undefined]) {
+      inserted = [];
+      await syncAnalystInsightsToActionCenter(7, [insight({ insight_type: 'forecast_risk', forecastSkill, forecastSkillReason: 'only 4 scored forecast point(s) so far' })], { site: SITE });
+      assert.equal(inserted.length, 1, 'still surfaced, not silently dropped');
+      assert.equal(inserted[0].priority, 'low');
+      assert.equal(inserted[0].riskTier, 'manual', 'an unproven forecast never ships unattended');
+      assert.match(inserted[0].reason, /not proven yet/);
+    }
+  });
+
+  test('a proven forecast keeps its normal tier and priority', async () => {
+    await syncAnalystInsightsToActionCenter(7, [insight({ insight_type: 'forecast_risk', forecastSkill: 'proven' })], { site: SITE });
+    assert.equal(inserted[0].priority, 'medium');
+    assert.equal(inserted[0].riskTier, riskTierForGenerator(inserted[0].recommendationType), 'a proven forecast keeps the generator\'s own tier');
+    assert.doesNotMatch(inserted[0].reason, /not proven yet/);
   });
 
   test('an observed decline is labelled detected and ranks higher', async () => {

@@ -6,7 +6,7 @@
 // It refuses to run against any database but the throwaway local one, because some scenarios use real SQL. Everything runs locally: fake GitHub, stubbed AI calls.
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
 const url = process.env.DATABASE_URL || '';
 if (!/@(localhost|127\.0\.0\.1):55432\/srtest/.test(url)) {
@@ -37,10 +37,32 @@ export const SCENARIOS = [
   ['R5', 'Database failure: the process survives, nothing recorded is lost, recording resumes', [['server/lib/db-fault.test.js', null]]],
   ['R6', 'Git safety: an agent can never merge; merges by an app account are alerted', [['server/store/drafts-agent-cannot-merge.test.js', null], ['server/lib/delivery-states.test.js', 'merge by an app account is CRITICAL']]],
   ['R7', 'Per-client isolation: design baselines, content index, research and decisions never cross clients', [['server/lib/design-protection/protect.test.js', 'per-tenant'], ['server/lib/blog-cycle/six-clients.db.test.js', null]]],
+  // ---- The analyst loop (Stages 3-6): prediction -> decision -> failure handling -> measured outcome -> a changed future prediction.
+  // A third element 'py' marks a pytest file under data-analyst-agent/, run against the throwaway ANALYST database only.
+  ['L1', 'A prediction is measured against the cheapest baseline and says honestly when there is too little evidence', [['data-analyst-agent/tests/predict/test_prediction_layer_db.py', null, 'py'], ['data-analyst-agent/tests/predict/test_calibration.py', null, 'py']]],
+  ['L2', 'A forecast only drives work once it beats the baseline: a worse one is withheld, an unproven one is for review, and neither can tip a page to act', [['server/agents/lib/analyst-forecast-skill.test.js', null], ['server/agents/lib/analyst-fusion.test.js', 'not PROVEN never counts'], ['server/agents/lib/analyst-sync.test.js', 'NOT proven is shown for review|proven forecast keeps'], ['server/job.analyst-findings-gate.test.js', 'forecast skill gate']]],
+  ['L3', 'An unknown refusal is capped but never silently taught as a proven content defect; a human rejection still counts', [['server/lib/attempt-classification.test.js', 'unrecognised|not .recognised'], ['server/agents/lib/generator-learning.test.js', 'NO rule recognises|free-text rejection']]],
+  ['L4', 'A measured production result is sent back to the Data Analyst; if it is unreachable nothing is lost and it is retried', [['server/agents/lib/analyst-outcome.test.js', null], ['data-analyst-agent/tests/intelligence/test_fix_outcomes_db.py', 'retried_send or over_http', 'py']]],
+  ['L5', 'The measured result changes a LATER prediction (a measured confidence), and never rewrites an earlier one', [['data-analyst-agent/tests/intelligence/test_fix_outcomes_db.py', 'change_the_confidence', 'py'], ['data-analyst-agent/tests/intelligence/test_fix_outcomes.py', null, 'py']]],
+  ['L6', 'A client track record only ever comes from its own measured fixes, and only re-ranks work that already cleared the evidence bar', [['server/agents/lib/analyst-track-record.test.js', null], ['server/agents/lib/analyst-track-record.db.test.js', null], ['data-analyst-agent/tests/intelligence/test_fix_outcomes_db.py', 'never_count_for_another', 'py']]],
+  ['L7', 'Every Node call to the analyst names the project it was given (no cross-client reads in the new paths)', [['server/lib/tenant-isolation.db.test.js', 'names a project it was given']]],
   ['R8', 'The window, the cron lines and the deadline steps cannot drift apart', [['server/lib/worker-session.test.js', 'the cron line follows the window'], ['server/lib/delivery-consolidation.test.js', 'deadline steps follow the window']]],
 ];
 
-function runOne(file, pattern) {
+// pytest, against the throwaway analyst database ONLY: the same local container and password as the srtest URL, never any other database.
+function runPy(file, pattern) {
+  const m = url.match(/^postgres(?:ql)?:\/\/([^:]+):([^@]+)@/);
+  const env = { ...process.env, DATABASE_URL: `postgresql+asyncpg://${m[1]}:${m[2]}@127.0.0.1:55432/analyst_stage1_test` };
+  const args = ['-m', 'pytest', '-q', '-p', 'no:cacheprovider', file.replace('data-analyst-agent/', '')];
+  if (pattern) args.push('-k', pattern);
+  const r = spawnSync(resolve('data-analyst-agent/.venv/bin/python'), args, { env, cwd: resolve('data-analyst-agent'), encoding: 'utf8', timeout: 240_000 });
+  const out = `${r.stdout || ''}${r.stderr || ''}`;
+  const count = (label) => Number((out.match(new RegExp(`(\\d+) ${label}`)) || [])[1] || 0);
+  return { code: r.status, tests: count('passed') + count('failed'), pass: count('passed'), fail: count('failed'), skipped: count('skipped'), tail: out.split('\n').filter((l) => /FAILED|Error/.test(l)).slice(0, 4).join(' | ') };
+}
+
+function runOne(file, pattern, kind) {
+  if (kind === 'py') return runPy(file, pattern);
   const args = ['--experimental-test-module-mocks', '--test'];
   if (pattern) args.push(`--test-name-pattern=${pattern}`);
   args.push(file);
@@ -52,7 +74,7 @@ function runOne(file, pattern) {
 
 const results = [];
 for (const [id, claim, runs] of SCENARIOS) {
-  const parts = runs.map(([file, pattern]) => ({ file, pattern, ...runOne(file, pattern) }));
+  const parts = runs.map(([file, pattern, kind]) => ({ file, pattern, ...runOne(file, pattern, kind) }));
   const totalPass = parts.reduce((n, p) => n + p.pass, 0);
   const bad = parts.filter((p) => p.code !== 0 || p.fail > 0);
   const empty = parts.filter((p) => p.pass === 0);

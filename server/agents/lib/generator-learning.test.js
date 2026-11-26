@@ -186,6 +186,14 @@ describe('attributeOutcome', () => {
     assert.equal(attributeOutcome('failed', '1 anchor(s) no longer found verbatim in src/pages/about.njk'), 'failed');
   });
 
+  test('a failure reason NO rule recognises is not counted against the generator (infra), until it is classified', () => {
+    assert.equal(attributeOutcome('failed', 'provider returned a brand new kind of refusal 7f3'), 'infra');
+  });
+
+  test('a human’s own free-text rejection is unrecognised by design and still counts as a rejection', () => {
+    assert.equal(attributeOutcome('rejected', 'Not our tone of voice.'), 'rejected');
+  });
+
   test('an unexplained failure stays a failure — unattributable is treated as real', () => {
     assert.equal(attributeOutcome('failed', null), 'failed');
     assert.equal(attributeOutcome('failed', '   '), 'failed');
