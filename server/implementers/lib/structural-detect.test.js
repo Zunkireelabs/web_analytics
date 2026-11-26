@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectHeadRegion, detectInsertionPoint, detectWithTrustedContainer, isJsxFile, isHtmlLikeFile, isVueFile, isSvelteFile } from './structural-detect.js';
+import { detectHeadRegion, detectInsertionPoint, detectWithTrustedContainer, wrapRootWithMarker, isJsxFile, isHtmlLikeFile, isVueFile, isSvelteFile } from './structural-detect.js';
 
 describe('file-type routing', () => {
   test('isJsxFile / isHtmlLikeFile', () => {
@@ -523,5 +523,44 @@ const { noindex } = Astro.props;
 
   test('a real second <head> in the markup is still ambiguous even when front matter is masked', () => {
     assert.equal(detectHeadRegion('---\nx\n---\n<head>{a}</head><head>{b}</head>').ok, false);
+  });
+});
+
+describe('wrapRootWithMarker: a page that is one self-closing component', () => {
+  const src = `export default function BirgunjPage() {\n  return <CityLandingTemplate data={birgunjData} />;\n}\n`;
+  test('the refusal tells the caller where the root is', () => {
+    const r = detectInsertionPoint(src, 'page.tsx');
+    assert.equal(r.reason, 'self-closing-root-no-body');
+    assert.equal(src.slice(r.wrap.start, r.wrap.end), '<CityLandingTemplate data={birgunjData} />');
+  });
+  test('the root is wrapped in a fragment with the marker before it, and the file still parses', () => {
+    const r = detectInsertionPoint(src, 'page.tsx');
+    const out = wrapRootWithMarker(src, r.wrap, '{/* SEOAI:BREADCRUMBSCHEMA:START */}{/* SEOAI:BREADCRUMBSCHEMA:END */}');
+    assert.match(out, /return <>\n\{\/\* SEOAI:BREADCRUMBSCHEMA:START \*\/\}\{\/\* SEOAI:BREADCRUMBSCHEMA:END \*\/\}\n<CityLandingTemplate data=\{birgunjData\} \/>\n<\/>;/);
+    const again = detectInsertionPoint(out, 'page.tsx'); // now a fragment with children: the next marker can use it
+    assert.equal(again.ok, true);
+  });
+});
+
+describe('detectInsertionPoint: the block goes inside the wrapper the page\'s own text sits in', () => {
+  const long = (w) => `<p>${w} ${'word '.repeat(60)}</p>`;
+  test('main holding one wrapper: the insertion point is inside that wrapper, not after it (Chayce /probate-house-clearance/)', () => {
+    const file = `<html><body><main><div class="v2-wrap"><div class="v2-intro">${long('intro')}</div><section>${long('body')}</section></div></main></body></html>`;
+    const r = detectInsertionPoint(file, 'areas/page.njk');
+    assert.equal(r.ok, true);
+    // the offset must fall before the wrapper's closing tag, i.e. inside it
+    assert.ok(file.slice(r.insertBeforeOffset).startsWith('</div></main>'), file.slice(r.insertBeforeOffset, r.insertBeforeOffset + 30));
+    assert.match(r.containerDescription, /main > div\.v2-wrap/);
+  });
+  test('main with two substantial children (page body plus a big sibling): nothing is guessed, the insertion stays at the end of main', () => {
+    const file = `<html><body><main><div class="a">${long('a')}</div><div class="b">${long('b')}</div></main></body></html>`;
+    const r = detectInsertionPoint(file, 'page.html');
+    assert.equal(r.ok, true);
+    assert.ok(file.slice(r.insertBeforeOffset).startsWith('</main>'));
+  });
+  test('descends through nested single wrappers', () => {
+    const file = `<html><body><main><div class="o"><div class="i">${long('a')}${long('b')}</div></div></main></body></html>`;
+    const r = detectInsertionPoint(file, 'page.html');
+    assert.ok(file.slice(r.insertBeforeOffset).startsWith('</div></div></main>'));
   });
 });

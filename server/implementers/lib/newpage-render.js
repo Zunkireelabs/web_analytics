@@ -124,7 +124,7 @@ export function renderLandingPageBody(content, site, { permalink = null, layout 
   return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'landing-page' })}\n`;
 }
 
-export function renderBlogOutlineBody(content, site, { permalink = null, layout = null, fieldNames = {}, frontMatterDefaults = null, sourcesInFrontMatter = false } = {}) {
+export function renderBlogOutlineBody(content, site, { permalink = null, layout = null, fieldNames = {}, frontMatterDefaults = null, sourcesInFrontMatter = false, bodyStyle = null } = {}) {
   // `fieldNames` maps a canonical field onto whatever THIS directory's
   // existing posts call it (newcontent-contract.js). The defaults below are
   // only what gets used when no sibling could be read — they are not a
@@ -196,7 +196,7 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
   // markdown rendered HERE, at apply time. Scaffolding introduced during
   // rendering is invisible to every guard by construction — so it has to not be
   // introduced.
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'blog-outline' })}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'blog-outline', bodyStyle })}\n`;
 }
 
 // Next.js App Router variant of renderBlogOutlineBody, for a
@@ -537,7 +537,7 @@ export function rendersAsInlineArticle(site, actionType = null, permalink = null
   return inline;
 }
 
-function wrapInSiteProse(body, site, permalink = null, { actionType = null } = {}) {
+function wrapInSiteProse(body, site, permalink = null, { actionType = null, bodyStyle = null } = {}) {
   // Any real markdown table in the generated body goes through the same
   // projectTable() call content-integrity-repair.js already uses to rebuild
   // a broken/raw-text table on an EXISTING page — one table pipeline for
@@ -578,7 +578,12 @@ function wrapInSiteProse(body, site, permalink = null, { actionType = null } = {
   // every hand-written post, because `typography.body` is the landing-page body
   // class (`text-lg md:text-xl max-w-2xl`) and `heading.item` carries
   // `md:text-3xl`. Opt-in only, so every other tenant's output is unchanged.
-  const layoutStylesProse = inline && site?.url_file_map?.siteRoot?.inlineProse === 'layout';
+  // A BLOG POST FOLLOWS THE SITE'S OWN POSTS. When the posts already in the blog folder could be read (bodyStyle, from generators/lib/body-style.js), their body
+  // decides: no classes on the text unless most of them carry classes, and the wrapper they share (or none). The design profile describes the landing pages, so it is
+  // used only when nothing was learned from the posts.
+  const siblingsDecide = actionType === 'blog-outline' && bodyStyle && bodyStyle.samples >= 3;
+  // The site's own explicit setting (inlineProse: 'layout') is kept as the final word: it was set because the layout styles article text.
+  const layoutStylesProse = (inline && site?.url_file_map?.siteRoot?.inlineProse === 'layout') || (siblingsDecide && !bodyStyle.classedProse);
   const proseProjected = layoutStylesProse
     ? tableProjected
     : projectMarkdownProseInBody(tableProjected, site?.url_file_map?.siteRoot?.designProfile, { inline });
@@ -595,6 +600,7 @@ function wrapInSiteProse(body, site, permalink = null, { actionType = null } = {
   // marker-merge.js's sanitizeCapturedTemplate for the 2026-09-09 case this
   // guards against) — catastrophic here specifically, since this wrapper
   // holds an ENTIRE net-new page body, not one section.
+  if (siblingsDecide) return bodyStyle.wrapper ? `<div class="${bodyStyle.wrapper}">\n\n${proseProjected}\n\n</div>` : proseProjected;
   const configured = stripFixedHeightClass(site?.url_file_map?.siteRoot?.componentTemplates?.contentWrapper?.wrapper);
   const wrapper = configured?.includes('{{BODY}}')
     ? configured

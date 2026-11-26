@@ -157,6 +157,13 @@ describe('the post, in the site\'s own format', () => {
     const amb = render({ ...rest, title: 'Salon and spa software' }); assert.equal(amb.ok, false); assert.match(amb.error, /exactly one/);
     const none = render({ ...rest, title: 'Something unrelated entirely', topic: 'zzz' }); assert.equal(none.ok, false);
   });
+  test('a tie on the title is settled by what the post itself says; a tie that stays a tie is still flagged', () => {
+    const { category, ...rest } = content;
+    const salonHeavy = { ...rest, title: 'Salon and spa software', quickAnswer: 'A salon needs booking. Every salon owner knows it.', sections: [{ heading: 'Why a salon wins', body: 'The salon calendar fills. Salon clients return.' }] };
+    const r = render(salonHeavy); assert.equal(r.ok, true); assert.equal(r.category, 'Salons');
+    const even = { ...rest, title: 'Salon and spa software', quickAnswer: 'Salon and spa.', sections: [{ heading: 'Salon and spa', body: 'Salon and spa.' }] };
+    assert.equal(render(even).ok, false);
+  });
   test('a cover the human names must already be an image the site\'s posts use', () => {
     assert.equal(render({ ...content, coverImage: '/assets/images/made-up.png' }).ok, false);
     assert.equal(parseFrontMatter(render({ ...content, coverImage: '/assets/images/spa.png' }).body).data.coverImage, '/assets/images/spa.png');

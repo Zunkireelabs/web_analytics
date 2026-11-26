@@ -1,5 +1,5 @@
 import { ensureMarkers, hasMarker, isHeadScopedField, isLineConventionField, isAttrFile, explainAttrGap } from './marker-merge.js';
-import { detectHeadRegion, isJsxFile } from './structural-detect.js';
+import { detectHeadRegion, isJsxFile, wrapRootWithMarker } from './structural-detect.js';
 import { getOrDetectStrategy } from './strategy-registry.js';
 import { refineMarkerPlacement, refineRelatedGuidesPlacement } from './expand-placement.js';
 
@@ -39,6 +39,12 @@ function insertMarkerAt(fileContent, filePath, markerName, offset) {
 // next page/call to reuse.
 async function ensureBodyMarker(site, fileContent, filePath, markerName) {
   const detection = await getOrDetectStrategy(site, filePath, fileContent);
+  // A JSON-LD schema block is invisible, so a page whose only content is one self-closing component can still take it: the root is wrapped in a fragment, the marker goes
+  // before it, and nothing on the page moves (Admizz's breadcrumb schema on its city pages, 8 held on 2026-11-26). Visible blocks (a FAQ, expanded text) keep refusing.
+  if (!detection.ok && detection.reason === 'self-closing-root-no-body' && detection.wrap && isJsxFile(filePath) && /SCHEMA$/.test(markerName)) {
+    const { start, end } = markerComment(markerName, filePath);
+    return { ok: true, content: wrapRootWithMarker(fileContent, detection.wrap, `${start}${end}`) };
+  }
   if (!detection.ok) return { ok: false, reason: detection.reason, error: detection.error };
   return { ok: true, content: insertMarkerAt(fileContent, filePath, markerName, detection.insertBeforeOffset) };
 }
@@ -114,8 +120,8 @@ export async function resolveInsertion(site, fileContent, filePath, markerMap, o
   if (placement?.field && markerMap[placement.field] && hasMarker(content, markerMap[placement.field])) {
     const markerWasPresent = hasMarker(fileContent, markerMap[placement.field]);
     const moved = placement.mode === 'related-guides'
-      ? refineRelatedGuidesPlacement(content, filePath, markerMap[placement.field], { markerWasPresent })
-      : refineMarkerPlacement(content, filePath, markerMap[placement.field], placement.beforeRoles, { markerWasPresent });
+      ? refineRelatedGuidesPlacement(content, filePath, markerMap[placement.field], { markerWasPresent, signals: options.signals || null })
+      : refineMarkerPlacement(content, filePath, markerMap[placement.field], placement.beforeRoles, { markerWasPresent, signals: options.signals || null });
     content = moved.content;
   }
 

@@ -86,9 +86,29 @@ export function renderRelatedGuides(template, items) {
     let html = template.card.replaceAll('{{URL}}', esc(i.url)).replaceAll('{{TITLE}}', esc(i.title));
     html = i.description ? html.replaceAll('{{DESCRIPTION}}', esc(i.description)) : dropElementWith(html, '{{DESCRIPTION}}');
     html = i.image ? html.replaceAll('{{IMAGE}}', esc(i.image)) : dropElementWith(html, '{{IMAGE}}');
-    return html;
+    return dropEmptySlots(html);
   }).join('\n');
   return { ok: true, html: template.section.replace('{{CARDS}}', cards) };
+}
+
+// A slot the site's own cards fill with data that was not captured (SuperRank's `<div class="post__foot"></div>`) renders as nothing, and the output guard rightly refuses an
+// empty wrapper, so it is dropped. A decorative box (inside an aria-hidden cover, drawn by the site's CSS) is the site's design and is kept.
+const MEDIA = new Set(['img', 'svg', 'picture', 'iframe', 'video', 'audio', 'input', 'br', 'hr', 'canvas', 'script', 'link', 'meta', 'source']);
+function dropEmptySlots(html) {
+  const c = cheerio.load(html, { xml: false }, false);
+  let changed = false;
+  for (let pass = 0; pass < 6; pass++) {
+    let removed = 0;
+    c('*').each((_, el) => {
+      const $el = c(el);
+      if (MEDIA.has(String(el.tagName).toLowerCase())) return;
+      if ($el.is('[aria-hidden="true"]') || $el.closest('[aria-hidden="true"]').length) return;
+      if (!$el.children().length && !$el.text().trim() && $el.parent().length) { $el.remove(); removed++; changed = true; }
+    });
+    if (!removed) break;
+  }
+  // Re-serialising rewrites entities (&quot; becomes "), so the original text is returned untouched when there was nothing to drop.
+  return changed ? c.html() : html;
 }
 
 // A card with no image or description loses just that element (and an emptied wrapper around an image), never leaves a placeholder behind.

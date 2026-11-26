@@ -124,3 +124,14 @@ describe('pickReferencePage — most specific reference first', () => {
     assert.equal(pickReferencePage(profile, 'section-page', '/other/new/'), 'https://a.com/services/x');
   });
 });
+
+test('pickReferencePage: with no permalink a blog is compared with a blog page, not with a legal page that happens to be listed first (Zennly /terms, 2026-11-26)', async () => {
+  const { pickReferencePage } = await import('./newpage-render-gate.js');
+  const profile = { pages: [
+    { url: 'https://z.example/terms', pageType: 'legal' },
+    { url: 'https://z.example/cookie-policy', pageType: 'legal' },
+    { url: 'https://z.example/blog/a-post', pageType: 'blog-article' },
+  ] };
+  assert.equal(pickReferencePage(profile, 'inline-article', null), 'https://z.example/blog/a-post');
+  assert.equal(pickReferencePage(profile, 'inline-article', null, { pageType: 'legal' }), 'https://z.example/terms'); // a legal draft still gets a legal page
+});

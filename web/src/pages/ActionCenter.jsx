@@ -146,8 +146,13 @@ const BLOCKED_KIND_META = {
 // A change to a live page that nothing here made (seo-drift) is not "blocked on setup": there is nothing to set up and nothing to
 // draft. It needs a decision (undo it, or mark it intended), so it says that instead of the generic blocked wording.
 const DRIFT_META = { icon: AlertTriangle, badge: 'Needs your decision', heading: 'A live page changed', className: 'amber' };
-function blockedMetaFor(item) {
+// A client never sees our internal "blocked" / "setup needed" / "retry" wording: those describe the platform's own work queue, which the client cannot act on. For a client the
+// same item reads as being prepared. Our team (isInternal) keeps every detail. A live page that changed (seo-drift) is a real decision for the client and stays as it is.
+const CLIENT_PREPARING_META = { icon: Clock, badge: 'Being prepared', heading: 'Nothing to do — we are preparing this', className: 'blue' };
+const CLIENT_PREPARING_TEXT = 'We are preparing this fix. It will appear here, ready for your approval, as soon as it is ready. You do not need to do anything.';
+function blockedMetaFor(item, internal = true) {
   if (item?.generatorId === 'seo-drift') return DRIFT_META;
+  if (!internal) return CLIENT_PREPARING_META;
   return BLOCKED_KIND_META[item?.blockedKind] || BLOCKED_KIND_META['our-config'];
 }
 
@@ -294,7 +299,7 @@ function ShowAllRow({ total, expanded, onToggle }) {
   );
 }
 
-export default function ActionCenter({ scope }) {
+export default function ActionCenter({ scope, isInternal = false }) {
   const isContent = scope === 'content';
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -848,15 +853,16 @@ export default function ActionCenter({ scope }) {
   // does refuse the draft, so a blocked item must never wear the "Safe" badge.
   const stateBadge = (item, detailed) => {
     if (LIFECYCLE_META[item.lifecycle] && !item.blockedReason) {
-      const meta = LIFECYCLE_META[item.lifecycle];
+      // A retry is the platform's own business: a client sees "In progress" and no count.
+      const meta = item.lifecycle === 'retry' && !isInternal ? { label: 'In progress', tone: 'outline' } : LIFECYCLE_META[item.lifecycle];
       return (
         <Badge tone={meta.tone} className="shrink-0">
-          {meta.label}{item.lifecycle === 'retry' && item.attemptCount > 1 ? ` ${item.attemptCount}×` : ''}
+          {meta.label}{item.lifecycle === 'retry' && isInternal && item.attemptCount > 1 ? ` ${item.attemptCount}×` : ''}
         </Badge>
       );
     }
     if (item.blockedReason) {
-      const meta = blockedMetaFor(item);
+      const meta = blockedMetaFor(item, isInternal);
       const blue = meta.className === 'blue';
       return <Badge tone={blue ? 'outline' : 'amber'} className="shrink-0">{detailed ? meta.badge : blue ? 'In progress' : 'Blocked'}</Badge>;
     }
@@ -879,7 +885,7 @@ export default function ActionCenter({ scope }) {
   const link = 'text-primary font-medium underline-offset-2 hover:underline';
 
   const sel = selectedRecommendation;
-  const selMeta = sel?.blockedReason ? blockedMetaFor(sel) : null;
+  const selMeta = sel?.blockedReason ? blockedMetaFor(sel, isInternal) : null;
   const selBlue = selMeta?.className === 'blue';
   const alignment = sel ? GOAL_ALIGNMENT_META[sel.goalAlignment?.level] : null;
 
@@ -1055,7 +1061,7 @@ export default function ActionCenter({ scope }) {
                         before and returned is a different thing from a brand-new one,
                         and the user is owed the difference — including whether the
                         system intends to try again by itself. */}
-                    {sel.attemptCount > 0 && sel.lifecycle !== 'in_progress' && (
+                    {isInternal && sel.attemptCount > 0 && sel.lifecycle !== 'in_progress' && (
                       <div className={`${callout} bg-[#fdf3e1] text-[#8a5300]`}>
                         <p className="flex items-center gap-1.5 font-medium">
                           <History size={14} />
@@ -1086,7 +1092,7 @@ export default function ActionCenter({ scope }) {
                           <BlockedIcon size={14} className="shrink-0 mt-0.5" />
                           <div className="min-w-0">
                             <div className={`font-medium mb-1 ${selBlue ? 'text-fg' : ''}`}>{selMeta.heading}</div>
-                            <p>{sel.blockedReason}</p>
+                            <p>{isInternal || sel.generatorId === 'seo-drift' ? sel.blockedReason : CLIENT_PREPARING_TEXT}</p>
                           </div>
                         </div>
                       );

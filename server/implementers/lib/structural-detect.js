@@ -106,6 +106,23 @@ function stripMarkerComments(text) {
 // its own (possibly sparse) content — it can trust the already-proven
 // selector directly. Never used for a page with no template-identity match;
 // that case always goes through the full, independently-earned check below.
+const WRAPPER_TAGS = new Set(['div', 'section']);
+function descendIntoContentWrapper($, el) {
+  const textOf = (n) => stripMarkerComments($(n).text()).trim().length;
+  let current = el;
+  for (let guard = 0; guard < 6; guard++) {
+    const total = textOf(current);
+    const holders = $(current).children().toArray().filter((c) => textOf(c) >= total * 0.8);
+    if (holders.length !== 1) break;
+    const next = holders[0];
+    if (!WRAPPER_TAGS.has(String(next.name).toLowerCase())) break;
+    if (CARD_AREA_CLASS.test(String(next.attribs?.class || ''))) break;
+    if (!(next.sourceCodeLocation && next.sourceCodeLocation.endTag)) break;
+    current = next;
+  }
+  return current;
+}
+
 function detectHtmlContainer(fileContent, offsetBase = 0, { minText = MIN_CONTAINER_TEXT, onlySelector = null } = {}) {
   let $;
   try {
@@ -130,11 +147,15 @@ function detectHtmlContainer(fileContent, offsetBase = 0, { minText = MIN_CONTAI
       continue; // an invalid CSS selector for this parse (unlikely) — try the next candidate rather than fail the whole detection
     }
     if (el) {
+      // Where the page's OWN paragraphs sit, not merely inside <main>: a page whose content lives in one wrapper (`main > div.v2-wrap > ...`) styles its text through that
+      // wrapper, so a block added after it is outside the site's typography and can overflow on a phone (Chayce /probate-house-clearance/, 39 to 60px, 2026-11-26).
+      // The same rule the layout measurement uses: go into the single child that still holds nearly all of the text.
+      const inner = descendIntoContentWrapper($, el);
       return {
         ok: true,
         fileKind: 'html',
-        insertBeforeOffset: offsetBase + el.sourceCodeLocation.endTag.startOffset,
-        containerDescription: selector,
+        insertBeforeOffset: offsetBase + inner.sourceCodeLocation.endTag.startOffset,
+        containerDescription: inner === el ? selector : `${selector} > ${inner.name}${inner.attribs?.class ? `.${String(inner.attribs.class).trim().split(/\s+/)[0]}` : ''}`,
       };
     }
   }
@@ -262,6 +283,16 @@ function findJsxContainer(node, tagNames = ['main', 'article']) {
   return null;
 }
 
+/**
+ * A page that returns one self-closing component (`return <CityLandingTemplate data={d} />;`, Admizz's city pages) has nothing beside the root to insert next to. For
+ * INVISIBLE content only (a JSON-LD script) the root can be wrapped in a fragment with the marker block placed before it: nothing on the page moves.
+ * Pure: returns the new file text.
+ */
+export function wrapRootWithMarker(fileContent, wrap, markerBlock) {
+  const { start, end } = wrap;
+  return `${fileContent.slice(0, start)}<>\n${markerBlock}\n${fileContent.slice(start, end)}\n</>${fileContent.slice(end)}`;
+}
+
 function detectJsxContainer(fileContent, { trustedTagName = null } = {}) {
   let ast;
   try {
@@ -314,7 +345,8 @@ function detectJsxContainer(fileContent, { trustedTagName = null } = {}) {
   // interior to insert into — inserting "before its closing tag" would mean
   // inserting into its opening tag's attribute list, which is nonsense.
   if (target.type === 'JSXElement' && !target.closingElement) {
-    return { ok: false, reason: 'self-closing-root-no-body', error: 'The page\'s root/content element has no children to insert content next to.' };
+    // `wrap` is where that root sits, so a caller whose content is invisible (a JSON-LD script) can put it beside the root: see wrapRootWithMarker.
+    return { ok: false, reason: 'self-closing-root-no-body', error: 'The page\'s root/content element has no children to insert content next to.', wrap: { start: target.start, end: target.end } };
   }
   const closing = target.type === 'JSXFragment' ? target.closingFragment : target.closingElement;
   if (!closing) return { ok: false, reason: 'no-closing-tag', error: 'Could not locate a closing tag to insert before.' };

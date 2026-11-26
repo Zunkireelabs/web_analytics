@@ -162,3 +162,11 @@ describe('false-positive protection', () => {
     assert.ok(ids(findContentIssues({ outline: { intro: '| Tool |  |\n|---|---|\n| A | B |' } })).includes('table-empty-header'));
   });
 });
+
+test('an empty box inside an aria-hidden decorative cover is the site\'s own design, not a blank wrapper (SuperRank related-guides card)', async () => {
+  const { findEmptyWrappers } = await import('./output-guard.js');
+  const card = '<a href="/x" class="post"><div class="post__cover" aria-hidden="true"><div class="cv cv--grid"><div class="cv-card"></div></div></div><div class="post__body"><h3 class="post__title">A title</h3><p class="post__ex">Text</p></div></a>';
+  assert.deepEqual(findEmptyWrappers(card), []);
+  // a real blank wrapper outside any decorative container is still refused
+  assert.equal(findEmptyWrappers('<section class="a-related"><div class="container"><div class="box"></div></div><h2>Related</h2></section>').length, 1);
+});

@@ -120,6 +120,18 @@ jobs:
             BLOG_DAY_START=2026-11-25
             BLOG_DAY_MAX_BLOGS=6
 
+            # ── Blog featured images (Pexels search) ──────────────────────
+            # Production never carried these (only deploy-staging.yml did), so every blog the generator wrote here had no featuredImage,
+            # featuredImageAlt or featuredImageCredit, unlike the site's older posts (Chayce, 2026-11-26). Same double gate as staging:
+            # the key alone does not turn image fetching on. PEXELS_API_KEY is an existing GitHub secret.
+            PEXELS_API_KEY=${{ secrets.PEXELS_API_KEY }}
+            BLOG_IMAGES_ENABLED=true
+
+            # ── Continuous topic research (owner's decision, 2026-11-26) ──
+            # Each project keeps a ready pool of evidence-checked blog topics, found by the agents with no manual topic approval, so a non-blog day still finds the next
+            # blog day's topics. It was on its default, log, which records decisions and proposes nothing (one decision in total). on: accepted topics become blog recommendations.
+            TOPIC_RESEARCH=on
+
             # ── Autonomous delivery (SRANK-48; docs/autonomous-delivery-deployment-plan.md) ──
             # Consolidation opens the PR for work that was validated but never got one (or saves it with the exact error); alerts write to the
             # database and email. Neither blocks normal output. The other new switches (design protection, blog gates, overwrite guard, topic

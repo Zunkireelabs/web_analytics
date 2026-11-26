@@ -988,3 +988,34 @@ describe('createRecommendationGates: a post body adapter blocks a raw-HTML post 
     assert.match(String(r.blockedReason), /raw HTML/);
   });
 });
+
+describe('createRecommendationGates — a meta-title that cannot be applied is held before any draft is written', () => {
+  const PAGE = 'https://acme.example/blog/a-post';
+  // Each test gets its own site id: the sibling pages are cached per site and folder for an hour.
+  const siteWith = (id) => ({ ...baseSite, id, url_file_map: { pages: { '/blog/a-post': { file: 'src/blog/a-post.md' } } } });
+  const post = (extra = '') => `---\ntitle: "A post"\ndate: 2026-01-01\n${extra}---\n\nBody text here that is long enough to count as a real page of content for the gate.\n`;
+  const deps = (siblingFm) => ({
+    ...neutralDeps(),
+    fetchFile: async (_s, path) => ({ content: path === 'src/blog/a-post.md' ? post() : post(siblingFm), sha: 'x' }),
+    fetchTree: async () => ({ files: ['src/blog/a-post.md', 'src/blog/other-1.md', 'src/blog/other-2.md'], truncated: false }),
+  });
+
+  test('title is also the visible headline and no sibling has a separate SEO-title field: blocked with the exact reason', async () => {
+    const gates = createRecommendationGates(9101, siteWith(9101), deps(''));
+    const r = await gates.evaluate('meta-title', { page: PAGE });
+    assert.equal(r.drop ?? null, null);
+    assert.match(String(r.blockedReason), /front-matter title is also the visible headline/);
+  });
+
+  test('a sibling that already uses seoTitle means the site supports one: not blocked by this rule', async () => {
+    const gates = createRecommendationGates(9102, siteWith(9102), deps('seoTitle: "A different SEO title"\n'));
+    const r = await gates.evaluate('meta-title', { page: PAGE });
+    assert.doesNotMatch(String(r.blockedReason || ''), /visible headline/);
+  });
+
+  test('the rule is for meta-title only: an FAQ on the same page is not held by it', async () => {
+    const gates = createRecommendationGates(9103, siteWith(9103), deps(''));
+    const r = await gates.evaluate('faq', { page: PAGE });
+    assert.doesNotMatch(String(r.blockedReason || ''), /visible headline/);
+  });
+});

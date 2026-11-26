@@ -77,7 +77,10 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     // An HTML-body target (a .njk post, see lib/njk-post.js) is stored with the same fast path but is not Markdown: reporting it as Markdown would apply
     // the Markdown-capability check to a file that contains none. Every other action type and target keeps 'markdown', exactly as before.
     const htmlBody = draft.action_type === 'blog-outline' && isHtmlBodyTarget(resolveNewContentTargetConfig(site, 'blog-outline'));
-    return { ok: true, filePath: draft.target_file_path, body: draft.rendered_body, contentFormat: htmlBody ? 'html' : 'markdown' };
+    // A .tsx/.jsx target holds JSX source, never Markdown (Admizz's posts are a component call). Reporting it as Markdown made the render check inject that source as text
+    // (measured montserrat 1.5 instead of the component's rubik 1.85) and made the Markdown-capability check refuse it as "NOT Markdown-safe": nine Admizz blogs, 2026-11-26.
+    const jsxBody = /\.(tsx|jsx)$/i.test(draft.target_file_path);
+    return { ok: true, filePath: draft.target_file_path, body: draft.rendered_body, contentFormat: jsxBody ? 'jsx' : (htmlBody ? 'html' : 'markdown') };
   }
 
   const actionType = draft.action_type;
@@ -171,7 +174,7 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     // draft that already carries an image (an Insights post's Pexels photo under
     // `featuredImage: 'insights-only'`) keeps it: the cover is for posts without one.
     const cover = content.featuredImage ? null : buildGradientCover(site, { slug: filePath.split('/').pop().replace(/\.[^.]+$/, '') });
-    const boBody = renderBlogOutlineBody(cover ? { ...content, featuredImage: cover.featuredImage } : content, site, { permalink, layout, fieldNames: contract.fieldNames, frontMatterDefaults: { ...(contract.siblingConstants || {}), ...(frontMatterDefaultsFor(site, 'blog-outline') || {}) }, sourcesInFrontMatter: Boolean(contract.declaresSources) });
+    const boBody = renderBlogOutlineBody(cover ? { ...content, featuredImage: cover.featuredImage } : content, site, { permalink, layout, fieldNames: contract.fieldNames, frontMatterDefaults: { ...(contract.siblingConstants || {}), ...(frontMatterDefaultsFor(site, 'blog-outline') || {}) }, sourcesInFrontMatter: Boolean(contract.declaresSources), bodyStyle: contract.bodyStyle || null });
     const boIncomplete = incompleteFrontMatter(boBody, contract, 'blog-outline');
     if (boIncomplete) return boIncomplete;
     return {

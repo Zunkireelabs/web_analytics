@@ -210,6 +210,14 @@ export function renderNjkPost(content, site, { posts = [], contract = null, toda
   if (!category) {
     const text = words(`${content?.title || ''} ${content?.topic || ''}`);
     const scored = [...cats.keys()].map((c) => ({ c, n: [...words(c)].filter((w) => text.has(w)).length })).filter((x) => x.n > 0).sort((a, b) => b.n - a.n);
+    // A tie on the title alone ("Salons" and "Spa & Wellness" both match "salon software … wellness studios") is settled by what the post itself says: how often each
+    // category's words occur in its headings, answer and body. A category still tied after that is not guessed (a person chooses), exactly as before.
+    if (scored.length > 1 && scored[1].n === scored[0].n) {
+      const bodyText = [content?.quickAnswer, ...(content?.sections || []).flatMap((x) => [x?.heading, x?.body])].filter(Boolean).join(' ');
+      const freq = new Map(); for (const w of String(bodyText).split(/[^A-Za-z0-9]+/).map(stem).filter((x) => x.length > 2)) freq.set(w, (freq.get(w) || 0) + 1);
+      const top = scored.filter((x) => x.n === scored[0].n).map((x) => ({ ...x, f: [...words(x.c)].reduce((t, w) => t + (freq.get(w) || 0), 0) })).sort((a, b) => b.f - a.f);
+      if (top[0].f > (top[1]?.f ?? -1)) { scored.length = 0; scored.push(top[0]); }
+    }
     if (!scored.length || (scored[1] && scored[1].n === scored[0].n)) return notReady(`This draft does not point to exactly one of this site's blog categories (${[...cats.keys()].join(', ')}). A person must choose one; nothing was guessed.`);
     category = scored[0].c;
   }

@@ -2,6 +2,8 @@ import { sharedTemplateTargetBlock, templateDrivenBodyBlock, templateEmitsSchema
 import { ensureMeasurementId, needsInputMessage, isMeasurementId } from '../../lib/ga4-measurement-id.js';
 import { generatedPageBlockReason } from './page-type.js';
 import { listAreas, siteForUrl, siteForActionType, areaNameOf } from '../../implementers/lib/site-areas.js';
+import { resolveLineKeys } from '../../implementers/lib/url-file-map.js';
+import { planMarkdownTitleField, loadSiblingMarkdown, isMarkdownFile } from '../../implementers/lib/markdown-native.js';
 import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget, resolveNotApplicable, resolveNewContentNotApplicable } from '../../implementers/lib/url-file-map.js';
 import { hasExistingFaqSchema, INSPECTABLE_ACTION_TYPES } from '../../implementers/lib/render-inspector.js';
 import { templateRendersItemsField } from '../../implementers/lib/faq-render-mode.js';
@@ -557,6 +559,15 @@ function createGatesForSite(siteId, initialSite, deps = {}) {
             return { drop: null, blockedReason: staleMappingBlockedReason(page, repair) };
           }
           return { drop: 'file-missing', blockedReason: null };
+        }
+
+        // A meta-title fix on a Markdown page whose `title:` is also the visible headline, on a site with no separate SEO-title field, is refused when it is applied
+        // (markdown-native.js planMarkdownTitleField: changing a headline is not a meta fix). Asked here, with the same function, before any draft is written, so the worker
+        // does not write nine titles (Zunkiree, 2026-11-26) that cannot ship. The page stays visible with the exact reason, and nothing is retried daily.
+        if (file && generatorId === 'meta-title' && isMarkdownFile(filePath) && !resolveAdapter(site, page, generatorId)) {
+          const siblings = await loadSiblingMarkdown(site, filePath, { getRepoTree: cachedFetchTree, getFileContent: cachedFetchFile, ref }).catch(() => []);
+          const plan = planMarkdownTitleField(file.content, siblings, resolveLineKeys(site, page, generatorId));
+          if (!plan.ok) return { drop: null, blockedReason: plan.error };
         }
 
         // A file that already carries an FAQPage schema block can never take
