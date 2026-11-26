@@ -140,3 +140,14 @@ describe('the cron line follows the window', () => {
     for (let m = SESSION_START_MINUTE; m < SESSION_CUTOFF_MINUTE; m += 5) { const h = Math.floor(m / 60); assert.ok(h >= from && h <= to, `minute ${m} (hour ${h}) is outside ${hours}`); }
   });
 });
+
+test('oncePerDay: runs the first call of a calendar day (in its own time zone) and not the rest of that day', async () => {
+  const { oncePerDay } = await import('./worker-session.js');
+  let t = new Date('2026-11-27T05:00:00Z'); let calls = 0;
+  const f = oncePerDay('Asia/Kathmandu', async () => { calls++; return 'ran'; }, { now: () => t });
+  assert.equal(await f(), 'ran'); assert.equal(await f(), undefined); assert.equal(calls, 1);
+  t = new Date('2026-11-27T17:00:00Z');                       // still 27 Nov in UTC, but 22:45 Nepal: same Nepal day
+  assert.equal(await f(), undefined);
+  t = new Date('2026-11-27T18:30:00Z');                       // 00:15 on 28 Nov in Nepal: a new day
+  assert.equal(await f(), 'ran'); assert.equal(calls, 2);
+});

@@ -43,6 +43,21 @@ export function minuteOfDay(timezone, now = new Date()) {
   return Number(parts.find((p) => p.type === 'hour').value) * 60 + Number(parts.find((p) => p.type === 'minute').value);
 }
 
+/**
+ * Wraps `fn` so it runs at most once per calendar day in `timezone`, the first time it is called that day (a later call the same day returns undefined). Used to put the day's issue
+ * re-check in front of the day's first fix pass: the laptop (and so the worker) is only on from about 10:30, so the re-check runs the moment the worker is up and the fixes follow it.
+ */
+export function oncePerDay(timezone, fn, { now = () => new Date() } = {}) {
+  let doneFor = null;
+  return async (...args) => {
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(now());
+    const day = `${parts.find((p) => p.type === 'year').value}-${parts.find((p) => p.type === 'month').value}-${parts.find((p) => p.type === 'day').value}`;
+    if (doneFor === day) return undefined;
+    doneFor = day;
+    return fn(...args);
+  };
+}
+
 /** @returns {{open:boolean, endsAt:number|null, minutesLeft:number}} Is the generation window open right now, and when does it close. */
 export function sessionWindow(timezone, now = new Date()) {
   const m = minuteOfDay(timezone, now);

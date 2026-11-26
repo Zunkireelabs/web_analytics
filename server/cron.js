@@ -8,7 +8,7 @@ import { runTopicResearchForAllSites } from './lib/topic-research/index.js';
 import { runDeliveryDayClose, runDeliveryConsolidation, runDeliveryAlerts, runCompetitorGrowthCycleForAllSites, runCompetitorOutcomeLearningForAllSites, runRankTrackingForAllSites, runPosthogIngestForAllSites, runGscScreenRefreshForAllSites } from './job.js';
 import { listConnectedSites, runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runSitemapSyncForAllSites, runFixVerificationsForAllSites, runNightlyIssueRecheckForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runKeywordScheduleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, runAiVisibilityShipForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, checkDesignChangesForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites, runTrendRadarIfDueForAllSites, runNewsPostsIfDueForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
-import { deferToWorker, workerSessionTick, workerSessionTimezone, msUntilWindowOpens, workerSessionCron, deliveryCloseCron, deliveryConsolidationCron, minuteOfDay, SESSION_CUTOFF_MINUTE } from './lib/worker-session.js';
+import { deferToWorker, oncePerDay, workerSessionTick, workerSessionTimezone, msUntilWindowOpens, workerSessionCron, deliveryCloseCron, deliveryConsolidationCron, minuteOfDay, SESSION_CUTOFF_MINUTE } from './lib/worker-session.js';
 import { workerOnline } from './store/llm-requests.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -586,8 +586,16 @@ export function startCron() {
   // THE LAPTOP WORKER'S SESSION: every 5 minutes between 10:00 and 17:00 (site time), start the day's fix pass if a worker is connected. The pass itself
   // ends at 17:00 (worker-session.js); anything left is picked up on the next tick or tomorrow. Does nothing unless LLM_WORKER_MODE=on.
   if (deferToWorker()) {
+    // THE DAY'S ISSUE RE-CHECK COMES FIRST. The laptop (and so the worker) is only on from about 10:30, and the re-check needs the AI, so it runs as the first thing the worker does: once a day,
+    // at the start of the day's first pass, before any fix is written, for at most NIGHTLY_RECHECK_BUDGET_MIN minutes (default 45). What it does not reach is checked first tomorrow (oldest
+    // first). A tick only gets here once the worker is online, so a re-check never runs without it.
+    const recheckFirst = oncePerDay(workerSessionTimezone(), async () => {
+      const budgetMs = (Number(process.env.NIGHTLY_RECHECK_BUDGET_MIN) || 45) * 60_000;
+      console.log(`[nightly-recheck] running first in the worker's day, up to ${Math.round(budgetMs / 60_000)} min, before the fixes`);
+      try { await runNightlyIssueRecheckForAllSites({ deadlineAt: Date.now() + budgetMs }); } catch (err) { console.error('[cron] nightly issue re-check error:', err.message); }
+    });
     cron.schedule(workerSessionCron(), () => locked('worker-session', async () => {
-      await workerSessionTick({ timezone: workerSessionTimezone(), isOnline: workerOnline, runPass: ({ windowEndsAt }) => runAutoRemediationForAllSites({ windowEndsAt }) });
+      await workerSessionTick({ timezone: workerSessionTimezone(), isOnline: workerOnline, runPass: async ({ windowEndsAt }) => { await recheckFirst(); return runAutoRemediationForAllSites({ windowEndsAt }); } });
       // Discovery that waited for the worker (it needs the laptop open) is retried here, inside the window, for the projects it was blocked for.
       try { if (await workerOnline()) { const r = await (await import('./lib/keyword-discovery-retry.js')).retryBlockedKeywordDiscovery({ run: runKeywordDemandCheckIfDueForAllSites, listSites: listConnectedSites }); if (r.retried?.length) console.log(`[cron] keyword discovery retried for project(s) ${r.retried.join(', ')}`); } } catch (err) { console.error('[cron] keyword discovery retry error:', err.message); }
     }), { timezone: workerSessionTimezone() });
@@ -596,10 +604,17 @@ export function startCron() {
 
   // CONTINUOUS RESEARCH: each project keeps a ready pool of evidence-checked blog topics, decided by the agents (no manual topic approval). Runs once a day after the
   // 06:30 discovery jobs, before the worker window; an empty backlog still starts research. TOPIC_RESEARCH=off|log|on (default log: decisions are recorded, nothing proposed).
-  cron.schedule('50 6 * * *', () => locked('topic-research', async () => {
-    try { const r = await runTopicResearchForAllSites(); console.log(`[topic-research] ${JSON.stringify(r).slice(0, 300)}`); } catch (err) { console.error('[cron] topic research error:', err.message); }
-  }), { timezone: tz });
-  console.log(`[cron] topic research scheduled "50 6 * * *" (${tz})`);
+  // Topic research is AI work, so with the laptop worker doing the AI it runs INSIDE the worker's window, when the worker is up: 10:45 server time (India), 11:00 in Nepal. Run at 06:50 it
+  // found nothing, because the worker is not on until 09:55. Without the worker the old 06:50 stays. TOPIC_RESEARCH_CRON_SCHEDULE moves it.
+  const topicSchedule = process.env.TOPIC_RESEARCH_CRON_SCHEDULE || (deferToWorker() ? '45 10 * * *' : '50 6 * * *');
+  if (!cron.validate(topicSchedule)) {
+    console.error(`[cron] invalid TOPIC_RESEARCH_CRON_SCHEDULE "${topicSchedule}" — topic research NOT scheduled.`);
+  } else {
+    cron.schedule(topicSchedule, () => locked('topic-research', async () => {
+      try { const r = await runTopicResearchForAllSites(); console.log(`[topic-research] ${JSON.stringify(r).slice(0, 300)}`); } catch (err) { console.error('[cron] topic research error:', err.message); }
+    }), { timezone: tz });
+    console.log(`[cron] topic research scheduled "${topicSchedule}" (${tz})`);
+  }
 
   // DESIGN PROTECTION BASELINES: a visible change whose template has no captured baseline waits as "awaiting-baseline" and a capture is requested (never assumed to
   // pass). Without something that works the request list, that wait never ends. Every 30 minutes from 07:00 to 16:30 (the worker's clock), a few requests are
@@ -635,8 +650,11 @@ export function startCron() {
   // about 08:35), and before the 11:00 shipping, so shipping starts from a list that has just been verified against the live pages.
   // It used to run at 04:30, before detection, on the previous day's picture; a run that finished its checks while the AI provider was
   // down then closed issues that the 07:00 run created again as new. (That is also guarded in nightly-recheck.js now.)
-  const recheckSchedule = process.env.NIGHTLY_RECHECK_CRON_SCHEDULE || '30 9 * * *';
-  if (!cron.validate(recheckSchedule)) {
+  // With the laptop worker the re-check is not on its own clock: it runs first in the worker's day (above), once the worker is up. NIGHTLY_RECHECK_CRON_SCHEDULE still forces a fixed time.
+  const recheckSchedule = process.env.NIGHTLY_RECHECK_CRON_SCHEDULE || (deferToWorker() ? null : '30 9 * * *');
+  if (!recheckSchedule) {
+    console.log('[cron] nightly issue re-check: runs first in the laptop worker\'s day, before the fixes (no fixed clock time)');
+  } else if (!cron.validate(recheckSchedule)) {
     console.error(`[cron] invalid NIGHTLY_RECHECK_CRON_SCHEDULE "${recheckSchedule}" — nightly issue re-check NOT scheduled.`);
   } else {
     cron.schedule(recheckSchedule, () => locked('nightly-issue-recheck', async () => {
