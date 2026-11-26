@@ -1,4 +1,5 @@
 import { query as defaultQuery } from '../../db.js';
+import { operatorDetail } from '../../lib/errors.js';
 
 // Did the Data Analyst CONFIRM that its findings are complete, and do they cover this site?
 //
@@ -31,7 +32,7 @@ export async function loadFindingsGate({ query = defaultQuery, now = new Date(),
         WHERE task_type = $1 ORDER BY started_at DESC LIMIT 1`, [FINDINGS_COMPLETE_TASK]);
     row = rows[0];
   } catch (err) {
-    return { state: 'unreadable', reason: `the analyst's findings marker could not be read: ${err.message}` };
+    return { state: 'unreadable', reason: `the analyst's findings marker could not be read: ${operatorDetail(err)}` };
   }
   if (!row) return { state: 'missing', reason: 'the analyst has never confirmed a complete analysis (no findings_complete marker)' };
 
