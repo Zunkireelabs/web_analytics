@@ -55,5 +55,14 @@ class Settings(BaseSettings):
     analysis_schedule_enabled: bool = True
     analysis_schedule_hour_utc: int = 4
 
+    # Recovery of an analysis pass a deploy or crash interrupted (app/analysis/ledger.py). At start-up the scheduler closes the
+    # rows its previous process left "running" as interrupted, and, if that pass has no completed findings marker, is recent
+    # enough and has attempts left, runs only its unfinished stages once, shortly after start. It never adds or moves a scheduled
+    # time. Set ANALYSIS_RESUME_ON_START=false to turn the resume off (the interrupted rows are still closed and recorded).
+    analysis_resume_on_start: bool = True
+    analysis_resume_window_hours: int = 20
+    analysis_resume_max_attempts: int = 3
+    analysis_resume_delay_seconds: int = 120
+
 
 settings = Settings()

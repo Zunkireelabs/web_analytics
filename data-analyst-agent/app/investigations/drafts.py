@@ -98,10 +98,12 @@ from app.intelligence import effort_estimation as effort_estimation_engine
 from app.intelligence import impact_prediction as impact_prediction_engine
 from app.intelligence import opportunity_scoring as opportunity_scoring_engine
 from app.intelligence import prioritizer as prioritizer_engine
-from app.mcp_client.client import McpAuthError, McpClient, McpToolError
+from app.mcp_client.client import McpAuthError, McpToolError
+from app.mcp_client.token import require_mcp
 from app.investigations.draft_switch import draft_trigger_enabled, log_state
 from app.metrics.direction import anomaly_is_worsening, is_worsening
 from app.mcp_client.tools import generate_draft
+from app.analysis.scope import active_clients, note_client_failure
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +208,7 @@ async def run_draft_trigger() -> None:
         return
 
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         try:
@@ -230,12 +232,14 @@ async def run_draft_trigger() -> None:
                         # external generate_draft MCP call already fired.
                         await session.commit()
                     except Exception:
+                        note_client_failure(client.id)
                         logger.exception(
                             "run_draft_trigger: client %s investigation %s raised — skipping this investigation only",
                             client.id, investigation.id,
                         )
                         await session.rollback()
         except Exception:
+            note_client_failure(client.id)
             logger.exception(
                 "run_draft_trigger: client %s raised outside the per-investigation loop — skipping this client only",
                 client.id,
@@ -387,7 +391,9 @@ async def _try_trigger(session: AsyncSession, client: Client, investigation: Inv
     # anyway. Its result is never consulted for the action decision.
     prediction = await _ensure_impact_prediction(session, client, rec)
 
-    mcp = McpClient(client.mcp_token_ciphertext)
+    mcp = require_mcp(client, "run_draft_trigger")
+    if mcp is None:
+        return
     try:
         await generate_draft(mcp, **action)
     except McpAuthError as e:

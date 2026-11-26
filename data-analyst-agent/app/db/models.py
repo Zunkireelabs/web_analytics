@@ -1,7 +1,7 @@
 from datetime import datetime, date
 from sqlalchemy import (
     BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Numeric, String,
-    Text, UniqueConstraint, LargeBinary, Index, func,
+    Text, UniqueConstraint, LargeBinary, Index, func, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -752,6 +752,32 @@ class ImpactPrediction(Base):
             name="impact_predictions_magnitude_check",
         ),
         Index("idx_impact_predictions_lookup", "client_id", "recommendation_id"),
+    )
+
+
+class FixOutcome(Base):
+    """What actually happened after a fix shipped, measured and sent back by the Node app (migration 0043). Per client; the
+    evidence impact_prediction.py turns into a measured confidence. Never read across clients."""
+
+    __tablename__ = "fix_outcomes"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    external_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    generator_id: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str | None] = mapped_column(Text)
+    improved: Mapped[bool] = mapped_column(nullable=False)
+    clicks_delta: Mapped[float | None] = mapped_column(Numeric)
+    delta: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    measured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("client_id", "external_ref", name="fix_outcomes_unique_ref"),
+        CheckConstraint(
+            "category IS NULL OR category IN ('metadata','content','technical','restructuring')", name="fix_outcomes_category_check",
+        ),
+        Index("idx_fix_outcomes_lookup", "client_id", "category"),
     )
 
 

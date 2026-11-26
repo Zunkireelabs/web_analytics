@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.dimension_lookup import dimension_values_for, iter_enabled_metric_dimensions
 from app.db.models import Client, MetricCatalog, MetricObservation, MetricPeriodStats
 from app.db.session import SessionLocal
+from app.analysis.scope import active_clients
 
 WOW_DAYS = 7
 MOM_DAYS = 30
@@ -22,7 +23,7 @@ MOM_DAYS = 30
 
 async def run_stats() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
         metric_dims = await iter_enabled_metric_dimensions(session)
 
     for client in clients:

@@ -8,6 +8,8 @@ from app.db.models import Client, ForecastPoint, ForecastRun, MetricCatalog, Met
 from app.db.session import SessionLocal
 from app.forecast.confidence import compute_forecast_confidence
 from app.forecast.registry import FORECASTERS
+from app.forecast.validity import clip_result, gap_reason, trailing_contiguous_daily
+from app.analysis.scope import active_clients
 
 HORIZON_BY_CADENCE = {
     "daily": settings.forecast_horizon_days,
@@ -18,7 +20,7 @@ HORIZON_BY_CADENCE = {
 
 async def run_forecasts() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
         metric_dims = await iter_enabled_metric_dimensions(session, forecastable_only=True)
 
     for client in clients:
@@ -48,21 +50,25 @@ async def _forecast_one(session: AsyncSession, client_id: int, metric: MetricCat
     ).all()
 
     df = pd.DataFrame(rows, columns=["period_start", "value"]).dropna()
+    series = pd.Series(dtype=float)
+    set_aside = 0
+    total_observed = len(df)
     if len(df):
         index = pd.DatetimeIndex(df["period_start"])
         series = pd.Series(df["value"].astype(float).values, index=index)
-        # Only stamp an explicit daily frequency when the series is genuinely
-        # contiguous (no real gaps) — a sparse metric (e.g. health_score,
-        # which isn't snapshotted every day) must NOT be reindexed/filled to
-        # fit a fixed frequency, since that would fabricate values for days
-        # with no real observation. Sparse series simply forecast with an
-        # unset frequency (statsmodels infers a coarser one, or none).
-        if len(index) > 1 and (index[-1] - index[0]).days == len(index) - 1:
-            series = series.asfreq("D")
-    else:
-        series = pd.Series(dtype=float)
+        if metric.cadence == "daily":
+            # Never reindex or fill across a gap (that would invent values for days with no observation). A series with a gap
+            # forecasts from its latest UNBROKEN run (app/forecast/validity.py); statsmodels refuses a daily model on an
+            # irregular index, which is what produced ~13,800 "No supported index is available." errors.
+            series, set_aside = trailing_contiguous_daily(series)
 
     result = forecaster.fit_predict(series, horizon)
+    if result.status == "insufficient-data" and set_aside:
+        # The history is short BECAUSE of a gap: say so, instead of an unexplained insufficient-data.
+        result.error = gap_reason(total_observed, len(series), getattr(forecaster, "min_history_periods", len(series) + 1))
+    if result.status == "ok" and set_aside:
+        result.params = {**(result.params or {}), "observations_set_aside_before_gap": set_aside}
+    clip_result(result, metric.unit)
 
     run = ForecastRun(
         client_id=client_id, metric_key=metric.metric_key, dimension_type=dimension_type, dimension_value=dimension_value,

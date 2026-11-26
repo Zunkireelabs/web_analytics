@@ -26,6 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.narrator import call_llm
 from app.db.models import Client, Investigation, MetricCatalog, Opportunity
 from app.db.session import SessionLocal
+from app.analysis.scope import active_clients
+from app.investigations.outlook import current_outlook
 
 
 def _strip_nul(text):
@@ -93,7 +95,7 @@ REASONING_TOOL = {
 
 async def run_investigation_reasoning() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         async with SessionLocal() as session:
@@ -129,7 +131,7 @@ async def _generate(session: AsyncSession, investigation: Investigation, metric:
         "dimension_type": investigation.dimension_type, "dimension_value": investigation.dimension_value,
         "insight_type": investigation.insight_type, "severity": investigation.severity,
         "status": investigation.status, "evidence": investigation.evidence,
-        "forecast_outlook": investigation.forecast_outlook, "root_cause_text": investigation.root_cause_text,
+        "forecast_outlook": current_outlook(investigation.forecast_outlook), "root_cause_text": investigation.root_cause_text,
         "confidence": float(investigation.confidence) if investigation.confidence is not None else None,
         "business_impact": business_impact_payload,
     }

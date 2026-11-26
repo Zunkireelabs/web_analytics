@@ -33,6 +33,7 @@ SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
 # "value went down" == "declined"; this is the one metric family where
 # that's backwards.
 from app.metrics.direction import LOWER_IS_BETTER_METRICS  # one definition, shared (app/metrics/direction.py)  # noqa: E402
+from app.analysis.scope import active_clients
 
 EXPLANATION_SYSTEM_PROMPT = (
     "You are a data analyst writing a short explanation of a flagged SEO/growth metric change for internal "
@@ -66,7 +67,7 @@ EXPLANATION_TOOL = {
 
 async def run_recommendation_engine() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         async with SessionLocal() as session:

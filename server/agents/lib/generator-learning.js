@@ -80,7 +80,20 @@ export function attributeOutcome(outcome, detail) {
   if (!ATTRIBUTABLE.has(outcome)) return outcome;
   const text = typeof detail === 'string' ? detail.trim() : '';
   if (!text) return outcome;
-  return classifyAbandonReason(text).retryPolicy === RETRY_POLICY.ITEM_DEFECT ? outcome : 'infra';
+  const c = classifyAbandonReason(text);
+  // A reason NO rule recognised is not proof of a content defect: it is logged as 'infra' (outside the quality ratio) and surfaces
+  // through the capability-gap investigation of unclassified failures instead, so a new failure mode cannot demote a generator unseen.
+  // Only for a system 'failed' reason: a human's own free-text 'rejected' reason is unrecognised by design and is a real signal.
+  if (outcome === 'failed' && c.recognised === false) { warnUnrecognised(text); return 'infra'; }
+  return c.retryPolicy === RETRY_POLICY.ITEM_DEFECT ? outcome : 'infra';
+}
+
+const warnedShapes = new Set();
+function warnUnrecognised(text) {
+  const shape = text.replace(/[\w.-]*\/[\w./-]+/g, '<path>').replace(/\d+/g, '#').slice(0, 160);
+  if (warnedShapes.has(shape) || warnedShapes.size > 200) return;
+  warnedShapes.add(shape);
+  console.warn(`[generator-learning] unrecognised failure reason, not counted against the generator until classified: "${shape}"`);
 }
 
 // A SEPARATE signal from the technical POSITIVE/NEGATIVE above — "did it

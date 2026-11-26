@@ -47,6 +47,7 @@ import { syncAnalystInsightsToActionCenter, syncGrowthOpportunitiesToActionCente
 import { runKeywordDemandIfDue } from './agents/lib/keyword-demand.js';
 import { splitByFreshness, maxInsightAgeDays } from './lib/analyst-insight-freshness.js';
 import { runAnalystFusion } from './agents/lib/analyst-fusion.js';
+import { loadForecastSkill, applyForecastSkillGate } from './agents/lib/analyst-forecast-skill.js';
 import { sweepAnalystOutcomes } from './agents/lib/analyst-outcome.js';
 import { checkFaqOnboardingCoverage } from './agents/lib/faq-onboarding-check.js';
 import { countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
@@ -1201,9 +1202,9 @@ export async function runFaqOnboardingCoverageForAllSites() {
 //
 // Best-effort per site and never throws: the Analyst is a separate service,
 // and it being down must not take the rest of the schedule with it.
-export async function runAnalystSyncForAllSites({ listSites = listConnectedSites, gate: injectedGate } = {}) {
+export async function runAnalystSyncForAllSites({ listSites = listConnectedSites, gate: injectedGate, loadSkill = loadForecastSkill, fetchInsights = fetchAnalystInsights, sync = syncAnalystInsightsToActionCenter } = {}) {
   const sites = await listSites();
-  const totals = { sites: 0, created: 0, skipped: 0, ineligible: 0, registered: 0, blocked: 0 };
+  const totals = { sites: 0, created: 0, skipped: 0, ineligible: 0, registered: 0, blocked: 0, forecastsWithheld: 0 };
   // Findings count only when the analyst confirmed a complete analysis that covers the site (agents/lib/analyst-findings-gate.js).
   const gate = injectedGate !== undefined ? injectedGate : (findingsGateEnabled() ? await loadFindingsGate() : null);
 
@@ -1220,12 +1221,20 @@ export async function runAnalystSyncForAllSites({ listSites = listConnectedSites
       const analyst = await ensureAnalystRegistered(site).catch((err) => ({ status: 'failed', error: err.message }));
       if (analyst.status === 'registered') { totals.registered++; console.log(`[job] analyst sync: site ${site.id} "${site.name}" was not registered with the Data Analyst — registered now.`); }
       else if (analyst.status === 'failed') console.error(`[job] analyst sync: could not register site ${site.id} "${site.name}" with the Data Analyst: ${analyst.error}`);
-      const fetched = await fetchAnalystInsights(site.id);
+      const fetched = await fetchInsights(site.id);
       // Only FRESH findings become recommendations (lib/analyst-insight-freshness.js): stale ones were being re-created nightly.
-      const { fresh: insights, stale } = splitByFreshness(fetched, { maxAgeDays: maxInsightAgeDays() });
+      const { fresh: freshInsights, stale } = splitByFreshness(fetched, { maxAgeDays: maxInsightAgeDays() });
       if (stale.length) console.log(`[job] analyst sync: site ${site.id} "${site.name}" skipped ${stale.length} stale insight(s) older than ${maxInsightAgeDays()} day(s).`);
+      if (!freshInsights.length) continue;
+      // The forecast skill gate (agents/lib/analyst-forecast-skill.js): a forecast that loses to "repeat the same weekday two weeks ago"
+      // is withheld; one with too little scored history is passed on marked unproven (low priority, human review).
+      const { insights, withheld } = applyForecastSkillGate(freshInsights, await loadSkill(site.id));
+      if (withheld.length) {
+        totals.forecastsWithheld += withheld.length;
+        console.log(`[job] analyst sync: site ${site.id} "${site.name}" withheld ${withheld.length} forecast insight(s) — the forecast does worse than repeating history for that metric.`);
+      }
       if (!insights.length) continue;
-      const result = await syncAnalystInsightsToActionCenter(site.id, insights, { site });
+      const result = await sync(site.id, insights, { site });
       totals.sites++;
       totals.created += result.created;
       totals.skipped += result.skipped;

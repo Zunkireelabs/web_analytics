@@ -17,6 +17,7 @@ from app.db.session import SessionLocal
 from app.intelligence.affected_pages import resolve_affected_page_count
 from app.intelligence.category_rules import BASE_EFFORT_BY_CATEGORY, EFFORT_LABELS, category_for_metric
 from app.scoring.confidence import compute_confidence
+from app.analysis.scope import active_clients
 
 # (min_page_count, level_bump) — first matching lower bound wins, applied
 # only when affected_page_count_status == 'ok'. Never applied on top of an
@@ -27,7 +28,7 @@ PAGE_COUNT_BUMP_THRESHOLDS = ((21, 2), (6, 1), (0, 0))
 
 async def run_effort_estimation() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         async with SessionLocal() as session:

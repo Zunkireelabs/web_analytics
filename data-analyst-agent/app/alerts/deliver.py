@@ -27,8 +27,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.metrics.direction import lower_is_better
 from app.db.models import Client, Insight, MetricCatalog, AnalystRecommendations
 from app.db.session import SessionLocal
-from app.mcp_client.client import McpAuthError, McpClient, McpToolError
+from app.mcp_client.client import McpAuthError, McpToolError
+from app.mcp_client.token import require_mcp
 from app.mcp_client.tools import push_predictive_alert
+from app.analysis.scope import active_clients
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +39,7 @@ ALERT_SEVERITIES = ("high", "medium")
 
 async def deliver_predictive_alerts() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         async with SessionLocal() as session:
@@ -45,7 +47,9 @@ async def deliver_predictive_alerts() -> None:
         if not alerts:
             continue
 
-        mcp = McpClient(client.mcp_token_ciphertext)
+        mcp = require_mcp(client, "deliver_predictive_alerts")
+        if mcp is None:
+            continue
         try:
             await push_predictive_alert(mcp, alerts)
         except McpAuthError as e:

@@ -569,18 +569,23 @@ const RULES = [
 export function classifyAbandonReason(reason, { legacy = false } = {}) {
   const text = typeof reason === 'string' ? reason.trim() : '';
   if (!text) {
-    return { failureClass: null, retryPolicy: RETRY_POLICY.RETRY, summary: 'The attempt ended without recording a reason.' };
+    return { failureClass: null, retryPolicy: RETRY_POLICY.RETRY, summary: 'The attempt ended without recording a reason.', recognised: false };
   }
   for (const rule of RULES) {
     if (legacy && rule.addedBy) continue;
     if (rule.match(text)) {
-      return { failureClass: rule.failureClass, retryPolicy: rule.policy, summary: rule.summary };
+      return { failureClass: rule.failureClass, retryPolicy: rule.policy, summary: rule.summary, recognised: true };
     }
   }
+  // `recognised: false` says out loud that NO rule matched. The policy stays ITEM_DEFECT so the per-item cap still converges
+  // (an unknown failure must not retry forever), but ITEM_DEFECT here means "stop retrying", NOT "we proved the content is
+  // wrong". Anything that LEARNS from a failure (generator-learning.js) must check this flag first: a refusal nobody has
+  // classified yet is not evidence against the generator's content.
   return {
     failureClass: FAILURE_CLASS.AGENT_LOGIC,
     retryPolicy: RETRY_POLICY.ITEM_DEFECT,
     summary: 'This fix could not be applied automatically.',
+    recognised: false,
   };
 }
 
@@ -590,4 +595,10 @@ export function classifyAbandonReason(reason, { legacy = false } = {}) {
 // returns to the board for a person to decide on.
 export function isAutoRetryable(policy) {
   return policy === RETRY_POLICY.RETRY || policy === RETRY_POLICY.ITEM_DEFECT;
+}
+
+// True when the classifier matched a rule for this reason. A reason that matched none is UNRECOGNISED: capped like any other
+// item failure, but never to be taught as a genuine content defect until a person or the capability-gap investigation names it.
+export function isRecognisedFailure(reason) {
+  return classifyAbandonReason(reason).recognised === true;
 }

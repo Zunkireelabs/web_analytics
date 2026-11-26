@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Client, ImpactProjectionRun, Investigation, Opportunity, OpportunityScore, AnalystRecommendations
 from app.db.session import SessionLocal
+from app.analysis.scope import active_clients
 
 
 def _opportunity_status(investigation_status: str) -> str:
@@ -20,7 +21,7 @@ def _opportunity_status(investigation_status: str) -> str:
 
 async def run_opportunity_rollup() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         async with SessionLocal() as session:

@@ -21,6 +21,7 @@ from app.db.models import (
     Client, ExecutiveBriefing, Insight, Investigation, MetricObservation, Opportunity, RecommendationRanking,
 )
 from app.db.session import SessionLocal
+from app.analysis.scope import active_clients
 
 CADENCE_WINDOW_DAYS = {"morning": 1, "weekly": 7, "monthly": 30}
 TOP_N = 5
@@ -170,7 +171,7 @@ async def _generate(client_id: int, cadence: str) -> None:
 
 async def _generate_for_all_clients(cadence: str) -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
     for client in clients:
         await _generate(client.id, cadence)
 

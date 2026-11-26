@@ -344,7 +344,7 @@ def _wire_trigger(monkeypatch, *, rec, ranking, prediction):
     monkeypatch.setattr(drafts, "_latest_recommendation", AsyncMock(return_value=rec))
     monkeypatch.setattr(drafts, "_ensure_priority_ranking", AsyncMock(return_value=ranking))
     monkeypatch.setattr(drafts, "_ensure_impact_prediction", AsyncMock(return_value=prediction))
-    monkeypatch.setattr(drafts, "McpClient", lambda *_a, **_kw: object())
+    monkeypatch.setattr(drafts, "require_mcp", lambda *_a, **_kw: object())
 
 
 def _run_trigger(monkeypatch, generate_draft_mock, *, insight, rec, ranking, prediction):

@@ -63,11 +63,21 @@ this docstring described that crontab as something nothing in the repo
 installs, which was true when written. The opt-in question above is
 therefore already answered in the affirmative on staging — revisit it there
 deliberately rather than assuming these paths are still dormant.
+Recorded, dependency-aware stages (Stage 1 of the Autonomous Growth Intelligence work). The chain above is no longer one block
+that dies at its first exception: each stage is run by app/analysis/pass_runner.py, which records its own outcome and duration,
+blocks stages whose dependency did not complete, runs a stage only for clients with fresh inputs
+(app/analysis/freshness.py), keeps independent stages running (predictions do not wait behind the insight engine), and writes the
+`findings_complete` marker only when every required stage completed. A pass that did not complete raises PassIncomplete after
+recording everything, and sends no notifications.
 """
-import logging
-from datetime import date
 
-from app.activity.log import FINDINGS_COMPLETE_TASK, run_in_progress, track
+import logging
+from datetime import date, datetime, timezone
+
+from app.activity.log import FINDINGS_COMPLETE_TASK, run_in_progress  # noqa: F401 — FINDINGS_COMPLETE_TASK re-exported for callers
+from app.analysis import freshness as fresh
+from app.analysis.ledger import MANUAL, SCHEDULER, DbLedger  # noqa: F401
+from app.analysis.pass_runner import Ledger, PassIncomplete, Stage, coverage, run_stages, summarise
 from app.notifications.nightly import send_nightly_notifications
 from app.forecast.accuracy import run_forecast_accuracy_evaluation
 from app.forecast.run import run_forecasts
@@ -92,6 +102,11 @@ from app.stats.deltas import run_stats
 
 logger = logging.getLogger(__name__)
 
+# Inputs a stage needs. Generic engines need at least one core site series (GSC or GA4); the prediction layer reads weekly
+# site clicks and per-page rows, so it needs GSC site data AND page/query data, all fresh.
+CORE_ANY = ("gsc_site", "ga4_site")
+PREDICT_ALL = ("gsc_site", "page_query")
+
 
 def is_training_day(today: date) -> bool:
     """The pooled prediction model is retrained on Mondays (and once on the very first night, so the
@@ -99,56 +114,99 @@ def is_training_day(today: date) -> bool:
     return today.weekday() == 0
 
 
-async def run_analysis_pass() -> None:
-    """Runs the analysis stages in dependency order. Raises on failure — the
-    caller decides whether that's fatal (a manual script run) or merely logged
-    (the scheduler, which must survive a bad night)."""
-    # Never two runs at once on the shared database (production's scheduler owns the night; a manual staging run must not overlap).
+def build_stages(*, train_pooled_model: bool) -> list[Stage]:
+    """The pipeline in its real dependency order. Callables are looked up when called, not now, so a test (or a hotfix) that
+    replaces a module-level stage function is honoured."""
+    S = Stage
+    stages = [
+        S("run_stats", "monitoring", lambda: run_stats(), needs_any=CORE_ANY),
+        S("run_anomaly_detection", "monitoring", lambda: run_anomaly_detection(), needs_any=CORE_ANY),
+
+        S("run_forecasts", "forecasting", lambda: run_forecasts(), needs_any=CORE_ANY),
+        # Measurement of past predictions against what landed: not scoped to fresh clients (it reads history, produces no finding).
+        S("run_forecast_accuracy_evaluation", "forecasting", lambda: run_forecast_accuracy_evaluation()),
+        S("run_investigation_outcome_evaluation", "forecasting", lambda: run_investigation_outcome_evaluation()),
+
+        S("run_feature_importance", "investigating", lambda: run_feature_importance(), needs_any=CORE_ANY),
+        S("run_insight_engine", "investigating", lambda: run_insight_engine(), deps=("run_stats", "run_anomaly_detection", "run_forecasts"), needs_any=CORE_ANY),
+    ]
+    if train_pooled_model:
+        # Optional: a failed training leaves the stored model in use (recorded, never silent).
+        stages.append(S("run_pooled_training", "investigating", lambda: run_pooled_training(), required=False))
+    stages += [
+        # Next-week predictions. Runs AFTER the insight engine (its forecast_risk insights must not be wiped by the engine's own
+        # reset) but does NOT depend on its success: it needs only its own fresh inputs.
+        S("run_predictions", "investigating", lambda: run_predictions(), needs_all=PREDICT_ALL),
+        S("run_target_keyword_evidence", "investigating", lambda: run_target_keyword_evidence(), needs_any=("gsc_site",)),
+        S("run_cannibalization_detection", "investigating", lambda: run_cannibalization_detection(), needs_any=("gsc_site",)),
+        S("run_root_cause_analysis", "investigating", lambda: run_root_cause_analysis(), deps=("run_insight_engine",), needs_any=CORE_ANY),
+
+        S("run_recommendation_engine", "generating_recommendations", lambda: run_recommendation_engine(), deps=("run_insight_engine",), needs_any=CORE_ANY),
+        S("run_effort_estimation", "generating_recommendations", lambda: run_effort_estimation(), deps=("run_recommendation_engine",), needs_any=CORE_ANY),
+        S("run_impact_prediction", "generating_recommendations", lambda: run_impact_prediction(), deps=("run_recommendation_engine",), needs_any=CORE_ANY),
+        S("run_opportunity_scoring", "generating_recommendations", lambda: run_opportunity_scoring(), deps=("run_effort_estimation", "run_impact_prediction"), needs_any=CORE_ANY),
+        S("run_recommendation_prioritizer", "generating_recommendations", lambda: run_recommendation_prioritizer(), deps=("run_opportunity_scoring",), needs_any=CORE_ANY),
+        S("run_investigation_engine", "generating_recommendations", lambda: run_investigation_engine(), deps=("run_recommendation_engine",), needs_any=CORE_ANY),
+        S("run_opportunity_rollup", "generating_recommendations", lambda: run_opportunity_rollup(), deps=("run_investigation_engine",), needs_any=CORE_ANY),
+        S("run_investigation_reasoning", "generating_recommendations", lambda: run_investigation_reasoning(), deps=("run_investigation_engine",), needs_any=CORE_ANY),
+
+        # Findings only when ANALYST_DRAFT_TRIGGER=off (app/investigations/draft_switch.py): the trigger checks it itself.
+        S("run_draft_trigger", "preparing_drafts", lambda: run_draft_trigger(), deps=("run_recommendation_prioritizer", "run_investigation_engine"), needs_any=CORE_ANY),
+    ]
+    return stages
+
+
+async def run_analysis_pass(*, owner: str = MANUAL, resume_pass_id: str | None = None, ledger: Ledger | None = None) -> None:
+    """Runs the analysis stages in dependency order. Raises PassIncomplete (after recording everything) when any required stage did
+    not complete; the caller decides whether that is fatal (a manual script run) or merely logged (the scheduler, which must
+    survive a bad night). `resume_pass_id` re-runs only the stages that did not complete in that earlier pass."""
+    # Never two runs at once on the shared database (production's scheduler owns the night; a manual run must not overlap).
     live_since = await run_in_progress()
     if live_since is not None:
         logger.warning("another Data Analyst run has been in progress since %s: not starting a second one", live_since)
         return
-    async with track("monitoring"):
-        await run_stats()
-        await run_anomaly_detection()
-    async with track("forecasting"):
-        await run_forecasts()
-        await run_forecast_accuracy_evaluation()
-        await run_investigation_outcome_evaluation()
-    async with track("investigating"):
-        await run_feature_importance()
-        await run_insight_engine()
-        # Next-week predictions (app/predict/). After the insight engine on purpose: the page-decline
-        # forecast_risk insights it writes must exist before the recommendation engine reads them.
-        # The pooled model is retrained on Mondays only; every other night reuses the stored one.
-        if is_training_day(date.today()) or not await has_pooled_model():
-            try:
-                await run_pooled_training()
-            except Exception:
-                logger.exception("pooled prediction model training failed; predictions use the stored model")
-        await run_predictions()
-        await run_target_keyword_evidence()
-        await run_cannibalization_detection()
-        await run_root_cause_analysis()
-    async with track("generating_recommendations"):
-        await run_recommendation_engine()
-        await run_effort_estimation()
-        await run_impact_prediction()
-        await run_opportunity_scoring()
-        await run_recommendation_prioritizer()
-        await run_investigation_engine()
-        await run_opportunity_rollup()
-        await run_investigation_reasoning()
-    async with track("preparing_drafts"):
-        await run_draft_trigger()
-    # Every findings stage above finished without raising: say so, for the analytics app's orchestrator. Never fatal: if the
-    # marker cannot be written (migration 0042 not applied yet), the findings ARE complete but stay unconfirmed, and the
-    # orchestrator safely refuses them rather than this run being reported as failed.
-    try:
-        async with track(FINDINGS_COMPLETE_TASK):
-            pass
-    except Exception:
-        logger.exception("findings_complete marker could not be written (is migration 0042 applied?): today's findings will be treated as unconfirmed")
-    # The customer-facing notifications the staging script used to be the only one to send (predictive alerts, morning briefing),
-    # at the same moment it sent them, at most once a day (app/notifications/nightly.py).
+    owns_db = ledger is None
+    ledger = ledger or DbLedger()
+    if owns_db:
+        # A "running" row older than the live-run window belongs to a process that died: close it as interrupted, not leave it.
+        from app.analysis.ledger import recover_interrupted_runs
+        from app.activity.log import RUN_IN_PROGRESS_HOURS
+        await recover_interrupted_runs(scheduler_owned_only=False, older_than_hours=RUN_IN_PROGRESS_HOURS)
+
+    pass_id = resume_pass_id or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+    freshness = await _load_freshness()
+    stages = build_stages(train_pooled_model=is_training_day(date.today()) or not await has_pooled_model())
+    logger.info("analysis pass %s starting (owner=%s, resume=%s): %s", pass_id, owner, bool(resume_pass_id),
+                {cid: f.verdict for cid, f in freshness.items()})
+
+    results = await run_stages(stages, ledger=ledger, pass_id=pass_id, owner=owner, freshness=freshness, resume=bool(resume_pass_id))
+
+    complete, why = summarise(stages, results)
+    covered, excluded = coverage(stages, results, sorted(freshness))
+    if complete and freshness and not covered:
+        # Every stage "completed" but not one client was covered by all of them (every client stale or failed): nothing to rely on.
+        complete, why = False, "no client is covered by every required stage"
+    await ledger.write_marker(
+        pass_id, complete, None if complete else f"findings incomplete: {why}",
+        {
+            "covered_clients": covered, "excluded_clients": {str(k): v for k, v in excluded.items()},
+            "evidence": {str(cid): f.as_detail() for cid, f in freshness.items()},
+            "stages": {n: r.outcome for n, r in results.items()},
+        },
+    )
+    if not complete:
+        # Never claim a completed analysis from partial findings, and never send "this morning's" alerts built on them.
+        raise PassIncomplete(f"analysis pass {pass_id} did not complete: {why}")
+    # The customer-facing notifications (predictive alerts, morning briefing), at most once a day (app/notifications/nightly.py).
     await send_nightly_notifications()
+
+
+async def _load_freshness() -> dict[int, fresh.ClientFreshness]:
+    from sqlalchemy import select
+
+    from app.db.models import Client
+    from app.db.session import SessionLocal
+
+    async with SessionLocal() as session:
+        ids = [c for (c,) in (await session.execute(select(Client.id).where(Client.status == "active"))).all()]
+        return await fresh.load_freshness(session, ids) if ids else {}
