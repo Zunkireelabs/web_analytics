@@ -4,7 +4,7 @@ import {
   getFileContent, getFileSha, beginFileOverlay, endFileOverlay, recordFileOverlayWrites,
   createCommitObject, updateRef, commitFilesAtomic, getCommitMessage,
   getBranchSha, getLastKnownRateLimit, RATE_LIMIT_RESERVE, searchCodeForString,
-  openPullRequest, prTargetBranchName,
+  openPullRequest, prTargetBranchName, githubConditionalStats, clearGithubConditionalCache,
 } from './client.js';
 import { clearInstallationTokenCache } from './app-auth.js';
 
@@ -677,5 +677,61 @@ describe('PR target branch', () => {
     assert.equal(bodies[0].base, 'stage');
     assert.equal(bodies[0].head, 'batch/2026-10-26');
     assert.equal(bodies[1].base, 'main'); // no setting -> exactly as before
+  });
+});
+
+// Conditional GETs: a repeat read costs no rate limit when GitHub says "unchanged", and is never stale because GitHub decides.
+describe('conditional GETs (ETag / 304)', () => {
+  const withFetch = async (fn, handler) => { const original = globalThis.fetch; const calls = []; globalThis.fetch = async (url, init) => { calls.push({ url, init }); return handler(calls.length, url, init); }; try { await fn(calls); } finally { globalThis.fetch = original; clearGithubConditionalCache(); } };
+  const b64 = (t) => Buffer.from(t).toString('base64');
+  const file = (text, etag) => new Response(JSON.stringify({ content: b64(text), encoding: 'base64', sha: 'abc' }), { status: 200, headers: { 'content-type': 'application/json', ...(etag ? { etag } : {}) } });
+
+  test('the second read sends If-None-Match and a 304 returns the same content without a new body', async () => {
+    clearGithubConditionalCache();
+    await withFetch(async (calls) => {
+      const a = await getFileContent(site, 'src/a.md', 'main');
+      const b = await getFileContent(site, 'src/a.md', 'main');
+      assert.equal(a.content, 'hello'); assert.equal(b.content, 'hello');
+      assert.equal(calls[0].init.headers['If-None-Match'], undefined);
+      assert.equal(calls[1].init.headers['If-None-Match'], '"v1"');
+      assert.equal(githubConditionalStats().hits, 1);
+    }, (n) => (n === 1 ? file('hello', '"v1"') : new Response(null, { status: 304, headers: { etag: '"v1"' } })));
+  });
+
+  test('changed content is returned fresh: a 200 replaces what was stored', async () => {
+    clearGithubConditionalCache();
+    await withFetch(async () => {
+      assert.equal((await getFileContent(site, 'src/b.md', 'main')).content, 'old');
+      assert.equal((await getFileContent(site, 'src/b.md', 'main')).content, 'new');
+      assert.equal((await getFileContent(site, 'src/b.md', 'main')).content, 'new');
+    }, (n) => (n === 1 ? file('old', '"v1"') : n === 2 ? file('new', '"v2"') : new Response(null, { status: 304 })));
+  });
+
+  test('a read that now fails is never answered from the old copy', async () => {
+    clearGithubConditionalCache();
+    await withFetch(async () => {
+      assert.equal((await getFileContent(site, 'src/c.md', 'main')).content, 'was here');
+      const second = await getFileContent(site, 'src/c.md', 'main');
+      assert.equal(second, null, 'a 404 is a 404, not yesterday\'s file');
+      assert.equal(githubConditionalStats().entries, 0);
+    }, (n) => (n === 1 ? file('was here', '"v1"') : new Response('{"message":"Not Found"}', { status: 404 })));
+  });
+
+  test('a response with no ETag is not stored, and writes are never conditional', async () => {
+    clearGithubConditionalCache();
+    await withFetch(async (calls) => {
+      await getFileContent(site, 'src/d.md', 'main'); await getFileContent(site, 'src/d.md', 'main');
+      assert.equal(calls[1].init.headers['If-None-Match'], undefined);
+      assert.equal(githubConditionalStats().entries, 0);
+    }, () => file('x', null));
+  });
+
+  test('one project\'s stored copy never answers for another project', async () => {
+    clearGithubConditionalCache();
+    await withFetch(async (calls) => {
+      await getFileContent({ ...site, id: 1 }, 'src/e.md', 'main');
+      await getFileContent({ ...site, id: 2 }, 'src/e.md', 'main');
+      assert.equal(calls[1].init.headers['If-None-Match'], undefined);
+    }, () => file('x', '"v1"'));
   });
 });

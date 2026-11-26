@@ -153,3 +153,12 @@ describe('body sections never go below the FAQ or Related guides', () => {
     assert.equal(expandedContentBelowClosingSection(page(''), 'EXPANDEDCONTENT'), null);
   });
 });
+
+import { canUseCapturedTemplateInstead } from './markdown-native.js';
+import assert2 from 'node:assert/strict';
+test('a captured template stands in only for the two "no sibling convention" refusals', () => {
+  assert2.equal(canUseCapturedTemplateInstead('no-markdown-faq-convention', true), true);
+  assert2.equal(canUseCapturedTemplateInstead('no-markdown-related-convention', true), true);
+  assert2.equal(canUseCapturedTemplateInstead('no-markdown-faq-convention', false), false);
+  for (const r of ['page-has-own-faq', 'empty', 'no-markdown-table-convention', 'unsupported']) assert2.equal(canUseCapturedTemplateInstead(r, true), false, r);
+});

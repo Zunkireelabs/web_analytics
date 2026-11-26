@@ -491,6 +491,17 @@ export async function recordPrState(siteId, id, prState, mergeableState = null) 
   return rows[0] || null;
 }
 
+// WHO merged it and when, exactly as GitHub reports it (migration 271). `human_merged` is a fact about a PERSON: mergedByType is GitHub's own account type
+// ('User' / 'Bot'); nothing here guesses. First write wins (COALESCE): a later poll never rewrites who merged. Pure annotation, no status guard.
+export async function recordPrMerge(siteId, id, { mergedBy = null, mergedByType = null, mergedAt = null } = {}) {
+  const { rows } = await query(
+    `UPDATE drafts SET merged_by = COALESCE(merged_by, $3), merged_by_type = COALESCE(merged_by_type, $4), merged_at = COALESCE(merged_at, $5::timestamptz, now()), updated_at = now()
+      WHERE site_id = $1 AND id = $2 RETURNING *`,
+    [siteId, id, mergedBy, mergedByType, mergedAt]
+  );
+  return rows[0] || null;
+}
+
 // Pure annotation write, shallow-merged (Postgres `||`) rather than
 // overwritten — the Approval Gate (routes/lib/approval-gate.js) has more
 // than one writer for this one column over a draft's lifecycle:

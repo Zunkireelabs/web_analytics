@@ -1,0 +1,23 @@
+{
+  "_what": "PROPOSAL, not applied. Replaces ONLY url_file_map.newContentTargets['blog-outline'] for site 8872 (Zennly). Every other key of the map is left exactly as it is.",
+  "site": 8872,
+  "set": {
+    "newContentTargets": {
+      "blog-outline": {
+        "dir": "marketing/src/blog",
+        "extension": ".njk",
+        "urlPattern": "/businesses/blog/{slug}",
+        "orderFile": { "path": "marketing/src/_data/blogOrder.json", "position": "top" }
+      }
+    }
+  },
+  "replaces": { "dir": "docs/marketing", "extension": ".md", "why": "a documentation folder left over from before the repository was connected; nothing written there is ever a page" },
+  "derivedFrom": [
+    "the 64 existing posts in marketing/src/blog/*.njk (same folder, same extension, same layout)",
+    "scripts: marketing/src/_data/blogIndex.js fails the build when a post is missing from blogOrder.json, so the index file is part of every post",
+    "the live addresses: https://zennly.io/businesses/blog/<slug>"
+  ],
+  "needsOwnerConfirmation": ["orderFile.position (top = the new post is first on /blog/; the existing first entry is the most recent post)"],
+  "dependsOn": ["the platform release that contains lib/njk-post.js and the orderFile support (deploy first)", "the CI workflow in ci/ (owner installs separately)"],
+  "howToApply": "Existing audited path: scripts/apply-url-file-map-proposal.js (backup, dry run, --apply, one site per command). It needs two small additions that are NOT made here: site 8872 in ALLOWED_SITES, and a 'zennly-8872-' name rule in checkGuards. 'blog-target' in the proposal file name already requires --engine-deployed."
+}

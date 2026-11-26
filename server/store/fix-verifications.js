@@ -384,6 +384,11 @@ export async function recordVerificationOutcome(id, outcome, evidence) {
      WHERE id = $1 RETURNING *`,
     [id, outcome, JSON.stringify(evidence ?? null)]
   );
+  // `production_verified` (migration 271): the LIVE page was re-read and the change is there. Only this outcome sets it, only once, and never from a PR merge.
+  if (outcome === 'verified-fixed' && rows[0]?.draft_id != null) {
+    await query(`UPDATE drafts SET production_verified_at = COALESCE(production_verified_at, now()) WHERE id = $1`, [rows[0].draft_id])
+      .catch((err) => console.error('[fix-verifications] could not mark the draft production-verified:', err.message));
+  }
   return rows[0] || null;
 }
 

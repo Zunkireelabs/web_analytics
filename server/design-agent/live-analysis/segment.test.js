@@ -165,3 +165,27 @@ describe('containerClasses', () => {
     assert.equal(out[1].containerClasses, '');
   });
 });
+
+
+describe('chrome blocks (a mega-menu panel beside the header, a dialog, an aria-hidden drawer)', () => {
+  const block = (o) => ({ order: 0, classes: '', tag: 'div', top: 0, height: 100, width: 1000, viewportWidth: 1000, headingLevel: null, headingText: null, headingClasses: '', bodyText: null, ...o });
+  test('a block flagged as chrome becomes a navigation section, never content, never the hero', () => {
+    const sections = segmentPage([
+      block({ order: 0, landmark: 'header', classes: 'v2-nav' }),
+      block({ order: 1, classes: 'v2-nav-mega v2-mm', chrome: 'name:mega', headingLevel: 4, headingText: 'Dont see your business?', headingClasses: 'v2-mm__aside-title' }),
+      block({ order: 2, classes: 'article', headingLevel: 1, headingText: 'The title', headingClasses: 'article-hero__h1', bodyText: 'x'.repeat(80) }),
+      block({ order: 3, landmark: 'footer', classes: 'foot' }),
+    ]);
+    assert.equal(sections[1].role, 'nav');
+    assert.equal(sections[2].role, 'hero', 'the first CONTENT block is still the hero: the panel no longer takes the role');
+  });
+  test('a block with no chrome flag (an older capture) segments exactly as before', () => {
+    const sections = segmentPage([block({ order: 0, headingLevel: 1, headingText: 'H' }), block({ order: 1, headingLevel: 2, headingText: 'S', bodyText: 'y'.repeat(60) })]);
+    assert.deepEqual(sections.map((s) => s.role), ['hero', 'footer']);
+  });
+  test('segmentSite carries the page\'s body headings through, and only when capture recorded them', () => {
+    const withB = segmentSite({ pages: [{ url: 'u', pageType: 'blog-article', title: 't', blocks: [], bodyHeadings: [{ level: 2, classes: '' }], bodyRegionFound: true }] })[0];
+    assert.deepEqual(withB.bodyHeadings, [{ level: 2, classes: '' }]); assert.equal(withB.bodyRegionFound, true);
+    assert.ok(!('bodyHeadings' in segmentSite({ pages: [{ url: 'u', pageType: 'blog-article', title: 't', blocks: [] }] })[0]));
+  });
+});

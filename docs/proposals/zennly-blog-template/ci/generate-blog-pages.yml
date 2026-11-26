@@ -1,0 +1,121 @@
+# PROPOSED FOR ZENNLY'S REPO (Zunkireelabs/zennly-marketplace). NOT INSTALLED ANYWHERE. Owner-approved copy goes to .github/workflows/generate-blog-pages.yml, together with
+# .github/scripts/regen-pages.sh (the same folder as this file).
+#
+# Why: a /businesses page (a blog post, a legal page, a feature page ...) is only live when its generated Next.js pages match its Eleventy source. Those pages are produced by the
+# repo's OWN scripts (scripts/sync-businesses-site.mjs builds the Eleventy marketing site and mirrors it into public/businesses; scripts/port-businesses-pages.py turns the mirrored
+# pages into src/app/... page.tsx + src/components/marketing/pages/generated/*.ts + the src/lib/businesses-ported.ts entry). Nothing runs them automatically today, so an edit to a
+# source page (a new blog post, internal links, breadcrumbs, an FAQ) would never reach the live site.
+# This job runs exactly those scripts on a pull request that adds or changes a source page, and commits ONLY their output back to the PR branch. A person still reviews and
+# merges the PR; nothing is deployed from here.
+#
+# Safety:
+#  - same-repository branches only (never a fork), never for the bot's own commits;
+#  - the job's token can write repository contents and nothing else; no secrets are used;
+#  - actions are pinned to full commit SHAs;
+#  - which pages to regenerate is worked out from the files the PR changed (regen-pages.sh); the two hand-ported pages are never touched;
+#  - after the build, any mirrored page that changed but is not accounted for fails the job (unrelated drift or a shared file) instead of being committed;
+#  - only generated /businesses paths are staged; any other changed file fails the job;
+#  - the build fails (and the PR shows it) if a post is missing from marketing/src/_data/blogOrder.json, the repo's own drift check.
+name: Generate Next pages from Eleventy sources
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'marketing/src/*.njk'
+      - 'marketing/src/**/*.njk'
+      - 'marketing/src/_data/blogOrder.json'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: generate-pages-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  generate:
+    name: Regenerate the Next pages for the changed source pages
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      # Same install the repo's own CI uses (npm install, not npm ci: the lockfile resolves differently on this runner), without lifecycle scripts:
+      # the marketing build needs no prisma/maplibre postinstall.
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Work out which pages this pull request changes
+        id: pages
+        run: |
+          set -euo pipefail
+          candidates=$(bash .github/scripts/regen-pages.sh candidates)
+          echo "Candidate pages: ${candidates:-none}"
+          {
+            echo 'candidates<<EOF'
+            printf '%s\n' "$candidates"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      # The repo's own build + mirror. Fails if a post file is missing from blogOrder.json.
+      - name: Build the marketing site and mirror it into public/businesses
+        run: node scripts/sync-businesses-site.mjs
+
+      - name: Keep the real mirrored pages, skip the hand-ported ones
+        id: final
+        env:
+          CANDIDATES: ${{ steps.pages.outputs.candidates }}
+        run: |
+          set -euo pipefail
+          final=$(printf '%s\n' "$CANDIDATES" | bash .github/scripts/regen-pages.sh final)
+          printf '%s\n' "$final" | bash .github/scripts/regen-pages.sh verify
+          echo "Pages to regenerate: ${final:-none}"
+          {
+            echo 'final<<EOF'
+            printf '%s\n' "$final"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      # The repo's own converter.
+      - name: Generate the Next pages
+        env:
+          FINAL: ${{ steps.final.outputs.final }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r p; do [ -n "$p" ] && args+=("$p"); done <<< "$FINAL"
+          if [ "${#args[@]}" -eq 0 ]; then echo "Nothing to generate."; exit 0; fi
+          python3 scripts/port-businesses-pages.py "${args[@]}"
+
+      - name: Commit the generated files to the pull request branch
+        run: |
+          set -euo pipefail
+          git checkout -- package-lock.json 2>/dev/null || true
+          allowed='^(public/businesses/|src/app/\(marketing-[^/]+\)/businesses/|src/components/marketing/pages/generated/[^/]+\.ts$|src/lib/businesses-ported\.ts$)'
+          unexpected=$(git ls-files --modified --others --exclude-standard | grep -Ev "$allowed" || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::The scripts changed files outside the generated /businesses paths; refusing to commit them:"; echo "$unexpected"; exit 1
+          fi
+          git add -A -- public/businesses src/app src/components/marketing/pages/generated src/lib/businesses-ported.ts
+          if git diff --cached --quiet; then echo "Generated pages are already up to date."; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Regenerate Next pages from the Eleventy sources (automated)"
+          git push origin "HEAD:${HEAD_REF}"

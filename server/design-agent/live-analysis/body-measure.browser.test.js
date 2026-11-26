@@ -140,3 +140,18 @@ test('plain-wrapper article (no article/main/prose): the element holding the par
     assert.equal(await page.evaluate(() => document.querySelector('[data-gate-region]')?.className), 'copy');
   } finally { await browser.close().catch(() => {}); }
 });
+
+// A site that styles its LEAD paragraph larger (`p:first-child`, the Chayce shape: 19px lead, 17px rest). A draft opens with a heading, so it has no lead
+// paragraph. Comparing first paragraph with first paragraph reported 19 vs 17 and held ten correct drafts (2026-11-25): body text is compared by its
+// most common size instead.
+test('a larger lead paragraph on the site does not make a correct body look the wrong size', async (t) => {
+  if (!(await browserOrSkip(t))) return;
+  const html = `<!doctype html><style>
+    body{font:17px/1.6 sans-serif;margin:0}
+    .post{max-width:700px;margin:0 auto}.post p{margin:0 0 20px;font-size:17px}.post p:first-child{font-size:19px}
+    .post h2{font-size:32px;margin:36px 0 14px}
+  </style><body><main><div class="post">${P()}${P()}<h2>Existing</h2>${P()}${P()}${P()}</div></main></body>`;
+  const r = await checkNewPageRender({ referenceUrl: dataUrl(html), newPageHtml: BARE_BODY });
+  assert.equal(r.ok, true);
+  assert.ok(!(r.deviations || []).some((d) => d.kind === 'body-size'), JSON.stringify(r.deviations));
+});

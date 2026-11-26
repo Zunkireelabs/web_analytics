@@ -59,6 +59,45 @@ export function workerIdFrom(hostname, user = '') {
 }
 
 /** Waiting time after a failed call to the server: 2s, 4s, 8s ... never more than a minute. */
+/**
+ * What the claim loop does with a failed call to the server. Only a refused token (401) stops the worker: that never fixes itself.
+ * A 404 is what the server answers while it is being deployed or restarted (the route is simply not there yet), and it looks exactly like
+ * "feature not enabled". 2026-11-25: one 404 seen mid-deploy made the worker exit, and no AI call was answered for the rest of the day.
+ * So a 404 is retried for as long as it lasts; after SUSPECT_404_MS it is also reported as probably a wrong URL or token setting, but the
+ * worker still keeps trying (a 60-second poll costs nothing, and a worker that has quit cannot notice the server coming back).
+ * @returns {{action:'stop'|'retry', suspect?:boolean, reason?:string}}
+ */
+export const SUSPECT_404_MS = 30 * 60_000;
+export function decideClaimFailure({ status = 0, firstNotFoundAt = null, now = Date.now() } = {}) {
+  if (status === 401) return { action: 'stop', reason: 'the server refused the worker token' };
+  if (status === 404) return { action: 'retry', suspect: firstNotFoundAt != null && now - firstNotFoundAt >= SUSPECT_404_MS, reason: 'route not found (server restarting, or a wrong SUPERRANK_URL / LLM_WORKER_TOKEN not set on the server)' };
+  return { action: 'retry' };
+}
+
+/**
+ * Hands a FINISHED answer (or a failure report) to the server, and keeps trying through a deploy or a network drop. Before this, one failed
+ * hand-over (the server restarting at that moment) threw the written answer away: the request stayed "claimed" until the stale timer put it
+ * back and the whole generation was paid for again. The text stays in memory and is retried with growing waits for up to `maxMs` (default
+ * 10 minutes, longer than the server's 5-minute stale-claim window would make useful: after that the server has given the request to someone else).
+ * Final at once (no retry): 400/401/403/409/410/413/422 — the server answered and means it ("not held by you any more", "too long", "bad token").
+ * Retried: no answer at all, 404 (a deploy: the route is not there yet), 408, 429, and any 5xx.
+ * @returns {Promise<{ok:true, value:any} | {ok:false, final:boolean, error:Error}>}
+ */
+export const FINAL_STATUSES = new Set([400, 401, 403, 409, 410, 413, 422]);
+export async function deliverWithRetry(send, { sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now, maxMs = 10 * 60_000, onRetry = () => {} } = {}) {
+  const started = now(); let attempt = 0;
+  for (;;) {
+    try { return { ok: true, value: await send() }; }
+    catch (error) {
+      if (FINAL_STATUSES.has(error?.status)) return { ok: false, final: true, error };
+      if (now() - started >= maxMs) return { ok: false, final: false, error };
+      const ms = backoffMs(++attempt);
+      onRetry({ error, attempt, ms });
+      await sleep(ms);
+    }
+  }
+}
+
 export const backoffMs = (attempt) => Math.min(60_000, 2000 * 2 ** Math.max(0, attempt - 1));
 
 export const clock = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;

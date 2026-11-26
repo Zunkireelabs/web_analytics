@@ -120,6 +120,13 @@ jobs:
             BLOG_DAY_START=2026-11-25
             BLOG_DAY_MAX_BLOGS=6
 
+            # ── Autonomous delivery (SRANK-48; docs/autonomous-delivery-deployment-plan.md) ──
+            # Consolidation opens the PR for work that was validated but never got one (or saves it with the exact error); alerts write to the
+            # database and email. Neither blocks normal output. The other new switches (design protection, blog gates, overwrite guard, topic
+            # research) are left unset on purpose: they default to log-only until a day of real data shows they will not zero a client's output.
+            DELIVERY_CONSOLIDATION_MODE=on
+            DELIVERY_ALERTS_MODE=on
+
             # ── DataForSEO (keywords, backlinks, real AI answers) ───────────
             # Was only in deploy-staging.yml, and this block rewrites .env on every deploy, so production had no DataForSEO
             # at all. Every call goes through the per-project monthly budget (providers/dataforseo/client.js, migration 231).

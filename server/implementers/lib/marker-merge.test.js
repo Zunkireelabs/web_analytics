@@ -1213,8 +1213,49 @@ describe('JSX marker convention (.jsx/.tsx bootstrap-created markers)', () => {
     const file = 'function Page() {\n  return (\n    <main>\n      {/* SEOAI:QACONTENT:START */}{/* SEOAI:QACONTENT:END */}\n    </main>\n  );\n}\n';
     const spliced = spliceMarkers(file, { qaContent: 'QACONTENT' }, { qaContent: '<div class="qa"><p>Q</p></div>' });
     assert.equal(spliced.ok, true);
-    assert.match(spliced.newContent, /dangerouslySetInnerHTML=\{\{ __html: "<div class=\\"qa\\"><p>Q<\/p><\/div>" \}\}/);
+    // one classed root element: the site's own element is the host (no extra classless <div>), same DOM
+    assert.match(spliced.newContent, /<div className="qa" suppressHydrationWarning dangerouslySetInnerHTML=\{\{ __html: "<p>Q<\/p>" \}\} \/>/);
     assert.doesNotMatch(spliced.newContent, /<main>\s*<div class="qa">/); // never a raw, invalid-JSX splice
+  });
+
+  describe('JSX host element: the injected block never adds a classless wrapper (the design gate refuses those)', () => {
+    const page = 'function Page() {\n  return (\n    <main>\n      {/* SEOAI:FAQ:START */}{/* SEOAI:FAQ:END */}\n    </main>\n  );\n}\n';
+    const splice = (html) => spliceMarkers(page, { faq: 'FAQ' }, { faq: html }).newContent;
+    const WRAP = (html) => `<div suppressHydrationWarning dangerouslySetInnerHTML={{ __html: ${JSON.stringify(html)} }} />`;
+
+    test('a FAQ wrapped in the site\'s own classed <dl> uses that <dl> as the host, and the rendered DOM is identical', () => {
+      const html = '<dl class="mx-auto max-w-7xl px-6 py-10">\n  <dt class="text-2xl">Q?</dt>\n  <dd class="text-muted">A.</dd>\n</dl>';
+      const out = splice(html);
+      assert.match(out, /<dl className="mx-auto max-w-7xl px-6 py-10" suppressHydrationWarning dangerouslySetInnerHTML=/);
+      const m = /<dl className="([^"]*)" suppressHydrationWarning dangerouslySetInnerHTML=\{\{ __html: ("(?:[^"\\]|\\.)*") \}\} \/>/.exec(out);
+      assert.equal(`<dl class="${m[1]}">${JSON.parse(m[2])}</dl>`, html, 'host element + innerHTML reproduces the original HTML exactly');
+    });
+    test('the design gate now accepts it: the first container carries className (it was refused as a bare <div> before)', async () => {
+      const { findBareAddedBlock } = await import('../../design-agent/lib/live-design-validation.js');
+      const html = '<dl class="mx-auto max-w-7xl"><dt class="t">Q?</dt><dd class="d">A.</dd></dl>';
+      assert.equal(findBareAddedBlock(page, splice(html)), null);
+      assert.equal(findBareAddedBlock(page, page.replace('{/* SEOAI:FAQ:START */}{/* SEOAI:FAQ:END */}', `{/* SEOAI:FAQ:START */}${WRAP(html)}{/* SEOAI:FAQ:END */}`)), 'div', 'the old form is still what the gate refuses');
+    });
+    test('a classless injected root is NOT dressed up: it keeps the wrapper, and the gate still refuses it', async () => {
+      const { findBareAddedBlock } = await import('../../design-agent/lib/live-design-validation.js');
+      const html = '<dl><dt>Q?</dt><dd>A.</dd></dl>';
+      assert.ok(splice(html).includes(WRAP(html)));
+      assert.equal(findBareAddedBlock(page, splice(html)), 'div');
+    });
+    test('several roots, other attributes, braces, void elements and unbalanced nesting all keep the wrapper exactly as before', () => {
+      for (const html of ['<div class="a">x</div><div class="b">y</div>', '<div class="a" style="color:red">x</div>', '<div class="a" onclick="f()">x</div>', '<div class="a{b}">x</div>', '<img class="a">', '<div class="a"><div>x</div>', '<p class="a">x</p> trailing']) {
+        assert.ok(splice(html).includes(WRAP(html)), html);
+      }
+    });
+    test('the same tag nested inside the root is handled: only the outermost element becomes the host', () => {
+      const out = splice('<div class="outer"><div class="inner">x</div></div>');
+      assert.match(out, /<div className="outer" suppressHydrationWarning dangerouslySetInnerHTML=\{\{ __html: "<div class=\\"inner\\">x<\/div>" \}\} \/>/);
+    });
+    test('aria-, data-, id and role attributes are carried over; the marker comments around the block are untouched', () => {
+      const out = splice('<section id="faq" role="region" aria-label="FAQ" data-x="1" class="s"><p>t</p></section>');
+      assert.match(out, /\{\/\* SEOAI:FAQ:START \*\/\}<section id="faq" role="region" aria-label="FAQ" data-x="1" className="s" suppressHydrationWarning dangerouslySetInnerHTML=/);
+      assert.match(out, /\/>\{\/\* SEOAI:FAQ:END \*\/\}/);
+    });
   });
 
   test('a marker already present on a JSX file round-trips through ensureMarkers unchanged', () => {

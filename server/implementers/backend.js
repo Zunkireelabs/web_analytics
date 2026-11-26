@@ -10,7 +10,7 @@ import { computeBlogPaginationMerge, pushBlogPaginationBranch, previewLiveBlogPa
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, resolveBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, getRepoTree } from '../github/client.js';
 import { stripManagedMarkers } from '../lib/managed-markers.js';
-import { MARKDOWN_NATIVE_TYPES, isMarkdownFile, learnMarkdownConventions, renderMarkdownNative, placeMarkdownMarker, loadSiblingMarkdown, planMarkdownTitleField, expandedContentBelowClosingSection } from './lib/markdown-native.js';
+import { MARKDOWN_NATIVE_TYPES, isMarkdownFile, canUseCapturedTemplateInstead, learnMarkdownConventions, renderMarkdownNative, placeMarkdownMarker, loadSiblingMarkdown, planMarkdownTitleField, expandedContentBelowClosingSection } from './lib/markdown-native.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
 import { planRedirect } from './lib/redirect-writer.js';
 import { planSecurityHeaders } from './lib/host-headers-writer.js';
@@ -1470,8 +1470,17 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     }
     const conventions = learnMarkdownConventions(siblings);
     const rendered = renderMarkdownNative(draft.action_type, draft.content, conventions, { fileBody: file.content });
-    if (!rendered.ok) return { ok: false, reason: rendered.reason, error: rendered.error };
-    markdownNative = { conventions, rendered };
+    if (!rendered.ok) {
+      // No sibling post shows how this site writes a FAQ / related-links list, but the site HAS a component template captured from its
+      // own real page (verified against the live page by the checks below, held if stale). That is a real design source, so use it
+      // through the template path instead of refusing (2026-11-25: nine site-1 drafts refused for this, retried three times each).
+      // Only these two "no convention" refusals fall through; every other refusal (own FAQ already there, empty draft, tables) still holds.
+      const capturedTemplate = COMPONENT_TEMPLATE_KEY[draft.action_type]
+        && site.url_file_map?.siteRoot?.componentTemplates?.[COMPONENT_TEMPLATE_KEY[draft.action_type]];
+      if (!canUseCapturedTemplateInstead(rendered.reason, Boolean(capturedTemplate))) return { ok: false, reason: rendered.reason, error: rendered.error };
+    } else {
+      markdownNative = { conventions, rendered };
+    }
   }
 
   // Checked only when this action type has SOME real design claim to verify
@@ -1688,6 +1697,20 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
       }
       console.warn(`[style-fidelity] log mode — ${page} (${marker}): ${summary}`);
     }
+  }
+
+  // STRICT DESIGN PROTECTION (lib/design-protection, Phase 3): the one gate every VISIBLE change passes, judged against this page's own template baseline at 1440 and
+  // 390 px. DESIGN_PROTECTION_MODE=log (the default) only records what it would hold; 'enforce' waits (no baseline / could not check), refuses a measured break and
+  // ships the repaired markup when a bounded repair passed the same check. The checks above keep enforcing meanwhile.
+  if (mode === 'visible' && componentField && marker && built.values[componentField]) {
+    const { protectMarkerSplice, toPendingError } = await import('../lib/design-protection/hooks.js');
+    const protection = await protectMarkerSplice({ site, draft, page, marker, html: built.values[componentField] })
+      .catch((err) => ({ ok: true, verdict: 'error', error: err.message, html: built.values[componentField], reasons: [] })); // protection's own failure never ships or blocks by itself
+    if (!protection.ok) {
+      if (protection.pending) throw await toPendingError(protection, page);
+      return { ok: false, reason: `design-protection-${protection.verdict}`, error: protection.error, draftHtml: built.values[componentField], pageUrl: page, marker };
+    }
+    if (protection.repaired && protection.html) built.values[componentField] = protection.html;
   }
 
   // Resolves any marker in markerMap that isn't already in the live file —

@@ -1,0 +1,33 @@
+{
+  "_what": "PROPOSAL, not applied. Points Zennly's /businesses pages at their Eleventy SOURCE files (which already carry every SEOAI marker) instead of the generated Next.js stubs, so platform fixes land where the markers are. Replaces ONLY the listed pages/patterns for site 8872; every other key of url_file_map is left exactly as it is. Apply with the audited path (backup, dry-run, --apply), one site, after the owner's approval.",
+  "site": 8872,
+  "problem_found": {
+    "saved_map_today": "127 pages mapped to Next route files; 0 have markers or adapters. The only pattern is a catch-all '^/(.+)/?$' -> src/app/(marketplace)/[...unmatched]/page.tsx (the not-found route), so a blog URL such as /blog/<slug>/ resolves to that file.",
+    "where_the_markers_are": "marketing/src (Eleventy source): 64/64 blog posts carry SEOAI:INTERNALLINKS and SEOAI:EXPANDEDCONTENT; cookie-policy, privacy-policy, terms-of-service, faq, index and solutions carry BREADCRUMBSCHEMA, FAQ, SCHEMA and TITLE. The generated Next stubs (page.tsx, generated/*.ts) are regenerated from that source and must never be edited by hand.",
+    "open_fixes_waiting": "16 pages: 10 blog posts (internal-links), 1 (expand-content), 3 legal pages (breadcrumbs), 1 solutions page (font-size), 1 marketplace home (faq)."
+  },
+  "set": {
+    "patterns_before_catch_all": [
+      { "file": "marketing/src/blog/$1.njk", "match": "^/(?:businesses/)?blog/([^/]+)/?$" },
+      { "file": "marketing/src/features/$1.njk", "match": "^/(?:businesses/)?features/([^/]+)/?$" },
+      { "file": "marketing/src/solutions/$1.njk", "match": "^/(?:businesses/)?solutions/([^/]+)/?$" },
+      { "file": "marketing/src/nepal/$1.njk", "match": "^/(?:businesses/)?nepal/([^/]+)/?$" },
+      { "file": "marketing/src/compare/$1.njk", "match": "^/(?:businesses/)?compare/([^/]+)/?$" }
+    ],
+    "pages": {
+      "/businesses/blog": { "file": "marketing/src/blog.njk" },
+      "/businesses/cookie-policy": { "file": "marketing/src/cookie-policy.njk" },
+      "/businesses/privacy-policy": { "file": "marketing/src/privacy-policy.njk" },
+      "/businesses/terms-of-service": { "file": "marketing/src/terms-of-service.njk" },
+      "/businesses/faq": { "file": "marketing/src/faq.njk" },
+      "/businesses": { "file": "marketing/src/index.njk" }
+    }
+  },
+  "keeps": "The existing catch-all pattern stays LAST, so the marketplace (consumer) pages are unaffected.",
+  "derivedFrom": [
+    "the 5 patterns of Zennly's own previous Eleventy map (_previousRepo), re-rooted at marketing/src, which is where the same files live in the connected repo",
+    "the file listing and marker counts of ~/Projects/zennly-marketplace/marketing/src"
+  ],
+  "depends_on": "Edits to marketing/src only reach the live site once the generated Next pages are regenerated: the CI workflow in ci/generate-blog-pages.yml (or a person running the repo's sync and port scripts) must be in place first. The workflow currently only covers marketing/src/blog/**; it must be widened to the other source paths before non-blog fixes are shipped.",
+  "not_covered": "The 21 hand-written Next marketplace pages (src/app/(marketplace)) have no markers and no adapters. 12 export Next metadata, so title/description/canonical could use the existing nextjs-metadata-export adapter (config only, as for Admizz). A body region such as the home page FAQ needs a marker pair placed where the design wants it: that is a design decision for the owner, and the only case that would need a (small) pull request into Zennly's repo."
+}

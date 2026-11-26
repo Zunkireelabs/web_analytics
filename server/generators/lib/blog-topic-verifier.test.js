@@ -34,4 +34,22 @@ describe('verifyBlogTopic', () => {
     await verifyBlogTopic({ params: { topic: 't' } }, { site: { id: 5 } }, async (id, gap, opts) => { seen = [id, opts]; return { status: 'gap' }; });
     assert.deepEqual(seen, [5, { allowLLM: false, persist: false }]);
   });
+
+  // The content index sees what page coverage cannot: the same topic already being made.
+  const inflight = (state, extra = {}) => async () => ({ entries: [{ kind: 'blog', state, url: null, title: 'Student accommodation in London', tokens: ['student', 'accommodation', 'london'], draftId: 5, ...extra }] });
+  test('a topic already in a draft, an approved draft, an open pull request or merged content is resolved by the content index', async () => {
+    for (const state of ['draft', 'approved', 'in_pr', 'merged']) {
+      const v = await verifyBlogTopic(rec({ topic: 'student accommodation in london' }), {}, classify({ status: 'gap', url: null }), inflight(state));
+      assert.equal(v.decision, 'already_resolved', state); assert.equal(v.reason, 'topic-already-in-content-index');
+      assert.match(v.evidence.indexReason, /already/);
+    }
+  });
+  test('a different topic passes the index; an unreadable index never blocks', async () => {
+    assert.equal((await verifyBlogTopic(rec({ topic: 'ielts preparation guide' }), {}, classify({ status: 'gap', url: null }), inflight('in_pr'))).decision, 'still_valid');
+    assert.equal((await verifyBlogTopic(rec({ topic: 'student accommodation in london' }), {}, classify({ status: 'gap', url: null }), async () => { throw new Error('db down'); })).decision, 'still_valid');
+  });
+  test('a person-requested topic still skips both checks', async () => {
+    const v = await verifyBlogTopic(rec({ topic: 'student accommodation in london', clientRequested: true }), {}, classify({ status: 'gap' }), inflight('in_pr'));
+    assert.equal(v.decision, 'still_valid');
+  });
 });

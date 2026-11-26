@@ -94,7 +94,9 @@ function componentsOf(block) {
 // preserved by `order`. Returns the schema's `sections` array for one page.
 export function segmentPage(blocks) {
   const sorted = [...(blocks || [])].sort((a, b) => a.order - b.order);
-  const landmarkOf = (block) => (block.landmark === 'header' ? 'header' : block.landmark === 'nav' ? 'nav' : block.landmark === 'footer' ? 'footer' : null);
+  // A block capture.js flagged as furniture (a mega-menu panel beside the header, a dialog, an aria-hidden drawer; see chrome-context.js) is navigation for every purpose
+  // here: it is skipped by the chrome exclusions that already protect header/nav/footer sections, and it can no longer be taken for the hero or the last content block.
+  const landmarkOf = (block) => (block.landmark === 'header' ? 'header' : block.landmark === 'nav' ? 'nav' : block.landmark === 'footer' ? 'footer' : block.chrome ? 'nav' : null);
   const firstContentIndex = sorted.findIndex((b) => !landmarkOf(b));
   const lastContentIndex = sorted.length - 1 - [...sorted].reverse().findIndex((b) => !landmarkOf(b));
   const sections = sorted.map((block, i) => {
@@ -134,6 +136,8 @@ export function segmentSite({ pages } = {}) {
     pageType: page.pageType,
     title: page.title,
     sections: segmentPage(page.blocks),
+    // The page's own body headings (h2/h3 in the body region, chrome excluded), when capture.js recorded them; absent on older captures.
+    ...(Array.isArray(page.bodyHeadings) ? { bodyHeadings: page.bodyHeadings, bodyRegionFound: page.bodyRegionFound !== false } : {}),
   }));
 }
 

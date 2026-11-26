@@ -7,6 +7,7 @@
 // source.
 import { callLLMForJson } from '../../llm.js';
 import { DESIGN_PROFILE_VERSION } from './schema.js';
+import { ARTICLE_PAGE_TYPES } from './chrome-context.js';
 import { maxTextPx, isFixedHeightOnly } from '../../lib/text-scale.js';
 
 const SYSTEM_PROMPT = `You are analyzing structural facts already extracted from a real, live website's rendered pages — real HTML class attributes, real computed text styles, real section ordering. You are NOT reading source code and you must NEVER invent a class name, color, or pattern that isn't present in the data you're given.
@@ -389,9 +390,49 @@ export function headingPageSamplesByContext(segmentedPages) {
 // just re-grouped here for cross-checking the model's OWN pageTypePatterns
 // summary against it. Excludes chrome and label-styled text, same as
 // headingSamplesByLevel above.
+// THE ARTICLE'S OWN HEADINGS, per article page type (blog-article, legal): how many h2/h3 the page body really has and how many of them carry a class. Taken only from
+// the body region capture.js marked (chrome is excluded there), so a navigation panel can never be a page's subheading evidence. Pages captured before capture.js recorded
+// this (no `bodyHeadings`) are simply absent here and fall back to the section-based evidence, exactly as before.
+export function articleBodyEvidence(segmentedPages) {
+  const out = new Map();
+  for (const page of segmentedPages || []) {
+    if (!ARTICLE_PAGE_TYPES.includes(page.pageType) || !Array.isArray(page.bodyHeadings) || !page.bodyHeadings.length) continue;
+    const e = out.get(page.pageType) || { observed: 0, classed: 0, items: [] };
+    for (const h of page.bodyHeadings) {
+      e.observed += 1;
+      const classes = String(h.classes || '').trim();
+      if (!classes) continue;
+      e.classed += 1;
+      e.items.push({ role: 'subheading', tag: `h${h.level}`, classes, style: { fontSize: `${h.fontSize}px` } });
+    }
+    out.set(page.pageType, e);
+  }
+  return out;
+}
+
+// The subheading entry that body-heading evidence supports. BARE (most body headings carry no class) is a positive finding: the site's layout styles them, and it must never be
+// replaced by a class borrowed from somewhere else on the page. Otherwise the central observed class, flagged as observed in the body.
+function entryFromBodyEvidence(existing, ev) {
+  const base = { ...(existing || {}), role: 'subheading' };
+  if (ev.classed / ev.observed < 0.5) {
+    return { ...base, classes: null, bare: true, observed: ev.observed, observedInBody: true, styleNotes: 'Body headings carry no class: the site styles them (bare h2/h3).' };
+  }
+  return { ...base, classes: pickCentralClass(ev.items), bare: false, observed: ev.observed, observedInBody: true };
+}
+
 function subheadingSamplesByPageType(segmentedPages) {
   const byType = new Map();
   for (const page of segmentedPages || []) {
+    if (ARTICLE_PAGE_TYPES.includes(page.pageType) && Array.isArray(page.bodyHeadings) && page.bodyHeadings.length) {
+      // body-region evidence replaces the section-based guess for this page (the classed body headings only; bare ones are counted by articleBodyEvidence)
+      for (const h of page.bodyHeadings) {
+        const classes = String(h.classes || '').trim();
+        if (!classes) continue;
+        if (!byType.has(page.pageType)) byType.set(page.pageType, []);
+        byType.get(page.pageType).push({ role: 'subheading', tag: `h${h.level}`, classes, style: { fontSize: `${h.fontSize}px` } });
+      }
+      continue;
+    }
     for (const section of page.sections || []) {
       if (CHROME_ROLES.has(section.role)) continue;
       for (const item of section.textHierarchy || []) {
@@ -433,9 +474,12 @@ export function backfillPageTypePatterns(patterns, segmentedPages) {
         byRole.get(item.role).push(item);
       }
     }
-    const textHierarchy = [...byRole.entries()]
+    let textHierarchy = [...byRole.entries()]
       .filter(([role]) => ['heading', 'subheading', 'body'].includes(role))
       .map(([role, items]) => ({ role, classes: pickCentralClass(items), styleNotes: 'Observed on the captured sample page.' }));
+    // An article's subheading comes from its body headings (bare is a finding), never from whatever classed heading the other blocks happened to hold.
+    const bodyEv = articleBodyEvidence([page]).get(type);
+    if (bodyEv) textHierarchy = [...textHierarchy.filter((e) => e.role !== 'subheading'), entryFromBodyEvidence(null, bodyEv)];
     if (!content.length && !textHierarchy.length) continue;
     out[type] = {
       sectionOrder: (page.sections || []).map((sec) => sec.role).filter(Boolean),
@@ -462,10 +506,20 @@ export function backfillPageTypePatterns(patterns, segmentedPages) {
 // left null when there is no evidence at all — never invented.
 export function correctPageTypeTextHierarchy(patterns, segmentedPages) {
   const samplesByType = subheadingSamplesByPageType(segmentedPages);
+  const bodyEvidence = articleBodyEvidence(segmentedPages);
   const out = {};
   const corrected = [];
 
   for (const [pageType, pattern] of Object.entries(patterns || {})) {
+    const ev = bodyEvidence.get(pageType);
+    if (ev) {
+      // The page body's own headings decide the subheading entry: bare stays bare (never replaced by a class from elsewhere), a class stays only if it was seen on a body heading.
+      const had = (pattern.textHierarchy || []).find((e) => e.role === 'subheading');
+      const entry = entryFromBodyEvidence(had, ev);
+      if (!had || (had.classes || null) !== (entry.classes || null)) corrected.push(pageType);
+      out[pageType] = { ...pattern, textHierarchy: [...(pattern.textHierarchy || []).filter((e) => e.role !== 'subheading'), entry] };
+      continue;
+    }
     const samples = samplesByType.get(pageType) || [];
     const textHierarchy = (pattern.textHierarchy || []).map((entry) => {
       if (entry.role !== 'subheading') return entry;
@@ -632,7 +686,11 @@ export async function extractDesignProfile(segmentedPages, {
     // `responsive.breakpoints` is unaffected.
     responsive: { ...(extracted.responsive || { breakpoints: [] }), measured: responsiveMeasured },
     navigation: extracted.navigation || {},
-    pages: (segmentedPages || []).map((p) => ({ url: p.url, pageType: p.pageType, sections: p.sections })),
+    pages: (segmentedPages || []).map((p) => ({
+      url: p.url, pageType: p.pageType, sections: p.sections,
+      // The page's own body headings (no text), so the evidence behind an article's subheading entry can be checked later; absent on older captures.
+      ...(Array.isArray(p.bodyHeadings) ? { bodyRegionFound: p.bodyRegionFound !== false, bodyHeadings: p.bodyHeadings.slice(0, 30).map((h) => ({ level: h.level, classes: h.classes || '', fontSize: h.fontSize, fontWeight: h.fontWeight, marginTop: h.marginTop })) } : {}),
+    })),
     pageTypePatterns,
     evidence: extracted.evidence || { pagesAnalyzed: pages.map((p) => p.url), notes: '' },
   };

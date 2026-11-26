@@ -14,6 +14,8 @@
 import { chromium } from 'playwright';
 import { classifyPageType } from './schema.js';
 import { surveyLayouts, NOT_A_LAYOUT } from './layout-survey.js';
+import { measureBodyInPage } from './body-measure.js';
+import { chromeConfig } from './chrome-context.js';
 
 // Raised from 8 (2026-09-16): with 'other' no longer sub-capped (see
 // discoverPages), a real small-business site's actual page variety needs
@@ -437,7 +439,8 @@ export async function discoverCardHeavyPages(browserPage, homepageUrl, excludeUr
 // the two style samples every projector and the extraction prompt actually
 // need, without serializing the whole subtree's markup back to Node.
 /* eslint-disable no-undef */
-function extractBlocksInPage() {
+function extractBlocksInPage(cfg) {
+  const CFG = { tags: (cfg && cfg.tags) || [], roles: (cfg && cfg.roles) || [], tokens: (cfg && cfg.tokens) || [] };
   function styleOf(el) {
     if (!el) return null;
     const cs = window.getComputedStyle(el);
@@ -588,6 +591,25 @@ function extractBlocksInPage() {
     return [el];
   }
 
+  // Is this element page FURNITURE (navigation, a mega-menu panel, a dialog, a cookie banner, a sidebar), judged by what it IS, not where it sits? A mega-menu panel is
+  // a top-level sibling of <header>, so `closest('header')` never caught it. Walks the element and its ancestors (up to `stopAt`, exclusive) and returns the reason, or
+  // null. The lists come from chrome-context.js (one definition, passed in), so the profile builder and the guards judge the same way.
+  const nameTok = (str) => String(str || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  function chromeReasonOf(el, stopAt) {
+    for (let e = el; e && e !== stopAt && e !== document.body && e !== document.documentElement; e = e.parentElement) {
+      const tag = e.tagName.toLowerCase();
+      if (CFG.tags.includes(tag)) return `tag:${tag}`;
+      const role = (e.getAttribute('role') || '').toLowerCase();
+      if (role && CFG.roles.includes(role)) return `role:${role}`;
+      if (e.getAttribute('aria-hidden') === 'true') return 'aria-hidden';
+      if (e.hasAttribute('hidden')) return 'hidden';
+      if (e.hasAttribute('inert')) return 'inert';
+      const hit = [...nameTok(e.id), ...nameTok(typeof e.className === 'string' ? e.className : '')].find((t) => CFG.tokens.includes(t));
+      if (hit) return `name:${hit}`;
+    }
+    return null;
+  }
+
   const topLevel = [...document.body.children].flatMap(unwrap);
   const blocks = [];
   let order = 0;
@@ -628,6 +650,8 @@ function extractBlocksInPage() {
       containerClasses: containerEl ? classesOf(containerEl) : '',
       tag: el.tagName.toLowerCase(),
       landmark: el.closest('header') ? 'header' : el.closest('nav') ? 'nav' : el.closest('footer') ? 'footer' : null,
+      // Furniture the landmark check cannot see (a mega-menu panel, a dialog, an aria-hidden drawer). segment.js treats such a block as chrome: never design evidence.
+      chrome: chromeReasonOf(el, null),
       classes: classesOf(el),
       top: Math.round(rect.top + window.scrollY),
       height: Math.round(rect.height),
@@ -665,7 +689,23 @@ function extractBlocksInPage() {
       linkClasses: classesOf(pickLink(el)),
     });
   }
-  return { title: document.title, blocks };
+  // THE ARTICLE'S OWN HEADINGS: every visible h2/h3 inside the body region (the region the render gate measures; capturePage marked it before this ran), with the class
+  // it carries or none. Bare headings are real evidence ("the site's layout styles them"), and the only evidence that is not tied to a block's single dominant heading.
+  const region = document.querySelector('[data-gate-region]');
+  const bodyHeadings = [];
+  if (region) {
+    for (const h of [...region.querySelectorAll('h2, h3')].slice(0, 60)) {
+      if (chromeReasonOf(h, region)) continue;
+      const hr = h.getBoundingClientRect();
+      if (hr.height === 0) continue;
+      const hs = window.getComputedStyle(h);
+      bodyHeadings.push({
+        level: Number(h.tagName[1]), classes: classesOf(h), text: (h.textContent || '').trim().slice(0, 60),
+        fontSize: parseFloat(hs.fontSize) || 0, fontWeight: hs.fontWeight, marginTop: parseFloat(hs.marginTop) || 0,
+      });
+    }
+  }
+  return { title: document.title, blocks, bodyHeadings, bodyRegionFound: !!region };
 }
 /* eslint-enable no-undef */
 
@@ -884,8 +924,15 @@ export async function captureResponsive(browserPage, url, { minTapTargetPx = MIN
 // in memory only, for the one LLM call it feeds, then discarded.
 export async function capturePage(browserPage, url, { screenshot = false } = {}) {
   await browserPage.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
-  const { title, blocks } = await browserPage.evaluate(extractBlocksInPage);
-  const result = { url, title, blocks };
+  return captureLoadedPage(browserPage, url, { screenshot });
+}
+
+// Everything capturePage does AFTER the navigation, so a test can hand it a page it loaded from a fixture. The body region is marked with the SAME finder the render
+// gate uses (body-measure.js measureBodyInPage), not a second copy, so "the article body" means one thing everywhere.
+export async function captureLoadedPage(browserPage, url, { screenshot = false } = {}) {
+  await browserPage.evaluate(measureBodyInPage, true).catch(() => null);
+  const { title, blocks, bodyHeadings, bodyRegionFound } = await browserPage.evaluate(extractBlocksInPage, chromeConfig());
+  const result = { url, title, blocks, bodyHeadings, bodyRegionFound };
   if (screenshot) {
     const buf = await browserPage.screenshot({ type: 'jpeg', quality: 70 });
     result.screenshot = buf.toString('base64');

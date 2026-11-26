@@ -14,6 +14,12 @@ import { findMarkdownFaqSection } from '../../lib/existing-faq.js';
 
 export const MARKDOWN_NATIVE_TYPES = new Set(['faq', 'qa-content', 'internal-links', 'expand-content', 'refresh-content']);
 
+// Pure. A Markdown page with no sibling showing a FAQ / related-links list may use the site's captured component template instead of
+// being refused, but only for those two "no convention" refusals and only when such a template exists. Every other refusal still holds.
+export function canUseCapturedTemplateInstead(reason, hasCapturedTemplate) {
+  return Boolean(hasCapturedTemplate) && (reason === 'no-markdown-faq-convention' || reason === 'no-markdown-related-convention');
+}
+
 export function isMarkdownFile(filePath) {
   return /\.mdx?$/i.test(String(filePath || ''));
 }

@@ -47,7 +47,7 @@ import { validateRendering, validateRenderingBatch, checkClientBuildStatus } fro
 import { reviewPrChecks, generatedFilePaths, AGENT_REVIEW_STATE } from '../implementers/lib/pr-self-review.js';
 import {
   createDraft, saveDraftPageClassification, getDraftByFindingId, listDrafts, listDraftsForBoard, countDraftsByLifecycle, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
-  markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, markCmsDraftPublished, recordAgentReviewState, recordPrState, recordApplyFailure, recordMergeFailure,
+  markDraftImplemented, recordPrMerge, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, markCmsDraftPublished, recordAgentReviewState, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds, countDesignDeferralsForFinding,
 } from '../store/drafts.js';
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
@@ -650,6 +650,11 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
       validation: { passed: false, gate: 'quality-gate', attempts: attemptsUsed },
     });
     await recordKnowledgeReuse(priorKnowledge, 'failure', { siteId, generatorId });
+    // A blog that failed every attempt KEEPS what was written: stored with its exact issues (lib/blog-cycle/quarantine.js) instead of being lost, so a person or
+    // a later repair starts from it and the day's record can name the blocked article. Best effort; the refusal below is unchanged.
+    if (generatorId === 'blog-outline') {
+      try { await (await import('../lib/blog-cycle/quarantine.js')).quarantineArticle(siteId, { topic: params?.topic || content?.topic || '', content, issues: gateResult.issues, attempts: attemptsUsed }); } catch { /* never blocks the refusal */ }
+    }
     const err = new Error(`This recommendation could not be generated cleanly (incomplete/invalid content after ${MAX_GENERATION_ATTEMPTS} attempts) — try again shortly.`);
     err.status = 502;
     err.userFacing = true;
@@ -887,7 +892,7 @@ router.get('/action-center/drafts', async (req, res, next) => {
 // Exact tab-badge counts, independent of listDraftsForBoard's own cap —
 // see countDraftsByLifecycle's own comment for why these must never be
 // derived from a possibly-capped list.
-// Where the day's fix-writing stands: the laptop worker (connected or not, 10:30 to 14:00 window) for the dashboard banner.
+// Where the day's fix-writing stands: the laptop worker (connected or not, 10:30 to 17:00 window) for the dashboard banner.
 router.get('/action-center/worker-status', async (req, res, next) => {
   try {
     const site = await getSiteById(req.siteId).catch(() => null);
@@ -2865,6 +2870,8 @@ export async function checkDraftPrStatus(siteId, draftId) {
 
   if (pr.merged) {
     await recordPrState(siteId, draft.id, 'merged');
+    // Who merged it, from GitHub itself (migration 271): `human_merged` is only ever a fact GitHub reported, and a merge by a Bot account is flagged by the alerts.
+    await recordPrMerge(siteId, draft.id, { mergedBy: pr.mergedBy, mergedByType: pr.mergedByType, mergedAt: pr.mergedAt }).catch((err) => console.error('[action-center] could not record who merged draft', draft.id, err.message));
     notifyGscBestEffort(site, draft);
     // A merge is evidence the change was accepted, never evidence it is live.
     // Recording the resulting commit here is what lets the Verify stage tell

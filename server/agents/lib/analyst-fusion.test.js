@@ -44,6 +44,16 @@ describe('familiesForDecliningPage', () => {
     assert.ok(families.size >= MIN_CORROBORATION_TO_ACT, 'four corroborating signals must clear the evidence bar');
   });
 
+  test('a page-decline THRESHOLD warning is worded as "at least N% below the recent average", not as a projected change', () => {
+    const decline = { reasons: ['position 4.0 -> 6.2 (slipped 2.2 places)'], impressionsLost: 0, impressionsAtRisk: 500 };
+    const threshold = { page: '/p', insight_type: 'forecast_risk', evidence: { confidence: 0.7, projection_basis: 'decline_threshold_of_the_model_label', decline_threshold_pct: 20, pct_projected_change: -20 } };
+    const ordinary = { page: '/p', insight_type: 'forecast_risk', evidence: { confidence: 0.7, pct_projected_change: -22 } };
+    const detailOf = (insight) => familiesForDecliningPage(decline, [insight]).signals.find((x) => x.family === 'forecast_risk').detail;
+    assert.match(detailOf(threshold), /at least 20% below the recent average/);
+    assert.doesNotMatch(detailOf(threshold), /projected change/);
+    assert.match(detailOf(ordinary), /-22% projected change/);                 // a real point forecast keeps its wording
+  });
+
   test('a POSITIVE anomaly (direction high) is never counted as decline evidence', () => {
     const decline = { reasons: ['position 4.0 -> 6.2 (slipped 2.2 places)'], impressionsLost: 0, impressionsAtRisk: 500 };
     const insights = [{ page: '/p', insight_type: 'anomaly', evidence: { direction: 'high', method: 'zscore', score: 3.5 } }];

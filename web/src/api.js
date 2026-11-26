@@ -137,6 +137,8 @@ export const api = {
   // The platform admin's own view across every client workspace (404 for anyone else).
   platform: {
     workspaces: () => req('/platform/workspaces'),
+    // Every client's day: the closed record, what is blocked and why, who merged what, and the alerts (platform admins only).
+    deliveryStatus: () => req('/platform/delivery/status'),
     // Agent instances, read only: one row per project, and one project's counts and statuses (never its content).
     instances: () => req('/platform/instances'),
     // AI crawler visits for every client, side by side (platform admins only).

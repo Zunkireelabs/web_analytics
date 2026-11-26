@@ -5,7 +5,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir, hostname, homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
-import { buildClaudeArgs, parseClaudeOutput, workerIdFrom, backoffMs, logLine } from './lib.mjs';
+import { buildClaudeArgs, parseClaudeOutput, workerIdFrom, backoffMs, logLine, decideClaimFailure, deliverWithRetry } from './lib.mjs';
 
 const env = process.env;
 const SERVER = String(env.SUPERRANK_URL || '').replace(/\/+$/, '');
@@ -73,11 +73,14 @@ async function handle(req) {
   try {
     const out = await runClaude({ system: req.system, user: req.user });
     if (out.ok) {
-      await api(`/requests/${req.id}/complete`, { text: out.text });
+      // The answer is already paid for: hand it over even if the server is restarting right now (see deliverWithRetry).
+      const sent = await deliverWithRetry(() => api(`/requests/${req.id}/complete`, { text: out.text }), { onRetry: ({ error, attempt, ms }) => say({ type: 'server-error', error: `could not hand over #${req.id}: ${error.message} (attempt ${attempt}, keeping the answer)`, ms }) });
+      if (!sent.ok) throw sent.error;
       stats.done++;
       say({ type: 'done', id: req.id, ms: Date.now() - started, chars: out.text.length, tokens: out.usage ? (out.usage.input || 0) + (out.usage.output || 0) : null });
     } else {
-      await api(`/requests/${req.id}/fail`, { error: out.error, retryable: out.retryable });
+      const sent = await deliverWithRetry(() => api(`/requests/${req.id}/fail`, { error: out.error, retryable: out.retryable }));
+      if (!sent.ok) throw sent.error;
       stats.failed++;
       say({ type: 'failed', id: req.id, error: out.error, retryable: out.retryable });
       if (out.cooldownMs) { restUntil = Date.now() + out.cooldownMs; say({ type: 'resting', ms: out.cooldownMs, why: out.kind === 'limit' ? 'the Claude usage limit or service is busy' : out.kind }); }
@@ -89,16 +92,20 @@ async function handle(req) {
 }
 
 async function lane() {
-  let attempt = 0;
+  let attempt = 0; let firstNotFoundAt = null;
   while (!stopping) {
     if (Date.now() < restUntil) { await sleep(Math.min(5000, restUntil - Date.now())); continue; }
     try {
       const { requests } = await api('/claim', { limit: 1, waitMs: 20_000, info: { host: hostname(), version: VERSION } }, { timeoutMs: 45_000 });
-      attempt = 0; serverFailures = 0;
+      attempt = 0; serverFailures = 0; firstNotFoundAt = null;
       for (const r of requests) await handle(r);
     } catch (e) {
-      if (e.status === 401 || e.status === 404) { console.error(`The server refused the worker (${e.status}): ${e.message}. Check SUPERRANK_URL and the token, and that LLM_WORKER_TOKEN is set on the server.`); process.exitCode = 3; stopping = true; return; }
-      const ms = backoffMs(++attempt); say({ type: 'server-error', error: e.message, ms }); await sleep(ms);
+      if (e.status === 404) firstNotFoundAt ??= Date.now(); else firstNotFoundAt = null;
+      const d = decideClaimFailure({ status: e.status, firstNotFoundAt });
+      if (d.action === 'stop') { console.error(`The server refused the worker (${e.status}): ${e.message}. Check SUPERRANK_URL and the token, and that LLM_WORKER_TOKEN is set on the server.`); process.exitCode = 3; stopping = true; return; }
+      const ms = backoffMs(++attempt);
+      say({ type: 'server-error', error: d.suspect ? `${e.message} — ${d.reason}; still retrying` : e.message, ms });
+      await sleep(ms);
     }
   }
 }
@@ -114,5 +121,11 @@ async function shutdown() {
 process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
 
 say({ type: 'start', workerId: WORKER_ID, concurrency: CONCURRENCY, server: SERVER });
+// A worker that was killed or restarted may have died holding requests. They are given back NOW (without costing an attempt) instead of
+// waiting out the 5-minute stale-claim timer. Tried a few times because the server may itself be mid-deploy when the laptop wakes.
+for (let i = 0; i < 6; i++) {
+  try { const r = await api('/release', {}, { timeoutMs: 10_000 }); if (r.released) console.log(`gave back ${r.released} request(s) the previous run was holding`); break; }
+  catch (e) { if (e.status === 401) break; await sleep(Math.min(30_000, 2000 * 2 ** i)); }
+}
 setInterval(() => say({ type: 'stats', ...stats }), 5 * 60_000).unref();
 await Promise.all(Array.from({ length: CONCURRENCY }, lane));

@@ -329,6 +329,19 @@ const ASTRO_DIR = {
   'src/content/blog/b.md': post(['cover:', '  kind: agent']),
   'src/content/blog/c.md': post(['cover:', '  kind: pills']),
 };
+import { minimalCoverKindFromSchema } from './newcontent-contract.js';
+describe('minimalCoverKindFromSchema', () => {
+  test('finds a cover variant that is only `{ kind }` in the site\'s content schema', () => {
+    const src = "const cover = z.discriminatedUnion('kind', [ z.object({ kind: z.literal('agent') }), z.object({ kind: z.literal('dark'), heading: z.string() }) ]);";
+    assert.equal(minimalCoverKindFromSchema(src), 'agent');
+  });
+  test('a variant with any other field is not minimal, and no schema means no answer', () => {
+    assert.equal(minimalCoverKindFromSchema("z.object({ kind: z.literal('dark'), heading: z.string() })"), null);
+    assert.equal(minimalCoverKindFromSchema(''), null);
+    assert.equal(minimalCoverKindFromSchema(undefined), null);
+  });
+});
+
 describe('deriveNewContentContract — a schema-validated (Astro content collection) site', () => {
   const dir = { dir: 'src/content/blog', extension: '.md' };
   test('learns the summary key is `excerpt`, not `description`', async () => {
@@ -341,6 +354,33 @@ describe('deriveNewContentContract — a schema-validated (Astro content collect
     assert.equal(c.schemaValidated, true);
     assert.deepEqual(c.requiredKeys, ['author', 'category', 'cover', 'date', 'excerpt', 'title']);
   });
+
+  test('a required key with the SAME value in every sibling is reused (author, category); titles and summaries are not, and a minimal `kind`-only cover a real post already uses is', async () => {
+    const c = await deriveNewContentContract(SITE, dir, depsFor(ASTRO_DIR));
+    assert.deepEqual(c.siblingConstants, { author: 'team', category: 'News', cover: { kind: 'agent' } });
+  });
+  test('an author or category that differs between posts takes the value most posts use, when at least two do (the client\'s own team, never invented)', async () => {
+    const files = { ...ASTRO_DIR, 'src/content/blog/c.md': ASTRO_DIR['src/content/blog/c.md'].replace('author: team', 'author: Jo') };
+    const c = await deriveNewContentContract(SITE, dir, depsFor(files));
+    assert.equal(c.siblingConstants.author, 'team');
+    assert.equal(c.siblingConstants.category, 'News');
+  });
+  test('when no value is shared by two posts, nothing is chosen', async () => {
+    const files = {
+      ...ASTRO_DIR,
+      'src/content/blog/a.md': ASTRO_DIR['src/content/blog/a.md'].replace('author: team', 'author: Ann').replace('category: News', 'category: One'),
+      'src/content/blog/b.md': ASTRO_DIR['src/content/blog/b.md'].replace('author: team', 'author: Bob').replace('category: News', 'category: Two'),
+      'src/content/blog/c.md': ASTRO_DIR['src/content/blog/c.md'].replace('author: team', 'author: Cy').replace('category: News', 'category: Three'),
+    };
+    const c = await deriveNewContentContract(SITE, dir, depsFor(files));
+    assert.equal(c.siblingConstants.author, undefined);
+    assert.equal(c.siblingConstants.category, undefined);
+  });
+  test('a rich cover (more than `kind`) is never copied', async () => {
+    const rich = (k) => post(['cover:', `  kind: ${k}`, '  heading: "H"', '  words: ["a"]']);
+    const files = { 'src/content.config.ts': 'x', 'src/content/blog/a.md': rich('pills'), 'src/content/blog/b.md': rich('pills'), 'src/content/blog/c.md': rich('pills') };
+    assert.equal((await deriveNewContentContract(SITE, dir, depsFor(files))).siblingConstants.cover, undefined);
+
   test('a required key with the SAME value in every sibling is reused (author, category); titles, summaries and a cover that varies are not', async () => {
     const c = await deriveNewContentContract(SITE, dir, depsFor(ASTRO_DIR));
     assert.deepEqual(c.siblingConstants, { author: 'team', category: 'News' });
@@ -348,6 +388,7 @@ describe('deriveNewContentContract — a schema-validated (Astro content collect
   test('a key whose value differs between siblings is never defaulted', async () => {
     const files = { ...ASTRO_DIR, 'src/content/blog/c.md': ASTRO_DIR['src/content/blog/c.md'].replace('author: team', 'author: Jo') };
     assert.deepEqual((await deriveNewContentContract(SITE, dir, depsFor(files))).siblingConstants, { category: 'News' });
+
   });
   test('missingRequiredKeys names what a generated file lacks', async () => {
     const c = await deriveNewContentContract(SITE, dir, depsFor(ASTRO_DIR));
@@ -404,3 +445,22 @@ describe('deriveNewContentContract — declaresSources', () => {
     assert.equal((await deriveNewContentContract(SITE, dir, depsFor(without))).declaresSources, false);
   });
 });
+
+
+describe('deriveNewContentContract — a required cover no post shows in minimal form', () => {
+  const dir = { dir: 'src/content/blog', extension: '.md' };
+  const rich = (n) => post(['cover:', '  kind: pills', '  heading: "H"', `  words: ["${n}"]`]);
+  test('is taken from the site\'s own content schema when that declares a `kind`-only variant', async () => {
+    const files = {
+      'src/content.config.ts': "const cover = z.discriminatedUnion('kind', [z.object({ kind: z.literal('agent') }), z.object({ kind: z.literal('pills'), heading: z.string(), words: z.array(z.string()) })]);",
+      'src/content/blog/a.md': rich('a'), 'src/content/blog/b.md': rich('b'), 'src/content/blog/c.md': rich('c'),
+    };
+    const c = await deriveNewContentContract(SITE, dir, depsFor(files));
+    assert.deepEqual(c.siblingConstants.cover, { kind: 'agent' });
+  });
+  test('stays unresolved (a person chooses) when the schema has no such variant', async () => {
+    const files = { 'src/content.config.ts': 'export const collections = {};', 'src/content/blog/a.md': rich('a'), 'src/content/blog/b.md': rich('b'), 'src/content/blog/c.md': rich('c') };
+    assert.equal((await deriveNewContentContract(SITE, dir, depsFor(files))).siblingConstants.cover, undefined);
+  });
+});
+

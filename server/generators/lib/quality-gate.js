@@ -12,6 +12,7 @@ import { findCompetitorLinks } from './outbound-link-guard.js';
 import { findCompetitorProminenceIssues } from './competitor-prominence.js';
 import { findDesignIntegrityIssues } from './design-integrity-guard.js';
 import { findBlogImageIssues } from './blog-image-guard.js';
+import { findBlogCycleIssues } from '../../lib/blog-cycle/article-gate.js';
 import { findBareMarkupIssues, findBareNewPageMarkupIssues } from './rendered-markup-guard.js';
 import { findContentIssues } from './output-guard.js';
 import { findVisibleClaimIssues, findNeverSayIssues, neverSayPhrasesFor, visibleClaimBansFor } from './visible-claim-guard.js';
@@ -170,6 +171,10 @@ export async function runQualityGate(content, generatorId, siteId, { site = null
     // human waiting on the Generate button should still see the draft.
     ...findBlogImageIssues(generatorId, content,
       enforceDesignIntegrity === undefined ? {} : { enforce: enforceDesignIntegrity }).issues,
+    // Blog cycle article checks (lib/blog-cycle/article-gate.js): statistics with no verified source, a finished title that duplicates live content, and the
+    // SEO / AEO / internal-link basics. Blog posts only; BLOG_ARTICLE_GATE='log' (default) reports without blocking. Its issues carry a `correction`, so a
+    // failure gets this loop's bounded regeneration, and a final failure refuses THIS article only.
+    ...(await findBlogCycleIssues(generatorId, content, siteId)),
     // Did the generator actually FOLLOW the structural guidance it was
     // given? Everything above checks the content in isolation; this is the
     // only check that compares it against this site's own canonical page

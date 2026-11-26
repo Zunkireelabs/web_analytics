@@ -1,22 +1,25 @@
 import { growthStageFor, ACCELERATION_DAYS } from '../../lib/growth-stage.js';
 
-// THE KEYWORD SCHEDULE (owner's plan, 2026-11-18). One queue and one calendar per project, run by the daily cron
-// (job.js runKeywordScheduleForAllSites), following the project's growth clock (sites.growth_started_at):
+// THE KEYWORD SCHEDULE (owner's plan, revised 2026-11-26). One queue and one calendar per project, run by the daily cron
+// (job.js runKeywordScheduleForAllSites). A 15-day cycle, starting the first day a project has qualified keywords (no 30-day wait):
 //
-//   days 1-30   GATHER: keywords are collected and nothing new is published (ranking pages keep getting their ordinary fixes).
-//   day 31      SHIP the first half of what was gathered. A keyword an existing page covers is added to that page; one that
-//               needs a page becomes a blog, given a day 3 apart (the project's blog gap).
-//   days 31-44  TRACK: each shipped keyword's impressions are counted over the 14 days after it went live.
-//   day 45      SHIP the second half (plus half of anything gathered since), and give the first half's weak keywords a fix.
-//   then        every 14 days the same.
+//   day 1       SHIP the best qualified keywords now (at most KEYWORD_CYCLE_MAX, default 10). A keyword an existing page covers is
+//               added to that page; one that needs a page becomes a blog, given a day 3 apart (the project's blog gap).
+//   days 1-14   TRACK: each shipped keyword's impressions, clicks and average position are counted from Search Console over the
+//               14 days after it went live. Nothing is estimated: no Search Console data in the window = not evaluated yet.
+//   day 15      EVALUATE and SHIP: successful keywords are kept (retain); weak ones get a fix (improve: a link from a page that
+//               already earns clicks); one that is still weak after its fix is replaced (replace), and the same day's ship step
+//               brings in freshly researched keywords. Then the same every 15 days.
 //
 // Keywords added by hand, and trend-radar topics, join the same queue and take the project's next free blog day.
 // Everything here is a recommendation in Action Center; auto-remediation drafts and opens the PR on or after its day, and a
-// person still merges it.
+// person still merges it. Strict client isolation: every query below is scoped by site_id.
 
-export const CYCLE_DAYS = 14;
+export const CYCLE_DAYS = 15;
 export const BLOG_GAP_DEFAULT_DAYS = 3;
-export const LOW_IMPRESSIONS = 10; // fewer than this in the 14 days after shipping = needs a follow-up fix
+export const LOW_IMPRESSIONS = 10; // fewer than this in the 14 days after shipping = not (yet) a success
+export const GOOD_POSITION = 20;  // average position at or above this (1 is best) counts as ranking, even before clicks arrive
+export const CYCLE_MAX_DEFAULT = 10; // new keywords one project ships per cycle; the rest wait for the next one
 export const TRACK_DAYS = 14;
 
 const MS_DAY = 86400000;
@@ -25,13 +28,11 @@ const addDays = (iso, n) => dayOnly(new Date(`${iso}T00:00:00Z`).getTime() + n *
 
 /**
  * Pure. What today is for this project.
- *   gather  day <= 30
- *   ship    day >= 31 and no cycle has run yet, or the last one was CYCLE_DAYS or more ago
+ *   ship    no cycle has run yet, or the last one was CYCLE_DAYS or more ago
  *   wait    between cycles (the 14 days of tracking)
  */
 export function cyclePhase({ growthStartedAt, lastCycleAt, now = new Date() }) {
   const g = growthStageFor(growthStartedAt, now);
-  if (g.day <= ACCELERATION_DAYS) return { phase: 'gather', day: g.day, daysToFirstShip: ACCELERATION_DAYS + 1 - g.day };
   const since = lastCycleAt ? Math.floor((now.getTime() - new Date(lastCycleAt).getTime()) / MS_DAY) : Infinity;
   return since >= CYCLE_DAYS ? { phase: 'ship', day: g.day } : { phase: 'wait', day: g.day, daysToNextShip: CYCLE_DAYS - since };
 }
@@ -49,6 +50,15 @@ export function splitHalf(gaps) {
   const cut = Math.ceil(ordered.length / 2);
   return { now: ordered.slice(0, cut), later: ordered.slice(cut) };
 }
+/** Pure. The best `max` keywords ship this cycle; the rest wait for the next. (Replaces the old half-split, which would have queued hundreds at once.) */
+export function cycleMax(env = process.env) {
+  const n = Number(env.KEYWORD_CYCLE_MAX ?? CYCLE_MAX_DEFAULT);
+  return Number.isInteger(n) && n >= 1 ? Math.min(n, 50) : CYCLE_MAX_DEFAULT;
+}
+export function splitCycle(gaps, max = cycleMax()) {
+  const ordered = orderKeywords(gaps);
+  return { now: ordered.slice(0, max), later: ordered.slice(max) };
+}
 
 /**
  * Pure. The next `count` free blog days, GAP days apart. A day is free when no blog was published or already booked
@@ -63,11 +73,16 @@ export function nextBlogDays(count, { today, lastBlogDay = null, gapDays = BLOG_
   return days;
 }
 
-/** Pure. A keyword the schedule may publish: relevant to the business, seen more than once (unless a person or the trend radar chose it). */
+/**
+ * Pure. A keyword the schedule may publish: relevant to the business AND the coverage check found it open (an opportunity or a market
+ * gap: not already covered, not a duplicate, not uncertain), or chosen by a person / the trend radar. It no longer has to be seen in a
+ * second weekly pass: that rule is what made a 30-day wait necessary.
+ */
 export const CHOSEN_SOURCES = new Set(['user_request', 'trend_radar']);
+export const OPEN_COVERAGE = new Set(['opportunity', 'market_gap']);
 export function isShippableKeyword(gap) {
   if (CHOSEN_SOURCES.has(gap.source)) return true;
-  return ['direct', 'supporting'].includes(gap.product_relevance) && Number(gap.observation_count || 1) >= 2;
+  return ['direct', 'supporting'].includes(gap.product_relevance) && OPEN_COVERAGE.has(gap.coverage_status);
 }
 
 /** Pure. Which of the three ways a keyword ships (null = not shippable by the schedule, stays in the queue). */
@@ -85,6 +100,21 @@ export function followUpFor({ shipMode, impressions, topPage, targetPage }) {
   const page = targetPage || topPage;
   if (!page) return { action: 'note', note: `Only ${impressions} impression(s) in ${TRACK_DAYS} days and no page of ours has been shown for it yet: check the page is indexed.` };
   return { action: 'internal-links', page, note: `Only ${impressions} impression(s) in ${TRACK_DAYS} days: queued a link to it from a page that already earns clicks.` };
+}
+
+/**
+ * Pure. The day-15 verdict, from measured Search Console numbers only.
+ *   hasData   false = Search Console has no rows near the end of the window: nothing is decided (never judged on missing data)
+ *   retain    enough impressions AND (a click, or an average position of GOOD_POSITION or better)
+ *   improve   weak, first evaluation: gets a fix, evaluated again CYCLE_DAYS later
+ *   replace   still weak after its fix: dropped, and the cycle's ship step brings in researched replacements
+ */
+export function evaluateKeyword({ impressions, clicks, position, round = 0, hasData = true }) {
+  if (!hasData) return { decision: 'pending', note: 'Search Console has no data for the end of the window yet: not evaluated.' };
+  const ranking = Number(clicks) > 0 || (position != null && Number(position) <= GOOD_POSITION);
+  if (Number(impressions) >= LOW_IMPRESSIONS && ranking) return { decision: 'retain', note: `Kept: ${impressions} impressions, ${clicks} click(s)${position != null ? `, average position ${Number(position).toFixed(1)}` : ''} in ${TRACK_DAYS} days.` };
+  if (round >= 1) return { decision: 'replace', note: `Replaced: still weak after its fix (${impressions} impressions, ${clicks} click(s) in ${TRACK_DAYS} days).` };
+  return { decision: 'improve', note: null };
 }
 
 // ───────────────────────── database side (loaded on first use, so the pure parts above stay importable anywhere) ─────────────────────────
@@ -171,7 +201,7 @@ export async function runKeywordScheduleForSite(siteId, site, { now = new Date()
     const carry = gaps.filter((g) => batchOf.has(g.id) && batchOf.get(g.id) <= cycle);
     const fresh = gaps.filter((g) => !batchOf.has(g.id));
     const chosenByPerson = fresh.filter((g) => CHOSEN_SOURCES.has(g.source));
-    const { now: firstHalf, later } = splitHalf(fresh.filter((g) => !CHOSEN_SOURCES.has(g.source)));
+    const { now: firstHalf, later } = splitCycle(fresh.filter((g) => !CHOSEN_SOURCES.has(g.source)));
     const toShip = [...carry, ...chosenByPerson, ...firstHalf];
     out.carried = carry.length; out.deferred = later.length;
     if (!dryRun) {
@@ -210,8 +240,10 @@ export async function runKeywordScheduleForSite(siteId, site, { now = new Date()
 }
 
 /**
- * Counts each shipped keyword's impressions over the TRACK_DAYS after it went live, and queues a link to its page when it is
- * weak. Reads gsc_query_page only; nothing here calls a model.
+ * Counts each shipped keyword's impressions, clicks and average position over the TRACK_DAYS after it went live (Search Console rows only),
+ * then decides (evaluateKeyword): retain, improve (queue a link to its page) or, after one fix, replace. Nothing here calls a model, and a
+ * keyword whose window has no Search Console data near its end is left for the next day rather than judged on nothing.
+ * Round 0 is measured from the day it shipped; a keyword that was 'improve'd is measured again from the day of its fix.
  */
 export async function measureKeywordImpressions(siteId, { now = new Date() } = {}) {
   const query = await db();
@@ -223,10 +255,14 @@ export async function measureKeywordImpressions(siteId, { now = new Date() } = {
               WHERE r.site_id = $1 GROUP BY r.id) d
       WHERE g.site_id = $1 AND g.recommendation_id = d.rid AND g.shipped_at IS NULL AND d.at IS NOT NULL`, [siteId]);
   const { rows: due } = await query(
-    `SELECT id, topic, ship_mode, target_page, shipped_at FROM keyword_gaps
-      WHERE site_id = $1 AND shipped_at IS NOT NULL AND impressions_measured_at IS NULL AND shipped_at <= $2::timestamptz - ($3 || ' days')::interval`,
+    `SELECT id, topic, ship_mode, target_page, shipped_at, evaluation_round, evaluated_at,
+            CASE WHEN evaluation_round = 0 THEN shipped_at ELSE evaluated_at END AS window_start
+       FROM keyword_gaps
+      WHERE site_id = $1 AND shipped_at IS NOT NULL
+        AND ((evaluation_round = 0 AND impressions_measured_at IS NULL) OR evaluation = 'improve')
+        AND (CASE WHEN evaluation_round = 0 THEN shipped_at ELSE evaluated_at END) <= $2::timestamptz - ($3 || ' days')::interval`,
     [siteId, now, String(TRACK_DAYS)]);
-  const out = { measured: 0, weak: 0, followUps: 0 };
+  const out = { measured: 0, weak: 0, followUps: 0, retained: 0, replaced: 0, notReady: 0 };
   if (!due.length) return out;
   const { pickLinkSource } = await import('./zero-impression-pages.js');
   const { insertRecommendation } = await import('../../store/recommendations.js');
@@ -237,30 +273,48 @@ export async function measureKeywordImpressions(siteId, { now = new Date() } = {
   const busy = new Set(open.map((r) => r.page));
 
   for (const g of due) {
-    const from = dayOnly(g.shipped_at); const to = addDays(from, TRACK_DAYS);
+    const from = dayOnly(g.window_start); const to = addDays(from, TRACK_DAYS);
+    // Search Console reports a couple of days late: only judge a window once rows exist from its last 4 days.
+    const { rows: [{ fresh }] } = await query(`SELECT count(*)::int AS fresh FROM gsc_query_page WHERE site_id = $1 AND date BETWEEN $2::date AND $3::date`, [siteId, addDays(to, -4), to]);
     const { rows: pages } = await query(
-      `SELECT page, SUM(impressions)::int AS impressions FROM gsc_query_page
+      `SELECT page, SUM(impressions)::int AS impressions, SUM(clicks)::int AS clicks,
+              CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) END AS position
+         FROM gsc_query_page
         WHERE site_id = $1 AND date BETWEEN $2::date AND $3::date AND lower(query) LIKE '%' || lower($4) || '%'
         GROUP BY page ORDER BY 2 DESC`, [siteId, from, to, g.topic]);
     const impressions = pages.reduce((n, p) => n + Number(p.impressions || 0), 0);
-    const fu = followUpFor({ shipMode: g.ship_mode, impressions, topPage: pages[0]?.page || null, targetPage: g.target_page });
-    let followId = null;
-    if (fu.action === 'internal-links') {
-      const source = pickLinkSource(fu.page, sources, busy);
-      if (source) {
-        busy.add(source);
-        const rec = await insertRecommendation(siteId, {
-          page: source, recommendationType: 'internal-links',
-          issue: `Keyword "${g.topic}" got few impressions after it shipped`,
-          reason: fu.note, params: { page: source, mustLinkTo: fu.page, measurePage: fu.page },
-          findingId: `keyword-schedule:${g.id}:links`, detectingAgent: 'keyword-schedule', priority: 'medium', riskTier: 'safe',
-        }).catch((err) => { console.error('[keyword-schedule] follow-up failed:', err.message); return null; });
-        followId = rec?.id ?? null; if (followId) out.followUps++;
+    const clicks = pages.reduce((n, p) => n + Number(p.clicks || 0), 0);
+    const position = impressions > 0 ? pages.reduce((n, p) => n + Number(p.position || 0) * Number(p.impressions || 0), 0) / impressions : null;
+    const verdict = evaluateKeyword({ impressions, clicks, position, round: Number(g.evaluation_round || 0), hasData: fresh > 0 });
+    if (verdict.decision === 'pending') { out.notReady++; continue; }
+
+    let followId = null; let note = verdict.note;
+    if (verdict.decision === 'improve') {
+      const fu = followUpFor({ shipMode: g.ship_mode, impressions, topPage: pages[0]?.page || null, targetPage: g.target_page });
+      note = fu.note;
+      if (fu.action === 'internal-links') {
+        const source = pickLinkSource(fu.page, sources, busy);
+        if (source) {
+          busy.add(source);
+          const rec = await insertRecommendation(siteId, {
+            page: source, recommendationType: 'internal-links',
+            issue: `Keyword "${g.topic}" got few impressions after it shipped`,
+            reason: fu.note, params: { page: source, mustLinkTo: fu.page, measurePage: fu.page },
+            findingId: `keyword-schedule:${g.id}:links`, detectingAgent: 'keyword-schedule', priority: 'medium', riskTier: 'safe',
+          }).catch((err) => { console.error('[keyword-schedule] follow-up failed:', err.message); return null; });
+          followId = rec?.id ?? null; if (followId) out.followUps++;
+        }
       }
     }
-    await query(`UPDATE keyword_gaps SET impressions_14d = $2, impressions_measured_at = now(), followup_recommendation_id = $3, followup_note = $4 WHERE id = $1`,
-      [g.id, impressions, followId, fu.note]);
-    out.measured++; if (impressions < LOW_IMPRESSIONS) out.weak++;
+    await query(
+      `UPDATE keyword_gaps SET impressions_14d = $2, clicks_14d = $3, position_14d = $4, evaluation = $5, evaluation_round = evaluation_round + 1,
+              evaluated_at = $6::timestamptz, impressions_measured_at = now(), followup_recommendation_id = COALESCE($7, followup_recommendation_id), followup_note = $8
+        WHERE id = $1 AND site_id = $9`,
+      [g.id, impressions, clicks, position == null ? null : Number(position.toFixed(2)), verdict.decision, now, followId, note, siteId]);
+    out.measured++;
+    if (verdict.decision === 'retain') out.retained++;
+    else if (verdict.decision === 'replace') out.replaced++;
+    else out.weak++;
   }
   return out;
 }

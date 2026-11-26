@@ -389,6 +389,17 @@ const RULES = [
     summary: 'This site’s repository mapping is missing an entry this fix needs.',
   },
   {
+    // A blog draft cannot be compared with the site's own articles when the site has no real article page to compare against (a repository that
+    // was just switched and not captured yet): nothing about the draft is wrong and a retry reaches the same refusal until a person or the
+    // Design Agent supplies the reference, so it waits instead of burning the attempt cap (2026-11-25: four Zennly drafts, retried up to three times).
+    // Deliberately NOT here: "no sibling FAQ / related-links to copy", "no separate SEO-title field" and "mapped file does not exist". Those were
+    // fixed by platform changes and site configuration the same day, so the findings must stay retryable and not be blocked behind a stale verdict.
+    match: (r) => /No real "[^"]+" page on this site could be found to compare it against/i.test(r),
+    failureClass: FAILURE_CLASS.INVALID_INPUT,
+    policy: RETRY_POLICY.NEEDS_HUMAN,
+    summary: 'This site has no real article page to compare a blog draft against yet.',
+  },
+  {
     match: (r) => /no github pat set/i.test(r) || /github app is not configured/i.test(r) || /bad credentials/i.test(r) || /token .*expired/i.test(r) || /no classic pat with .*scope set for code search/i.test(r),
     failureClass: FAILURE_CLASS.CLIENT_REPO,
     policy: RETRY_POLICY.NEEDS_HUMAN,

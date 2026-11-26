@@ -1,6 +1,7 @@
 import { getOrCreateSite, query, resumeDueAutoRemediationPauses } from './db.js';
 import { safeMessage } from './lib/errors.js';
 import { callDataAnalystAgent } from './lib/data-analyst-client.js';
+import { findingsGateEnabled, gateForSite, loadFindingsGate } from './agents/lib/analyst-findings-gate.js';
 import { ensureAnalystRegistered } from './lib/tenant-provisioning.js';
 import { fetchGscForDate } from './ingest/gsc.js';
 import { fetchGa4ForDate } from './ingest/ga4.js';
@@ -10,7 +11,7 @@ import { competitorProviderConfigured } from './ingest/competitor-providers/inde
 import { upsertGsc, upsertGa4, saveNarrative, saveCompetitorRankings, saveHealthScoreSnapshot, recordIntegrationCheck } from './store/upsert.js';
 import { getDay, getNarrative, listSites, getCompetitorRankingDates, getHealthScoreOnOrBefore } from './store/read.js';
 import { generateNarrative } from './report/narrative.js';
-import { sendDailyEmail, sendStaffShipStallEmail } from './report/email.js';
+import { sendDailyEmail, sendStaffShipStallEmail, sendStaffDeliveryAlertEmail } from './report/email.js';
 import { runWeeklyDocReport } from './report/weekly-doc.js';
 import { runExecutiveDocReport } from './report/executive-doc.js';
 import { runMonthlyDocReport } from './report/monthly-doc.js';
@@ -37,7 +38,7 @@ import { sanitizeForCustomer } from './lib/errors.js';
 import { buildApprovedForToday } from './agents/lib/pick-runner.js';
 import { runWorkArbiter } from './agents/lib/work-arbiter.js';
 import { withJobLock, jobKeyFor } from './lib/job-lock.js';
-import { rotateForToday, orderByUrgency, runSiteWithDeadline, windowClosed } from './lib/site-run.js';
+import { rotateForToday, orderByUrgency, orderByTurn, runSiteWithDeadline, windowClosed } from './lib/site-run.js';
 import { getGoogleConnection } from './store/project-google.js';
 
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
@@ -568,14 +569,27 @@ export async function runCompetitorCheckIfDueForAllSites() {
 // search-volume-backed keyword_gaps rows the weekly keyword-gap ship cycle
 // (runKeywordGapShipCycleForAllSites) then works through across the rest of
 // the month. See server/agents/lib/keyword-demand.js.
-export async function runKeywordDemandCheckIfDueForAllSites() {
-  const sites = await listConnectedSites();
+export async function runKeywordDemandCheckIfDueForAllSites({ listSites = listConnectedSites, runDemand = runKeywordDemandIfDue, runOwn = null, record = null } = {}) {
+  const sites = await listSites();
   const results = [];
+  // Two independent discovery paths per project, each in its own try/catch so one failing (no AI credit, no DataForSEO credit) never stops the
+  // other, and one project failing never stops the next. Whatever happens is written to keyword_discovery_status with its reason.
+  const own = runOwn || (await import('./agents/lib/keyword-own-queries.js')).discoverKeywordsFromOwnQueries;
+  const recordStatus = record || (await import('./store/keyword-discovery-status.js')).recordDiscoveryStatus;
   for (const site of sites) {
     try {
-      results.push(await runKeywordDemandIfDue(site));
+      results.push(await runDemand(site));
     } catch (err) {
       console.error(`[job] keyword demand check failed for site ${site.id} "${site.name}":`, err.message);
+      await recordStatus(site.id, 'dataforseo_demand', { status: 'blocked', code: 'unexpected_error', message: `The search-volume keyword check crashed: ${String(err.message).slice(0, 200)}` }).catch(() => {});
+    }
+    try {
+      const r = await own(site);
+      if (r?.saved) console.log(`[job] keyword discovery (own search queries): site ${site.id} "${site.name}" saved ${r.saved} keyword(s).`);
+      else console.log(`[job] keyword discovery (own search queries): site ${site.id} "${site.name}" ${r?.status}: ${r?.code}`);
+    } catch (err) {
+      console.error(`[job] own-query keyword discovery failed for site ${site.id} "${site.name}":`, err.message);
+      await recordStatus(site.id, 'own_search_queries', { status: 'blocked', code: 'unexpected_error', message: `Keyword discovery from the project's own search queries crashed: ${String(err.message).slice(0, 200)}` }).catch(() => {});
     }
   }
   return results;
@@ -1096,12 +1110,19 @@ export async function runHourlyCatchupForAllSites(tz) {
 // richer approval path). Where both would touch the same page+generator,
 // findOpenRecommendation's existing-row check makes the second call a safe
 // no-op — nothing here needed to change that idempotency contract.
-export async function runAnalystFusionForAllSites() {
-  const sites = await listConnectedSites();
-  const totals = { sites: 0, created: 0, monitored: 0, stale: 0 };
+export async function runAnalystFusionForAllSites({ listSites = listConnectedSites, gate: injectedGate, fuse = runAnalystFusion } = {}) {
+  const sites = await listSites();
+  const totals = { sites: 0, created: 0, monitored: 0, stale: 0, blocked: 0 };
+  const gate = injectedGate !== undefined ? injectedGate : (findingsGateEnabled() ? await loadFindingsGate() : null);
   for (const site of sites) {
     try {
-      const result = await runAnalystFusion(site.id, { site });
+      const allowed = gateForSite(gate, site.id);
+      if (!allowed.allowed) {
+        totals.blocked++;
+        console.warn(`[job] analyst fusion: site ${site.id} "${site.name}" skipped — ${allowed.reason}. No recommendation was created from unconfirmed findings.`);
+        continue;
+      }
+      const result = await fuse(site.id, { site });
       totals.sites++;
       totals.created += result.created;
       totals.monitored += result.monitored;
@@ -1180,12 +1201,20 @@ export async function runFaqOnboardingCoverageForAllSites() {
 //
 // Best-effort per site and never throws: the Analyst is a separate service,
 // and it being down must not take the rest of the schedule with it.
-export async function runAnalystSyncForAllSites() {
-  const sites = await listConnectedSites();
-  const totals = { sites: 0, created: 0, skipped: 0, ineligible: 0, registered: 0 };
+export async function runAnalystSyncForAllSites({ listSites = listConnectedSites, gate: injectedGate } = {}) {
+  const sites = await listSites();
+  const totals = { sites: 0, created: 0, skipped: 0, ineligible: 0, registered: 0, blocked: 0 };
+  // Findings count only when the analyst confirmed a complete analysis that covers the site (agents/lib/analyst-findings-gate.js).
+  const gate = injectedGate !== undefined ? injectedGate : (findingsGateEnabled() ? await loadFindingsGate() : null);
 
   for (const site of sites) {
     try {
+      const allowed = gateForSite(gate, site.id);
+      if (!allowed.allowed) {
+        totals.blocked++;
+        console.warn(`[job] analyst sync: site ${site.id} "${site.name}" skipped — ${allowed.reason}. No recommendation was created from unconfirmed findings.`);
+        continue;
+      }
       // A project the analyst never heard of (the service was down when it was connected) gets registered
       // here, so it starts getting forecasts and anomaly checks instead of staying silently without them.
       const analyst = await ensureAnalystRegistered(site).catch((err) => ({ status: 'failed', error: err.message }));
@@ -1263,10 +1292,11 @@ export async function runKeywordScheduleForAllSites({ listAllSites = listConnect
     try {
       const { getSiteById } = await import('./store/read.js');
       const fresh = (await getSiteById(site.id)) || site;
-      const r = await runKeywordScheduleForSite(site.id, fresh);
+      // Evaluate first: a keyword judged 'replace' today is replaced by the fresh ones this same run ships.
       const m = await measureKeywordImpressions(site.id);
+      const r = await runKeywordScheduleForSite(site.id, fresh);
       totals.sites++; totals.queued += r.queued; totals.booked += r.booked; totals.measured += m.measured;
-      if (r.queued || r.booked || m.measured) console.log(`[job] keyword schedule: site ${site.id} "${site.name}" ${r.phase} (day ${r.day}): queued ${r.queued}, booked ${r.booked} blog day(s), measured ${m.measured} keyword(s).`);
+      if (r.queued || r.booked || m.measured) console.log(`[job] keyword schedule: site ${site.id} "${site.name}" ${r.phase} (day ${r.day}): queued ${r.queued}, booked ${r.booked} blog day(s), measured ${m.measured} keyword(s) (${m.retained} kept, ${m.weak} to improve, ${m.replaced} replaced).`);
     } catch (err) {
       console.error(`[job] keyword schedule failed for site ${site.id} "${site.name}":`, err.message);
     }
@@ -1723,7 +1753,14 @@ export async function runAutoRemediationForAllSites({ windowEndsAt = null, drain
   // simply today's rotation, as before.
   const urgency = await query(`SELECT site_id, count(*)::int AS n FROM recommendations WHERE status = 'open' AND priority = 'high' GROUP BY site_id`)
     .then((r) => new Map(r.rows.map((row) => [row.site_id, row.n]))).catch(() => new Map());
-  const sites = orderByUrgency(rotateForToday((await listSites()).filter(isShippable)), urgency);
+  // Then whoever was served longest ago today goes first (the day record knows each project's last pass). Unreadable: the urgency order stands.
+  const servedAt = await (async () => {
+    const { cycleDateIn } = await import('./lib/delivery-cycle.js');
+    const { workerSessionTimezone } = await import('./lib/worker-session.js');
+    const { rows } = await query(`SELECT site_id, last_pass_at FROM delivery_cycles WHERE cycle_date = $1 AND last_pass_at IS NOT NULL`, [cycleDateIn(workerSessionTimezone())]);
+    return new Map(rows.map((r) => [r.site_id, new Date(r.last_pass_at).getTime()]));
+  })().catch(() => new Map());
+  const sites = orderByTurn(orderByUrgency(rotateForToday((await listSites()).filter(isShippable)), urgency), servedAt);
   const results = [];
   let globalRemaining = await globalRemainingSeed();
   const unreachable = [];
@@ -2133,13 +2170,102 @@ export async function queueConsistencyScanForAllSites({
 
 // Every night: re-read the live page behind every open issue and close the ones that are fixed (agents/lib/nightly-recheck.js).
 // Never throws; one project's failure is logged and the rest continue.
-export async function runNightlyIssueRecheckForAllSites() {
+// THE DAY'S CLOSE (lib/delivery-cycle.js). Called when the worker window ends, and again at startup after a restart: idempotent, so a
+// second call changes nothing. Every active project leaves the day with one closed record, including ones nothing reached.
+export async function runDeliveryDayClose({ now = new Date() } = {}) {
+  const { closeDeliveryDay } = await import('./lib/delivery-cycle.js');
+  const { workerSessionTimezone, closeIsForced } = await import('./lib/worker-session.js');
+  const sites = (await listConnectedSites()).filter(isActiveSite);
+  const timezone = workerSessionTimezone();
+  // The deadline step first (idempotent): any project with pushed work and no PR gets one last try before its day is recorded.
+  await runDeliveryConsolidation({ now, sites }).catch((err) => console.error('[delivery-day] consolidation failed:', err.message));
+  // How much eligible work was still waiting, as of each project's last real pass (the selection that pass recorded).
+  const eligibleFor = async (siteId) => {
+    const { rows } = await query(
+      `SELECT shipped, selection FROM auto_remediation_runs WHERE site_id = $1 AND COALESCE((selection->>'runSkipped')::boolean, false) = false
+        ORDER BY started_at DESC LIMIT 1`, [siteId]);
+    if (!rows[0]) return null;
+    return Math.max(0, Number(rows[0].selection?.eligible || 0) - Number(rows[0].shipped || 0));
+  };
+  const results = await closeDeliveryDay({ sites, timezone, now, eligibleFor, isInFlight: isShipLockHeld, force: closeIsForced(timezone, now) });
+  for (const r of results) console.log(`[delivery-day] site ${r.siteId}: ${r.status}${r.blocker ? ` — ${r.blocker}` : ''}${r.why ? ` — ${r.why}` : ''}`);
+  return results;
+}
+
+// THE ALERTS (lib/delivery-alerts.js): hourly, cheap (database only, no GitHub). Each alert key is stated once per day: the key is remembered on the day record of
+// the project it is about (or the company project's, for platform-wide ones). Critical and high alerts are mailed to staff; all are logged and shown on the status view.
+export async function runDeliveryAlerts({ now = new Date(), mail = sendStaffDeliveryAlertEmail } = {}) {
+  const { alertsMode } = await import('./lib/delivery-modes.js');
+  const mode = alertsMode();
+  if (mode === 'off') return { evaluated: 0, fresh: 0, mailed: 0, mode };
+  const { evaluateAlerts } = await import('./lib/delivery-alerts.js');
+  const { cycleDateIn, getOrOpenCycle } = await import('./lib/delivery-cycle.js');
+  const { listLifecycleDrafts, summarizeLifecycle } = await import('./lib/delivery-lifecycle.js');
+  const { workerSessionTimezone, sessionState } = await import('./lib/worker-session.js');
+  const timezone = workerSessionTimezone();
+  const sites = (await listConnectedSites()).filter(isActiveSite);
+  const day = cycleDateIn(timezone, now);
+  const { rows: cycles } = await query(`SELECT * FROM delivery_cycles WHERE site_id = ANY($1::int[]) AND cycle_date = $2::date`, [sites.map((s) => s.id), day]);
+  const { rows: locks } = await query(`SELECT job_key, acquired_at, heartbeat_at, expires_at FROM job_locks`);
+  const mergedByBot = []; const mergedUnverified = [];
+  for (const s of sites) { const lc = summarizeLifecycle(await listLifecycleDrafts(s.id).catch(() => []), { now }); mergedByBot.push(...lc.mergedBot); mergedUnverified.push(...lc.mergedUnverified); }
+  let capabilityFindings = [];
+  try { capabilityFindings = await (await import('./lib/self-repair/index.js')).listOpenFindings(); } catch { /* the findings table may not exist yet: no findings */ }
+  const alerts = evaluateAlerts({ now, timezone, sites, cycles, locks, mergedByBot, mergedUnverified, skippedTicks: sessionState().skippedTicks, capabilityFindings });
+  const homeSite = (a) => a.siteId ?? Number(process.env.COMPANY_SITE_ID) ?? sites[0]?.id;
+  const fresh = [];
+  for (const a of alerts) {
+    const home = homeSite(a); if (!home) continue;
+    const cycle = await getOrOpenCycle(home, { timezone, now });
+    const sent = new Set(cycle.stages?.alertsSent || []);
+    if (sent.has(a.key)) continue;
+    fresh.push(a);
+    await query(`UPDATE delivery_cycles SET stages = jsonb_set(stages, '{alertsSent}', COALESCE(stages->'alertsSent', '[]'::jsonb) || to_jsonb($2::text), true) WHERE id = $1`, [cycle.id, a.key]);
+  }
+  for (const a of fresh) console.warn(`[delivery-alert] ${a.severity}: ${a.message}`);
+  const mailable = mode === 'on' ? fresh.filter((a) => a.severity === 'critical' || a.severity === 'high') : [];
+  if (mailable.length) await mail({ alerts: mailable }).catch((err) => console.error('[delivery-alert] could not email staff:', err.message));
+  return { evaluated: alerts.length, fresh: fresh.length, mailed: mailable.length, mode };
+}
+
+// True while a shipping pass holds this project's lock (probed by taking and releasing it). The deadline steps never act on such a project.
+async function isShipLockHeld(site) {
+  const { ran } = await withJobLock(jobKeyFor(SHIP_LOCK_JOB_NAME, site.id), async () => true);
+  return !ran;
+}
+
+// PHASE 4's deadline step: each project's validated work is brought to ONE pull request, or preserved with the exact reason (lib/delivery-consolidation.js).
+export async function runDeliveryConsolidation({ now = new Date(), sites = null } = {}) {
+  const { consolidationMode } = await import('./lib/delivery-modes.js');
+  const mode = consolidationMode();
+  if (mode === 'off') return [];
+  const { consolidateDay } = await import('./lib/delivery-consolidation.js');
+  const { workerSessionTimezone } = await import('./lib/worker-session.js');
+  const { recoverUnopenedBatchPrs } = await import('./lib/batch-pr-recovery.js');
+  const { getBranchSha, listCommitSubjectsAheadOfBase } = await import('./github/client.js');
+  const list = sites || (await listConnectedSites()).filter(isActiveSite);
+  const results = await consolidateDay({
+    sites: list, now, timezone: workerSessionTimezone(), dryRun: mode === 'log',
+    isLocked: isShipLockHeld,
+    recover: (siteId) => recoverUnopenedBatchPrs(siteId, { apply: true, openPr: async (id, draftId) => (await import('./routes/action-center.js')).openDraftPr(id, draftId) }),
+    describeBranch: async (site, branch) => ({ headSha: await getBranchSha(site, branch).catch(() => null), commitSubjects: await listCommitSubjectsAheadOfBase(site, branch).catch(() => null) }),
+  });
+  for (const r of results) if (r.outcome !== 'nothing-to-open') console.log(`[delivery-consolidation]${mode === 'log' ? ' (log only)' : ''} site ${r.siteId}: ${r.outcome}${r.why ? ` (${r.why})` : ''}${r.error ? ` ${r.error}` : ''}`);
+  return results;
+}
+
+export async function runNightlyIssueRecheckForAllSites({ deadlineAt = null } = {}) {
   const { recheckOpenIssuesForSite } = await import('./agents/lib/nightly-recheck.js');
   const sites = (await listConnectedSites()).filter(isActiveSite);
   const results = [];
   for (const site of sites) {
+    if (deadlineAt != null && Date.now() >= deadlineAt) {
+      console.log(`[nightly-recheck] deadline reached before site ${site.id}: it and the sites after it are checked first tomorrow night.`);
+      results.push({ siteId: site.id, skipped: 'deadline' });
+      continue;
+    }
     try {
-      const r = await recheckOpenIssuesForSite(site.id);
+      const r = await recheckOpenIssuesForSite(site.id, { deadlineAt });
       const ideas = await (await import('./agents/lib/nightly-recheck.js')).closeSatisfiedIdeasForSite(site.id).catch(() => ({ closed: 0 }));
       r.ideasClosed = ideas.closed;
       console.log(`[nightly-recheck] site ${site.id}: ${r.fixed} fixed, ${r.stillOpen} still open, ${r.unverified} not verified (${r.degraded ?? 0} held because the AI provider failed during the check), ${r.ideasClosed} idea(s) already covered, ${r.errors} error(s)`);

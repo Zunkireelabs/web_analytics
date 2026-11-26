@@ -416,12 +416,15 @@ describe('net-new pages consume the site design profile', () => {
     assert.doesNotMatch(out, /<h2 class="text-2xl">/);
   });
 
-  test('the same content with no permalink at all is unchanged — still section scale (today\'s default)', () => {
+  // Was pinned to section scale ("today's default") for a blog post with no permalink. That default was the bug: a blog target with only a `dir` has no
+  // permalink, and its posts were rendered as landing pages (2026-11-25, render gate held them). A blog post is an article with or without a URL.
+  test('a blog post with no permalink at all is still an article: item-scale headings, same as with a real permalink', () => {
     const out = renderBlogOutlineBody(
       { title: 'T', sections: [{ heading: 'A subheading', body: 'Body text.' }] },
       siteWithProfile,
     );
-    assert.match(out, /<h2 class="text-2xl">A subheading<\/h2>/);
+    assert.match(out, /<h2 class="text-lg font-medium">A subheading<\/h2>/);
+    assert.doesNotMatch(out, /<h2 class="text-2xl">/);
   });
 
   test('a landing page keeps section-scale headings even when given a permalink', () => {
@@ -612,6 +615,30 @@ describe('renderBlogOutlineBody — siteRoot.inlineProse: "layout" (blog layout 
   test('opted in but NOT an article page (a landing page permalink): still projected', () => {
     const body = renderBlogOutlineBody(content, mk({ inlineProse: 'layout' }), { permalink: '/services/boilers/' });
     assert.match(body, /<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">/);
+  });
+
+  // 2026-11-25: a blog target with only a `dir` (no urlPattern) renders with permalink=null. `inline` then stayed false, so the post was dressed in the
+  // LANDING page's classes and ignored inlineProse:'layout'; the render gate (correctly) held it: 20px/56 characters against the site's 18px/82.
+  describe('a blog post whose target has no URL pattern (permalink null) is still an article', () => {
+    test('opted in: plain markdown, so the layout styles it', () => {
+      const body = renderBlogOutlineBody(content, mk({ inlineProse: 'layout' }), { permalink: null });
+      assert.match(body, /^## Bleeding radiators$/m);
+      assert.doesNotMatch(body, /text-lg md:text-xl|text-3xl|max-w-2xl|<h2|<p /);
+    });
+    test('not opted in: article-scale (item) headings, never the landing page section scale', () => {
+      const body = renderBlogOutlineBody(content, mk(), { permalink: null });
+      assert.match(body, /<h2 class="text-2xl md:text-3xl font-normal text-gray-900">Bleeding radiators<\/h2>/);
+      assert.doesNotMatch(body, /text-3xl md:text-4xl lg:text-5xl/);
+    });
+    test('a tenant that declares the blog target a section page keeps the section styling (config still wins)', () => {
+      const site = { url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', pageRole: 'section-page' } }, siteRoot: { designProfile, componentTemplates: { contentWrapper: wrapper }, inlineProse: 'layout' } } };
+      const body = renderBlogOutlineBody(content, site, { permalink: null });
+      assert.match(body, /<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">/);
+    });
+    test('other page types without a permalink are unchanged (a landing page is still a section page)', () => {
+      const body = renderLandingPageBody({ headline: 'Boilers', sections: [{ heading: 'Bleeding radiators', body: 'Turn the valve.' }] }, mk({ inlineProse: 'layout' }), { permalink: null });
+      assert.doesNotMatch(body, /^## Bleeding radiators$/m);
+    });
   });
 });
 

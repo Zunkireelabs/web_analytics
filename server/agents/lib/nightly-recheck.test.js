@@ -133,3 +133,27 @@ describe('growth opportunities the detector no longer reports', () => {
     assert.deepEqual(closed, []); assert.equal(out.closed, 0);
   });
 });
+
+describe('the deadline (the re-check must end before the worker window opens)', () => {
+  const mkDeps = (rows, ran, clockMs) => ({
+    query: async (sql) => (/^\s*SELECT/i.test(sql) ? { rows } : { rows: [] }),
+    getSiteById: async () => ({ timezone: 'UTC' }), coord: { recommendationPageKey: ({ params }) => params.page },
+    recheckLink: async () => ({ broken: false }), close: async () => {}, providerFailureCount: () => 0,
+    now: () => clockMs.t,
+    runAgent: async (agent) => { ran.push(agent); clockMs.t += 60_000; return { status: 'ok', facts: { findings: [], checkedPages: ['/a', '/b', '/c'] } }; },
+  });
+  test('stops between agent groups once the deadline passes, and says so', async () => {
+    const rows = [rec(1, '/a', { detecting_agents: ['agent-one'] }), rec(2, '/b', { detecting_agents: ['agent-two'] }), rec(3, '/c', { detecting_agents: ['agent-three'] })];
+    const ran = []; const clockMs = { t: 0 };
+    const out = await recheckOpenIssuesForSite(9, { deadlineAt: 90_000, deps: mkDeps(rows, ran, clockMs) });
+    assert.equal(ran.length, 2, 'two groups ran (0s and 60s), the third would start at 120s, after the deadline');
+    assert.equal(out.deadlineHit, true);
+  });
+  test('no deadline means every group runs and deadlineHit stays false', async () => {
+    const rows = [rec(1, '/a', { detecting_agents: ['agent-one'] }), rec(2, '/b', { detecting_agents: ['agent-two'] })];
+    const ran = []; const clockMs = { t: 0 };
+    const out = await recheckOpenIssuesForSite(9, { deps: mkDeps(rows, ran, clockMs) });
+    assert.equal(ran.length, 2);
+    assert.equal(out.deadlineHit, false);
+  });
+});
