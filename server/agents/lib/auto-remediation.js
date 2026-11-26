@@ -3,6 +3,8 @@ import { makePageSourceResolver } from '../../implementers/lib/page-source-resol
 import { listOpenRecommendations, closeRecommendation, blockRecommendation } from '../../store/recommendations.js';
 import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, markDraftAbandoned, recordMergeFailure, requeueUnpushedBatchDraft } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
+import { recordItemOutcome } from '../../lib/delivery-cycle.js';
+import { workerSessionTimezone } from '../../lib/worker-session.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr, pushDraftBranch, openDraftPr } from '../../routes/action-center.js';
 import { batchBranchName, beginBatchPush, pushDraftBranch as pushFileEditsOntoBatch } from '../../implementers/lib/github-ops.js';
@@ -293,7 +295,20 @@ export async function selectRemediationCandidates(site, siteId, { globalRemainin
   // for a batch of FIXES; it was never a decision to publish a quarter's
   // worth of blog content at once. Both paths now share this via
   // ship-pacing.js.
-  const { paced, notes: pacingNotes } = await applyPacing(site, eligible);
+  // EVIDENCE GATE for blogs (lib/blog-cycle/select.js): what replaces a person's approval of a topic. Before pacing, so the blog day's ceiling is filled from
+  // topics that already passed (client-specific business relevance, no duplicate, no cannibalisation, real evidence) and a rejected topic never takes one of
+  // the slots. BLOG_EVIDENCE_GATE: 'log' (default) records every decision and changes nothing; 'enforce' filters; 'off' skips. Blogs on a normal day are
+  // dropped by the blog-day rule anyway, so they are not judged then. Any failure here is contained inside the gate (log: ignored, enforce: blogs held).
+  let gatedEligible = eligible;
+  if (blogDayMode() !== 'normal' && eligible.some((r) => r.recommendation_type === 'blog-outline')) {
+    try {
+      const { applyBlogEvidenceGate } = await import('../../lib/blog-cycle/select.js');
+      const gated = await applyBlogEvidenceGate(site, eligible);
+      gatedEligible = gated.kept;
+      for (const note of gated.notes) console.log(`[auto-remediation] ${clientLabel}: ${note}`);
+    } catch (err) { console.error(`[auto-remediation] ${clientLabel}: blog evidence gate unavailable (${err.message}); candidates unchanged`); }
+  }
+  const { paced, notes: pacingNotes } = await applyPacing(site, gatedEligible);
   for (const note of pacingNotes) console.log(`[auto-remediation] ${clientLabel}: ${note}`);
 
   // Convergence cap: a finding that has already failed this many times for an
@@ -873,6 +888,8 @@ export async function autoRemediateSafeRecommendations(siteId, {
       if (err?.designPending === true) {
         attempted--;
         designPending++;
+        // Kept on the project's day record: this skip used to leave nothing but a console line, and the console was lost on every restart.
+        await recordItemOutcome(siteId, { recommendationId: rec.id, findingId: null, generatorId: rec.recommendation_type, page: rec.page, skipReason: 'design-pending', reason: err.pendingReason || 'design not confirmed' }, { timezone: workerSessionTimezone() }).catch(() => {});
         console.warn(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) skipped for now — ${err.pendingReason || 'design not confirmed'}${err.exhausted ? ' (waiting for a design review)' : ''}; nothing counted against it.`);
         if (attempted < remaining) {
           const backfill = nextBackfillCandidate();

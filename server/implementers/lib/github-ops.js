@@ -380,6 +380,21 @@ export async function pushDraftBranch(site, draft, files, target) {
   const scopeGate = validateWriteScope(site, files);
   if (!scopeGate.ok) return scopeGate;
 
+  // Overwrite protection (lib/content-index/overwrite-guard.js): an edit never replaces a file that changed after the item read it, and a new page never replaces
+  // an existing file or a path another in-flight item holds. OVERWRITE_GUARD: 'log' (default) records what it would refuse and never refuses, 'enforce' refuses
+  // before anything is written (a changed file is retryable: the edit is rebuilt from the current file), 'off' skips. Lazy import: a fault here must not
+  // cost the push its other gates.
+  try {
+    const { validateNoBlindOverwrite, overwriteGuardMode } = await import('../../lib/content-index/overwrite-guard.js');
+    if (overwriteGuardMode() !== 'off') {
+      const { getFileSha } = await import('../../github/client.js');
+      let entries = [];
+      try { entries = (await (await import('../../lib/content-index/store.js')).loadContentIndex(site.id)) || []; } catch { entries = []; }
+      const overwriteGate = await validateNoBlindOverwrite(site, draft, files, { ref: baseBranch(site), batchRef: target?.branchName || null, getSha: getFileSha, entries });
+      if (!overwriteGate.ok) return overwriteGate;
+    }
+  } catch (err) { console.error(`[github-ops] overwrite guard unavailable for draft ${draft?.id}: ${err.message}`); }
+
   const renderGate = await validateRenderingBatch(site, files);
   if (!renderGate.ok) return renderGate;
 

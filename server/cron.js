@@ -2,10 +2,13 @@ import cron from 'node-cron';
 import { masterTick } from './lib/master-agent.js';
 import { getMasterMode, recordPlanError } from './lib/master-agent-control.js';
 import { RUN_WINDOW_MS } from './lib/site-run.js';
-import { runCompetitorGrowthCycleForAllSites, runCompetitorOutcomeLearningForAllSites, runRankTrackingForAllSites, runPosthogIngestForAllSites, runGscScreenRefreshForAllSites } from './job.js';
+import { runProtectionBaselineQueue } from './design-agent/protection/capture-baseline.js';
+import { designProtectionMode } from './lib/design-protection/mode.js';
+import { runTopicResearchForAllSites } from './lib/topic-research/index.js';
+import { runDeliveryDayClose, runDeliveryConsolidation, runDeliveryAlerts, runCompetitorGrowthCycleForAllSites, runCompetitorOutcomeLearningForAllSites, runRankTrackingForAllSites, runPosthogIngestForAllSites, runGscScreenRefreshForAllSites } from './job.js';
 import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runSitemapSyncForAllSites, runFixVerificationsForAllSites, runNightlyIssueRecheckForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runKeywordScheduleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, runAiVisibilityShipForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, checkDesignChangesForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites, runTrendRadarIfDueForAllSites, runNewsPostsIfDueForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
-import { deferToWorker, workerSessionTick, workerSessionTimezone } from './lib/worker-session.js';
+import { deferToWorker, workerSessionTick, workerSessionTimezone, msUntilWindowOpens, workerSessionCron, deliveryCloseCron, deliveryConsolidationCron, minuteOfDay, SESSION_CUTOFF_MINUTE } from './lib/worker-session.js';
 import { workerOnline } from './store/llm-requests.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -198,7 +201,7 @@ export function startCron() {
       // must not cost every OTHER site its PRs, which is the same per-tenant
       // isolation runAutoRemediationForAllSites already applies internally.
       if (!process.env.SHIP_CRON_SCHEDULE && deferToWorker()) {
-        console.log('[cron] fix writing is the laptop worker\'s job (10:30-14:00): no generation in the morning run');
+        console.log('[cron] fix writing is the laptop worker\'s job (10:30-17:00): no generation in the morning run');
       } else if (!process.env.SHIP_CRON_SCHEDULE) {
         // No lock taken here: runAutoRemediationForAllSites takes a PER-SITE
         // shipping lock around each tenant's own run (job.js). A platform-wide
@@ -580,13 +583,47 @@ export function startCron() {
   }
 
 
-  // THE LAPTOP WORKER'S SESSION: every 5 minutes between 10:00 and 14:00 (site time), start the day's fix pass if a worker is connected. The pass itself
-  // ends at 14:00 (worker-session.js); anything left is picked up on the next tick or tomorrow. Does nothing unless LLM_WORKER_MODE=on.
+  // THE LAPTOP WORKER'S SESSION: every 5 minutes between 10:00 and 17:00 (site time), start the day's fix pass if a worker is connected. The pass itself
+  // ends at 17:00 (worker-session.js); anything left is picked up on the next tick or tomorrow. Does nothing unless LLM_WORKER_MODE=on.
   if (deferToWorker()) {
-    cron.schedule('*/5 10-13 * * *', () => locked('worker-session', async () => {
+    cron.schedule(workerSessionCron(), () => locked('worker-session', async () => {
       await workerSessionTick({ timezone: workerSessionTimezone(), isOnline: workerOnline, runPass: ({ windowEndsAt }) => runAutoRemediationForAllSites({ windowEndsAt }) });
     }), { timezone: workerSessionTimezone() });
-    console.log(`[cron] laptop worker session scheduled every 5 min, 10:30-14:00 (${workerSessionTimezone()})`);
+    console.log(`[cron] laptop worker session scheduled "${workerSessionCron()}" (window 10:30-17:00, ${workerSessionTimezone()})`);
+  }
+
+  // CONTINUOUS RESEARCH: each project keeps a ready pool of evidence-checked blog topics, decided by the agents (no manual topic approval). Runs once a day after the
+  // 06:30 discovery jobs, before the worker window; an empty backlog still starts research. TOPIC_RESEARCH=off|log|on (default log: decisions are recorded, nothing proposed).
+  cron.schedule('50 6 * * *', () => locked('topic-research', async () => {
+    try { const r = await runTopicResearchForAllSites(); console.log(`[topic-research] ${JSON.stringify(r).slice(0, 300)}`); } catch (err) { console.error('[cron] topic research error:', err.message); }
+  }), { timezone: tz });
+  console.log(`[cron] topic research scheduled "50 6 * * *" (${tz})`);
+
+  // DESIGN PROTECTION BASELINES: a visible change whose template has no captured baseline waits as "awaiting-baseline" and a capture is requested (never assumed to
+  // pass). Without something that works the request list, that wait never ends. Every 30 minutes from 07:00 to 16:30 (the worker's clock), a few requests are
+  // captured from the live site (read only). Off when DESIGN_PROTECTION_MODE=off.
+  cron.schedule('*/30 7-16 * * *', () => locked('design-protection-baselines', async () => {
+    if (designProtectionMode() === 'off') return;
+    try { const r = await runProtectionBaselineQueue({ limit: 3 }); if (r?.length) console.log(`[design-protection] baselines: ${r.map((x) => `site ${x.siteId} ${x.templateKey} ${x.status}`).join('; ')}`); } catch (err) { console.error('[cron] design-protection baselines error:', err.message); }
+  }), { timezone: workerSessionTimezone() });
+
+  // THE DAY'S CLOSE: when the worker window ends, every active project gets its closed day record (delivered / preserved / no-work /
+  // incomplete / unreached). Runs whether or not the laptop worker is in use: no project may leave a day without a record. A restart
+  // after the cut-off closes the day on startup (closing is idempotent), so a deploy at 17:05 cannot lose it.
+  cron.schedule(deliveryConsolidationCron(), () => locked('delivery-consolidation', async () => {
+    try { await runDeliveryConsolidation(); } catch (err) { console.error('[cron] delivery consolidation error:', err.message); }
+  }), { timezone: workerSessionTimezone() });
+  // Alerts: hourly at :55, database only. Each alert is stated once per day (see runDeliveryAlerts).
+  cron.schedule('55 * * * *', () => locked('delivery-alerts', async () => {
+    try { await runDeliveryAlerts(); } catch (err) { console.error('[cron] delivery alerts error:', err.message); }
+  }), { timezone: workerSessionTimezone() });
+  console.log(`[cron] delivery consolidation scheduled "${deliveryConsolidationCron()}" (${workerSessionTimezone()})`);
+  cron.schedule(deliveryCloseCron(), () => locked('delivery-day-close', async () => {
+    try { await runDeliveryDayClose(); } catch (err) { console.error('[cron] delivery day close error:', err.message); }
+  }), { timezone: workerSessionTimezone() });
+  console.log(`[cron] delivery day close scheduled "${deliveryCloseCron()}" (${workerSessionTimezone()})`);
+  if (minuteOfDay(workerSessionTimezone()) >= SESSION_CUTOFF_MINUTE) {
+    runDeliveryDayClose().catch((err) => console.error('[cron] startup delivery day close error:', err.message));
   }
 
   // Issue re-check: the agent re-reads the live page behind every open issue and closes what is fixed, so the list holds only
@@ -599,7 +636,10 @@ export function startCron() {
     console.error(`[cron] invalid NIGHTLY_RECHECK_CRON_SCHEDULE "${recheckSchedule}" — nightly issue re-check NOT scheduled.`);
   } else {
     cron.schedule(recheckSchedule, () => locked('nightly-issue-recheck', async () => {
-      try { await runNightlyIssueRecheckForAllSites(); } catch (err) { console.error('[cron] nightly issue re-check error:', err.message); }
+      // With the laptop worker owning the day's fixes, the re-check must be finished before its window opens (it ran 09:30 to
+      // past 15:00 on 2026-11-25). A re-check cut short by the deadline resumes tomorrow: the oldest-checked issues go first.
+      const untilWindow = deferToWorker() ? msUntilWindowOpens(workerSessionTimezone()) : null;
+      try { await runNightlyIssueRecheckForAllSites({ deadlineAt: untilWindow == null ? null : Date.now() + untilWindow }); } catch (err) { console.error('[cron] nightly issue re-check error:', err.message); }
     }), { timezone: tz });
     console.log(`[cron] nightly issue re-check scheduled "${recheckSchedule}" (${tz})`);
   }

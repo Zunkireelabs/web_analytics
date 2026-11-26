@@ -106,7 +106,19 @@ export function measureBodyInPage(mark) {
     if (g >= 0 && g < 200) gaps.push(g);
   }
   gaps.sort((x, y) => x - y);
-  const firstP = bodyParas[0] || null;
+  // The paragraph that stands for the body: the first one carrying the MOST COMMON font size among the body paragraphs. Not simply the first: many
+  // sites style a lead paragraph larger (`.post p:first-child { font-size: 19px }` while the rest are 17px), and a draft that opens with a heading has
+  // no lead paragraph, so comparing "first with first" reported a correct draft as the wrong size (2026-11-25, ten Chayce blog drafts held at 17 vs 19).
+  // Fewer than three paragraphs: no basis for "most common", so the first one stands, as before.
+  let firstP = bodyParas[0] || null;
+  if (bodyParas.length >= 3) {
+    const sizes = bodyParas.map((p) => px(getComputedStyle(p).fontSize));
+    const counts = new Map();
+    for (const sz of sizes) counts.set(sz, (counts.get(sz) || 0) + 1);
+    let modal = null; let top = 0;
+    for (const [sz, n] of counts) if (n > top) { modal = sz; top = n; }
+    firstP = bodyParas[sizes.indexOf(modal)] || firstP;
+  }
   const pStat = stat(firstP);
   const regionRect = region.getBoundingClientRect();
   let plugin = false;

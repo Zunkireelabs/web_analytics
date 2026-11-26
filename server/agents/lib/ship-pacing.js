@@ -1,5 +1,6 @@
 import { hasRecentDraftOfType, countFailedAttemptsByFinding, countDraftsOfTypeToday } from '../../store/drafts.js';
-import { blogDayMode, blogDayMax } from '../../lib/blog-day.js';
+import { blogDayMode } from '../../lib/blog-day.js';
+import { blogCycleCeiling } from '../../lib/blog-cycle/ceiling.js';
 import { countRecoveryCyclesByFinding, countRefusalRecoveryCyclesByRecommendation } from '../../store/recommendation-attempts.js';
 import { countRefusalsByRecommendation } from './generator-learning.js';
 
@@ -110,7 +111,7 @@ export function effectiveConvergenceCap(recoveryCycles) {
 // to one each. Returns the candidates in their original priority order, plus
 // the human-readable notes the caller logs — deferrals are never silent, the
 // same rule the daily budget's truncation already follows.
-export async function applyPacing(site, candidates, { recentDraftCheck = hasRecentDraftOfType, countToday = countDraftsOfTypeToday, blogMode = blogDayMode(), blogMax = blogDayMax() } = {}) {
+export async function applyPacing(site, candidates, { recentDraftCheck = hasRecentDraftOfType, countToday = countDraftsOfTypeToday, blogMode = blogDayMode(), blogMax = blogCycleCeiling() } = {}) {
   const timezone = site.timezone || 'UTC';
   const notes = [];
   const dropped = new Set();
@@ -153,6 +154,8 @@ export async function applyPacing(site, candidates, { recentDraftCheck = hasRece
     const ordinaryGap = site[gapColumn] ?? defaultGapDays;
     let lanes;
     if (generatorId === 'blog-outline' && blogMode === 'blog') {
+      // FIVE IS A CEILING, NEVER A QUOTA (lib/blog-cycle/ceiling.js): blogMax caps how many ship; the evidence gate (lib/blog-cycle/select.js, called before
+      // this) decides how many are fit to ship, so fewer than blogMax ship when fewer pass and none ship when none do.
       // A BLOG DAY ships a batch (owner's rule, 2026-11-24): up to blogMax blogs for the project in total today, whatever their booked day, so 5 to 6 go out
       // together every third day. Booked-and-due first (earliest day), then hand-added topics, then the rest in priority order. Blogs already drafted today
       // count, so the passes the worker's window runs cannot exceed the batch. The gap rule does not apply: the blog day IS the gap.

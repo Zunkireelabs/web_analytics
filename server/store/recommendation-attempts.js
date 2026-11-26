@@ -11,6 +11,8 @@
 // finding_id survives that.
 import { query } from '../db.js';
 import { classifyAbandonReason } from '../lib/attempt-classification.js';
+import { recordItemOutcome } from '../lib/delivery-cycle.js';
+import { workerSessionTimezone } from '../lib/worker-session.js';
 
 // Records one attempt outcome. Callers pass an already-classified
 // retryPolicy/failureClass where they have a structured error; where all they
@@ -34,6 +36,8 @@ export async function recordAttempt(siteId, {
      RETURNING *`,
     [siteId, recommendationId ?? null, findingId ?? null, draftId ?? null, outcome, cls, policy, reason ?? null],
   );
+  // Also into the project's day record, so "what happened to this item today" and its stored content have one home. Never throws.
+  await recordItemOutcome(siteId, { recommendationId, findingId, draftId, outcome, failureClass: cls, retryPolicy: policy, reason }, { timezone: workerSessionTimezone() });
   return rows[0];
 }
 

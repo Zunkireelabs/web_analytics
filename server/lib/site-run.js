@@ -24,6 +24,15 @@ export function orderByUrgency(list, urgency) {
   return list.map((site, i) => ({ site, i, u: Number(urgency.get(site.id)) || 0 })).sort((a, b) => (b.u - a.u) || (a.i - b.i)).map((x) => x.site);
 }
 
+// Within a working day with several passes (the laptop worker's session runs one every 20+ minutes), whoever was served longest ago goes first: a project not yet
+// reached today leads, then the one whose last pass is oldest, and the urgency order (the list as given) breaks ties. Without this the project with the most
+// high-priority work leads EVERY pass and spends its 30-minute allowance first each time. `servedAt` is Map<siteId, ms of that project's last pass today>.
+// Pure and stable: an empty or missing map returns the list unchanged, so on the day's first pass the urgency order is exactly what it was.
+export function orderByTurn(list, servedAt) {
+  if (!Array.isArray(list) || list.length < 2 || !(servedAt instanceof Map) || servedAt.size === 0) return list || [];
+  return list.map((site, i) => ({ site, i, t: servedAt.has(site.id) ? Number(servedAt.get(site.id)) : -Infinity })).sort((a, b) => (a.t - b.t) || (a.i - b.i)).map((x) => x.site);
+}
+
 // One client gets 30 minutes for its detection work and 30 for shipping; then the pass moves to the next client.
 export const SITE_RUN_TIMEOUT_MS = Number(process.env.SITE_RUN_TIMEOUT_MS) || 30 * 60 * 1000;
 

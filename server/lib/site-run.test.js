@@ -65,7 +65,7 @@ test('the morning window is open until its end, closed from then on, and never c
 });
 
 import { describe } from 'node:test';
-import { orderByUrgency } from './site-run.js';
+import { orderByUrgency, orderByTurn } from './site-run.js';
 describe('orderByUrgency', () => {
   const sites = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
   test('the site with the most open high-priority work goes first', () => {
@@ -85,5 +85,31 @@ describe('orderByUrgency', () => {
     assert.equal(orderByUrgency(sites, null), sites);
     orderByUrgency(sites, new Map([[4, 5]]));
     assert.deepEqual(sites, copy);
+  });
+});
+
+describe('orderByTurn (whoever was served longest ago today goes first)', () => {
+  const sites = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+  const ids = (l) => l.map((s) => s.id);
+  test('on the day\'s first pass nobody has been served, so the urgency order stands unchanged', () => {
+    assert.deepEqual(ids(orderByTurn(sites, new Map())), [1, 2, 3, 4]);
+    assert.deepEqual(ids(orderByTurn(sites, undefined)), [1, 2, 3, 4]);
+  });
+  test('a project not yet reached today goes before every project that was, then oldest-served first', () => {
+    const servedAt = new Map([[1, 5000], [3, 1000], [2, 9000]]); // 4 never served today
+    assert.deepEqual(ids(orderByTurn(sites, servedAt)), [4, 3, 1, 2]);
+  });
+  test('ties keep the urgency order, so the busiest project is not pushed behind an equally recent one', () => {
+    assert.deepEqual(ids(orderByTurn(sites, new Map([[1, 1000], [2, 1000], [3, 1000], [4, 1000]]))), [1, 2, 3, 4]);
+  });
+  test('the project that led the previous pass (and used its 30 minutes) goes last next time', () => {
+    const servedAt = new Map([[1, 60_000 * 90], [2, 60_000 * 50], [3, 60_000 * 55], [4, 60_000 * 60]]);
+    assert.equal(orderByTurn(sites, servedAt).at(-1).id, 1);
+  });
+  test('does not mutate its input and handles tiny lists', () => {
+    const copy = [...sites]; orderByTurn(sites, new Map([[1, 5]]));
+    assert.deepEqual(sites, copy);
+    assert.deepEqual(orderByTurn([], new Map([[1, 5]])), []);
+    assert.deepEqual(orderByTurn([{ id: 9 }], new Map([[9, 5]])), [{ id: 9 }]);
   });
 });

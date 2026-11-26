@@ -296,6 +296,17 @@ export async function sendStaffShipStallEmail({ siteName, days, causes = [] }) {
   return true;
 }
 
+// Staff-only: the delivery system's alerts (lib/delivery-alerts.js), each stated once per day. Only critical and high ones are mailed; the rest are on the status view.
+export async function sendStaffDeliveryAlertEmail({ alerts }) {
+  const transporter = getTransporter();
+  if (!transporter) { console.log('[email] SMTP not fully configured — skipping staff delivery alert email.'); return false; }
+  const rows = alerts.map((a) => `<tr><td style="padding:4px 12px 4px 0;color:${a.severity === 'critical' ? '#b00020' : '#996600'};white-space:nowrap">${escapeHtml(a.severity)}</td><td>${escapeHtml(a.message)}</td></tr>`).join('');
+  const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:640px"><h2 style="margin:0 0 8px">Delivery alerts</h2><table style="border-collapse:collapse">${rows}</table><p style="margin:16px 0 0;color:#555">Full picture: the delivery status view (platform admin).</p></div>`;
+  await transporter.sendMail({ from: process.env.REPORT_EMAIL_FROM || process.env.SMTP_USER, to: staffNoticeRecipients(), subject: `Delivery alerts (${alerts.length})`, html });
+  console.log(`[email] staff delivery alert (${alerts.length}) sent to ${staffNoticeRecipients().join(', ')}`);
+  return true;
+}
+
 export async function sendContactLeadEmail({ companyName, websiteDomain, contactEmail, message }) {
   const transporter = getTransporter();
   if (!transporter) {

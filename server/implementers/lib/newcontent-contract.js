@@ -63,6 +63,9 @@ const FIELD_ALIASES = {
 // An Astro content collection's schema file: the build rejects a content file whose front matter does not satisfy it.
 const CONTENT_SCHEMA_FILE = /^src\/content(\/config|\.config)\.(ts|mts|js|mjs)$/;
 
+// Required keys whose value is chosen from the site's own posts when the generator cannot supply one (see contractFromSamples).
+const SIBLING_CHOICE_KEYS = new Set(['author', 'authors', 'category', 'categories']);
+
 const GENERATOR_OWNED_KEYS = new Set(['title', 'description', 'excerpt', 'summary', 'date', 'dateModified', 'datePublished', 'publishedAt', 'slug', 'permalink']);
 const OPTIONAL_BY_NATURE = new Set(['updated', 'lastmod', 'modified', 'featured', 'draft', 'tags', 'seoTitle', 'slug', 'permalink', 'layout', 'templateEngineOverride', 'eleventyExcludeFromCollections']);
 
@@ -141,7 +144,10 @@ async function readFrontMatter(readFile, site, path, ref) {
     const v = m[2].replace(/^(["'])(.*)\1$/, '$2');
     if (v && !/^[\[{|>]/.test(m[2])) values[m[1]] = v;
   }
-  return { keys, layout: declared ? declared[1].trim() : null, values };
+  // A `cover:` block holding ONLY `kind: x` (the site's own minimal artwork shape, e.g. Astro's `{ kind: 'agent' }`): the one object value a new post may
+  // reuse as written, because a real post already ships it and it needs no other field. Anything richer (heading, rows, words) belongs to one post.
+  const kindOnly = /^cover\s*:\s*\r?\n[ \t]+kind\s*:\s*["']?([A-Za-z0-9_-]+)["']?[ \t]*(?:\r?\n(?![ \t])|(?![\s\S]))/m.exec(block);
+  return { keys, layout: declared ? declared[1].trim() : null, values, coverKind: kindOnly ? kindOnly[1] : null };
 }
 
 // Turns a set of real files' front matter into the contract a new file in
@@ -186,6 +192,26 @@ function contractFromSamples(samples, { schemaValidated = false } = {}) {
     if (GENERATOR_OWNED_KEYS.has(k) || Object.values(fieldNames).includes(k)) continue; // the post's own title, summary and dates are never copied from a sibling
     const vals = samples.map((s) => s.values?.[k]);
     if (vals.every((v) => v !== undefined && v === vals[0])) siblingConstants[k] = vals[0];
+  }
+
+  // Identity and taxonomy keys whose value differs between posts are still the CLIENT'S OWN: the author is one of its team, the category one of its
+  // list. A required one the generator cannot supply takes the value most posts already use, so a new post is attributed to the client's team and
+  // builds, instead of being refused for a person to choose (2026-11-25: SuperRank's `author: superrank-team` on 30+ posts, `category: AEO Know-How`).
+  // Per-post fields (images, dates, read time, titles) are never chosen this way, and a value must be used by at least two posts.
+  for (const k of requiredKeys) {
+    if (k in siblingConstants || !SIBLING_CHOICE_KEYS.has(k)) continue;
+    const counts = new Map();
+    for (const smp of samples) { const v = smp.values?.[k]; if (v) counts.set(v, (counts.get(v) || 0) + 1); }
+    let best = null; let n = 0;
+    for (const [v, c] of counts) if (c > n) { best = v; n = c; }
+    if (best && n >= 2) siblingConstants[k] = best;
+  }
+  if (requiredKeys.includes('cover') && !('cover' in siblingConstants)) {
+    const kinds = new Map();
+    for (const smp of samples) if (smp.coverKind) kinds.set(smp.coverKind, (kinds.get(smp.coverKind) || 0) + 1);
+    let kind = null; let n = 0;
+    for (const [v, c] of kinds) if (c > n) { kind = v; n = c; }
+    if (kind) siblingConstants.cover = { kind };
   }
 
   // True when the site's existing posts carry a `sources:` front-matter key (Chayce): verified sources then go there, in the same shape, not in the body.
@@ -310,8 +336,25 @@ export async function deriveNewContentContract(site, { dir, extension, ref } = {
       const sample = await readFrontMatter(readFile, site, path, branch);
       if (sample) samples.push(sample);
     }
-    return contractFromSamples(samples, { schemaValidated });
+    const contract = contractFromSamples(samples, { schemaValidated });
+    // A required `cover` no sampled post shows in its minimal form: the site's own content schema may still declare one (a union variant that is
+    // just `{ kind: 'agent' }`). That is the site stating, in code, a cover that needs nothing else, so it is as safe as a sibling that uses it.
+    if (!contract.unknown && contract.requiredKeys?.includes('cover') && !contract.siblingConstants?.cover) {
+      const schemaPath = (await tree(site, branch).then((t) => t.files || []).catch(() => [])).find((p) => CONTENT_SCHEMA_FILE.test(p));
+      if (schemaPath) {
+        const raw = await readFile(site, schemaPath, branch).then((f) => (typeof f === 'string' ? f : f?.content)).catch(() => null);
+        const kind = minimalCoverKindFromSchema(raw);
+        if (kind) contract.siblingConstants = { ...contract.siblingConstants, cover: { kind } };
+      }
+    }
+    return contract;
   });
+}
+
+// The first `z.object({ kind: z.literal('x') })` in a content schema: a cover variant with no other field. Null when there is none.
+export function minimalCoverKindFromSchema(src) {
+  const m = /z\.object\(\{\s*kind\s*:\s*z\.literal\(\s*['"]([A-Za-z0-9_-]+)['"]\s*\)\s*,?\s*\}\)/.exec(String(src || ''));
+  return m ? m[1] : null;
 }
 
 // A blog target pointing at a folder that is NOT where the site's published posts live (Chayce: configured "docs", real posts in "src/blog"). A post

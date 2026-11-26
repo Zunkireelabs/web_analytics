@@ -1,4 +1,6 @@
 import { query } from '../db.js';
+import { recordRunIntoCycle } from '../lib/delivery-cycle.js';
+import { workerSessionTimezone } from '../lib/worker-session.js';
 
 // Best-effort: a logging write failing must never take down the shipping run
 // it's observing (same swallow-and-log convention as design-integrity-verdicts.js).
@@ -17,6 +19,8 @@ export async function recordAutoRemediationRun(siteId, {
   } catch (err) {
     console.error('[auto-remediation-runs] failed to record run log:', err.message);
   }
+  // The project's day record (delivery_cycles) sees every run record, real or skipped. Its own errors are swallowed inside.
+  await recordRunIntoCycle(siteId, { attempted, shipped, failed, refused, skipped, stoppedReason, prUrl, selection }, { timezone: workerSessionTimezone(), now: finishedAt });
 }
 
 export async function listRecentAutoRemediationRuns(siteId, limit = 20) {

@@ -102,7 +102,10 @@ export function familiesForDecliningPage(decline, pageInsights) {
     signals.push({
       family: insight.insight_type, source: 'insights', metricKey: insight.metric_key,
       detail: insight.insight_type === 'forecast_risk'
-        ? `forecast projects continued decline (confidence ${e.confidence?.toFixed?.(2) ?? 'n/a'}, ${Math.round(e.pct_projected_change || 0)}% projected change)`
+        ? (e.projection_basis === 'decline_threshold_of_the_model_label'
+          // a threshold, not a point forecast: "projected change -20%" would overstate what the model said
+          ? `forecast warns of a decline (confidence ${e.confidence?.toFixed?.(2) ?? 'n/a'}, at least ${Math.round(Math.abs(e.decline_threshold_pct ?? e.pct_projected_change ?? 0))}% below the recent average)`
+          : `forecast projects continued decline (confidence ${e.confidence?.toFixed?.(2) ?? 'n/a'}, ${Math.round(e.pct_projected_change || 0)}% projected change)`)
         : insight.insight_type === 'anomaly'
           ? `anomaly detected (${e.method}, score ${e.score?.toFixed?.(2) ?? e.score})`
           : `${Math.round(e.pct_change)}% trend shift`,

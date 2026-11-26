@@ -422,3 +422,23 @@ test('"could not be pushed to GitHub right now" is a retryable outage, never an 
   assert.equal(c.retryPolicy, RETRY_POLICY.RETRY);
   assert.equal(c.failureClass, FAILURE_CLASS.EXTERNAL_SERVICE);
 });
+
+test('a blog draft with no reference article page waits on a human, instead of counting against the item (2026-11-25)', () => {
+  const r = 'Auto-ship failed: No real "inline-article" page on this site could be found to compare it against, so it needs a person to look at it. Held rather than shipped.';
+  const { retryPolicy } = classifyAbandonReason(r);
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
+test('refusals fixed by platform changes the same day stay retryable, not blocked', () => {
+  for (const r of [
+    'Auto-ship failed: No other page in this collection has a FAQ section to copy the format from, so none is invented.',
+    'Auto-ship failed: On this site the front-matter title is also the visible headline, and no separate SEO-title field is in use, so the title was not changed.',
+    'Auto-ship failed: src/blog/articles.md does not exist on branch "main" — confirm the path in url_file_map is correct.',
+  ]) assert.equal(isAutoRetryable(classifyAbandonReason(r).retryPolicy), true, r);
+});
+
+test('a real defect in the draft still counts, and a rate limit still retries', () => {
+  assert.equal(classifyAbandonReason('Auto-ship failed: This schema draft has 1 unverified placeholder field(s) (image) — the model couldn’t confirm these').retryPolicy, RETRY_POLICY.ITEM_DEFECT);
+  assert.equal(classifyAbandonReason('Auto-ship failed: GitHub rate limit reached for /repos/x/y/contents/a.md?ref=main (resets 2026-11-25T08:37:39.000Z) — retried 2x, still limited.').retryPolicy, RETRY_POLICY.RETRY);
+});

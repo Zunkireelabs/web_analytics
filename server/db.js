@@ -77,6 +77,15 @@ export const pool = new Pool({
   ssl: process.env.DB_SSL === 'off' ? false : { rejectUnauthorized: false },
 });
 
+// A pooled connection that the database drops while it sits idle (a failover, a pooler restart, an administrator terminating the backend) makes `pg` emit
+// 'error' on the POOL. With no listener Node treats that as fatal and the whole process exits, taking its in-memory state (the worker session, a pass in progress)
+// with it. Measured on 2026-11-25 against a local Postgres: terminate the idle backend and the process dies with "Unhandled 'error' event". The pool already
+// discards the broken client and opens a fresh one for the next query, so the right response is to say so and carry on. Queries that were running on that
+// connection still reject on their own and are handled by their callers.
+pool.on('error', (err) => {
+  console.error(`[db] an idle database connection was dropped (${err.code || 'no code'}: ${String(err.message).slice(0, 120)}); the pool will open a new one on the next query`);
+});
+
 export const query = (text, params) => pool.query(text, params);
 
 // Fetch the configured site row, creating it from env on first run if absent.

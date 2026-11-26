@@ -35,6 +35,8 @@ mock.module(resolve('../github/client.js'), {
   namedExports: {
     ...strictGithub,
     getFileContent: async (site, path) => (repo.has(path) ? { content: repo.get(path), sha: 'sha-' + path } : null),
+    // The overwrite guard (lib/content-index/overwrite-guard.js, default log mode) reads the current sha of each file before a push. A read, answered from the same fake repo (same sha scheme as getFileContent).
+    getFileSha: async (site, path) => (repo.has(path) ? 'sha-' + path : null),
     getBranchSha: async () => { if (githubDown) throw new Error('GitHub 502'); return 'base-sha'; },
     createBranch: async () => { if (githubDown) throw new Error('GitHub 502'); return {}; },
     commitFilesAtomic: async (site, branch, files) => { if (githubDown) throw new Error('GitHub 502'); commits.push({ branch, files: files.map((f) => ({ path: f.path, content: f.content })) }); return { sha: 'c' + commits.length }; },

@@ -48,6 +48,7 @@ const Account = lazy(() => import('./pages/Account.jsx'));
 const ConnectedTab = lazy(() => import('./pages/ConnectedTab.jsx'));
 const UsersAndTokens = lazy(() => import('./pages/admin/UsersAndTokens.jsx'));
 const Monitoring = lazy(() => import('./pages/admin/Monitoring.jsx'));
+const DeliveryStatus = lazy(() => import('./pages/admin/DeliveryStatus.jsx'));
 
 export default function App() {
   const navigate = useNavigate();
@@ -335,6 +336,7 @@ export default function App() {
               {isPlatformAdmin && <Route path="/admin/users" element={<UsersAndTokens />} />}
               {isPlatformAdmin && <Route path="/admin/mcp" element={<Navigate to="/admin/users" replace />} />}
               {isPlatformAdmin && <Route path="/admin/system-health" element={<Monitoring />} />}
+              {isPlatformAdmin && <Route path="/admin/delivery" element={<DeliveryStatus />} />}
               {isPlatformAdmin && <Route path="/admin/audit-log" element={<Navigate to="/admin/system-health" replace />} />}
             </Routes>
           </Suspense>

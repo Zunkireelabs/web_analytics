@@ -18,6 +18,7 @@ const defaults = {
   updateRef: async () => { throw new Error('Bad credentials (401)'); },
   openPullRequest: async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); },
   getFileContent: async () => null,
+  getFileSha: async () => null,
   mergeBranchFromBase: async () => ({ ok: true, conflicted: false, synced: false }),
   compareCommits: async () => ({ files: [] }),
   listOpenPullRequestsForBranch: async () => [],
@@ -47,6 +48,7 @@ mock.module(resolve('../../github/client.js'), {
     defaultBranchName: (site) => site.repo_default_branch || 'main',
     prTargetBranchName: (site) => site.pr_target_branch || site.repo_default_branch || 'main',
     getFileContent: (...a) => defaults.getFileContent(...a),
+    getFileSha: (...a) => defaults.getFileSha(...a),
     getRepoTree: async () => ({ files: [], truncated: false }),
     putFile: async () => ({}),
   },
@@ -794,5 +796,58 @@ describe('syncBranchWithBase — any batch branch, not only today\'s', () => {
       const r = await syncBranchWithBase(site, 'action-center/batch-1-2026-11-21');
       assert.equal(r.conflicted, true); assert.equal(r.corrupted, true);
     } finally { reset(); }
+  });
+});
+
+// OVERWRITE PROTECTION wired into the one push funnel (lib/content-index/overwrite-guard.js). The read ledger is fed by getFileContent in the real client;
+// here it is fed directly, and the file's CURRENT sha comes from the mocked getFileSha.
+const { noteFileRead, clearReadLedger } = await import('../../lib/content-index/overwrite-guard.js');
+describe('pushDraftBranch refuses to overwrite a file that changed after the item read it', () => {
+  const target = { branchName: 'action-center/batch-1-2026-11-25', exists: true };
+  const arrange = () => {
+    const committed = [];
+    defaults.getBranchSha = async () => 'sha123'; defaults.createBranch = async () => ({});
+    defaults.commitFilesAtomic = async (s, b, files) => { committed.push(files.map((f) => f.path)); return { sha: 'new' }; };
+    defaults.getFileSha = async () => 's2';           // main now has a different version
+    clearReadLedger(); noteFileRead(site.id, 'main', 'src/faq.md', 's1'); // ...than the one this item read
+    return committed;
+  };
+  const restore = () => {
+    defaults.getBranchSha = async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); };
+    defaults.createBranch = async () => { throw new Error('Bad credentials (401)'); };
+    defaults.commitFilesAtomic = async () => { throw new Error('Bad credentials (401)'); };
+    defaults.getFileSha = async () => null; clearReadLedger(); delete process.env.OVERWRITE_GUARD;
+  };
+
+  test('enforce: the push is refused as retryable, nothing is committed', async () => {
+    const committed = arrange(); process.env.OVERWRITE_GUARD = 'enforce';
+    try {
+      const r = await pushDraftBranch(site, { ...draft, action_type: 'faq' }, [{ path: 'src/faq.md', content: 'x' }], target);
+      assert.deepEqual([r.ok, r.reason, r.retryable], [false, 'file-changed-since-read', true]); assert.match(r.error, /Nothing was written/);
+      assert.deepEqual(committed, []);
+    } finally { restore(); }
+  });
+  test('log (the default): the same push goes through, so deploying the guard changes nothing by itself', async () => {
+    const committed = arrange();
+    const warn = console.warn; console.warn = () => {};
+    try {
+      const r = await pushDraftBranch(site, { ...draft, action_type: 'faq' }, [{ path: 'src/faq.md', content: 'x' }], target);
+      assert.equal(r.ok, true); assert.deepEqual(committed, [['src/faq.md']]);
+    } finally { console.warn = warn; restore(); }
+  });
+  test('enforce: an unchanged file is written; a brand-new page at a free path is written; a new blog onto an existing path is refused', async () => {
+    const committed = arrange(); process.env.OVERWRITE_GUARD = 'enforce';
+    try {
+      defaults.getFileSha = async (_s, p) => (p === 'src/faq.md' ? 's1' : p === 'src/blog/taken.md' ? 'old' : null);
+      assert.equal((await pushDraftBranch(site, { ...draft, action_type: 'faq' }, [{ path: 'src/faq.md', content: 'x' }], target)).ok, true);
+      assert.equal((await pushDraftBranch(site, { ...draft, id: 43, action_type: 'blog-outline' }, [{ path: 'src/blog/new-post.md', content: 'x' }], target)).ok, true);
+      const taken = await pushDraftBranch(site, { ...draft, id: 44, action_type: 'blog-outline' }, [{ path: 'src/blog/taken.md', content: 'x' }], target);
+      assert.deepEqual([taken.ok, taken.reason, taken.retryable], [false, 'overwrite-blocked', false]);
+      assert.deepEqual(committed, [['src/faq.md'], ['src/blog/new-post.md']]);
+    } finally { restore(); }
+  });
+  test('off: the guard is skipped entirely', async () => {
+    arrange(); process.env.OVERWRITE_GUARD = 'off'; let asked = false; defaults.getFileSha = async () => { asked = true; return 's2'; };
+    try { assert.equal((await pushDraftBranch(site, { ...draft, action_type: 'faq' }, [{ path: 'src/faq.md', content: 'x' }], target)).ok, true); assert.equal(asked, false); } finally { restore(); }
   });
 });

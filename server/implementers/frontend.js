@@ -486,6 +486,18 @@ export async function apply(site, draft) {
   const designGate = await runDesignGates(site, draft, resolved, designGateDeps());
   if (!designGate.ok) return designGate;
 
+  // STRICT DESIGN PROTECTION (lib/design-protection, Phase 3): a new page is rendered into a real page of its own template (baseline captured, never assumed).
+  // 'log' (default) records only; 'enforce' waits when there is no baseline or it cannot be rendered, and refuses a measured break.
+  {
+    const { protectNewPage, toPendingError } = await import('../lib/design-protection/hooks.js');
+    const protection = await protectNewPage({ site, draft, resolved })
+      .catch((err) => ({ ok: true, verdict: 'error', error: err.message, reasons: [] })); // protection's own failure never ships or blocks by itself
+    if (!protection.ok) {
+      if (protection.pending) throw await toPendingError(protection);
+      return { ok: false, reason: `design-protection-${protection.verdict}`, error: protection.error };
+    }
+  }
+
   if (siteHasUsableDesignProfile(site)) {
     const gate = await checkDesignIntegrityGate(site, { actionType: draft.action_type, findingId: draft.finding_id });
     if (!gate.ok) {

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildClaudeArgs, parseClaudeOutput, classifyClaudeError, workerIdFrom, backoffMs, logLine, clock } from '../../tools/claude-code-worker/lib.mjs';
+import { buildClaudeArgs, parseClaudeOutput, classifyClaudeError, workerIdFrom, backoffMs, logLine, clock, decideClaimFailure, SUSPECT_404_MS, deliverWithRetry, FINAL_STATUSES } from '../../tools/claude-code-worker/lib.mjs';
 
 describe('the worker runs Claude Code as a plain text writer', () => {
   test('no tools, no saved sessions, none of the account\'s settings or instructions, no skills or connectors', () => {
@@ -68,5 +68,45 @@ describe('small rules', () => {
     assert.match(logLine({ type: 'failed', id: 3, error: 'x', retryable: true }, d), /given back for another try/);
     assert.match(logLine({ type: 'resting', ms: 600000, why: 'busy' }, d), /resting 600s/);
     assert.match(logLine({ type: 'stop', held: 2 }, d), /giving back 2 unfinished/);
+  });
+});
+
+describe('the worker survives a server deploy (2026-11-25: one 404 mid-deploy made it exit for the whole day)', () => {
+  test('a 404 is retried, however long it lasts, and never stops the worker', () => {
+    assert.deepEqual(decideClaimFailure({ status: 404, firstNotFoundAt: 1000, now: 1500 }).action, 'retry');
+    const long = decideClaimFailure({ status: 404, firstNotFoundAt: 0, now: 3 * 60 * 60_000 });
+    assert.equal(long.action, 'retry');
+    assert.equal(long.suspect, true, 'after half an hour it is flagged as probably a settings problem, but still retried');
+  });
+  test('a short 404 (a deploy) is not flagged', () => {
+    assert.equal(decideClaimFailure({ status: 404, firstNotFoundAt: 0, now: SUSPECT_404_MS - 1 }).suspect, false);
+  });
+  test('only a refused token stops it', () => {
+    assert.equal(decideClaimFailure({ status: 401 }).action, 'stop');
+    for (const status of [0, 429, 500, 502, 503, 504]) assert.equal(decideClaimFailure({ status }).action, 'retry', String(status));
+  });
+});
+
+describe('a finished answer survives the server restarting at the moment it is handed over', () => {
+  const noSleep = { sleep: async () => {} };
+  const err = (status, message = 'x') => Object.assign(new Error(message), { status });
+  test('retries through a connection drop, a 404 (route missing during a deploy) and 5xx, then delivers', async () => {
+    const seen = []; let n = 0;
+    const r = await deliverWithRetry(async () => { n++; if (n === 1) throw new Error('fetch failed'); if (n === 2) throw err(404); if (n === 3) throw err(502); return { ok: true }; }, { ...noSleep, onRetry: (x) => seen.push(x.attempt) });
+    assert.deepEqual(r, { ok: true, value: { ok: true } }); assert.equal(n, 4); assert.deepEqual(seen, [1, 2, 3]);
+  });
+  test('a "you do not hold this any more" (409) or a refused token is final at once: no retry storm', async () => {
+    for (const status of [409, 401, 400, 413]) { let n = 0; const r = await deliverWithRetry(async () => { n++; throw err(status); }, noSleep); assert.deepEqual([r.ok, r.final, n], [false, true, 1], String(status)); }
+    assert.ok(FINAL_STATUSES.has(409));
+  });
+  test('gives up (not final) only after the time allowed, and reports the last error', async () => {
+    let t = 0; let n = 0;
+    const r = await deliverWithRetry(async () => { n++; throw err(503, 'down'); }, { sleep: async (ms) => { t += ms; }, now: () => t, maxMs: 60_000 });
+    assert.equal(r.ok, false); assert.equal(r.final, false); assert.match(r.error.message, /down/); assert.ok(n >= 4);
+  });
+  test('waits grow as the worker\'s other retries do', async () => {
+    const waits = []; let n = 0;
+    await deliverWithRetry(async () => { if (++n < 5) throw err(500); return 1; }, { sleep: async (ms) => waits.push(ms) });
+    assert.deepEqual(waits, [2000, 4000, 8000, 16000]);
   });
 });

@@ -4,7 +4,9 @@
 // simplest and safest shape for a single-repo, PAT-scoped pilot (see
 // server/implementers/ for what calls these).
 
+import { noteFileRead } from '../lib/content-index/overwrite-guard.js';
 import { resolveGithubToken, githubTokenEnvVar, isFineGrainedToken, usesGithubApp } from './credentials.js';
+import { conditionalGetsMode } from '../lib/delivery-modes.js';
 
 const API_BASE = 'https://api.github.com';
 
@@ -268,15 +270,38 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // legitimately take longer than an ordinary page load.
 const GITHUB_REQUEST_TIMEOUT_MS = 30_000;
 
+// CONDITIONAL GETS. A GET that GitHub answered with an ETag is repeated with If-None-Match; a 304 means "unchanged", costs NO rate limit,
+// and is answered here from the stored body. The content is therefore always as fresh as an unconditional read (GitHub decides, not us),
+// while the repeat reads that burned Zunkiree's 5000/hour three days running (tree + file reads repeated for every item of a pass) become
+// free. Never used for writes, for code search, or for a body over ETAG_MAX_BODY (a huge tree is not worth the memory); the cache is a
+// bounded LRU keyed by project + path, so one project's credential can never answer for another's.
+const ETAG_MAX_ENTRIES = 400;
+const ETAG_MAX_BODY = 2_000_000;
+const etagCache = new Map();
+const etagStats = { hits: 0, stored: 0, misses: 0 };
+export const githubConditionalStats = () => ({ ...etagStats, entries: etagCache.size });
+export const clearGithubConditionalCache = () => { etagCache.clear(); etagStats.hits = 0; etagStats.stored = 0; etagStats.misses = 0; };
+const etagKeyFor = (site, method, path, forSearch) => (method === 'GET' && !forSearch && conditionalGetsMode() === 'on' ? `${site?.id ?? `${site?.repo_owner}/${site?.repo_name}`}|${path}` : null);
+function rememberEtag(key, res, text) {
+  const etag = res.headers.get('etag');
+  if (!key || !etag || text.length > ETAG_MAX_BODY) return;
+  etagCache.delete(key); // re-insert last = most recently used
+  etagCache.set(key, { etag, text, contentType: res.headers.get('content-type') || 'application/json' });
+  etagStats.stored++;
+  if (etagCache.size > ETAG_MAX_ENTRIES) etagCache.delete(etagCache.keys().next().value);
+}
+
 async function githubRequest(site, method, path, body, { forSearch = false } = {}) {
+  const etagKey = etagKeyFor(site, method, path, forSearch);
   for (let attempt = 0; ; attempt++) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), GITHUB_REQUEST_TIMEOUT_MS);
+    const cached = etagKey ? etagCache.get(etagKey) : null;
     let res;
     try {
       res = await fetch(`${API_BASE}${path}`, {
         method,
-        headers: { ...(await authHeaders(site, { forSearch })), ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        headers: { ...(await authHeaders(site, { forSearch })), ...(body ? { 'Content-Type': 'application/json' } : {}), ...(cached ? { 'If-None-Match': cached.etag } : {}) },
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
@@ -291,7 +316,12 @@ async function githubRequest(site, method, path, body, { forSearch = false } = {
     recordRateLimitHeaders(site, res, { forSearch });
 
     const rateLimit = await rateLimitWaitMs(res);
-    if (rateLimit == null) return res;
+    if (rateLimit == null) {
+      if (res.status === 304 && cached) { etagStats.hits++; return new Response(cached.text, { status: 200, headers: { 'content-type': cached.contentType, 'x-superrank-cache': 'etag-304' } }); }
+      if (etagKey && res.ok) { etagStats.misses++; rememberEtag(etagKey, res, await res.clone().text().catch(() => '')); }
+      else if (etagKey && cached) etagCache.delete(etagKey); // an error or a 404 now: never answer later from what was there before
+      return res;
+    }
     const { waitMs, trueWaitMs } = rateLimit;
     const attemptsLeft = RATE_LIMIT_MAX_RETRIES - attempt;
     // Fail fast when the header already proves retrying is futile — e.g. an
@@ -447,6 +477,8 @@ export async function getFileContent(site, path, ref) {
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`getFileContent failed (${res.status}): ${await res.text()}`);
   const data = await res.json();
+  // What this read saw, for overwrite protection (lib/content-index/overwrite-guard.js): the push later compares the file's current sha with it.
+  noteFileRead(site?.id, ref, path, data.sha);
   return { content: Buffer.from(data.content, 'base64').toString('utf8'), sha: data.sha };
 }
 
@@ -662,7 +694,7 @@ export async function getPullRequest(site, prNumber) {
   const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/pulls/${prNumber}`);
   if (!res.ok) throw new Error(`getPullRequest failed (${res.status}): ${await res.text()}`);
   const data = await res.json();
-  return { state: data.state, merged: data.merged, mergeable: data.mergeable, mergeableState: data.mergeable_state, base: data.base?.ref ?? null, headSha: data.head?.sha ?? null, headRef: data.head?.ref ?? null, mergeSha: data.merge_commit_sha ?? null, mergedAt: data.merged_at ?? null, title: data.title ?? null, url: data.html_url ?? null };
+  return { state: data.state, merged: data.merged, mergeable: data.mergeable, mergeableState: data.mergeable_state, base: data.base?.ref ?? null, headSha: data.head?.sha ?? null, headRef: data.head?.ref ?? null, mergeSha: data.merge_commit_sha ?? null, mergedAt: data.merged_at ?? null, mergedBy: data.merged_by?.login ?? null, mergedByType: data.merged_by?.type ?? null, title: data.title ?? null, url: data.html_url ?? null };
 }
 
 // Open pull requests INTO one base branch, with their head branch names. Read-only. The platform staging agent

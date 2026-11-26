@@ -64,7 +64,7 @@ export function planRechecks(rows, { limit = MAX_RECHECKS_PER_SITE, size = MAX_P
 }
 
 /** One project. Never throws; returns counts. `deps` lets tests run it without a database or live site. */
-export async function recheckOpenIssuesForSite(siteId, { deps = {} } = {}) {
+export async function recheckOpenIssuesForSite(siteId, { deps = {}, deadlineAt = null } = {}) {
   const query = deps.query || (await import('../../db.js')).query;
   const { getSiteById } = deps.getSiteById ? deps : await import('../../store/read.js');
   const { daysAgoInTz } = await import('../../util/dates.js');
@@ -73,7 +73,9 @@ export async function recheckOpenIssuesForSite(siteId, { deps = {} } = {}) {
   const recheckLink = deps.recheckLink || (await import('./technical-seo-analysis.js')).recheckLink;
   const close = deps.close || (await import('../../store/recommendations.js')).closeRecommendation;
   const keyOf = (f) => coord.recommendationPageKey({ generatorId: f.recommendedAction.generatorId, params: f.recommendedAction.params });
-  const out = { siteId, checked: 0, fixed: 0, stillOpen: 0, unverified: 0, errors: 0 };
+  const out = { siteId, checked: 0, fixed: 0, stillOpen: 0, unverified: 0, errors: 0, deadlineHit: false };
+  const now = deps.now || Date.now;
+  const pastDeadline = () => deadlineAt != null && now() >= deadlineAt;
 
   const { rows } = await query(
     `SELECT id, page, recommendation_type, detecting_agents, params, last_rechecked_at FROM recommendations
@@ -84,6 +86,7 @@ export async function recheckOpenIssuesForSite(siteId, { deps = {} } = {}) {
   const tz = site?.timezone || 'UTC';
 
   for (const r of links) {
+    if (pastDeadline()) { out.deadlineHit = true; break; }
     try {
       if (!r.params?.href) { out.unverified++; continue; }
       const res = await recheckLink(r.params.href);
@@ -95,6 +98,8 @@ export async function recheckOpenIssuesForSite(siteId, { deps = {} } = {}) {
   const providerFailures = deps.providerFailureCount || (await import('../../lib/provider-health.js')).providerFailureCount;
   out.degraded = 0;
   for (const g of groups) {
+    // Stops BETWEEN groups, never inside one: what was not reached keeps its old last_rechecked_at and is first in line tomorrow.
+    if (pastDeadline()) { out.deadlineHit = true; break; }
     try {
       const failuresBefore = providerFailures();
       const output = await runAgent(g.agent, { siteId, start: daysAgoInTz(tz, 28), end: daysAgoInTz(tz, 0), ...(g.siteWide ? {} : { params: { pages: g.recs.map((r) => r.page) } }) }, { persist: false });

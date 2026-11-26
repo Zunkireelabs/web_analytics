@@ -12,6 +12,9 @@ import { setAutonomy, loadAutonomy, AutonomyError } from '../lib/autonomy-contro
 import { listIndustrySets, saveIndustrySet, resetIndustrySet, industrySetHistory } from '../lib/industry-sets.js';
 import { loadClientComparison, periodDays } from './ai-crawlers.js';
 import { listAgentMeta } from '../agents/registry.js';
+import { loadDeliveryStatus } from '../lib/delivery-status.js';
+import { isActiveSite } from '../lib/ship-window.js';
+import { workerOnline } from '../store/llm-requests.js';
 import { isPlatformAdmin, listAllWorkspacesForPlatform, getProject, deleteWorkspaceAsPlatform } from '../store/workspaces.js';
 
 // The platform admin's own view across every client workspace. Everything here
@@ -31,6 +34,15 @@ async function requirePlatformAdmin(req, res, next) {
 // AI crawler comparison across every client (platform admins only; a 404 for anyone else, like everything here).
 router.get('/platform/ai-crawlers', requireAuth, requirePlatformAdmin, async (req, res, next) => {
   try { res.json(await loadClientComparison(periodDays(req.query.days))); } catch (e) { next(e); }
+});
+
+// Every client's day in one read: the closed day record, what is blocked and why, the three lifecycle facts on each pull request, and the alerts.
+router.get('/platform/delivery/status', requireAuth, requirePlatformAdmin, async (req, res, next) => {
+  try {
+    // job.js is imported here, not at the top: it pulls in most of the app, and this route file must stay light (and importable with a mocked store in tests).
+    const { listConnectedSites } = await import('../job.js');
+    res.json(await loadDeliveryStatus({ sites: (await listConnectedSites()).filter(isActiveSite), workerOnline: await workerOnline().catch(() => false) }));
+  } catch (e) { next(e); }
 });
 
 router.get('/platform/workspaces', requireAuth, requirePlatformAdmin, async (req, res, next) => {
