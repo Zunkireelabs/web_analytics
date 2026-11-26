@@ -12,6 +12,7 @@ import { evaluateTopic } from '../blog-cycle/evidence-gate.js';
 import { blogCycleCeiling } from '../blog-cycle/ceiling.js';
 
 import { mergeCandidates, risingQueries, seasonalLift } from './signals.js';
+import { operatorDetail } from '../errors.js';
 
 export const topicResearchMode = (env = process.env) => { const v = String(env.TOPIC_RESEARCH || 'log').toLowerCase(); return ['off', 'log', 'on'].includes(v) ? v : 'log'; };
 export const poolTarget = (env = process.env) => Math.max(blogCycleCeiling(env), Number(env.BLOG_POOL_TARGET) || 0);
@@ -105,7 +106,7 @@ export async function runTopicResearchForSite(site, { mode = topicResearchMode()
     log(`[topic-research] site ${site.id} (${mode}): pool ${out.pool}/${target}, ${candidates.length} candidate(s), ${ranked.length} accepted, ${chosen.length} chosen${mode === 'on' ? `, ${out.proposed} proposed` : ' (log only: nothing created)'}, ${out.rejected} rejected, ${out.deferred} held.`);
     return out;
   } catch (err) {
-    log(`[topic-research] site ${site.id}: ${err.message}`);
+    log(`[topic-research] site ${site.id}: ${operatorDetail(err)}`);
     return { ...out, error: err.message };
   }
 }

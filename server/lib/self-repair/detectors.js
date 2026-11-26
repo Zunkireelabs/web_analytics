@@ -11,6 +11,8 @@
 
 import { isChromeLikeClass } from '../../design-agent/live-analysis/chrome-context.js';
 
+import { operatorDetail } from '../errors.js';
+
 export const SEVERITY = Object.freeze({ HIGH: 'high', WARNING: 'warning' });
 export const STALLED_DAYS = 2; // a design decision / skipped selection older than this is no longer "just today"
 
@@ -185,9 +187,9 @@ export function detectCapabilityFindings(facts, { now = new Date() } = {}) {
   // 8. A discovery path that is recorded as blocked (no service credit, no connection token, ...): stated per path, with the recorded reason. A person acts on
   //    the credit/token; the system does not guess keywords to fill the gap, and a keyword without real search data keeps its volume empty.
   for (const d of k.blockedPaths || []) {
-    out.push(finding('keyword-discovery-blocked', d.path, SEVERITY.HIGH, `${site.name}: keyword discovery path "${d.path}" is ${d.status}: ${d.message}`, {
+    out.push(finding('keyword-discovery-blocked', d.path, SEVERITY.HIGH, `${site.name}: keyword discovery path "${d.path}" is ${d.status}: ${operatorDetail(d.message, 400)}`, {
       evidence: { path: d.path, status: d.status, reasonCode: d.reasonCode || null, checkedAt: d.checkedAt || null, otherPaths: (k.paths || []).filter((p) => p.path !== d.path) },
-      blocker: `${d.message} (a service credit or connection token is a person's to supply; no search data is invented meanwhile${(k.paths || []).some((p) => p.path !== d.path && p.status === 'ok') ? '; the other discovery path is working' : ''}).`,
+      blocker: `${operatorDetail(d.message, 400)} (a service credit or connection token is a person's to supply; no search data is invented meanwhile${(k.paths || []).some((p) => p.path !== d.path && p.status === 'ok') ? '; the other discovery path is working' : ''}).`,
     }));
   }
   // 9. The recorded article SUBHEADING class is not one the article body uses (the Zennly shape: a mega-menu panel's <h4 class="v2-mm__aside-title"> recorded as the article's

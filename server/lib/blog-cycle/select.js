@@ -7,6 +7,7 @@
 // other generator through; in log mode an error is swallowed (fail open), exactly like the other observability hooks.
 import { evaluateTopic } from './evidence-gate.js';
 import { blogCycleCeiling, blogGateMode } from './ceiling.js';
+import { operatorDetail } from '../errors.js';
 
 const BLOG = 'blog-outline';
 const topicOf = (rec) => String(rec?.params?.topic || rec?.params?.keyword || rec?.issue || '').trim();
@@ -82,7 +83,7 @@ export async function applyBlogEvidenceGate(site, eligible, { mode = blogGateMod
     }
     return { kept, decisions, notes };
   } catch (err) {
-    notes.push(`blog evidence gate (${mode}) error: ${err.message}${mode === 'enforce' ? ' — blogs held this pass, other fixes continue' : ' — ignored (log mode)'}`);
+    notes.push(`blog evidence gate (${mode}) error: ${operatorDetail(err)}${mode === 'enforce' ? ' — blogs held this pass, other fixes continue' : ' — ignored (log mode)'}`);
     log(`[blog-cycle] site ${site.id}: ${notes.at(-1)}`);
     if (mode === 'enforce') return { kept: eligible.filter((r) => r?.recommendation_type !== BLOG), decisions: [], notes };
     return { kept: eligible, decisions: [], notes };

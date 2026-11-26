@@ -11,6 +11,7 @@
 //    safe: a net-new page onto an existing file is refused; anything else is allowed but reported as 'unverified-base', never as safe.
 // Mode (OVERWRITE_GUARD): 'off' | 'log' (default: decides and records, never refuses) | 'enforce' (refuses).
 import { NET_NEW_ACTION_TYPES } from './build.js';
+import { operatorDetail } from '../errors.js';
 
 export const overwriteGuardMode = (env = process.env) => {
   const v = String(env.OVERWRITE_GUARD || 'log').toLowerCase();
@@ -64,7 +65,7 @@ export async function validateNoBlindOverwrite(site, draft, files, { ref, batchR
     let currentSha = null;
     try { currentSha = await getSha(site, f.path, readRef); } catch (err) {
       // Cannot read the file: the guard cannot judge, and says so. Never a silent pass in enforce mode.
-      const d = { ok: mode !== 'enforce', action: 'unverified', reason: `could not read "${f.path}" to compare it (${err.message})` };
+      const d = { ok: mode !== 'enforce', action: 'unverified', reason: `could not read "${f.path}" to compare it (${operatorDetail(err)})` };
       notes.push({ path: f.path, ...d }); if (!d.ok) refusals.push(d); continue;
     }
     const claimedBy = entries.find((e) => e.filePath === f.path && e.draftId != null && Number(e.draftId) !== Number(draft?.id) && ['draft', 'approved', 'in_pr'].includes(e.state)) || null;

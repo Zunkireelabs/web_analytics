@@ -5,6 +5,7 @@
 // (scripts/apply-url-file-map-proposal.js: backup, dry-run, apply; Design Review). It runs inside the existing hourly alerts tick (no new scheduler).
 // SELF_REPAIR_MODE: on (default; writes only its own table) | off.
 import { detectCapabilityFindings, headingEvidenceFromProfile } from './detectors.js';
+import { operatorDetail } from '../errors.js';
 
 export const selfRepairMode = (env = process.env) => (String(env.SELF_REPAIR_MODE || 'on').toLowerCase() === 'off' ? 'off' : 'on');
 const defaultQuery = async (...a) => (await import('../../db.js')).query(...a);
@@ -29,7 +30,7 @@ export async function gatherFacts(siteId, { query = defaultQuery, readContract =
   const lastRun = (await tolerant(() => query(`SELECT max(checked_at) AS at FROM keyword_demand_runs WHERE site_id = $1`, [siteId]), { rows: [{}] })).rows[0]?.at || null;
   const discovery = (await tolerant(() => query(`SELECT path, status, reason_code AS "reasonCode", message, checked_at AS "checkedAt" FROM keyword_discovery_status WHERE site_id = $1`, [siteId]), { rows: [] })).rows;
   const blockedPaths = discovery.filter((d) => d.status === 'blocked' || d.status === 'skipped');
-  const skipReason = blockedPaths.length ? blockedPaths.map((d) => `${d.path}: ${d.message}`).join(' | ') : null;
+  const skipReason = blockedPaths.length ? blockedPaths.map((d) => `${d.path}: ${operatorDetail(d.message, 400)}`).join(' | ') : null;
 
   // The project's own sibling posts, only when a front-matter refusal makes it worth the repo read.
   let siblingConstants = {}; let siblingsSampled = 0; let requiredKeys = [];

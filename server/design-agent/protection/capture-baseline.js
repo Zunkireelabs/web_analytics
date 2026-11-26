@@ -8,6 +8,7 @@ import { launchBrowser } from '../../design-agent/live-analysis/capture.js';
 import { measureBodyInPage, MEASURE_VIEWPORTS } from '../../design-agent/live-analysis/body-measure.js';
 import { prepareForBaselineInPage, measureTemplateExtrasInPage } from '../../lib/design-protection/tokens.js';
 import { urlsForTemplateKey, absoluteUrls } from '../../lib/design-protection/template.js';
+import { operatorDetail } from '../../lib/errors.js';
 
 const median = (arr) => { const a = arr.filter((x) => Number.isFinite(x)).sort((x, y) => x - y); return a.length ? a[Math.floor(a.length / 2)] : null; };
 const modeOf = (arr) => { const c = new Map(); for (const v of arr.filter((x) => x != null)) c.set(JSON.stringify(v), (c.get(JSON.stringify(v)) || 0) + 1); let best = null; let top = 0; for (const [v, k] of c) if (k > top) { best = JSON.parse(v); top = k; } return best; };
@@ -58,7 +59,7 @@ export function mergePatterns(extrasList) {
 export async function captureTemplateBaseline({ urls, viewports = MEASURE_VIEWPORTS, launchBrowserFn = launchBrowser, navTimeoutMs = 20000 } = {}) {
   if (!urls?.length) return { status: 'failed', error: 'the template has no live pages to measure' };
   let browser;
-  try { browser = await launchBrowserFn(); } catch (err) { return { status: 'failed', error: `no browser: ${err.message}` }; }
+  try { browser = await launchBrowserFn(); } catch (err) { return { status: 'failed', error: `no browser: ${operatorDetail(err)}` }; }
   const perViewport = Object.fromEntries(viewports.map((v) => [v.name, []]));
   const extrasDesktop = []; const sampled = []; const errors = [];
   try {
@@ -71,7 +72,7 @@ export async function captureTemplateBaseline({ urls, viewports = MEASURE_VIEWPO
           // eslint-disable-next-line no-await-in-loop
           const page = await context.newPage();
           // eslint-disable-next-line no-await-in-loop
-          try { await page.goto(url, { waitUntil: 'load', timeout: navTimeoutMs }); } catch (err) { errors.push(`${url}: ${err.message}`); continue; }
+          try { await page.goto(url, { waitUntil: 'load', timeout: navTimeoutMs }); } catch (err) { errors.push(`${url}: ${operatorDetail(err)}`); continue; }
           // eslint-disable-next-line no-await-in-loop
           await page.evaluate(prepareForBaselineInPage);
           // eslint-disable-next-line no-await-in-loop

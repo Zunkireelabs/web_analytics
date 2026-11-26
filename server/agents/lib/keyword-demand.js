@@ -26,6 +26,7 @@ import { previousWeek, previousMonth, monthBounds } from '../../util/dates.js';
 import { resolveSiteLocations, LOCATION_NAMES } from './site-locations.js';
 import { recordDiscoveryStatus } from '../../store/keyword-discovery-status.js';
 import { todayInTz } from '../../util/dates.js';
+import { operatorDetail } from '../../lib/errors.js';
 
 const MAX_SEED_TERMS = 8; // a homepage describes a handful of real offerings, not dozens
 const MAX_GAPS_PER_RUN = 20; // one month's worth of real candidate topics — the weekly ship cycle works through these gradually, same volume as the existing LLM-research step (RESEARCH_KEYWORDS_PER_TOPIC=20)
@@ -71,7 +72,7 @@ export async function fetchIdeasAcrossLocations(seedTerms, locations, { siteId =
       } catch (fallbackErr) {
         console.warn(`[keyword-demand] location ${location.locationCode} also failed on search_volume: ${fallbackErr.message}`);
         failedLocations.push(location);
-        errors.push({ locationCode: location.locationCode, message: `${err.message} | ${fallbackErr.message}` });
+        errors.push({ locationCode: location.locationCode, message: `${operatorDetail(err)} | ${operatorDetail(fallbackErr)}` });
         continue;
       }
     }
@@ -129,7 +130,7 @@ function difficultyBucket(score) {
 // to any client's site without per-site configuration.
 // Why a model call failed, in words a person can act on. The API providers reply with their own message; the worker module throws workerUnavailable.
 export function explainModelFailure(err) {
-  const m = String(err?.message || err || '');
+  const m = operatorDetail(err, 500);
   if (/credit balance|billing|quota|insufficient/i.test(m)) return { code: 'model_no_credit', message: 'The AI provider has no credit left, so the homepage could not be read for seed terms. Top up the provider account, or open the laptop worker.' };
   if (err?.workerUnavailable || /worker is not connected|did not answer in time/i.test(m)) return { code: 'worker_offline', message: 'The laptop worker was not connected when the homepage was read. Open the laptop during the worker window and this retries.' };
   return { code: 'model_failed', message: `The AI call that reads the homepage failed: ${m.slice(0, 160)}` };
@@ -209,8 +210,8 @@ export async function runKeywordDemandIfDue(site, { deps = {} } = {}) {
   const seedTerms = await (deps.deriveSeedTerms || deriveSeedTermsForSite)(site, { start, end }, { onReason: (r) => { seedReason = r; } });
   if (!seedTerms.length) {
     const r = seedReason || { code: 'no_seed_terms', message: 'No offering terms could be extracted from the homepage.' };
-    console.log(`[keyword-demand] site ${site.id}: skipping — ${r.code}: ${r.message}`);
-    await note('blocked', r.code, `Search-volume keywords could not start: ${r.message}`);
+    console.warn(`[keyword-demand] site ${site.id}: skipping — ${r.code}: ${operatorDetail(r.message, 400)}`);
+    await note('blocked', r.code, `Search-volume keywords could not start: ${operatorDetail(r.message, 400)}`);
     return null;
   }
 
@@ -270,7 +271,7 @@ export async function runKeywordDemandIfDue(site, { deps = {} } = {}) {
     // The paid check did not happen, so no completed run is recorded (it retries); the worker's research has its own status.
     if (llmGuessed) await record(site.id, 'worker_research', { status: 'ok', code: null, message: `The Claude worker researched ${llmGuessed} phrase(s) from the project's own pages and services. They carry no search volume: a model never supplies a number.`, keywords: llmGuessed, details: { seedTerms: seedTerms.length } }).catch(() => {});
     else { const why = guessError ? explainModelFailure(guessError) : { code: 'no_phrases', message: 'The worker returned no usable phrases for this project.' };
-      await record(site.id, 'worker_research', { status: 'blocked', code: why.code, message: `Model research found nothing: ${why.message}`, details: { seedTerms: seedTerms.length } }).catch(() => {}); }
+      await record(site.id, 'worker_research', { status: 'blocked', code: why.code, message: `Model research found nothing: ${operatorDetail(why.message, 400)}`, details: { seedTerms: seedTerms.length } }).catch(() => {}); }
     console.log(`[keyword-demand] site ${site.id}: model-only research — ${seedTerms.length} seed term(s) → ${llmGuessed} phrase(s) saved (no volume).`);
     return { seedTerms: seedTerms.length, keywords: 0, llmGuessed, modelOnly: true };
   }

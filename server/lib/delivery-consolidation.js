@@ -10,6 +10,7 @@
 // calls it again, and the in-flight pass opens its own PR when it ends). It opens pull requests only; it never merges, never creates branches, never writes files.
 import { query as defaultQuery } from '../db.js';
 import { batchBranchFor, cycleDateIn } from './delivery-cycle.js';
+import { operatorDetail } from './errors.js';
 
 /** Pure. The one record that says what is stuck and how to finish it by hand. Everything a person needs, nothing they have to go looking for. */
 export function buildPreservedDelivery({ site, branch, drafts = [], headSha = null, commitSubjects = null, exactError = null, now = new Date() }) {
@@ -105,7 +106,7 @@ export async function consolidateDay({ sites, now = new Date(), timezone = 'Asia
       log?.(`[delivery-consolidation] site ${site.id}: PR not opened; ${delivery.itemCount} change(s) preserved on ${branch} (${delivery.cause})`);
       out.push({ siteId: site.id, outcome: 'preserved', branch, delivery });
     } catch (err) {
-      log?.(`[delivery-consolidation] site ${site.id} failed: ${err.message}`);
+      log?.(`[delivery-consolidation] site ${site.id} failed: ${operatorDetail(err)}`);
       out.push({ siteId: site.id, outcome: 'error', error: err.message });
     }
   }
