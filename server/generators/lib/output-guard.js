@@ -50,8 +50,29 @@ function isDecorative(el) {
   return !cardLike && /\b(h-(px|\d+)|w-(px|\d+)|border-[tb])\b/.test(cls) && !/\bp[xy]?-\d/.test(cls);
 }
 
+// Whatever sits inside an element that is hidden from assistive tech on purpose (aria-hidden="true", role presentation/none) is decoration the site's CSS draws into:
+// SuperRank's related-guides card has `<div class="post__cover" aria-hidden="true"><div class="cv"><div class="cv-card"></div></div></div>`, an empty box by design,
+// and the guard refused the draft for it (2026-11-26, three drafts). The element and everything inside it is taken out before looking for blank wrappers.
+function stripDecorativeBlocks(html) {
+  let out = html;
+  for (let guard = 0; guard < 50; guard++) {
+    const m = /<([a-z][a-z0-9]*)\b[^>]*\b(?:aria-hidden=["']true["']|role=["'](?:presentation|none)["'])[^>]*>/i.exec(out);
+    if (!m) break;
+    const tag = m[1].toLowerCase();
+    let depth = 0; let end = -1;
+    for (const t of out.slice(m.index).matchAll(new RegExp(`<${tag}\\b[^>]*>|</${tag}>`, 'gi'))) {
+      depth += t[0][1] === '/' ? -1 : 1;
+      if (depth === 0) { end = m.index + t.index + t[0].length; break; }
+    }
+    if (end < 0) break;
+    out = out.slice(0, m.index) + out.slice(end);
+  }
+  return out;
+}
+
 export function findEmptyWrappers(html, path = '') {
   if (typeof html !== 'string' || !html.includes('<')) return [];
+  html = stripDecorativeBlocks(html);
   // A wrapper that only contains empty wrappers is empty too, so collapse
   // inside-out until nothing changes and report the first empty one found.
   let work = html;

@@ -1339,8 +1339,7 @@ const DEFAULT_TABLE_STYLE = {
 };
 
 // Whether an expand/refresh draft would render ANY table (a structured section.table, or a Markdown table in a body).
-// backend.js holds such a draft on a page with no captured componentTemplates.table rather than shipping
-// DEFAULT_TABLE_STYLE / a projected table the site never uses (design-preservation rule, 2026-11-23).
+// backend.js used to hold such a draft until a table was captured; since 2026-11-26 it is built (captured table, else projected, else DEFAULT_TABLE_STYLE).
 export function draftHasTable(content) {
   const sections = Array.isArray(content?.sections) ? content.sections : [];
   return sections.some((sec) => (Array.isArray(sec?.table) && sec.table.length > 0)

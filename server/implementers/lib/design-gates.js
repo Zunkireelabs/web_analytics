@@ -112,7 +112,9 @@ export async function runDesignGates(site, draft, resolved, deps = {}) {
     return { ok: true, role, assessment };
   }
 
-  const refPageType = permalink ? classifyPageType(`https://x.invalid${permalink.startsWith('/') ? '' : '/'}${permalink}`, { propertyType: site?.property_type }) : null;
+  // With no permalink (a template-built post has none) the kind of page to compare with is known from what is being made.
+  const FALLBACK_REFERENCE_TYPE = { 'blog-outline': 'blog-article', 'cookie-policy': 'legal', 'privacy-policy': 'legal', 'terms-of-service': 'legal' };
+  const refPageType = permalink ? classifyPageType(`https://x.invalid${permalink.startsWith('/') ? '' : '/'}${permalink}`, { propertyType: site?.property_type }) : (FALLBACK_REFERENCE_TYPE[actionType] || null);
   const referenceUrl = pickReferencePage(profile, role.role, permalink, { pageType: refPageType });
   const result = referenceUrl ? await d.checkRender({ referenceUrl, newPageHtml: body.html }) : null;
   const verdict = renderGateVerdict(result, { roleConfidence: role.confidence, hasReference: Boolean(referenceUrl) });

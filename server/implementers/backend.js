@@ -15,7 +15,7 @@ import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
 import { planRedirect } from './lib/redirect-writer.js';
 import { planSecurityHeaders } from './lib/host-headers-writer.js';
 import { HEADER_BY_KEY } from '../generators/security-headers.js';
-import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS, draftHasTable } from './lib/marker-merge.js';
+import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
 import { resolveInsertion, buildUnresolvedInsertionFailure } from './lib/insertion-engine.js';
 import { loadExpandStructurePrior } from '../design-agent/lib/expand-structure-loader.js';
 import { classifyPageType } from '../design-agent/live-analysis/schema.js';
@@ -29,6 +29,8 @@ import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, hasExistingFaqSchema, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
 import { decideFaqRenderMode, checkSchemaOnlyFaqMatchesVisible, faqSchemaRequiresVisible } from './lib/faq-render-mode.js';
+import { learnHtmlFaqTemplate } from '../generators/lib/html-faq-learn.js';
+import { learnSectionSignals } from './lib/section-signals.js';
 import { COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, checkDesignIntegrityGate, resolvePageComponentTemplate, lacksDesignBaseline } from './lib/design-drift.js';
 import { designGateMode } from '../design-agent/lib/design-completeness.js';
 import { checkResponsivePreview, describeResponsiveRegressions } from '../generators/lib/responsive-preview-gate.js';
@@ -1463,6 +1465,9 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // never as HTML from a component template: the site's renderer then gives it the site's real design. Holds — never
   // guesses — when no sibling shows the component. Everything template-related below is skipped for this path.
   let markdownNative = null;
+  // The FAQ block this collection's OWN posts carry as HTML (a site with a card FAQ at the end of every post): when no sibling writes its FAQ in Markdown, this is the site's real form, and
+  // it is used instead of the one site-wide template (captured from a page, so centred where the blog is left-aligned: Zunkiree, 2026-11-26).
+  let siblingFaqTemplate = null;
   if (mode === 'visible' && isMarkdownFile(filePath) && MARKDOWN_NATIVE_TYPES.has(draft.action_type)) {
     const siblings = await loadSiblingMarkdown(site, filePath, { getRepoTree, getFileContent, ref: branch }).catch(() => null);
     if (!siblings) {
@@ -1470,7 +1475,10 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     }
     const conventions = learnMarkdownConventions(siblings);
     const rendered = renderMarkdownNative(draft.action_type, draft.content, conventions, { fileBody: file.content });
-    if (!rendered.ok) {
+    const htmlFaq = (draft.action_type === 'faq' || draft.action_type === 'qa-content') ? learnHtmlFaqTemplate(siblings) : null;
+    if (!rendered.ok && rendered.reason === 'no-markdown-faq-convention' && htmlFaq) {
+      siblingFaqTemplate = { wrapper: htmlFaq.wrapper, row: htmlFaq.row };
+    } else if (!rendered.ok) {
       // No sibling post shows how this site writes a FAQ / related-links list, but the site HAS a component template captured from its
       // own real page (verified against the live page by the checks below, held if stale). That is a real design source, so use it
       // through the template path instead of refusing (2026-11-25: nine site-1 drafts refused for this, retried three times each).
@@ -1534,12 +1542,15 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
       componentKey, actionType: draft.action_type,
     };
   };
-  if (!markdownNative && lacksDesignBaseline(site, { componentKey, mode, gateMode: designGateMode() })) {
+  if (siblingFaqTemplate && mode === 'visible') {
+    componentTemplatesForMerge = { ...site.url_file_map?.siteRoot?.componentTemplates, faq: siblingFaqTemplate, qaContent: siblingFaqTemplate };
+  }
+  if (!markdownNative && !siblingFaqTemplate && lacksDesignBaseline(site, { componentKey, mode, gateMode: designGateMode() })) {
     // Same self-heal as before (the profile repair) plus a capture of this specific component.
     await (await import('../design-agent/lib/design-block-repair.js')).requeueProfileForRepeatedBlocks(site).catch(() => {});
     return holdForComponentCapture({ resolution: 'no-captured-template' });
   }
-  if (!markdownNative && mode === 'visible' && componentKey && (siteLevelTemplate || hasPageCaptures || siteHasUsableDesignProfile(site))) {
+  if (!markdownNative && !siblingFaqTemplate && mode === 'visible' && componentKey && (siteLevelTemplate || hasPageCaptures || siteHasUsableDesignProfile(site))) {
     const resolved = await resolvePageComponentTemplate(site, draft.action_type, page);
     if (!resolved.ok) {
       return {
@@ -1566,12 +1577,9 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     }
   }
 
-  // A table is its own component: with no table captured from this site, a draft carrying one would ship a generic
-  // inline-styled or projected table. Hold it until the site's real table style is captured.
-  if (!markdownNative && designGateMode() === 'enforce' && mode === 'visible' && ['expand-content', 'refresh-content'].includes(draft.action_type)
-    && !site.url_file_map?.siteRoot?.componentTemplates?.table && draftHasTable(draft.content)) {
-    return holdForComponentCapture({ resolution: 'no-captured-table', component: 'table' });
-  }
+  // A table is built, never held. The precedence is the site's own captured table (componentTemplates.table), then one projected from its own typography and colours, then ONE
+  // standard table (marker-merge.js DEFAULT_TABLE_STYLE: full width, inline styles, colourless, a horizontal-scroll wrapper) that never borrows another site's look. A draft with a table
+  // used to be held until a table was captured (2026-11-23); the owner decided on 2026-11-26 that a standard table is built instead, so no draft waits for a capture.
 
   // The design-integrity gate (design-integrity-gate proposal, change 04) —
   // last, because it's the most drastic refusal and every cheaper check
@@ -1589,7 +1597,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // checkDesignIntegrityGate's own comment: verifyProfileRoles catches the
   // real incident class — a confirmed role-mismatch — automatically, and a
   // failure here quarantines only THIS draft, never the whole site).
-  if (!markdownNative && mode === 'visible' && siteHasUsableDesignProfile(site)) {
+  if (!markdownNative && !siblingFaqTemplate && mode === 'visible' && siteHasUsableDesignProfile(site)) {
     const gate = await checkDesignIntegrityGate(site, { actionType: draft.action_type, findingId: draft.finding_id });
     if (!gate.ok) {
       return {
@@ -1746,7 +1754,8 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     placedContent = plan.content;
     lineKeysForInsert = plan.lineKeys;
   }
-  const { content: ensuredContent, unresolved } = await resolveInsertion(site, placedContent, filePath, markerMap, { placement, lineKeys: lineKeysForInsert });
+  // What this site calls its own FAQ and call-to-action sections, learned from its captured pages, in addition to the generic words (section-signals.js).
+  const { content: ensuredContent, unresolved } = await resolveInsertion(site, placedContent, filePath, markerMap, { placement, lineKeys: lineKeysForInsert, signals: placement ? learnSectionSignals(site.url_file_map?.siteRoot?.designProfile) : null });
 
   // Body sections go above the page's FAQ and Related guides, never below them. Placement moves an empty slot; a slot that could not be
   // moved (it already holds content, or its heading was not found) is refused here rather than shipped under the FAQ.

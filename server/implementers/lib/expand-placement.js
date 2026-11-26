@@ -22,8 +22,9 @@ const SIGNALS = {
   cta: /\bcta\b|call[\s-]*to[\s-]*action|get[\s-]*started|get[\s-]*in[\s-]*touch|contact[\s-]*us|book[\s-]*(a|your)\b|request[\s-]*(a|your)\b|ready[\s-]*to\b|free[\s-]*(trial|consultation|quote)/i,
 };
 
-export function classifyBlock(text, roles) {
-  for (const role of roles) if (SIGNALS[role]?.test(text)) return role;
+// `learned` is the site's own vocabulary ({ faq: RegExp|null, cta: RegExp|null } from section-signals.js): what THIS site calls those sections, used in addition to the generic words.
+export function classifyBlock(text, roles, learned = null) {
+  for (const role of roles) if (SIGNALS[role]?.test(text) || learned?.[role]?.test(text)) return role;
   return null;
 }
 
@@ -59,13 +60,13 @@ const headingNear = (text, from) => {
 // its own attributes and first heading. <section> always counts as a block;
 // a div/aside/component counts only when it positively matches a role, so
 // ordinary wrappers never become fake boundaries.
-export function markupBlocks(text, roles) {
+export function markupBlocks(text, roles, learned = null) {
   const out = [];
   const re = /<(section|aside|div|[A-Z][A-Za-z0-9]*)\b([^>]*)>/g;
   let m;
   while ((m = re.exec(text))) {
     const tag = m[1]; const attrs = m[2] || '';
-    const role = classifyBlock(`${tag} ${attrs}`, roles) || (tag === 'section' || /^[A-Z]/.test(tag) ? classifyBlock(headingNear(text, m.index), roles) : null);
+    const role = classifyBlock(`${tag} ${attrs}`, roles, learned) || (tag === 'section' || /^[A-Z]/.test(tag) ? classifyBlock(headingNear(text, m.index), roles, learned) : null);
     if (tag !== 'section' && !role) continue;
     out.push({ start: m.index, tag, role: role || null, close: closeOffset(text, m.index, tag) });
   }
@@ -84,21 +85,35 @@ function topLevel(blocks) {
   return kept;
 }
 
-function markdownBlocks(text, roles) {
+function markdownBlocks(text, roles, learned = null) {
   const out = [];
   const re = /^#{2,3}[ \t]+(.+)$/gm;
   let m;
-  while ((m = re.exec(text))) out.push({ start: m.index, role: classifyBlock(m[1], roles), close: m.index });
+  while ((m = re.exec(text))) out.push({ start: m.index, role: classifyBlock(m[1], roles, learned), close: m.index });
   return out;
+}
+
+// A closing call to action, recognised by what it IS when no word names it: the LAST section before the marker, short, with a heading and a link or a button ("Your next step",
+// a closing banner, a contact strip). Used only when no trailing FAQ/CTA was recognised by name, only for the very last section, and only when it closes (never one that
+// encloses the marker), so a long content section or a section with nothing to click is never taken for one.
+const CLOSING_CTA_MAX_TEXT = 400;
+export function lastSectionIsClosingCta(text, blocks, markerOffset) {
+  const last = blocks[blocks.length - 1];
+  if (!last || last.tag !== 'section' || !Number.isFinite(last.close) || last.close > markerOffset) return null;
+  const inner = text.slice(last.start, last.close);
+  const visible = inner.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!visible || visible.length > CLOSING_CTA_MAX_TEXT) return null;
+  if (!/<h[1-4]\b/i.test(inner) || !/<(a|button)\b/i.test(inner)) return null;
+  return last.start > 0 ? last.start : null;
 }
 
 /**
  * The offset at which the marker should sit, or null to leave it where it is.
  * `text` is the file WITHOUT the marker; `markerOffset` is where it was.
  */
-export function placementOffset(text, markerOffset, { roles, markdown = false }) {
+export function placementOffset(text, markerOffset, { roles, markdown = false, signals = null }) {
   if (!roles?.length) return null;
-  const all = (markdown ? markdownBlocks(text, roles) : topLevel(markupBlocks(text, roles)))
+  const all = (markdown ? markdownBlocks(text, roles, signals) : topLevel(markupBlocks(text, roles, signals)))
     .filter((b) => b.start < markerOffset);
   // A block still open at the marker's position ENCLOSES it. Placing relative
   // to something we are inside of would be a guess.
@@ -107,14 +122,15 @@ export function placementOffset(text, markerOffset, { roles, markdown = false })
   }
   let first = null;
   for (let i = all.length - 1; i >= 0 && all[i].role; i--) first = all[i];
-  return first && first.start > 0 ? first.start : null;
+  if (first) return first.start > 0 ? first.start : null;
+  return markdown ? null : lastSectionIsClosingCta(text, all, markerOffset);
 }
 
 /**
  * Move a marker created in THIS call above the trailing FAQ/CTA run.
  * Returns { content, moved, reason }.
  */
-export function refineMarkerPlacement(content, filePath, markerName, roles, { markerWasPresent = false } = {}) {
+export function refineMarkerPlacement(content, filePath, markerName, roles, { markerWasPresent = false, signals = null } = {}) {
   if (markerWasPresent) return { content, moved: false, reason: 'marker-already-on-page' };
   const pats = markerPattern(markerName);
   const found = pats.jsx.exec(content) || pats.html.exec(content);
@@ -128,7 +144,7 @@ export function refineMarkerPlacement(content, filePath, markerName, roles, { ma
   const without = content.slice(0, cutStart) + content.slice(found.index + block.length).replace(/^\n/, '');
 
   const markdown = /\.mdx?$/i.test(filePath || '');
-  const at = placementOffset(without, cutStart, { roles, markdown });
+  const at = placementOffset(without, cutStart, { roles, markdown, signals });
   if (at == null) return { content, moved: false, reason: 'no-trailing-faq-or-cta' };
 
   return { content: `${without.slice(0, at)}\n${block}\n${without.slice(at)}`, moved: true, reason: 'before-trailing-sections', offset: at };
@@ -141,14 +157,14 @@ export function refineMarkerPlacement(content, filePath, markerName, roles, { ma
  *  - no trailing FAQ or CTA            -> null (leave where the engine put it)
  * `text` is the file WITHOUT the marker; `markerOffset` is where it was. Never invents a position, and gives up when the marker sits inside a block.
  */
-export function relatedGuidesOffset(text, markerOffset, { markdown = false } = {}) {
+export function relatedGuidesOffset(text, markerOffset, { markdown = false, signals = null } = {}) {
   if (markdown) return null; // a markdown page has no sections to order against; leave the marker where it is
   const roles = ['faq', 'cta'];
-  const all = topLevel(markupBlocks(text, roles)).filter((b) => b.start < markerOffset);
+  const all = topLevel(markupBlocks(text, roles, signals)).filter((b) => b.start < markerOffset);
   if (all.some((b) => b.close > markerOffset)) return null; // inside a block: placing relative to it would be a guess
   const run = [];
   for (let i = all.length - 1; i >= 0 && all[i].role; i--) run.unshift(all[i]);
-  if (!run.length) return null;
+  if (!run.length) return lastSectionIsClosingCta(text, all, markerOffset);
   const cta = run.find((b) => b.role === 'cta');
   if (cta) return cta.start > 0 ? cta.start : null;
   const faq = run[run.length - 1]; // only FAQ blocks in the run: go after the last one
@@ -156,7 +172,7 @@ export function relatedGuidesOffset(text, markerOffset, { markdown = false } = {
 }
 
 /** Move a related-guides marker created in THIS call to its place in the standard order. Same safety rules as refineMarkerPlacement. */
-export function refineRelatedGuidesPlacement(content, filePath, markerName, { markerWasPresent = false } = {}) {
+export function refineRelatedGuidesPlacement(content, filePath, markerName, { markerWasPresent = false, signals = null } = {}) {
   if (markerWasPresent) return { content, moved: false, reason: 'marker-already-on-page' };
   const pats = markerPattern(markerName);
   const found = pats.jsx.exec(content) || pats.html.exec(content);
@@ -165,7 +181,7 @@ export function refineRelatedGuidesPlacement(content, filePath, markerName, { ma
   let cutStart = found.index;
   if (content[cutStart - 1] === '\n') cutStart -= 1;
   const without = content.slice(0, cutStart) + content.slice(found.index + block.length).replace(/^\n/, '');
-  const at = relatedGuidesOffset(without, cutStart, { markdown: /\.mdx?$/i.test(filePath || '') });
+  const at = relatedGuidesOffset(without, cutStart, { markdown: /\.mdx?$/i.test(filePath || ''), signals });
   if (at == null) return { content, moved: false, reason: 'no-trailing-faq-or-cta' };
   return { content: `${without.slice(0, at)}\n${block}\n${without.slice(at)}`, moved: true, reason: 'after-faq-before-cta', offset: at };
 }

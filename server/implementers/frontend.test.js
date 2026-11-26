@@ -493,3 +493,13 @@ describe('resolveTargetAndBody — blog target in the wrong folder is refused (b
     assert.equal(r.filePath, 'src/blog/why-teams-stall.md');
   });
 });
+
+test('a stored .tsx post body is reported as jsx, never markdown (Admizz: the render and Markdown-safety checks both misjudged it, 2026-11-26)', async () => {
+  const { resolveTargetAndBody } = await import('./frontend.js');
+  const site = { id: 8862, url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/app', filename: 'page.tsx', extension: '.tsx' } } } };
+  const draft = { action_type: 'blog-outline', rendered_body: 'export default function Page() { return null }', target_file_path: 'src/app/a-post/page.tsx' };
+  const r = await resolveTargetAndBody(site, draft);
+  assert.equal(r.contentFormat, 'jsx');
+  const md = await resolveTargetAndBody({ id: 1, url_file_map: {} }, { action_type: 'blog-outline', rendered_body: '## Hi', target_file_path: 'src/blog/a.md' });
+  assert.equal(md.contentFormat, 'markdown'); // everything else is unchanged
+});

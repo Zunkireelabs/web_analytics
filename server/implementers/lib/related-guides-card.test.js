@@ -78,3 +78,17 @@ describe('tokenRelatedGuides: only for a site with no card, from its own colours
     assert.equal(tokenRelatedGuides([]).ok, false);
   });
 });
+
+test('a card slot the site fills with uncaptured data is dropped, and a decorative aria-hidden cover is kept (SuperRank post__foot / cv-card)', async () => {
+  const { renderRelatedGuides } = await import('./related-guides-card.js');
+  const { findEmptyWrappers } = await import('../../generators/lib/output-guard.js');
+  const template = {
+    card: '<a href="{{URL}}" class="post"><div class="post__cover" aria-hidden="true"><div class="cv"><div class="cv-card"></div></div></div><div class="post__body"><h3>{{TITLE}}</h3><p>{{DESCRIPTION}}</p></div><div class="post__foot"></div></a>',
+    section: '<section class="a-related"><h2>Related articles</h2><div class="b-grid">{{CARDS}}</div></section>',
+  };
+  const r = renderRelatedGuides(template, [{ url: '/x', title: 'A title', description: null, image: null }]);
+  assert.equal(r.ok, true);
+  assert.doesNotMatch(r.html, /post__foot/);
+  assert.match(r.html, /cv-card/);
+  assert.deepEqual(findEmptyWrappers(r.html), []);
+});

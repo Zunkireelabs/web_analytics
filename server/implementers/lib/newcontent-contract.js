@@ -40,6 +40,7 @@
 // exist; their absence is not evidence of anything.
 
 import { getRepoTree, getFileContent, defaultBranchName } from '../../github/client.js';
+import { bodySignature, bodyStyleFromSignatures } from '../../generators/lib/body-style.js';
 
 // How many sibling files to sample. The contract we're reading is a property
 // of the directory, not of any one file, so a handful is plenty — and a blog
@@ -151,7 +152,7 @@ async function readFrontMatter(readFile, site, path, ref) {
   // A `cover:` block holding ONLY `kind: x` (the site's own minimal artwork shape, e.g. Astro's `{ kind: 'agent' }`): the one object value a new post may
   // reuse as written, because a real post already ships it and it needs no other field. Anything richer (heading, rows, words) belongs to one post.
   const kindOnly = /^cover\s*:\s*\r?\n[ \t]+kind\s*:\s*["']?([A-Za-z0-9_-]+)["']?[ \t]*(?:\r?\n(?![ \t])|(?![\s\S]))/m.exec(block);
-  return { keys, layout: declared ? declared[1].trim() : null, values, coverKind: kindOnly ? kindOnly[1] : null };
+  return { keys, layout: declared ? declared[1].trim() : null, values, coverKind: kindOnly ? kindOnly[1] : null, bodySig: bodySignature(raw) };
 
   return { keys, layout: declared ? declared[1].trim() : null, values };
 
@@ -224,7 +225,10 @@ function contractFromSamples(samples, { schemaValidated = false } = {}) {
 
 
   // True when the site's existing posts carry a `sources:` front-matter key (Chayce): verified sources then go there, in the same shape, not in the body.
-  return { layout, unknown: false, fieldNames, requiredKeys, siblingConstants, declaresSources: observed.has('sources'), schemaValidated, sampled: samples.length };
+  // How the existing posts' BODIES are built (their wrapper, and whether their headings/paragraphs carry classes): a new post is built the same way. Null when fewer than 3 posts
+  // could be read, and the renderer then does what it always did.
+  const bodyStyle = bodyStyleFromSignatures(samples.map((s) => s.bodySig));
+  return { layout, unknown: false, fieldNames, requiredKeys, siblingConstants, declaresSources: observed.has('sources'), schemaValidated, sampled: samples.length, bodyStyle };
 }
 
 // ---------------------------------------------------------------------------

@@ -301,7 +301,7 @@ export default function App() {
               {/* The Agent view: the systems map by default, one group's live agents for ?group=. */}
               <Route path="/ai-orchestration" element={<AgentsRoute isInternal={isInternal} />} />
               {/* The fixes side of the drafts board; the writing is on /content. */}
-              <Route path="/action-center" element={<ActionCenter scope="fixes" />} />
+              <Route path="/action-center" element={<ActionCenter scope="fixes" isInternal={isInternal} />} />
               {/* Universal Product Growth mode's one new page — reachable by
                   URL for any session (server-scoped to its own siteId, same
                   as every route above), but Sidebar.jsx only links to it

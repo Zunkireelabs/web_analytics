@@ -42,9 +42,12 @@ export function pickReferencePage(profile, role, permalink = null, { pageType = 
   //   3. any page of a valid type
   // /recursos/ posts are best compared with other /recursos/ posts, whose
   // layout they will actually share.
+  // Last resort: the first page of the MOST preferred type. REFERENCE_TYPES lists them in order, so a blog post is compared with a blog page before a legal page. Taking the
+  // first captured page of either type compared Zennly's blogs with its Terms page (headings 20px/600 there, 15px/400 in the post), 2026-11-26.
+  const byPreference = [...pages].sort((a, b) => types.indexOf(a.pageType) - types.indexOf(b.pageType));
   return (pages.find((p) => want && segment(p.url) === want)
     || pages.find((p) => pageType && p.pageType === pageType)
-    || pages[0]).url;
+    || (role === 'inline-article' ? byPreference : pages)[0]).url;
 }
 
 // The draft body as the browser needs it: HTML. The rendered body is front

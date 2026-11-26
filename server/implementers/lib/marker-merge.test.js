@@ -1851,3 +1851,29 @@ describe('dedupeFrontMatterKeys', () => {
     assert.equal(dedupeFrontMatterKeys(astro, 'page.astro'), astro);
   });
 });
+
+describe('a table on a site with none captured is built as the standard table, not held (2026-11-26)', () => {
+  const sections = [{ heading: 'How the plans compare', body: 'Both plans include support.', table: [{ plan: 'Starter', price: '£10', support: 'Email' }, { plan: 'Pro', price: '£25', support: 'Phone' }] }];
+  test('structured table: a full-width table with a header row, inline styles, and a horizontal-scroll safety wrapper; no site-specific classes', () => {
+    const r = buildMergeValues('expand-content', { sections }, 'visible', {}, null);
+    assert.equal(r.ok, true, r.error);
+    const html = JSON.stringify(r.values);
+    assert.match(html, /<table[^>]*width:100%;border-collapse:collapse/);
+    assert.match(html, /<thead[^>]*>/);
+    assert.match(html, /<th[^>]*>Plan<\/th>/);
+    assert.match(html, /<td[^>]*>£10<\/td>/);
+    assert.doesNotMatch(html, /class="[^"]*(bg-|text-|border-)/);   // no borrowed look
+  });
+  test('a Markdown table written in the body gets the same standard table', () => {
+    const md = [{ heading: 'Compare', body: 'Intro text.\n\n| Plan | Price |\n|---|---|\n| Starter | £10 |\n| Pro | £25 |\n\nAfter text.' }];
+    const r = buildMergeValues('expand-content', { sections: md }, 'visible', {}, null);
+    assert.equal(r.ok, true, r.error);
+    assert.match(JSON.stringify(r.values), /<table/);
+  });
+  test('a site that HAS captured a table still gets exactly its own classes (the captured table wins)', () => {
+    const own = { table: 'min-w-full text-sm', th: 'px-3 py-2 text-left font-semibold', td: 'px-3 py-2', tr: 'border-b', wrapper: 'overflow-x-auto' };
+    const r = buildMergeValues('expand-content', { sections }, 'visible', { table: own }, null);
+    assert.equal(r.ok, true, r.error);
+    assert.match(JSON.stringify(r.values), /min-w-full text-sm/);
+  });
+});
