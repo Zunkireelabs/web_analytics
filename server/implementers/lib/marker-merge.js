@@ -645,6 +645,17 @@ function singleRootHost(rawHtml) {
   return { tag, attrs, inner: html.slice(open[0].length, html.length - close.length) };
 }
 function jsxSafeWrap(rawHtml) {
+  // A FAQ/Q&A block is ONE styled root followed by its JSON-LD <script>. Two roots used to fall through to the classless wrapper <div>, which the design gate
+  // refuses (Zennly home page FAQ, 2026-11-26). Render the root as its own host and the script as a sibling instead.
+  const ld = /^([\s\S]*?)\s*(<script\b[^>]*type="application\/ld\+json"[^>]*>[\s\S]*?<\/script>)\s*$/i.exec(String(rawHtml).trim());
+  if (ld) {
+    const rootHost = singleRootHost(ld[1]);
+    const sm = /^<script\b[^>]*>([\s\S]*?)<\/script>$/i.exec(ld[2]);
+    if (rootHost && sm) {
+      return `<><${rootHost.tag} ${rootHost.attrs.join(' ')} suppressHydrationWarning dangerouslySetInnerHTML={{ __html: ${JSON.stringify(rootHost.inner)} }} />`
+        + `<script type="application/ld+json" suppressHydrationWarning dangerouslySetInnerHTML={{ __html: ${JSON.stringify(sm[1])} }} /></>`;
+    }
+  }
   const host = singleRootHost(rawHtml);
   if (host) return `<${host.tag} ${host.attrs.join(' ')} suppressHydrationWarning dangerouslySetInnerHTML={{ __html: ${JSON.stringify(host.inner)} }} />`;
   return `<div suppressHydrationWarning dangerouslySetInnerHTML={{ __html: ${JSON.stringify(String(rawHtml))} }} />`;
