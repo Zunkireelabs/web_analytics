@@ -38,7 +38,7 @@
  *                                          agent.run() is ever called — no agent_runs row, no
  *                                          insufficient-data noise. Absent/empty = runs on any site
  *                                          (the default for the 18 live-page agents that read no
- *                                          gsc_*/ga4_* tables at all). Use this, not dataSources, for
+ *                                          gsc_* and ga4_* tables at all). Use this, not dataSources, for
  *                                          a hard dependency on this platform's own GSC/GA4 ingestion.
  */
 

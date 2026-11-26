@@ -366,6 +366,8 @@ export function minimalCoverKindFromSchema(src) {
   return m ? m[1] : null;
 }
 
+
+
 // A blog target pointing at a folder that is NOT where the site's published posts live (Chayce: configured "docs", real posts in "src/blog"). A post
 // written there never gets the blog layout, so it is refused instead of shipped. Pure: decided from the repo's file list alone.
 const BLOG_DIR_NAME = /(^|\/)(blog|blogs|posts?|articles?|news|insights)(\/|$)/i;
@@ -412,6 +414,7 @@ export async function findBetterBlogDirectory(site, { dir, extension, ref } = {}
   });
   return r.better;
 }
+
 
 // A blog target pointing at a folder that is NOT where the site's published posts live (Chayce: configured "docs", real posts in "src/blog"). A post
 // written there never gets the blog layout, so it is refused instead of shipped. Pure: decided from the repo's file list alone.

@@ -397,6 +397,15 @@ describe('resolveTargetAndBody — a new post must satisfy the site\'s content s
     assert.match(r.body, /^category: "/m);
     assert.match(r.body, /^cover:\n  kind: "/m);
 
+
+  test('without defaults the post takes author, category and a minimal cover from the site\'s OWN posts, and so builds (2026-11-25)', async () => {
+    // Nothing is configured: the client's own team and categories are read from its posts, and a cover shape a real post already ships (`kind` only).
+    const r = await resolveTargetAndBody(mkSite(), draft, repoDeps(ASTRO_REPO));
+    assert.equal(r.ok, true, r.error);
+    assert.match(r.body, /^author: "/m);
+    assert.match(r.body, /^category: "/m);
+    assert.match(r.body, /^cover:\n  kind: "/m);
+
   test('without defaults the post is refused for what the siblings do not agree on, naming the key and where to set it', async () => {
     // author and category are the same in every sibling, so the post reuses them (blog standard); the cover varies per post, so only it is missing.
     const r = await resolveTargetAndBody(mkSite(), draft, repoDeps(ASTRO_REPO));
@@ -405,6 +414,7 @@ describe('resolveTargetAndBody — a new post must satisfy the site\'s content s
     assert.match(r.error, /declares "cover",/);
     assert.doesNotMatch(r.error, /"author"/);
     assert.match(r.error, /newContentTargets\["blog-outline"\]\.frontMatterDefaults/);
+
 
   });
 
