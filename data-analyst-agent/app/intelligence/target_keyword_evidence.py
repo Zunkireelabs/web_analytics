@@ -22,8 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Client
 from app.db.session import SessionLocal
 from app.insights.engine import _replace_insight
-from app.mcp_client.client import McpAuthError, McpClient, McpToolError
+from app.mcp_client.client import McpAuthError, McpToolError
+from app.mcp_client.token import require_mcp
 from app.mcp_client.tools import get_keyword_gaps, get_query_page_metrics, get_technical_seo_signals
+from app.analysis.scope import active_clients, note_client_failure
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +43,7 @@ async def run_target_keyword_evidence() -> None:
     cannibalization_detection — one client's malformed keyword_gaps row or
     MCP failure must never abort the run for every other client."""
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         try:
@@ -49,11 +51,14 @@ async def run_target_keyword_evidence() -> None:
                 await _grade_client_targets(session, client)
                 await session.commit()
         except Exception:
+            note_client_failure(client.id)
             logger.exception("run_target_keyword_evidence: client %s raised — skipping this client only", client.id)
 
 
 async def _grade_client_targets(session: AsyncSession, client: Client) -> None:
-    mcp = McpClient(client.mcp_token_ciphertext)
+    mcp = require_mcp(client, "run_target_keyword_evidence")
+    if mcp is None:
+        return
     try:
         gaps = await get_keyword_gaps(mcp, status="approved")
     except (McpAuthError, McpToolError) as e:

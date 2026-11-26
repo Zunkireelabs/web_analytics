@@ -44,8 +44,12 @@ def test_topic_already_persisted_is_still_sent_to_save_keyword_gaps(monkeypatch)
     monkeypatch.setattr(kc.ic, "research_topic_keywords", _fake_research)
     monkeypatch.setattr(kc, "save_keyword_gaps", _fake_save)
 
+    async def _no_existing_gaps(_mcp, **_kw):
+        return []  # the collector first asks for this month's existing real-demand batch; there is none
+    monkeypatch.setattr(kc, "get_keyword_gaps", _no_existing_gaps)
+
     collector = kc.KeywordClusteringCollector()
-    asyncio.run(collector._run_external_research(None, _Client(), _profile(), [], []))
+    asyncio.run(collector._run_external_research(None, _Client(), _profile(), [], [], date(2026, 11, 25)))
 
     assert len(saved) == 1, "a re-seen research topic must still be persisted as a re-observation"
     assert saved[0]["source"] == "claude_research"
@@ -66,9 +70,13 @@ def test_topic_this_run_already_emitted_in_clustering_is_not_duplicated(monkeypa
     monkeypatch.setattr(kc.ic, "research_topic_keywords", _fake_research)
     monkeypatch.setattr(kc, "save_keyword_gaps", _fake_save)
 
+    async def _no_existing_gaps(_mcp, **_kw):
+        return []  # the collector first asks for this month's existing real-demand batch; there is none
+    monkeypatch.setattr(kc, "get_keyword_gaps", _no_existing_gaps)
+
     collector = kc.KeywordClusteringCollector()
     step3_gaps = [{"topic": "ielts prep"}]
-    asyncio.run(collector._run_external_research(None, _Client(), _profile(), [], step3_gaps))
+    asyncio.run(collector._run_external_research(None, _Client(), _profile(), [], step3_gaps, date(2026, 11, 25)))
 
     assert saved == [], "a topic this run's clustering pass already emitted must not be emitted again"
 

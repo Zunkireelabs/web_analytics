@@ -15,6 +15,7 @@ from app.db.models import Client, FeatureImportanceRun, FeatureImportanceScore, 
 from app.db.session import SessionLocal
 from app.ml.feature_matrix import build_feature_matrix
 from app.scoring.confidence import compute_confidence
+from app.analysis.scope import active_clients
 
 MIN_OBSERVATIONS_FOR_MODEL = 60
 TEST_FRACTION = 0.2
@@ -26,7 +27,7 @@ MODEL_TYPE = "gradient_boosting_regressor"
 
 async def run_feature_importance() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
         # Forecastable metrics are the plausible target KPIs — same notion
         # of "is this metric a real trend worth explaining" the Forecast
         # Engine already uses (app/forecast/run.py).

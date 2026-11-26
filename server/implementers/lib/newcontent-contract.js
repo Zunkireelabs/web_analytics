@@ -366,56 +366,6 @@ export function minimalCoverKindFromSchema(src) {
   return m ? m[1] : null;
 }
 
-
-
-// A blog target pointing at a folder that is NOT where the site's published posts live (Chayce: configured "docs", real posts in "src/blog"). A post
-// written there never gets the blog layout, so it is refused instead of shipped. Pure: decided from the repo's file list alone.
-const BLOG_DIR_NAME = /(^|\/)(blog|blogs|posts?|articles?|news|insights)(\/|$)/i;
-const CONTENT_FILE = /\.(md|mdx|njk|html|liquid|astro|tsx|jsx|vue)$/i;
-export function betterBlogDirectory(files, { dir, extension } = {}) {
-  if (!dir || !Array.isArray(files)) return null;
-  const norm = (d) => String(d).replace(/\/+$/, '');
-  const configured = norm(dir);
-  if (BLOG_DIR_NAME.test(`${configured}/`)) return null; // already named like a blog folder: never second-guessed
-  const counts = new Map();
-  for (const f of files) {
-    if (!CONTENT_FILE.test(f)) continue;
-    const i = f.lastIndexOf('/');
-    if (i < 0) continue;
-    const d = f.slice(0, i);
-    if (/(^|\/)[_.]/.test(`/${d}/`)) continue; // plumbing/dot folders are never a content home
-    const base = f.slice(i + 1);
-    if (/^index\./i.test(base)) continue;
-    counts.set(d, (counts.get(d) || 0) + 1);
-  }
-  const here = counts.get(configured) || 0;
-  const candidates = [...counts.entries()]
-    .filter(([d, n]) => d !== configured && BLOG_DIR_NAME.test(`${d}/`) && n >= 3 && n > here)
-    .sort((a, b) => b[1] - a[1]);
-  if (!candidates.length) return null;
-  // Two equally likely blog folders is ambiguous: say nothing rather than point at the wrong one.
-  if (candidates.length > 1 && candidates[0][1] === candidates[1][1]) return null;
-  const [better, count] = candidates[0];
-  const ext = extension && files.some((f) => f.startsWith(`${better}/`) && f.endsWith(extension)) ? extension : null;
-  return { dir: better, files: count, extension: ext };
-}
-
-/** Cached lookup of betterBlogDirectory for a site's configured blog target. Never throws: no evidence means no objection. */
-export async function findBetterBlogDirectory(site, { dir, extension, ref } = {}, deps = {}) {
-  const tree = deps.getRepoTree || getRepoTree;
-  if (!site || !dir) return null;
-  const branch = refFor(site, ref);
-  // memoized() wants an object with `unknown` (a failed lookup is not remembered), so the answer is wrapped.
-  const r = await memoized(cacheFor(deps), cacheKey(site, branch, `blogdir|${dir}`), deps.now, async () => {
-    try {
-      const { files } = await tree(site, branch);
-      return { unknown: false, better: betterBlogDirectory(files || [], { dir, extension }) };
-    } catch { return { unknown: true, better: null }; }
-  });
-  return r.better;
-}
-
-
 // A blog target pointing at a folder that is NOT where the site's published posts live (Chayce: configured "docs", real posts in "src/blog"). A post
 // written there never gets the blog layout, so it is refused instead of shipped. Pure: decided from the repo's file list alone.
 const BLOG_DIR_NAME = /(^|\/)(blog|blogs|posts?|articles?|news|insights)(\/|$)/i;

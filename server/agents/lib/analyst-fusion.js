@@ -19,6 +19,8 @@ import { listActiveGoals } from '../../store/site-goals.js';
 import { pickBestGoalAlignment } from './goal-alignment.js';
 import { claimForItem } from './work-claims.js';
 import { isLeadingIndicatorsEnabled } from './leading-indicators.js';
+import { loadForecastSkill, annotateForecastSkill, forecastCountsAsEvidence } from './analyst-forecast-skill.js';
+import { loadTrackRecord, applyTrackRecord } from './analyst-track-record.js';
 
 // THE EVIDENCE-FUSION ENGINE.
 //
@@ -82,6 +84,10 @@ export function familiesForDecliningPage(decline, pageInsights) {
   }
 
   let forecastConfidence = null;
+  // Forecasts whose accuracy is not proven (analyst-forecast-skill.js) are kept OUT of the families and the signal list: a
+  // prediction that has not beaten "repeat last fortnight" must not be one of the two signals that tip a page to 'act'.
+  // Returned separately so the run can say what it held back; not in `signals`, whose length is quoted in the narrative.
+  const withheldForecasts = [];
   // The single strongest root-cause contributor across every decline signal
   // on this page (2026-09 Data Analyst audit finding — the Python Root Cause
   // Analysis Engine's own output was computed but never read on the Node
@@ -98,6 +104,10 @@ export function familiesForDecliningPage(decline, pageInsights) {
       insight.insight_type === 'forecast_risk' ||
       (insight.insight_type === 'trend_shift' && isWorsening(insight.metric_key, e.pct_change));
     if (!isDeclineSignal) continue;
+    if (!forecastCountsAsEvidence(insight)) {
+      withheldForecasts.push({ page: insight.page, metricKey: insight.metric_key, skill: insight.forecastSkill || 'unproven', reason: insight.forecastSkillReason || 'forecast skill not assessed' });
+      continue;
+    }
     families.add(insight.insight_type);
     signals.push({
       family: insight.insight_type, source: 'insights', metricKey: insight.metric_key,
@@ -119,7 +129,7 @@ export function familiesForDecliningPage(decline, pageInsights) {
     }
   }
 
-  return { families, signals, forecastConfidence, topRootCause };
+  return { families, signals, forecastConfidence, topRootCause, withheldForecasts };
 }
 
 export function generatorForDecliningPage(decline, page) {
@@ -429,7 +439,7 @@ export async function runAnalystFusion(siteId, { site: siteArg } = {}) {
 
   const freshness = await checkAnalystFreshness(siteId);
 
-  const [{ declines, leading, siteWide }, pageInsights, capabilities, growth, activeGoals] = await Promise.all([
+  const [{ declines, leading, siteWide }, rawPageInsights, capabilities, growth, activeGoals, forecastSkill] = await Promise.all([
     loadDeclines(siteId, { timezone: site.timezone || 'UTC' }).catch(() => ({ declines: new Map(), leading: new Map(), siteWide: null })),
     getRecentPageInsights(siteId).catch(() => []),
     loadVerifiedCapabilities(siteId).catch(() => []),
@@ -440,7 +450,10 @@ export async function runAnalystFusion(siteId, { site: siteArg } = {}) {
     // before this feature existed. Same discipline recommendations.js's own
     // buildRecommendations already uses.
     listActiveGoals(siteId).catch(() => []),
+    // Each metric's forecast skill (does it beat the same-weekday baseline?), read once per run. Never throws.
+    loadForecastSkill(siteId),
   ]);
+  const pageInsights = annotateForecastSkill(rawPageInsights, forecastSkill);
 
   const provider = getSearchDemandProvider();
 
@@ -458,7 +471,10 @@ export async function runAnalystFusion(siteId, { site: siteArg } = {}) {
   // A page is in `declines` or in `leading`, never both (decline-detection
   // routes it to exactly one), so no page produces both a measured decline
   // and an early warning.
-  const deduped = dedupeConclusions([...declineConclusions, ...growthConclusions, ...leadingConclusions]);
+  // This client's own record of which kinds of fix have really improved its clicks re-ranks what already cleared the evidence bar
+  // (analyst-track-record.js). It never decides whether to act, and it is read for this site only.
+  const trackRecord = await loadTrackRecord(siteId);
+  const deduped = dedupeConclusions(applyTrackRecord([...declineConclusions, ...growthConclusions, ...leadingConclusions], trackRecord));
 
   const gates = createRecommendationGates(siteId, site);
   let created = 0;
@@ -487,10 +503,14 @@ export async function runAnalystFusion(siteId, { site: siteArg } = {}) {
     results.push({ ...conclusion, recommendationId });
   }
 
+  const heldForecasts = pageInsights.filter((i) => !forecastCountsAsEvidence(i)).length;
+  if (heldForecasts) {
+    console.log(`[analyst-fusion] site ${siteId}: ${heldForecasts} forecast insight(s) not counted as evidence — accuracy not proven against the same-weekday baseline${forecastSkill.available ? '' : ' (scorecard unreachable)'}.`);
+  }
   if (freshness.verdict === 'stale') {
     console.warn(`[analyst-fusion] site ${siteId}: inputs are STALE — no autonomous recommendation created this run; every conclusion recorded as 'monitor'. ${freshnessGate(freshness).reason}`);
   }
   console.log(`[analyst-fusion] site ${siteId}: ${deduped.length} conclusion(s) fused (${declineConclusions.length} decline-risk, ${growthConclusions.length} growth-opportunity) — ${created} created, ${monitored} monitored. Freshness: ${freshness.verdict}.`);
 
-  return { conclusions: results, created, monitored, freshness, siteWide };
+  return { conclusions: results, created, monitored, freshness, siteWide, forecastSkill, heldForecasts };
 }

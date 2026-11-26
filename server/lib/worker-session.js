@@ -12,7 +12,6 @@ import { hourInTimezone } from './ship-window.js';
 // The window is counted in the laptop's own time zone (Nepal), NOT the server's: the server runs on India time (+05:30, TZ=Asia/Kolkata), which would make
 
 // "17:00" 5:15 PM in Nepal. Override with WORKER_SESSION_TZ.
-
 export const workerSessionTimezone = (env = process.env) => env.WORKER_SESSION_TZ || 'Asia/Kathmandu';
 
 export const SESSION_START_MINUTE = 10 * 60 + 30; // 10:30
@@ -36,37 +35,6 @@ export const deliveryConsolidationCron = () => { const m = SESSION_CUTOFF_MINUTE
 export const deliveryCloseCron = () => `${CLOSE_RETRY_MIN.map((x) => (SESSION_CUTOFF_MINUTE % 60) + x).join(',')} ${Math.floor(SESSION_CUTOFF_MINUTE / 60)} * * *`;
 /** True on the close run that must close everything left (the last of the retries). */
 export const closeIsForced = (timezone, now = new Date()) => minuteOfDay(timezone, now) >= SESSION_CUTOFF_MINUTE + CLOSE_FORCE_AFTER_MIN;
-
-export const workerSessionTimezone = (env = process.env) => env.WORKER_SESSION_TZ || 'Asia/Kathmandu';
-
-export const SESSION_START_MINUTE = 10 * 60 + 30; // 10:30
-export const SESSION_CUTOFF_MINUTE = 17 * 60;     // 17:00 (was 14:00 until 2026-11-25, then 16:00; the whole day's work, finding, fixing and PRs, runs inside this window and every PR is open by 5 PM)
-/**
- * The cron expression that ticks the session, DERIVED from the window so the two can never disagree. They were two hand-edited numbers:
- * on 2026-11-25 the cut-off in code said 16:00 while the deployed cron line still stopped at 13:55, so no pass could start after 14:00.
- * Fires every five minutes from the hour the window opens to the last hour before it closes.
- */
-export const workerSessionCron = () => `*/5 ${Math.floor(SESSION_START_MINUTE / 60)}-${Math.ceil(SESSION_CUTOFF_MINUTE / 60) - 1} * * *`;
-/**
- * The deadline steps, derived from the window like the session cron so they can never drift from it:
- *   consolidation  30 minutes before the cut-off: every project's validated work is brought to one pull request, or preserved with the exact reason
- *   close          at the cut-off and again 10 and 20 minutes later: every project's day record is closed. A project whose pass is still running is deferred to the
- *                  next run; the last run (CLOSE_FORCE_AFTER_MIN) closes whatever is left.
- */
-export const CONSOLIDATION_LEAD_MIN = 30;
-export const CLOSE_RETRY_MIN = [0, 10, 20];
-export const CLOSE_FORCE_AFTER_MIN = 20;
-export const deliveryConsolidationCron = () => { const m = SESSION_CUTOFF_MINUTE - CONSOLIDATION_LEAD_MIN; return `${m % 60} ${Math.floor(m / 60)} * * *`; };
-export const deliveryCloseCron = () => `${CLOSE_RETRY_MIN.map((x) => (SESSION_CUTOFF_MINUTE % 60) + x).join(',')} ${Math.floor(SESSION_CUTOFF_MINUTE / 60)} * * *`;
-/** True on the close run that must close everything left (the last of the retries). */
-export const closeIsForced = (timezone, now = new Date()) => minuteOfDay(timezone, now) >= SESSION_CUTOFF_MINUTE + CLOSE_FORCE_AFTER_MIN;
-
-// "16:00" 4:15 PM in Nepal. Override with WORKER_SESSION_TZ.
-export const workerSessionTimezone = (env = process.env) => env.WORKER_SESSION_TZ || 'Asia/Kathmandu';
-
-export const SESSION_START_MINUTE = 10 * 60 + 30; // 10:30
-export const SESSION_CUTOFF_MINUTE = 16 * 60;     // 16:00 (was 14:00 until 2026-11-25; the worker has more to write than fits before 2 PM)
-
 
 export const MIN_GAP_MS = 20 * 60_000;            // a pass that found nothing to do is not repeated for this long
 
@@ -108,13 +76,6 @@ export function describeSession({ timezone, now = new Date(), workerOnline, last
   if (workerOnline && w.open) return { mode: 'worker', state: last?.running ? 'writing' : 'connected', message: last?.running ? 'The laptop worker is writing today\'s fixes.' : `The laptop worker is connected. Today\'s fixes are written until 17:00 (${w.minutesLeft} min left).` };
   if (workerOnline) return { mode: 'worker', state: 'connected-outside-window', message: 'The laptop worker is connected. Fixes are written between 10:30 and 17:00; anything left is picked up then.' };
   if (w.open) return { mode: 'worker', state: 'waiting', message: `Waiting for the laptop worker. Open the laptop and start it: the day's fixes are written until 17:00 (${w.minutesLeft} min left).` };
-
-
-
-  if (workerOnline && w.open) return { mode: 'worker', state: last?.running ? 'writing' : 'connected', message: last?.running ? 'The laptop worker is writing today\'s fixes.' : `The laptop worker is connected. Today\'s fixes are written until 16:00 (${w.minutesLeft} min left).` };
-  if (workerOnline) return { mode: 'worker', state: 'connected-outside-window', message: 'The laptop worker is connected. Fixes are written between 10:30 and 16:00; anything left is picked up then.' };
-  if (w.open) return { mode: 'worker', state: 'waiting', message: `Waiting for the laptop worker. Open the laptop and start it: the day's fixes are written until 16:00 (${w.minutesLeft} min left).` };
-
 
   return { mode: 'worker', state: 'idle', message: 'The laptop worker is not connected. It is next needed from 10:30.' };
 }

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Client, ForecastAccuracy, ForecastPoint, ForecastRun, MetricObservation
 from app.db.session import SessionLocal
+from app.forecast.error import abs_pct_error as _abs_pct_error
 
 # Below this many evaluated points for a client, there's no real signal to
 # ground a rolling accuracy figure on yet — callers should treat fewer than
@@ -71,7 +72,7 @@ async def _evaluate_client(session: AsyncSession, client_id: int) -> None:
             continue  # the real value for this date hasn't landed yet — retry a later night
 
         predicted, actual_f = float(point.point_estimate), float(actual)
-        abs_pct_error = abs(predicted - actual_f) / abs(actual_f) * 100 if actual_f != 0 else None
+        abs_pct_error = _abs_pct_error(predicted, actual_f)  # percent; None when the actual is 0 (see app/forecast/error.py)
 
         session.add(ForecastAccuracy(
             client_id=client_id, metric_key=run.metric_key, forecast_point_id=point.id,

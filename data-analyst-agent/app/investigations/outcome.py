@@ -57,6 +57,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Client, Investigation, InvestigationEvent, InvestigationOutcome, MetricObservation
 from app.db.session import SessionLocal
+from app.analysis.scope import note_client_failure
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ async def run_investigation_outcome_evaluation() -> None:
                 await _evaluate_client(session, client.id)
                 await session.commit()
         except Exception:
+            note_client_failure(client.id)
             logger.exception(
                 "run_investigation_outcome_evaluation: client %s raised outside the per-investigation loop — skipping this client only",
                 client.id,
@@ -136,6 +138,7 @@ async def _evaluate_client(session: AsyncSession, client_id: int) -> None:
             # investigation's already-computed InvestigationOutcome row.
             await session.commit()
         except Exception:
+            note_client_failure(client_id)
             logger.exception(
                 "run_investigation_outcome_evaluation: client %s investigation %s raised — skipping this investigation only",
                 client_id, inv.id,

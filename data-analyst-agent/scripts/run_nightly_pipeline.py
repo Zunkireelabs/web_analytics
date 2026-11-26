@@ -60,85 +60,29 @@ Run via cron (see docker-compose.yml comment) as:
 """
 import asyncio
 import logging
-import os
 
-from app.activity.log import FINDINGS_COMPLETE_TASK, run_in_progress, track
-from app.notifications.nightly import send_nightly_notifications
+from app.analysis.pass_runner import PassIncomplete
+from app.analysis.run_pass import run_analysis_pass
+from app.ingestion.run_nightly import run_nightly
 
 logger = logging.getLogger(__name__)
-from app.forecast.accuracy import run_forecast_accuracy_evaluation
-from app.forecast.run import run_forecasts
-from app.ingestion.run_nightly import run_nightly
-from app.insights.engine import run_insight_engine
-from app.insights.recommendations import run_recommendation_engine
-from app.intelligence.cannibalization import run_cannibalization_detection
-from app.intelligence.effort_estimation import run_effort_estimation
-from app.intelligence.impact_prediction import run_impact_prediction
-from app.intelligence.opportunity_scoring import run_opportunity_scoring
-from app.intelligence.prioritizer import run_recommendation_prioritizer
-from app.intelligence.root_cause import run_root_cause_analysis
-from app.intelligence.target_keyword_evidence import run_target_keyword_evidence
-from app.investigations.drafts import run_draft_trigger
-from app.investigations.engine import run_investigation_engine
-from app.investigations.outcome import run_investigation_outcome_evaluation
-from app.investigations.reasoning import run_investigation_reasoning
-from app.ml.feature_importance import run_feature_importance
-from app.opportunities.rollup import run_opportunity_rollup
-from app.stats.anomalies import run_anomaly_detection
-from app.stats.deltas import run_stats
 
 
 async def main() -> None:
-    # Never two runs at once on the shared database (production's scheduler owns the night; a manual staging run must not overlap).
-    live_since = await run_in_progress()
-    if live_since is not None:
-        logger.warning("another Data Analyst run has been in progress since %s: not starting a second one", live_since)
-        return
-    async with track("monitoring"):
-        await run_nightly()
-        await run_stats()
-        await run_anomaly_detection()
-    async with track("forecasting"):
-        await run_forecasts()
-        await run_forecast_accuracy_evaluation()
-        await run_investigation_outcome_evaluation()
-    async with track("investigating"):
-        await run_feature_importance()
-        await run_insight_engine()
-        # Must mirror app/analysis/run_pass.py::run_analysis_pass exactly —
-        # that module's own docstring claims stage-for-stage parity with
-        # this script, which these two calls were originally missing from.
-        await run_target_keyword_evidence()
-        await run_cannibalization_detection()
-        await run_root_cause_analysis()
-    async with track("generating_recommendations"):
-        await run_recommendation_engine()
-        await run_effort_estimation()
-        await run_impact_prediction()
-        await run_opportunity_scoring()
-        await run_recommendation_prioritizer()
-        await run_investigation_engine()
-        await run_opportunity_rollup()
-        await run_investigation_reasoning()
-    # Findings only when ANALYST_DRAFT_TRIGGER=off (app/investigations/draft_switch.py). run_draft_trigger() also checks it, but
-    # skipping here keeps a "preparing_drafts" row that never ran out of ai_activity_log.
-    from app.investigations.draft_switch import draft_trigger_enabled, log_state
-    log_state("run_nightly_pipeline")
-    if draft_trigger_enabled():
-        async with track("preparing_drafts"):
-            await run_draft_trigger()
-    # Every findings stage above finished without raising: say so, for the analytics app's orchestrator. Never fatal: if the
-    # marker cannot be written (migration 0042 not applied yet), the findings ARE complete but stay unconfirmed, and the
-    # orchestrator safely refuses them rather than this run being reported as failed.
+    """Ingest, then the SAME recorded analysis pass the scheduler runs (app/analysis/run_pass.py), owned as a manual run.
+
+    This script used to carry its own copy of the stage chain, which had drifted: it never ran the prediction layer and its
+    docstring claimed parity it did not have. One path now: the stage order, dependencies, freshness gate, per-stage records and
+    the findings marker are identical to the scheduled run. (The group names in the docstring above are still the activity-log
+    task types.)"""
+    await run_nightly()
     try:
-        async with track(FINDINGS_COMPLETE_TASK):
-            pass
-    except Exception:
-        logger.exception("findings_complete marker could not be written (is migration 0042 applied?): today's findings will be treated as unconfirmed")
-    # Predictive alerts and the morning briefing (the nightly run IS "this morning" for every client; weekly/monthly briefings run
-    # from their own scripts). Shared with production's scheduled run and sent at most once a day (app/notifications/nightly.py),
-    # so a manual staging run on the same day as production's cannot send them twice.
-    await send_nightly_notifications()
+        await run_analysis_pass(owner="manual")
+    except PassIncomplete as exc:
+        # Recorded already; surface it to whoever ran this by hand.
+        logger.error("%s", exc)
+        raise SystemExit(1)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

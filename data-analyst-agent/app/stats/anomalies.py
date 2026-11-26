@@ -13,6 +13,7 @@ from app.config import settings
 from app.db.dimension_lookup import dimension_values_for, iter_enabled_metric_dimensions
 from app.db.models import Anomaly, Client, MetricObservation
 from app.db.session import SessionLocal
+from app.analysis.scope import active_clients
 
 BASELINE_WINDOW = 30
 MIN_BASELINE_PERIODS = 7
@@ -20,7 +21,7 @@ MIN_BASELINE_PERIODS = 7
 
 async def run_anomaly_detection() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
         metric_dims = await iter_enabled_metric_dimensions(session, cadence="daily", anomaly_only=True)
 
     for client in clients:

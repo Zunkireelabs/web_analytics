@@ -17,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Client, ImpactPrediction, Insight, AnalystRecommendations
 from app.db.session import SessionLocal
 from app.intelligence.category_rules import category_for_metric
-from app.scoring.confidence import compute_confidence
+from app.intelligence.fix_outcomes import measured_evidence
+from app.analysis.scope import active_clients
 
 # (duration_min_weeks, duration_max_weeks, expected_impact_magnitude) per
 # fix category. Reasoning: metadata fixes re-crawl/re-index fast but rarely
@@ -36,7 +37,7 @@ TIME_TO_IMPACT_BY_CATEGORY: dict[str, tuple[int, int, str]] = {
 
 async def run_impact_prediction() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         async with SessionLocal() as session:
@@ -76,14 +77,20 @@ async def _predict(session: AsyncSession, client_id: int, rec: AnalystRecommenda
 
     duration_min, duration_max, magnitude = TIME_TO_IMPACT_BY_CATEGORY[category]
 
-    confidence_id, confidence = await compute_confidence(
-        session, client_id=client_id, subject_type="impact_prediction", subject_id=rec.id,
-        components={"data_completeness": 1.0},
-    )
+    # The duration and magnitude stay a hand-curated lookup by fix category (not fitted to this client). CONFIDENCE is different: it
+    # is not stored at all until this client's own MEASURED fixes in this category are numerous enough to say something
+    # (fix_outcomes.py, fed by the Node app's post-merge measurement), and then it is the lower bound of how often such a fix has
+    # really improved clicks here, not a self-assessed number. It was stored as exactly 1.00 on every one of the 364 production rows
+    # before this, which read as certainty. Existing predictions are never rewritten; new ones pick up what has been measured since.
+    evidence = await measured_evidence(session, client_id, category)
 
     session.add(ImpactPrediction(
         client_id=client_id, recommendation_id=rec.id, status="ok", category=category,
         duration_min_weeks=duration_min, duration_max_weeks=duration_max, expected_impact_magnitude=magnitude,
-        method_detail={"metric_key": insight.metric_key},
-        confidence_score_id=confidence_id, confidence=confidence.score,
+        method_detail={
+            "metric_key": insight.metric_key, "basis": "static_category_rule", "fitted_to_client_data": False,
+            "measured_outcomes": evidence,
+            "confidence_meaning": "lower bound (95%) of how often this client's own measured fixes in this category improved clicks",
+        },
+        confidence_score_id=None, confidence=evidence["confidence"],
     ))

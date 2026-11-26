@@ -1,8 +1,12 @@
 import logging
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
+from app.analysis.ledger import SCHEDULER, find_resumable_pass, recover_interrupted_runs
+from app.analysis.pass_runner import PassIncomplete
 from app.analysis.run_pass import run_analysis_pass
 from app.config import settings
 from app.ingestion.run_nightly import run_nightly
@@ -69,6 +73,12 @@ def start_scheduler() -> None:
         logger.info("Nightly analysis scheduled: daily at %02d:00 UTC", settings.analysis_schedule_hour_utc)
 
     _scheduler.start()
+    if settings.analysis_schedule_enabled:
+        # One-off recovery shortly after start; not a change to any scheduled time.
+        _scheduler.add_job(
+            _recover_after_start, DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=settings.analysis_resume_delay_seconds)),
+            id="analysis-recover-after-start", max_instances=1,
+        )
 
 
 def stop_scheduler() -> None:
@@ -90,7 +100,31 @@ async def _run_ingestion_and_log() -> None:
 async def _run_analysis_and_log() -> None:
     logger.info("Nightly analysis run starting")
     try:
-        await run_analysis_pass()
+        await run_analysis_pass(owner=SCHEDULER)
         logger.info("Nightly analysis run finished")
+    except PassIncomplete as exc:
+        # Everything is already recorded (stage outcomes, the failed findings marker); this is the log line that agrees with them.
+        logger.error("Nightly analysis run did NOT complete: %s", exc)
     except Exception:  # noqa: BLE001 — same rule as ingestion above
         logger.exception("Nightly analysis run failed")
+
+
+async def _recover_after_start() -> None:
+    """A deploy replaces this container and kills a pass in progress. Close what the dead process left "running" (recorded as
+    interrupted, never completed) and, if allowed, finish the pass's unfinished stages once. Never raises."""
+    try:
+        await recover_interrupted_runs(scheduler_owned_only=True)
+        if not settings.analysis_resume_on_start:
+            return
+        found = await find_resumable_pass(
+            window_hours=settings.analysis_resume_window_hours, max_attempts=settings.analysis_resume_max_attempts,
+        )
+        if found is None:
+            return
+        pass_id, attempts = found
+        logger.warning("resuming interrupted analysis pass %s (attempt %s of %s): only its unfinished stages run", pass_id, attempts + 1, settings.analysis_resume_max_attempts)
+        await run_analysis_pass(owner=SCHEDULER, resume_pass_id=pass_id)
+    except PassIncomplete as exc:
+        logger.error("Resumed analysis pass did NOT complete: %s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("analysis recovery after start failed")

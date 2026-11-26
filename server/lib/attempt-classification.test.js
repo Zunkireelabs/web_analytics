@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyAbandonReason, isAutoRetryable, RETRY_POLICY, structuredApplyFailure, ITEM_LEVEL_DESIGN_REASON_CODES, DESIGN_DEFERRAL_MESSAGES, DESIGN_DEFERRAL_FRAGMENTS } from './attempt-classification.js';
+import { classifyAbandonReason, isRecognisedFailure, isAutoRetryable, RETRY_POLICY, structuredApplyFailure, ITEM_LEVEL_DESIGN_REASON_CODES, DESIGN_DEFERRAL_MESSAGES, DESIGN_DEFERRAL_FRAGMENTS } from './attempt-classification.js';
 import { FAILURE_CLASS } from './failure-classification.js';
 
 // Every string below is a REAL abandoned_reason counted in the live drafts
@@ -441,4 +441,23 @@ test('refusals fixed by platform changes the same day stay retryable, not blocke
 test('a real defect in the draft still counts, and a rate limit still retries', () => {
   assert.equal(classifyAbandonReason('Auto-ship failed: This schema draft has 1 unverified placeholder field(s) (image) — the model couldn’t confirm these').retryPolicy, RETRY_POLICY.ITEM_DEFECT);
   assert.equal(classifyAbandonReason('Auto-ship failed: GitHub rate limit reached for /repos/x/y/contents/a.md?ref=main (resets 2026-11-25T08:37:39.000Z) — retried 2x, still limited.').retryPolicy, RETRY_POLICY.RETRY);
+});
+
+// STAGE 4: an unknown refusal is capped but is never silently presented as a proven content defect.
+test('a reason matching a rule is recognised; one matching none is flagged unrecognised and still capped', () => {
+  const known = classifyAbandonReason('This content-expansion draft has no sections.');
+  assert.equal(known.recognised, true);
+  const unknown = classifyAbandonReason('provider returned a brand new kind of refusal 7f3');
+  assert.equal(unknown.recognised, false);
+  assert.equal(unknown.retryPolicy, RETRY_POLICY.ITEM_DEFECT, 'still stops the endless retry loop');
+  assert.equal(isRecognisedFailure('provider returned a brand new kind of refusal 7f3'), false);
+  assert.equal(isRecognisedFailure('This content-expansion draft has no sections.'), true);
+});
+
+test('a missing reason is not "recognised" either, and stays retryable rather than becoming a defect', () => {
+  for (const r of [null, undefined, '   ']) {
+    const c = classifyAbandonReason(r);
+    assert.equal(c.recognised, false);
+    assert.equal(c.retryPolicy, RETRY_POLICY.RETRY);
+  }
 });

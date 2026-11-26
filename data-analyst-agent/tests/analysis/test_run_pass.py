@@ -17,19 +17,29 @@ to record their own name, so this never touches a real database or event
 loop beyond asyncio.run.
 """
 import asyncio
-from contextlib import asynccontextmanager
+from datetime import date
 
+from app.analysis import freshness as fresh
 from app.analysis import run_pass
 
+TODAY = date.today()
 
-def _install_recorder(monkeypatch):
+
+def _install_recorder(monkeypatch, freshness=None):
     calls = []
+    from app.analysis import ledger as ledger_module
+    from app.analysis.ledger import MemoryLedger
 
-    async def _noop_track(task_type, **_kw):
-        calls.append(f"track:{task_type}")
-        yield
+    # No database: the pass records into memory, finds no interrupted rows to recover, and sees every client as fresh.
+    monkeypatch.setattr(run_pass, "DbLedger", MemoryLedger)
 
-    monkeypatch.setattr(run_pass, "track", lambda task_type, **kw: asynccontextmanager(_noop_track)(task_type, **kw))
+    async def _no_recovery(**_kw):
+        return 0
+    monkeypatch.setattr(ledger_module, "recover_interrupted_runs", _no_recovery)
+
+    async def _fresh():
+        return freshness if freshness is not None else {1: fresh.evaluate(1, {"gsc_site": TODAY, "ga4_site": TODAY, "page_query": TODAY}, TODAY)}
+    monkeypatch.setattr(run_pass, "_load_freshness", _fresh)
 
     stage_names = [
         "run_stats", "run_anomaly_detection", "run_forecasts",
@@ -65,7 +75,7 @@ def test_run_analysis_pass_now_runs_the_full_batch_pipeline_in_dependency_order(
 
     asyncio.run(run_pass.run_analysis_pass())
 
-    stage_order = [c for c in calls if not c.startswith("track:") and c != "send_nightly_notifications"]
+    stage_order = [c for c in calls if c != "send_nightly_notifications"]
     assert stage_order == [
         "run_stats", "run_anomaly_detection",
         "run_forecasts", "run_forecast_accuracy_evaluation", "run_investigation_outcome_evaluation",
@@ -87,7 +97,7 @@ def test_opportunity_scoring_and_prioritizer_run_before_the_draft_trigger(monkey
 
     asyncio.run(run_pass.run_analysis_pass())
 
-    stage_order = [c for c in calls if not c.startswith("track:") and c != "send_nightly_notifications"]
+    stage_order = [c for c in calls if c != "send_nightly_notifications"]
     assert stage_order.index("run_opportunity_scoring") < stage_order.index("run_draft_trigger")
     assert stage_order.index("run_recommendation_prioritizer") < stage_order.index("run_draft_trigger")
     assert stage_order.index("run_effort_estimation") < stage_order.index("run_opportunity_scoring")
@@ -121,7 +131,7 @@ def test_predictions_run_after_insights_and_before_recommendations_and_pooled_tr
 
     asyncio.run(run_pass.run_analysis_pass())
 
-    order = [c for c in calls if not c.startswith("track:")]
+    order = list(calls)
     assert order.index("run_insight_engine") < order.index("run_pooled_training") < order.index("run_predictions") < order.index("run_recommendation_engine")
 
 

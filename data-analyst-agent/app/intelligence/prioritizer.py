@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Client, EffortEstimation, OpportunityScore, AnalystRecommendations, RecommendationRanking
 from app.db.session import SessionLocal
 from app.scoring.confidence import compute_confidence
+from app.analysis.scope import active_clients
 
 
 def compute_priority_score(opportunity_score: float, confidence: float, effort_level: int) -> float:
@@ -54,7 +55,7 @@ def compute_priority_score(opportunity_score: float, confidence: float, effort_l
 
 async def run_recommendation_prioritizer() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         async with SessionLocal() as session:

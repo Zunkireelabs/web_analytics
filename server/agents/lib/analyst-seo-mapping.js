@@ -10,6 +10,7 @@ import { getLearnedGapConfidence, temperPriorityBoost } from './gap-learning.js'
 import { classifyGapCoverage, isCoverageFresh } from './keyword-coverage-service.js';
 import { foldText, baseLang, LOCATION_CODE_TO_MARKET } from './keyword-coverage.js';
 import { buildGrowthOpportunities } from './growth-opportunities.js';
+import { SKILL } from './analyst-forecast-skill.js';
 import { findOpenRecommendation, insertRecommendation, refreshRecommendationBlockState, corroborateRecommendation } from '../../store/recommendations.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
 import { isWorsening, anomalyIsWorsening } from '../../lib/metric-direction.js';
@@ -988,21 +989,26 @@ export async function syncAnalystInsightsToActionCenter(siteId, insights, { site
     // the issue text matters: a human reading the Action Center needs to know
     // whether this already happened or is about to.
     const predicted = insight.insight_type === 'forecast_risk';
+    // A forecast whose accuracy has not been proven (analyst-forecast-skill.js) can still be SEEN, but it never decides alone:
+    // lowest priority, a human reviews it, and the reason says so. A forecast that loses to the baseline never gets here
+    // (applyForecastSkillGate withholds it before this function is called). SKILL.WORSE is demoted too, if called directly.
+    const unproven = predicted && insight.forecastSkill !== SKILL.PROVEN; // not annotated at all counts as not proven
+    const priority = unproven ? 'low' : predicted ? 'medium' : 'high';
     await insertRecommendation(siteId, {
       page,
       recommendationType: action.generatorId,
       issue: `${predicted ? 'Predicted' : 'Detected'} ${insight.metric_key} decline on this page`,
-      reason: analystReason(insight, predicted),
+      reason: analystReason(insight, predicted) + (unproven ? ` Forecast accuracy for this metric is not proven yet (${insight.forecastSkillReason || 'forecast skill not assessed'}), so this is for review, not automatic action.` : ''),
       params: action.params,
       findingId: action.findingId,
       detectingAgent: 'analyst-insights',
-      priority: predicted ? 'medium' : 'high',
-      riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(action.generatorId),
+      priority,
+      riskTier: gate.blockedReason || unproven ? 'manual' : riskTierForGenerator(action.generatorId),
       blockedReason: gate.blockedReason,
       confidence: action.confidence,
       // See createActionCenterRecommendationForGap's comment on why label
       // (not a fabricated value) is what's set here.
-      expectedImpact: { label: impactFromPriority(predicted ? 'medium' : 'high'), basis: 'estimate', value: null },
+      expectedImpact: { label: impactFromPriority(priority), basis: 'estimate', value: null },
     });
     created++;
   }

@@ -28,6 +28,7 @@ from app.db.models import (
     AnalystRecommendations, RecommendationRanking, RootCauseAnalysisRun,
 )
 from app.db.session import SessionLocal
+from app.analysis.scope import active_clients
 
 # States a brand-new investigation reaches automatically in one nightly
 # pass, in order.
@@ -48,7 +49,7 @@ CLOSED_STATUSES = ("completed", "archived")
 
 async def run_investigation_engine() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         async with SessionLocal() as session:

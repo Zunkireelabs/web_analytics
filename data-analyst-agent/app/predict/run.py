@@ -23,12 +23,15 @@ from app.db.models import (
     Client, Insight, KeywordPrediction, MetricObservation, PageQueryObservation, PredictedIssue, PredictionLog, PredictionModel,
 )
 from app.db.session import SessionLocal
+from app.forecast.error import abs_pct_error
 from app.predict import issues as issue_model
 from app.predict.industry import MIN_PROJECTS, industry_outlook
 from app.predict.features import DECLINE_FRACTION, MIN_VOLUME, feature_row, training_rows
+from app.predict.calibration import calibrated_confidence
 from app.predict.keywords import growth_candidate
 from app.predict.outlook import forecast_series
 from app.predict.series import week_start, weekly_mean_weighted, weekly_rate, weekly_sum
+from app.analysis.scope import active_clients, note_client_failure
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +121,7 @@ async def _resolve_past(session: AsyncSession, client_id: int, as_of: date, fram
         if ts in s.index:
             actual = float(s.loc[ts])
             p.actual = actual
-            p.abs_pct_error = abs(actual - float(p.predicted)) / max(actual, 1.0)
+            p.abs_pct_error = abs_pct_error(float(p.predicted), actual)  # percent, same as forecast_accuracy; None when actual is 0
             p.resolved_at = datetime.now(timezone.utc)
 
     open_issues = (await session.execute(
@@ -149,8 +152,20 @@ async def _upsert_forecasts(session: AsyncSession, client_id: int, as_of: date) 
             await session.execute(stmt)
 
 
+async def _resolved_pairs(session: AsyncSession, client_id: int) -> list[tuple[float, bool]]:
+    """This client's own resolved page-decline predictions as (likelihood, happened). Strictly per client."""
+    rows = (await session.execute(
+        select(PredictedIssue.likelihood, PredictedIssue.outcome).where(
+            PredictedIssue.client_id == client_id, PredictedIssue.kind == "page_decline", PredictedIssue.outcome.is_not(None),
+        )
+    )).all()
+    return [(float(l), o == "happened") for l, o in rows]
+
+
 async def _predict_pages(session: AsyncSession, client_id: int, as_of: date, frames: dict[str, pd.DataFrame], model_name: str, model) -> list[dict]:
     target = week_start(as_of)  # the week now starting is the one being predicted
+    resolved = await _resolved_pairs(session, client_id)
+    decline_pct = round((1 - DECLINE_FRACTION) * 100, 1)   # what the model's label means: next week below DECLINE_FRACTION of recent
     out = []
     for page, f in frames.items():
         c, i, p = f["clicks"].values, f["impressions"].values, f["position"].values
@@ -166,9 +181,10 @@ async def _predict_pages(session: AsyncSession, client_id: int, as_of: date, fra
         if lk < LIKELIHOOD_FLOOR:
             continue
         base = float(np.mean(c[-4:-1]))
+        confidence, basis = calibrated_confidence(lk, resolved)
         out.append({
-            "page": page, "likelihood": lk, "model": model_name_used,
-            "expected_loss": round(base * 0.25 * lk, 1), "reason": issue_model.reason_text(row, c, p),
+            "page": page, "likelihood": lk, "model": model_name_used, "confidence": confidence, "confidence_basis": basis,
+            "expected_loss": round(base * (1 - DECLINE_FRACTION) * lk, 1), "reason": issue_model.reason_text(row, c, p),
             "evidence": {"features": row, "weekly_clicks": [round(float(x), 1) for x in c[-6:]]},
             "last": float(c[-1]), "base": base,
         })
@@ -190,9 +206,17 @@ async def _predict_pages(session: AsyncSession, client_id: int, as_of: date, fra
                     period_start=target, insight_type="forecast_risk", severity="high" if r["likelihood"] >= 0.75 else "medium",
                     evidence={
                         "source": "predict", "model": r["model"], "likelihood": round(r["likelihood"], 3),
-                        "last_actual": r["last"], "projected_last_point": r["base"] * (1 - 0.25),
+                        "last_actual": r["last"],
+                        # NOT a point forecast: the model predicts "next week falls below DECLINE_FRACTION of the recent
+                        # average", so these are the level at that threshold and the decline it means. They used to be a
+                        # hardcoded -25% that did not even match the model's own 20% label.
+                        "projected_last_point": r["base"] * DECLINE_FRACTION, "pct_projected_change": -decline_pct,
+                        "projection_basis": "decline_threshold_of_the_model_label", "decline_threshold_pct": decline_pct,
                         "predicted_date": target.isoformat(), "days_until_drop": max((target - as_of).days, 0),
-                        "pct_projected_change": -25.0, "horizon_periods": 1, "confidence": round(r["likelihood"], 3),
+                        "horizon_periods": 1,
+                        # Honest confidence: the observed hit rate of this likelihood band once this client has enough
+                        # resolved outcomes, else the raw model score, labelled as uncalibrated (app/predict/calibration.py).
+                        "confidence": r["confidence"], "confidence_basis": r["confidence_basis"],
                     },
                 )
                 session.add(ins)
@@ -230,7 +254,7 @@ async def _predict_keywords(session: AsyncSession, client_id: int, as_of: date) 
 async def run_predictions(as_of: date | None = None) -> None:
     as_of = as_of or date.today()
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
         model_name, model = await _active_model(session)
     for client in clients:
         try:
@@ -242,6 +266,7 @@ async def run_predictions(as_of: date | None = None) -> None:
                 await _predict_keywords(session, client.id, as_of)
                 await session.commit()
         except Exception as e:
+            note_client_failure(client.id)
             logger.exception("predict: client %s failed: %s", client.id, e)
 
 
@@ -251,7 +276,7 @@ async def run_pooled_training(as_of: date | None = None) -> dict:
     as_of = as_of or date.today()
     rows, labels, order, projects = [], [], [], 0
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
         for client in clients:
             frames = await weekly_frames(session, client.id, "page", as_of)
             used = False

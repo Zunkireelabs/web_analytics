@@ -32,6 +32,7 @@ from app.db.session import SessionLocal
 from app.insights.recommendations import LOWER_IS_BETTER_METRICS, impact_inputs_from_insight
 from app.scoring.confidence import compute_confidence
 from app.scoring.impact_projection import project_impact
+from app.analysis.scope import active_clients
 
 # Hand-picked normalization constants — not derived from data, since there's
 # no distribution of "all possible impacts/page-counts" this service could
@@ -53,7 +54,7 @@ FACTOR_WEIGHTS = {
 
 async def run_opportunity_scoring() -> None:
     async with SessionLocal() as session:
-        clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
+        clients = await active_clients(session)
 
     for client in clients:
         async with SessionLocal() as session:
