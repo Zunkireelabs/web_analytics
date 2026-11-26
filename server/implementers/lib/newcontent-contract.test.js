@@ -354,6 +354,7 @@ describe('deriveNewContentContract — a schema-validated (Astro content collect
     assert.equal(c.schemaValidated, true);
     assert.deepEqual(c.requiredKeys, ['author', 'category', 'cover', 'date', 'excerpt', 'title']);
   });
+
   test('a required key with the SAME value in every sibling is reused (author, category); titles and summaries are not, and a minimal `kind`-only cover a real post already uses is', async () => {
     const c = await deriveNewContentContract(SITE, dir, depsFor(ASTRO_DIR));
     assert.deepEqual(c.siblingConstants, { author: 'team', category: 'News', cover: { kind: 'agent' } });
@@ -379,6 +380,15 @@ describe('deriveNewContentContract — a schema-validated (Astro content collect
     const rich = (k) => post(['cover:', `  kind: ${k}`, '  heading: "H"', '  words: ["a"]']);
     const files = { 'src/content.config.ts': 'x', 'src/content/blog/a.md': rich('pills'), 'src/content/blog/b.md': rich('pills'), 'src/content/blog/c.md': rich('pills') };
     assert.equal((await deriveNewContentContract(SITE, dir, depsFor(files))).siblingConstants.cover, undefined);
+
+  test('a required key with the SAME value in every sibling is reused (author, category); titles, summaries and a cover that varies are not', async () => {
+    const c = await deriveNewContentContract(SITE, dir, depsFor(ASTRO_DIR));
+    assert.deepEqual(c.siblingConstants, { author: 'team', category: 'News' });
+  });
+  test('a key whose value differs between siblings is never defaulted', async () => {
+    const files = { ...ASTRO_DIR, 'src/content/blog/c.md': ASTRO_DIR['src/content/blog/c.md'].replace('author: team', 'author: Jo') };
+    assert.deepEqual((await deriveNewContentContract(SITE, dir, depsFor(files))).siblingConstants, { category: 'News' });
+
   });
   test('missingRequiredKeys names what a generated file lacks', async () => {
     const c = await deriveNewContentContract(SITE, dir, depsFor(ASTRO_DIR));
@@ -436,6 +446,7 @@ describe('deriveNewContentContract — declaresSources', () => {
   });
 });
 
+
 describe('deriveNewContentContract — a required cover no post shows in minimal form', () => {
   const dir = { dir: 'src/content/blog', extension: '.md' };
   const rich = (n) => post(['cover:', '  kind: pills', '  heading: "H"', `  words: ["${n}"]`]);
@@ -452,3 +463,4 @@ describe('deriveNewContentContract — a required cover no post shows in minimal
     assert.equal((await deriveNewContentContract(SITE, dir, depsFor(files))).siblingConstants.cover, undefined);
   });
 });
+
