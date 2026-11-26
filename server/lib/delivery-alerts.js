@@ -22,7 +22,7 @@ export const WORKER_OFFLINE_MIN = 30;
  *                      mergedByBot:[drafts], mergedUnverified:[drafts], skippedTicks:[{why,count,firstAt,lastAt}] }
  * @returns {{key:string, severity:string, siteId:number|null, message:string}[]}
  */
-export function evaluateAlerts({ now = new Date(), timezone = 'Asia/Kathmandu', sites = [], cycles = [], locks = [], mergedByBot = [], mergedUnverified = [], skippedTicks = [] } = {}) {
+export function evaluateAlerts({ now = new Date(), timezone = 'Asia/Kathmandu', sites = [], cycles = [], locks = [], mergedByBot = [], mergedUnverified = [], skippedTicks = [], capabilityFindings = [] } = {}) {
   const out = []; const nowMs = new Date(now).getTime(); const minute = minuteOfDay(timezone, now);
   const afterClose = minute >= SESSION_CUTOFF_MINUTE + CLOSE_FORCE_AFTER_MIN;
   const byId = new Map(cycles.map((c) => [c.site_id, c]));
@@ -49,6 +49,15 @@ export function evaluateAlerts({ now = new Date(), timezone = 'Asia/Kathmandu', 
   const inWindow = minute >= SESSION_START_MINUTE && minute < SESSION_CUTOFF_MINUTE;
   const off = skippedTicks.filter((t) => t.why === 'worker-offline').reduce((m, t) => Math.max(m, (new Date(t.lastAt).getTime() - new Date(t.firstAt).getTime()) / 60_000), 0);
   if (inWindow && off >= WORKER_OFFLINE_MIN) out.push({ key: 'worker-offline', severity: SEVERITY.HIGH, siteId: null, message: `The laptop worker has not been connected for ${Math.round(off)} minutes of the working window; no fixes are being written.` });
+  // Something a project needs is missing (blog target, blog template, front-matter default, discovery input) and has been for at least a day: said out loud,
+  // with the repair that is proposed or the thing only a person can decide. Once a day per finding, like every alert here.
+  for (const f of capabilityFindings) {
+    if (f.severity !== SEVERITY.HIGH && f.severity !== SEVERITY.CRITICAL) continue;
+    const ageMs = nowMs - new Date(f.first_seen || f.firstSeen || nowMs).getTime();
+    if (ageMs < 86_400_000) continue;
+    const siteId = f.site_id ?? f.siteId;
+    out.push({ key: `capability:${siteId}:${f.kind}:${f.subject || ''}`, severity: SEVERITY.HIGH, siteId, message: `${f.summary} ${f.blocker ? `Needs a person: ${f.blocker}` : `Proposed repair: ${f.proposal?.action || 'see the finding'}.`}`.trim() });
+  }
   return out;
 }
 

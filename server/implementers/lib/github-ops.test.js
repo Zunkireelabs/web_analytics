@@ -96,7 +96,8 @@ describe('persisted GitHub failures carry a correlation ref', () => {
       // The raw error carried a token and an HTTP status. Neither may reach a
       // string that gets stored on the draft and rendered to a customer.
       assert.doesNotMatch(result.error, /ghp_SECRET/);
-      assert.doesNotMatch(result.error, /401/);
+      // the correlation ref is random hex and can contain "401" by chance (it did, 2026-11-26): check the message with the ref removed
+      assert.doesNotMatch(result.error.replace(/\(ref: [0-9a-f]+\)/, ''), /401/);
       assert.match(result.error, /our team has been notified/);
     });
   }

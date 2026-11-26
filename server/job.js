@@ -569,14 +569,27 @@ export async function runCompetitorCheckIfDueForAllSites() {
 // search-volume-backed keyword_gaps rows the weekly keyword-gap ship cycle
 // (runKeywordGapShipCycleForAllSites) then works through across the rest of
 // the month. See server/agents/lib/keyword-demand.js.
-export async function runKeywordDemandCheckIfDueForAllSites() {
-  const sites = await listConnectedSites();
+export async function runKeywordDemandCheckIfDueForAllSites({ listSites = listConnectedSites, runDemand = runKeywordDemandIfDue, runOwn = null, record = null } = {}) {
+  const sites = await listSites();
   const results = [];
+  // Two independent discovery paths per project, each in its own try/catch so one failing (no AI credit, no DataForSEO credit) never stops the
+  // other, and one project failing never stops the next. Whatever happens is written to keyword_discovery_status with its reason.
+  const own = runOwn || (await import('./agents/lib/keyword-own-queries.js')).discoverKeywordsFromOwnQueries;
+  const recordStatus = record || (await import('./store/keyword-discovery-status.js')).recordDiscoveryStatus;
   for (const site of sites) {
     try {
-      results.push(await runKeywordDemandIfDue(site));
+      results.push(await runDemand(site));
     } catch (err) {
       console.error(`[job] keyword demand check failed for site ${site.id} "${site.name}":`, err.message);
+      await recordStatus(site.id, 'dataforseo_demand', { status: 'blocked', code: 'unexpected_error', message: `The search-volume keyword check crashed: ${String(err.message).slice(0, 200)}` }).catch(() => {});
+    }
+    try {
+      const r = await own(site);
+      if (r?.saved) console.log(`[job] keyword discovery (own search queries): site ${site.id} "${site.name}" saved ${r.saved} keyword(s).`);
+      else console.log(`[job] keyword discovery (own search queries): site ${site.id} "${site.name}" ${r?.status}: ${r?.code}`);
+    } catch (err) {
+      console.error(`[job] own-query keyword discovery failed for site ${site.id} "${site.name}":`, err.message);
+      await recordStatus(site.id, 'own_search_queries', { status: 'blocked', code: 'unexpected_error', message: `Keyword discovery from the project's own search queries crashed: ${String(err.message).slice(0, 200)}` }).catch(() => {});
     }
   }
   return results;
@@ -1279,10 +1292,11 @@ export async function runKeywordScheduleForAllSites({ listAllSites = listConnect
     try {
       const { getSiteById } = await import('./store/read.js');
       const fresh = (await getSiteById(site.id)) || site;
-      const r = await runKeywordScheduleForSite(site.id, fresh);
+      // Evaluate first: a keyword judged 'replace' today is replaced by the fresh ones this same run ships.
       const m = await measureKeywordImpressions(site.id);
+      const r = await runKeywordScheduleForSite(site.id, fresh);
       totals.sites++; totals.queued += r.queued; totals.booked += r.booked; totals.measured += m.measured;
-      if (r.queued || r.booked || m.measured) console.log(`[job] keyword schedule: site ${site.id} "${site.name}" ${r.phase} (day ${r.day}): queued ${r.queued}, booked ${r.booked} blog day(s), measured ${m.measured} keyword(s).`);
+      if (r.queued || r.booked || m.measured) console.log(`[job] keyword schedule: site ${site.id} "${site.name}" ${r.phase} (day ${r.day}): queued ${r.queued}, booked ${r.booked} blog day(s), measured ${m.measured} keyword(s) (${m.retained} kept, ${m.weak} to improve, ${m.replaced} replaced).`);
     } catch (err) {
       console.error(`[job] keyword schedule failed for site ${site.id} "${site.name}":`, err.message);
     }
@@ -2195,7 +2209,9 @@ export async function runDeliveryAlerts({ now = new Date(), mail = sendStaffDeli
   const { rows: locks } = await query(`SELECT job_key, acquired_at, heartbeat_at, expires_at FROM job_locks`);
   const mergedByBot = []; const mergedUnverified = [];
   for (const s of sites) { const lc = summarizeLifecycle(await listLifecycleDrafts(s.id).catch(() => []), { now }); mergedByBot.push(...lc.mergedBot); mergedUnverified.push(...lc.mergedUnverified); }
-  const alerts = evaluateAlerts({ now, timezone, sites, cycles, locks, mergedByBot, mergedUnverified, skippedTicks: sessionState().skippedTicks });
+  let capabilityFindings = [];
+  try { capabilityFindings = await (await import('./lib/self-repair/index.js')).listOpenFindings(); } catch { /* the findings table may not exist yet: no findings */ }
+  const alerts = evaluateAlerts({ now, timezone, sites, cycles, locks, mergedByBot, mergedUnverified, skippedTicks: sessionState().skippedTicks, capabilityFindings });
   const homeSite = (a) => a.siteId ?? Number(process.env.COMPANY_SITE_ID) ?? sites[0]?.id;
   const fresh = [];
   for (const a of alerts) {

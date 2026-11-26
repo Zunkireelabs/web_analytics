@@ -661,6 +661,9 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // the loop below stays a single straightforward pass over `workQueue`
   // rather than needing its own nested retry logic.
   const workQueue = [...queue];
+  // ACCOUNTABILITY: every item the selection chose must end the loop either attempted or with a recorded reason a person can act on.
+  // `settled` holds the ids that did (attempted, or skipped/closed/blocked with the reason stored); the sweep after the loop records the rest.
+  const settled = new Set();
 
   for (let cursor = 0; cursor < workQueue.length; cursor++) {
     const rec = workQueue[cursor].rec;
@@ -672,6 +675,8 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // does not touch either streak counter.
     if (quarantinedGenerators.has(rec.recommendation_type)) {
       quarantined++;
+      settled.add(rec.id);
+      await recordItemOutcome(siteId, { recommendationId: rec.id, findingId: null, generatorId: rec.recommendation_type, page: rec.page, skipReason: 'generator-quarantined', reason: `${rec.recommendation_type} was quarantined for the rest of this run after repeated failures: ${quarantinedGenerators.get(rec.recommendation_type) || 'see the run summary'}` }, { timezone: workerSessionTimezone() }).catch(() => {});
       if (attempted < remaining) {
         const backfill = nextBackfillCandidate();
         if (backfill) workQueue.push(backfill);
@@ -692,6 +697,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
     const preflight = await verifyRecommendation(rec, { site, resolveSource: pageSourceResolver || undefined });
     if (preflight.decision === VERIFICATION_DECISION.ALREADY_RESOLVED) {
       await closeRecommendation(rec.id).catch(() => {});
+      settled.add(rec.id);
       resolved++;
       console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) closed before drafting — already resolved (${preflight.reason})`);
       if (attempted < remaining) {
@@ -715,6 +721,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
         `Pre-flight verification found a conflict (${preflight.reason}) that can't be safely resolved automatically — needs a human to pick the right outcome.`,
       ).catch(() => {});
       conflicted++;
+      settled.add(rec.id);
       console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) blocked before drafting — conflict (${preflight.reason})`);
       if (attempted < remaining) {
         const backfill = nextBackfillCandidate();
@@ -730,6 +737,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
       const why = preflight.evidence?.message || `Needs a person: ${preflight.reason}.`;
       await blockRecommendation(rec.id, String(why).slice(0, 400)).catch(() => {});
       needsInput++;
+      settled.add(rec.id);
       console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) parked before drafting — needs a person (${preflight.reason})`);
       if (attempted < remaining) {
         const backfill = nextBackfillCandidate();
@@ -766,6 +774,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
           `Precondition check refused this before drafting (${pre.reason}): ${pre.detail}`,
         ).catch(() => {});
         conflicted++;
+        settled.add(rec.id);
         console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) blocked before drafting — precondition ${pre.failures.map((f) => f.reason).join(', ')}`);
         if (attempted < remaining) {
           const backfill = nextBackfillCandidate();
@@ -804,6 +813,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
     }
     if (attempted >= remaining) break; // backfill can grow workQueue past the budget's raw length
     attempted++;
+    settled.add(rec.id);
     try {
       // The one path from "we decided to fix this" to "a real branch/PR
       // exists" — shipDraftForRecommendation already runs the full
@@ -889,7 +899,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
         attempted--;
         designPending++;
         // Kept on the project's day record: this skip used to leave nothing but a console line, and the console was lost on every restart.
-        await recordItemOutcome(siteId, { recommendationId: rec.id, findingId: null, generatorId: rec.recommendation_type, page: rec.page, skipReason: 'design-pending', reason: err.pendingReason || 'design not confirmed' }, { timezone: workerSessionTimezone() }).catch(() => {});
+        await recordItemOutcome(siteId, { recommendationId: rec.id, findingId: null, generatorId: rec.recommendation_type, page: rec.page, skipReason: err.exhausted ? 'needs-design-decision' : 'design-pending', reason: err.message || err.pendingReason || 'design not confirmed' }, { timezone: workerSessionTimezone() }).catch(() => {});
         console.warn(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) skipped for now — ${err.pendingReason || 'design not confirmed'}${err.exhausted ? ' (waiting for a design review)' : ''}; nothing counted against it.`);
         if (attempted < remaining) {
           const backfill = nextBackfillCandidate();
@@ -912,6 +922,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
       // this item. Neither a fault nor a refusal: stop quietly, count nothing against the item, leave it open for tomorrow.
       if (isCeilingError(err)) {
         attempted--;
+        settled.delete(rec.id); // never started: the sweep records it
         stoppedReason = 'ceiling-reached';
         console.log(`[auto-remediation] ${clientLabel}: the daily ceiling was filled by another run or lane (${err.used}/${err.cap}) — stopping; remaining candidates stay open for tomorrow. Not a fault.`);
         break;
@@ -919,6 +930,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
       const shipFailure = classifyShipFailure(err, { isRefusal: false });
       if (shipFailure.kind === FAILURE_KIND.RATE_LIMIT) {
         stoppedReason = 'github-rate-limited';
+        settled.delete(rec.id); // stays open untouched: the sweep records it
         console.warn(`[auto-remediation] ${clientLabel}: GitHub rate limit hit on recommendation ${rec.id} (${rec.recommendation_type}) — stopping this run. ${workQueue.length - cursor - 1} candidate(s) left untouched; this item and they stay open and will be re-attempted next run. Not a fault.`);
         break;
       }
@@ -927,6 +939,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
       // items open, and let the all-sites run come back to it after everyone else.
       if (err?.reason === 'unreachable') {
         stoppedReason = 'site-unreachable';
+        settled.delete(rec.id); // stays open untouched: the sweep records it
         console.warn(`[auto-remediation] ${clientLabel}: live site unreachable on recommendation ${rec.id} (${rec.recommendation_type}) — stopping this site for now; it will be retried at the end of the run.`);
         break;
       }
@@ -1022,6 +1035,14 @@ export async function autoRemediateSafeRecommendations(siteId, {
       }
       console.warn(`[auto-remediation] ${clientLabel} ${isRefusal ? 'declined to draft' : 'could not auto-fix'} recommendation ${rec.id} (${rec.recommendation_type}), leaving it open:`, err.message);
     }
+  }
+
+  // THE SWEEP: items the selection chose that the loop never settled (it stopped first: time limit, rate limit, ceiling, circuit breaker, or the budget ran out
+  // before their turn). Each gets a recorded reason, so no selected item is ever silently dropped.
+  const whyStopped = stoppedReason ? `this run stopped early (${stoppedReason})` : 'this run ended before its turn (the daily budget was used up)';
+  for (const { rec } of workQueue) {
+    if (settled.has(rec.id)) continue;
+    await recordItemOutcome(siteId, { recommendationId: rec.id, findingId: null, generatorId: rec.recommendation_type, page: rec.page, skipReason: 'not-reached', reason: `Selected for today but not started: ${whyStopped}. It stays open and is first in line next pass.` }, { timezone: workerSessionTimezone() }).catch(() => {});
   }
 
   // SHARED QUEUE DRAIN, continued: fold whatever real headroom is left after

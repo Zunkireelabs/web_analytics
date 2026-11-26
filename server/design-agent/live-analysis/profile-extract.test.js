@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { correctBodyTypography, bodySamples, correctHeadingTypography, headingSamplesByLevel, headingPageSamplesByContext, correctLinkTypography, correctPageTypeTextHierarchy, correctSpacing, backfillPageTypePatterns } from './profile-extract.js';
+import { correctBodyTypography, bodySamples, correctHeadingTypography, headingSamplesByLevel, headingPageSamplesByContext, correctLinkTypography, correctPageTypeTextHierarchy, correctSpacing, backfillPageTypePatterns, articleBodyEvidence } from './profile-extract.js';
 
 // The real classes and computed styles captured from zunkireelabs.com on
 // 2026-08-31. The eyebrow is the site's most consistent body-role paragraph —
@@ -472,5 +472,56 @@ describe('correctLayout', () => {
     const base = { version: DESIGN_PROFILE_VERSION, typography: { body: 'hub-sub', heading: { item: 'sec-title' } } };
     assert.equal(validateDesignProfile({ ...base, layout: { container: null, prose: null } }).ok, false);
     assert.equal(validateDesignProfile({ ...base, layout: correctLayout({ container: null, prose: null }, pages).layout }).ok, true);
+  });
+});
+
+
+// The article's own headings decide its subheading entry (zennly.io 2026-11: a navigation panel's class had become the article's "subheading" class).
+describe('article body headings are the evidence for an article subheading', () => {
+  const bh = (level, classes = '') => ({ level, classes, fontSize: level === 2 ? 28 : 20, fontWeight: '600', marginTop: 24 });
+  const art = (bodyHeadings, sections = [], pageType = 'blog-article') => ({ url: 'https://x.test/blog/p', pageType, sections, bodyHeadings, bodyRegionFound: true });
+  const MENU = { role: 'content', textHierarchy: [{ role: 'subheading', tag: 'h4', classes: 'v2-mm__aside-title', style: { fontSize: '18px' } }] };
+  const sub = (patterns) => patterns['blog-article'].textHierarchy.find((e) => e.role === 'subheading');
+
+  test('evidence counts every body heading, and how many of them carry a class', () => {
+    const ev = articleBodyEvidence([art([bh(2), bh(2), bh(3, 'post-h3')])]).get('blog-article');
+    assert.deepEqual([ev.observed, ev.classed, ev.items.map((i) => i.classes)], [3, 1, ['post-h3']]);
+  });
+  test('pages without body headings (older captures) and non-article page types give no body evidence', () => {
+    assert.equal(articleBodyEvidence([{ pageType: 'blog-article', sections: [] }, art([bh(2)], [], 'service')]).size, 0);
+  });
+  test('BARE body headings are a positive finding: classes null, bare true, observed n, observedInBody true', () => {
+    const { pageTypePatterns } = backfillPageTypePatterns({}, [art([bh(2), bh(2), bh(3)], [MENU])]);
+    assert.deepEqual([sub(pageTypePatterns).classes, sub(pageTypePatterns).bare, sub(pageTypePatterns).observed, sub(pageTypePatterns).observedInBody], [null, true, 3, true]);
+    assert.ok(!JSON.stringify(pageTypePatterns).includes('v2-mm__aside-title'), 'a chrome section can never reach the evidence');
+  });
+  test('a bare finding is never replaced by a class from elsewhere on the page (model summary or other blocks)', () => {
+    const seg = [art([bh(2), bh(2), bh(3)], [MENU])];
+    const out = correctPageTypeTextHierarchy({ 'blog-article': { textHierarchy: [{ role: 'subheading', classes: 'v2-mm__aside-title' }, { role: 'body', classes: 'x' }] } }, seg);
+    assert.equal(sub(out.pageTypePatterns).classes, null); assert.equal(sub(out.pageTypePatterns).bare, true);
+    assert.equal(out.pageTypePatterns['blog-article'].textHierarchy.find((e) => e.role === 'body').classes, 'x', 'other roles untouched');
+    assert.deepEqual(out.corrected, ['blog-article']);
+  });
+  test('a model summary with NO subheading entry still gets the bare finding recorded', () => {
+    const out = correctPageTypeTextHierarchy({ 'blog-article': { textHierarchy: [{ role: 'body', classes: 'x' }] } }, [art([bh(2), bh(3)])]);
+    assert.equal(sub(out.pageTypePatterns).bare, true);
+  });
+  test('a client whose body headings DO carry a class keeps that class (central observed one), flagged as observed in the body', () => {
+    const seg = [art([bh(2, 'post-h2'), bh(2, 'post-h2'), bh(3, 'post-h3')], [MENU])];
+    const fromBackfill = sub(backfillPageTypePatterns({}, seg).pageTypePatterns);
+    assert.deepEqual([fromBackfill.bare, fromBackfill.observedInBody, fromBackfill.observed], [false, true, 3]); assert.match(fromBackfill.classes, /post-h/);
+    const fixed = sub(correctPageTypeTextHierarchy({ 'blog-article': { textHierarchy: [{ role: 'subheading', classes: 'text-4xl font-black' }] } }, seg).pageTypePatterns);
+    assert.match(fixed.classes, /post-h/);
+    const kept = correctPageTypeTextHierarchy({ 'blog-article': { textHierarchy: [{ role: 'subheading', classes: 'post-h2' }] } }, seg);
+    assert.equal(sub(kept.pageTypePatterns).classes, 'post-h2'); assert.deepEqual(kept.corrected, [], 'an already-correct class is not reported as a correction');
+  });
+  test('mixed evidence: mostly-bare headings are bare, mostly-classed headings take the class', () => {
+    assert.equal(sub(backfillPageTypePatterns({}, [art([bh(2), bh(2), bh(2), bh(3, 'x')])]).pageTypePatterns).bare, true);
+    assert.equal(sub(backfillPageTypePatterns({}, [art([bh(2, 'a'), bh(2, 'a'), bh(2), bh(3, 'a')])]).pageTypePatterns).bare, false);
+  });
+  test('a page captured WITHOUT body headings behaves exactly as before (section-based evidence, chrome sections excluded by role)', () => {
+    const old = [{ url: 'u', pageType: 'blog-article', sections: [{ role: 'nav', textHierarchy: [{ role: 'subheading', tag: 'h4', classes: 'v2-mm__aside-title', style: { fontSize: '18px' } }] }, { role: 'content', textHierarchy: [{ role: 'subheading', tag: 'h2', classes: 'post-h2', style: { fontSize: '28px' } }] }] }];
+    const e = sub(backfillPageTypePatterns({}, old).pageTypePatterns);
+    assert.equal(e.classes, 'post-h2'); assert.ok(!('observedInBody' in e));
   });
 });

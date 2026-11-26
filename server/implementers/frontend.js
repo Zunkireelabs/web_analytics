@@ -6,6 +6,7 @@ import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, resolveBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderBlogOutlineBodyTsx, renderTranslationBody, renderTranslationBodyTsx, renderDirectAnswerBody, renderDirectAnswerBodyTsx, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
 import { buildGradientCover } from '../generators/lib/gradient-cover.js';
+import { isHtmlBodyTarget, readSiblingPosts, renderNjkPost, computeOrderFileUpdate } from './lib/njk-post.js';
 import { siteHasUsableDesignProfile, checkDesignIntegrityGate, getDesignProfile } from './lib/design-drift.js';
 import { runDesignGates } from './lib/design-gates.js';
 import { renderableBody } from '../generators/lib/newpage-render-gate.js';
@@ -73,7 +74,10 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
   if (draft.rendered_body != null && draft.target_file_path != null) {
     // Every branch below always produces contentFormat: 'markdown' — the
     // one constant this fast path can safely assume without its own column.
-    return { ok: true, filePath: draft.target_file_path, body: draft.rendered_body, contentFormat: 'markdown' };
+    // An HTML-body target (a .njk post, see lib/njk-post.js) is stored with the same fast path but is not Markdown: reporting it as Markdown would apply
+    // the Markdown-capability check to a file that contains none. Every other action type and target keeps 'markdown', exactly as before.
+    const htmlBody = draft.action_type === 'blog-outline' && isHtmlBodyTarget(resolveNewContentTargetConfig(site, 'blog-outline'));
+    return { ok: true, filePath: draft.target_file_path, body: draft.rendered_body, contentFormat: htmlBody ? 'html' : 'markdown' };
   }
 
   const actionType = draft.action_type;
@@ -136,6 +140,14 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
         body: renderBlogOutlineBodyTsx(content, site, { canonicalUrl: permalink }),
         contentFormat: 'jsx',
       };
+    }
+
+    // An Eleventy/Nunjucks target (.njk/.html): the site's own posts are plain HTML under a layout that builds everything from front matter. Written in that format,
+    // from the site's own posts (lib/njk-post.js). Opt-in by target shape; no other client's target matches it.
+    if (isHtmlBodyTarget(targetConfig)) {
+      const posts = await readSiblingPosts(site, targetConfig, { getRepoTree: repoDeps.getRepoTree, getFileContent: repoDeps.getFileContent, noCache: Boolean(repoDeps.getRepoTree) });
+      const njk = renderNjkPost(content, site, { posts, today: repoDeps.today || new Date() });
+      return njk.ok ? { ok: true, filePath, body: njk.body, contentFormat: 'html', ...(njk.exemplar ? { notes: [`Category "${njk.category}"; call-to-action wording, related reading and "keep reading" cards are taken from this site's own post "${njk.exemplar}".`] } : {}) } : njk;
     }
 
     // Siblings first: the posts already in this directory are the authority on
@@ -551,6 +563,18 @@ export async function apply(site, draft) {
     }
   }
 
+  // An HTML-body blog target whose build requires every post to be listed in an index file (newContentTargets['blog-outline'].orderFile): the slug is added in
+  // the SAME commit, so a post can never be pushed in a way that fails the client's own build. Fatal on failure, like the manifest above.
+  if (draft.action_type === 'blog-outline' && resolved.contentFormat === 'html') {
+    const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
+    const slug = resolved.filePath.split('/').pop().replace(/\.[^.]+$/, '');
+    const orderUpdate = await computeOrderFileUpdate(site, slug, getFileContent, beforeRef);
+    if (orderUpdate) {
+      if (!orderUpdate.ok) return orderUpdate;
+      if (!orderUpdate.unchanged) files.push({ path: orderUpdate.filePath, content: orderUpdate.newContent, actionType: draft.action_type });
+    }
+  }
+
   return pushDraftBranch(site, draft, files, batchInfo);
 }
 
@@ -589,6 +613,14 @@ export async function preview(site, draft, opts = {}) {
   for (const f of resolved.extraFiles || []) {
     const before = await getFileContent(site, f.path, branch).catch(() => null);
     extraRegions.push({ field: `file: ${f.path}`, before: before?.content || '(new file)', after: f.content });
+  }
+  if (draft.action_type === 'blog-outline' && resolved.contentFormat === 'html') {
+    const slug = resolved.filePath.split('/').pop().replace(/\.[^.]+$/, '');
+    const orderUpdate = await computeOrderFileUpdate(site, slug, getFileContent, branch).catch(() => null);
+    if (orderUpdate?.ok && !orderUpdate.unchanged) {
+      const before = await getFileContent(site, orderUpdate.filePath, branch).catch(() => null);
+      extraRegions.push({ field: `file: ${orderUpdate.filePath}`, before: before?.content || '(missing)', after: orderUpdate.newContent });
+    } else if (orderUpdate && !orderUpdate.ok) return orderUpdate;
   }
   return {
     ok: true,

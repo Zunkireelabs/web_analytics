@@ -1,7 +1,8 @@
 import { buildMergeValues, isInlineContentPage } from '../../implementers/lib/marker-merge.js';
+import { isChromeLikeClass, ARTICLE_PAGE_TYPES as ARTICLE_TYPES } from '../../design-agent/live-analysis/chrome-context.js';
 import {
   renderLandingPageBody, renderBlogOutlineBody, renderDirectAnswerBody,
-  renderTranslationBody, renderCompliancePageBody, renderMissingPageBody,
+  renderTranslationBody, renderCompliancePageBody, renderMissingPageBody, rendersAsInlineArticle,
 } from '../../implementers/lib/newpage-render.js';
 
 // The systemic safety net for the "flat/unstyled generated content" bug
@@ -150,15 +151,80 @@ const NEW_PAGE_RENDERERS = {
 // regression it exists to catch: grounding that should have run but didn't.
 const ATX_HEADING_RE = /^#{1,6}\s+\S/m;
 
-export function findBareNewPageMarkupIssues(actionType, content, site) {
+
+// ── HEADING STANDARD AND STRUCTURE FOR GENERATED PAGES ──────────────────────────────────────────────────────────────────────────────────────────────────
+// The rule: whatever is generated follows THAT client's own published format. The standard is read from the client's own evidence, never from a default and
+// never from another client:
+//   layout     siteRoot.inlineProse === 'layout': the client's blog layout styles the article's prose, so markdown headings are the client's own format
+//              (the real typography is then verified on the rendered page by the render gate, desktop and mobile, against the client's own article)
+//   grounded   the client's own article pattern records a subheading class: headings must carry it, so a raw "#" that survived is a grounding failure
+//   inherit    the client has a captured article page but no subheading class: headings inherit the article's own styling (the render gate measures it)
+//   unknown    no article of this client was ever captured: there is NO standard to hold the draft to, so it is not assumed acceptable. It is flagged for review.
+export function articleHeadingStandard(site) {
+  const sr = site?.url_file_map?.siteRoot || {};
+  if (sr.inlineProse === 'layout') return { mode: 'layout' };
+  const profile = sr.designProfile;
+  const pattern = profile?.pageTypePatterns?.['blog-article'];
+  const entry = Array.isArray(pattern?.textHierarchy) ? pattern.textHierarchy.find((h) => h?.role === 'subheading') : null;
+  // A reference article exists when the profile recorded an article pattern/template or captured an article (or legal) page. Then the standard is ESTABLISHED, even when
+  // the one subheading class on record cannot be trusted: it falls back to the page's own styling (inherit), never to "unknown".
+  const hasReference = Boolean(pattern) || Boolean(sr.pageTemplates?.['blog-article'])
+    || (Array.isArray(profile?.pages) && profile.pages.some((p) => ARTICLE_TYPES.includes(p?.pageType)));
+  if (entry?.classes) {
+    // A class is accepted as "the client's own subheading class" only when the evidence says it was OBSERVED ON A BODY HEADING (observedInBody). A profile recorded before that
+    // evidence existed is accepted only while the class name does not read like navigation furniture ('v2-mm__aside-title' was a mega-menu panel's heading, not the article's).
+    const observed = entry.observedInBody === true;
+    const legacyAccepted = entry.observedInBody === undefined && !isChromeLikeClass(entry.classes);
+    if (observed || legacyAccepted) return { mode: 'grounded', classes: String(entry.classes) };
+    return hasReference ? { mode: 'inherit', ignoredClass: String(entry.classes) } : { mode: 'unknown' };
+  }
+  if (entry?.bare === true) return { mode: 'inherit', bare: true };
+  return hasReference ? { mode: 'inherit' } : { mode: 'unknown' };
+}
+
+const HEADING_RE = /^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$|^(#{1,6})[ \t]*$|<h([1-6])\b[^>]*>([\s\S]*?)<\/h\4>/gim;
+
+/** The headings of a rendered body in document order, from both markdown ("## x") and HTML (<h2>x</h2>) form. */
+export function headingsOf(body) {
+  const out = []; const text = String(body || '').replace(/```[\s\S]*?```/g, '');
+  for (const m of text.matchAll(HEADING_RE)) {
+    if (m[4]) out.push({ level: Number(m[4]), text: m[5].replace(/<[^>]+>/g, '').trim() });
+    else if (m[3]) out.push({ level: m[3].length, text: '' });
+    else out.push({ level: m[1].length, text: (m[2] || '').trim() });
+  }
+  return out;
+}
+
+/** Structure problems in a generated page body. `article`: the layout supplies the title (the H1), so the body starts at H2 and has no H1 of its own. */
+export function headingStructureIssues(body, { article = false } = {}) {
+  const hs = headingsOf(body); const issues = []; const add = (patternId, detail, snippet) => issues.push({ path: 'body', patternId, snippet: String(snippet || '').slice(0, 120), detail, blocking: true });
+  const h1s = hs.filter((h) => h.level === 1);
+  if (article && h1s.length) add('heading-structure', `An article's title is the page's H1 (the layout supplies it); this body adds another H1 ("${h1s[0].text}").`, `# ${h1s[0].text}`);
+  else if (h1s.length > 1) add('heading-structure', `A page has one H1; this body has ${h1s.length}.`, `# ${h1s[1].text}`);
+  const empty = hs.find((h) => !h.text);
+  if (empty) add('heading-structure', `A heading (H${empty.level}) is empty.`, '#'.repeat(empty.level));
+  let prev = article ? 1 : 0;
+  for (const h of hs) {
+    if (h.level > prev + 1 && !(prev === 0 && h.level <= 2)) { add('heading-structure', `Heading level skipped: H${prev || 1} is followed directly by H${h.level} ("${h.text}").`, `${'#'.repeat(h.level)} ${h.text}`); break; }
+    prev = h.level;
+  }
+  return issues;
+}
+
+export function findBareNewPageMarkupIssues(actionType, content, site, { renderBody = null } = {}) {
   const renderer = NEW_PAGE_RENDERERS[actionType];
   if (!renderer || !content) return { issues: [] };
-  const designProfile = site?.url_file_map?.siteRoot?.designProfile;
-  if (!designProfile?.typography?.body) return { issues: [] };
+  // A blog the client's repo builds from a TSX component (a `filename` target, directory-per-post) is not markdown: its styling is that component's, and the
+  // render gate measures the live page. Nothing here applies to it.
+  if (actionType === 'blog-outline' && site?.url_file_map?.newContentTargets?.['blog-outline']?.filename) return { issues: [] };
+  const designProfile = site?.url_file_map?.siteRoot?.designProfile || {};
+  // The class-based checks below need typography evidence; the article STANDARD check and the heading STRUCTURE check do not (a client with no captured article
+  // is exactly the case where nothing can be assumed), so they always run.
+  const hasTypography = Boolean(designProfile?.typography?.body);
 
   let body;
   try {
-    body = renderer(content, site);
+    body = renderBody ? renderBody(content, site) : renderer(content, site); // renderBody: a test seam to force a specific rendered body
   } catch {
     return { issues: [] }; // a render failure is this generator's own concern, not this check's
   }
@@ -166,7 +232,7 @@ export function findBareNewPageMarkupIssues(actionType, content, site) {
 
   const issues = [];
   const seenTags = new Set();
-  for (const match of body.matchAll(BARE_TAG_RE)) {
+  for (const match of hasTypography ? body.matchAll(BARE_TAG_RE) : []) {
     const tag = match[1].toLowerCase();
     if (seenTags.has(tag)) continue;
     seenTags.add(tag);
@@ -179,9 +245,20 @@ export function findBareNewPageMarkupIssues(actionType, content, site) {
     });
   }
 
+  const isArticle = actionType === 'blog-outline' && rendersAsInlineArticle(site, actionType);
   const headingClass = designProfile.typography?.heading?.section || designProfile.typography?.heading?.item;
   const headingMatch = ATX_HEADING_RE.exec(body);
-  if (headingClass && headingMatch) {
+  if (isArticle) {
+    // An article is held to ITS OWN client's article standard (articleHeadingStandard), not to the landing-page heading class.
+    const standard = articleHeadingStandard(site);
+    if (standard.mode === 'unknown') {
+      issues.push({ path: 'body', patternId: 'article-standard-not-established', snippet: '', blocking: true,
+        detail: 'No published article of this client was captured, so there is no heading or typography standard to hold this draft to. It is not assumed acceptable: it needs a person to confirm the format.' });
+    } else if (standard.mode === 'grounded' && headingMatch) {
+      issues.push({ path: 'body', patternId: 'ungrounded-heading-markdown', snippet: headingMatch[0].slice(0, 120), blocking: true,
+        detail: `This client's own articles style their subheadings with "${standard.classes}", but a raw "#" markdown heading survived into the rendered body without it.` });
+    }
+  } else if (hasTypography && headingClass && headingMatch) {
     issues.push({
       path: 'body',
       patternId: 'ungrounded-heading-markdown',
@@ -191,6 +268,6 @@ export function findBareNewPageMarkupIssues(actionType, content, site) {
       blocking: true,
     });
   }
-
+  issues.push(...headingStructureIssues(body, { article: isArticle }));
   return { issues };
 }

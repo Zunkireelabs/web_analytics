@@ -49,6 +49,17 @@ describe('alerts: the silent failures are said out loud', () => {
     assert.deepEqual(keys(a), ['in-flight-at-close:8874', 'preserved:1', 'unreached:8872']);
     assert.equal(a.find((x) => x.key === 'preserved:1').severity, 'high'); assert.match(a.find((x) => x.key === 'preserved:1').message, /rate limit/);
   });
+  test('a capability finding open for a day or more is an alert with its repair or what only a person can decide; a fresh or low one is not', () => {
+    const at = (h) => new Date(NOW.getTime() - h * 3_600_000).toISOString();
+    const a = evaluateAlerts({ now: NOW, timezone: TZ, sites, cycles: sites.map((x) => closed(x.id)), capabilityFindings: [
+      { site_id: 8862, kind: 'blog-waiting-on-design-decision', subject: 'blog-article', severity: 'high', first_seen: at(30), summary: 'Admizz: blog drafts are held.', proposal: { action: 'rederive-design-profile' }, blocker: null },
+      { site_id: 8872, kind: 'no-blog-template', subject: '', severity: 'high', first_seen: at(48), summary: 'Zennly: no blog template.', proposal: null, blocker: 'Needs a design proposal.' },
+      { site_id: 1, kind: 'new', subject: '', severity: 'high', first_seen: at(2), summary: 'fresh', proposal: null, blocker: 'x' },
+      { site_id: 1, kind: 'minor', subject: '', severity: 'warning', first_seen: at(90), summary: 'minor', proposal: null, blocker: 'x' },
+    ] });
+    assert.deepEqual(keys(a), ['capability:8862:blog-waiting-on-design-decision:blog-article', 'capability:8872:no-blog-template:']);
+    assert.match(a.find((x) => x.siteId === 8862).message, /rederive-design-profile/); assert.match(a.find((x) => x.siteId === 8872).message, /Needs a person: Needs a design proposal/);
+  });
   test('a lock held for hours is a hung lock; a lock that already expired, or a short one, is not', () => {
     const at = (h) => new Date(NOW.getTime() - h * 3_600_000).toISOString();
     const a = evaluateAlerts({ now: NOW, timezone: TZ, sites: [], locks: [

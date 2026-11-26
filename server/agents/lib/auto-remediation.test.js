@@ -54,9 +54,11 @@ let onboardingPending; // two-stage onboarding: whether the whole-site analysis 
 let learnedRepairQueueItems; // rows store/shipping-queue.js's listByState(QUEUED) would return, filtered to source='learned-repair' by the code under test
 let contentRepairQueueItems; // rows store/shipping-queue.js's listByState(PREPARED) would return, filtered to source='content-repair'/kind='file-edits'
 let contentRepairPushOn; // (queueId) => boolean — simulates a specific content-repair item's pushDraftBranch call failing
+let recordedItems = []; // delivery-cycle's recordItemOutcome: every per-item outcome/skip the loop records, for the accountability tests
 let preflightImpl; // (rec, ctx) => verification result — simulates verifyRecommendation's pre-flight "already resolved?" check
 
 function reset() {
+  recordedItems = [];
   draftClassification = null;
   site = { id: 1, timezone: 'Asia/Kolkata', auto_remediation_enabled: true, auto_remediation_daily_limit: 30 };
   onboardingPending = false; // matches every existing test's assumption: analysis already done, repair may proceed
@@ -242,6 +244,10 @@ mock.module(resolve('../../store/autonomous-slots.js'), {
 const realAttempts = await import(resolve('../../store/recommendation-attempts.js'));
 mock.module(resolve('../../store/recommendation-attempts.js'), {
   namedExports: { ...realAttempts, recordAttempt: async () => {}, countRecoveryCyclesByFinding: async () => new Map(), countRefusalRecoveryCyclesByRecommendation: async () => new Map(), attemptSummaryByFinding: async () => new Map(), listAttemptsForRecommendation: async () => [] },
+});
+const realDeliveryCycle = await import(resolve('../../lib/delivery-cycle.js'));
+mock.module(resolve('../../lib/delivery-cycle.js'), {
+  namedExports: { ...realDeliveryCycle, recordItemOutcome: async (siteId, item) => { recordedItems.push({ siteId, ...item }); } },
 });
 mock.module(resolve('../../agent-memory.js'), {
   namedExports: {
@@ -1734,6 +1740,47 @@ describe('live design validation — a page whose design cannot be confirmed is 
     const result = await autoRemediateSafeRecommendations(1);
     assert.equal(result.refused, 2);
     assert.equal(result.quarantined, 10);
+  });
+});
+
+describe('accountability — every selected item is attempted or has a recorded, actionable reason', () => {
+  beforeEach(reset);
+  const waitsForDecision = () => Object.assign(
+    new Error('blog-outline is waiting for a design decision: this site has no "blog-article" page yet, so the layout for the first one needs approval.'),
+    { status: 503, userFacing: true, designPending: true, reason: 'needs-approved-pattern', pendingReason: 'needs-approved-pattern', exhausted: true, transient: false },
+  );
+  const accounted = (id) => calls.generated.some((f) => f === `f${id}`) || recordedItems.some((r) => r.recommendationId === id && r.skipReason);
+
+  test('six blogs all waiting on a design decision (the Admizz case): none is silent, each carries the actionable message', async () => {
+    generateError = () => waitsForDecision();
+    recommendations = Array.from({ length: 6 }, (_, i) => rec(i + 1));
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.attempted, 0);
+    for (let id = 1; id <= 6; id++) assert.ok(recordedItems.some((r) => r.recommendationId === id && r.skipReason === 'needs-design-decision' && /needs approval/.test(r.reason)), `rec ${id} has a recorded reason`);
+  });
+
+  test('a rate limit mid-run: the item that hit it and every one after it get a recorded "not reached" reason', async () => {
+    rateLimitOn = (type) => type === 'limited';
+    recommendations = [rec(1, { type: 'limited' }), rec(2, { type: 'limited' }), rec(3, { type: 'limited' })];
+    await autoRemediateSafeRecommendations(1);
+    const notReached = recordedItems.filter((r) => r.skipReason === 'not-reached');
+    assert.equal(notReached.length, 3, 'the item that hit the limit and both after it are recorded');
+    assert.ok(notReached.every((r) => /github-rate-limited/.test(r.reason)), 'with the real reason');
+  });
+
+  test('items skipped because their generator was quarantined this run are recorded too', async () => {
+    generateError = () => Object.assign(new Error('no real data on the page'), { status: 422, userFacing: true });
+    recommendations = Array.from({ length: 6 }, (_, i) => rec(i + 1));
+    await autoRemediateSafeRecommendations(1);
+    assert.ok(recordedItems.some((r) => r.skipReason === 'generator-quarantined'));
+  });
+
+  test('invariant: after a mixed run no selected item is unaccounted for (attempted, or a recorded skip)', async () => {
+    generateError = (n) => (n === 2 ? waitsForDecision() : null);
+    recommendations = Array.from({ length: 5 }, (_, i) => rec(i + 1));
+    await autoRemediateSafeRecommendations(1);
+    const attemptedIds = new Set(calls.generated.map((f) => Number(String(f).slice(1))));
+    for (let id = 1; id <= 5; id++) assert.ok(attemptedIds.has(id) || accounted(id), `rec ${id} unaccounted`);
   });
 });
 

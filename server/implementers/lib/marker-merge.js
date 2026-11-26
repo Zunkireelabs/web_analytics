@@ -614,7 +614,39 @@ export function getMarkerContent(fileContent, name) {
 // hydration-mismatch warning here even though the content itself is correct
 // and static, because this div's children are set via __html/injected
 // after the fact rather than usual JSX-rendered markup.
+// The site's own wrapper element is the host whenever the HTML is ONE root element with simple attributes (a FAQ's `<dl class="...">`, a section's `<div class="...">`):
+// `<dl className="..." suppressHydrationWarning dangerouslySetInnerHTML={{ __html: "<rows>" }} />` renders exactly the same DOM as the raw HTML, with no extra element.
+// The old form always added a classless `<div>` around the block, and the design gate (findBareAddedBlock) rightly refuses a block that starts with a classless
+// container: every FAQ for a Next.js page was held for that reason (Zennly home page, 2026-11-25). Anything else (several roots, other attributes, a void element)
+// keeps the wrapper `<div>` exactly as before.
+const JSX_HOST_ATTR = /^(class|id|role|aria-[\w-]+|data-[\w-]+)$/;
+function singleRootHost(rawHtml) {
+  const html = String(rawHtml).trim();
+  const open = /^<([a-z][a-z0-9]*)((?:\s+[a-z][\w:-]*\s*=\s*"[^"{}\n]*")*)\s*>/i.exec(html);
+  if (!open) return null;
+  const tag = open[1].toLowerCase();
+  if (['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr'].includes(tag)) return null;
+  const close = `</${tag}>`;
+  if (!html.toLowerCase().endsWith(close)) return null;
+  // the root's closing tag must be the LAST one: scan the nesting of this tag name
+  let depth = 0;
+  for (const m of html.matchAll(new RegExp(`<${tag}\\b[^>]*>|</${tag}>`, 'gi'))) {
+    if (m[0][1] === '/') depth--; else depth++;
+    if (depth === 0 && m.index + m[0].length < html.length) return null;
+  }
+  if (depth !== 0) return null;
+  const attrs = [];
+  for (const a of open[2].matchAll(/([a-z][\w:-]*)\s*=\s*"([^"]*)"/gi)) {
+    const name = a[1].toLowerCase();
+    if (!JSX_HOST_ATTR.test(name)) return null;
+    attrs.push(`${name === 'class' ? 'className' : name}=${JSON.stringify(a[2])}`);
+  }
+  if (!attrs.length) return null; // a classless root adds nothing: keep today's wrapper so nothing changes
+  return { tag, attrs, inner: html.slice(open[0].length, html.length - close.length) };
+}
 function jsxSafeWrap(rawHtml) {
+  const host = singleRootHost(rawHtml);
+  if (host) return `<${host.tag} ${host.attrs.join(' ')} suppressHydrationWarning dangerouslySetInnerHTML={{ __html: ${JSON.stringify(host.inner)} }} />`;
   return `<div suppressHydrationWarning dangerouslySetInnerHTML={{ __html: ${JSON.stringify(String(rawHtml))} }} />`;
 }
 

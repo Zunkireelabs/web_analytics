@@ -498,6 +498,45 @@ function fillContentWrapper(wrapper, body) {
 // real PR. Unchanged fallback: a site with no contentWrapper configured gets
 // the plain markdown body exactly as before, so nothing regresses for a site
 // that hasn't been through the Design Agent yet.
+// Whether a net-new body is an ARTICLE (a blog post, a legal page): decided once, here, so the renderer below and the quality gate's bare-markup guard can never
+// disagree about what an article's markdown headings mean (an article keeps its "## Subheading": the site's layout or its own markdown pipeline styles it).
+export function rendersAsInlineArticle(site, actionType = null, permalink = null) {
+  let inline = false;
+  // Role is resolved from evidence first (action type, tenant config, the
+  // site's own captured pages) and only then from the URL regex, so a post
+  // under /recursos/ or /articulos/ — which classifyPageType calls 'other' —
+  // still gets article-scale headings. Resolved once here, the single place
+  // this path decides, so the splice path and this one cannot disagree.
+  let regexInline = false;
+  let regexKnown = false;
+  if (permalink) {
+    try {
+      const href = new URL(permalink, 'https://placeholder.invalid').href;
+      regexInline = isInlineContentPage(href);
+      regexKnown = classifyPageType(href, { propertyType: site?.property_type }) !== 'other';
+    } catch { /* both stay false */ }
+  }
+  // Compatibility floor: with no permalink there is nothing to place, so
+  // behaviour is exactly what it was. And where the regex positively
+  // recognises the URL as a non-article page type (a service or landing
+  // path), the action type does not override it — the fix targets the
+  // case the regex is blind to ('other'), not the ones it already knows.
+  if (permalink) {
+    const role = resolvePageRole(site, { permalink, actionType });
+    const actionTypeOverRecognised = role.source === 'action-type' && regexKnown;
+    inline = role.role !== 'unknown' && !actionTypeOverRecognised ? isInlineRole(role.role) : regexInline;
+  } else if (actionType === 'blog-outline') {
+    // A blog post is an article by definition, whether or not this site's config names a URL pattern for it. A site whose blog target has only a
+    // `dir` (zunkireelabs.com, chayceproperties.com) renders the post with permalink=null, so `inline` stayed false: the post got the LANDING page's
+    // classes (text-[18px] sm:text-[20px], max-w-[560px], text-center, ... / v2-h2, body-copy) and ignored `siteRoot.inlineProse: 'layout'`, so the
+    // render gate measured 20px/56 characters against the site's own 18px/82 (2026-11-25, held 3 Zunkiree drafts). The tenant's own pageRole config
+    // still wins; only an explicit non-article role turns this off. Other action types keep the permalink-less behaviour above.
+    const role = resolvePageRole(site, { actionType });
+    inline = isInlineRole(role.role);
+  }
+  return inline;
+}
+
 function wrapInSiteProse(body, site, permalink = null, { actionType = null } = {}) {
   // Any real markdown table in the generated body goes through the same
   // projectTable() call content-integrity-repair.js already uses to rebuild
@@ -528,31 +567,7 @@ function wrapInSiteProse(body, site, permalink = null, { actionType = null } = {
   // pathname from, so a placeholder origin stands in; only the path is ever
   // read. Malformed/absent permalinks fall through to inline=false, same as
   // today's behavior for a caller with no permalink at all.
-  let inline = false;
-  // Role is resolved from evidence first (action type, tenant config, the
-  // site's own captured pages) and only then from the URL regex, so a post
-  // under /recursos/ or /articulos/ — which classifyPageType calls 'other' —
-  // still gets article-scale headings. Resolved once here, the single place
-  // this path decides, so the splice path and this one cannot disagree.
-  let regexInline = false;
-  let regexKnown = false;
-  if (permalink) {
-    try {
-      const href = new URL(permalink, 'https://placeholder.invalid').href;
-      regexInline = isInlineContentPage(href);
-      regexKnown = classifyPageType(href, { propertyType: site?.property_type }) !== 'other';
-    } catch { /* both stay false */ }
-  }
-  // Compatibility floor: with no permalink there is nothing to place, so
-  // behaviour is exactly what it was. And where the regex positively
-  // recognises the URL as a non-article page type (a service or landing
-  // path), the action type does not override it — the fix targets the
-  // case the regex is blind to ('other'), not the ones it already knows.
-  if (permalink) {
-    const role = resolvePageRole(site, { permalink, actionType });
-    const actionTypeOverRecognised = role.source === 'action-type' && regexKnown;
-    inline = role.role !== 'unknown' && !actionTypeOverRecognised ? isInlineRole(role.role) : regexInline;
-  }
+  const inline = rendersAsInlineArticle(site, actionType, permalink);
   // Per-site opt-out for article pages: `siteRoot.inlineProse: 'layout'` means
   // this site's blog/legal LAYOUT already styles article prose (site 1's
   // blog-post.njk wraps the body in Tailwind Typography's `.prose`, which is

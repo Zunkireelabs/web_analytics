@@ -79,6 +79,8 @@ export function measureBodyInPage(mark) {
       fontSize, lineHeightRatio: fontSize ? Math.round((lh / fontSize) * 100) / 100 : 0,
       marginTop: px(cs.marginTop), marginBottom: px(cs.marginBottom),
       borderBottom: px(cs.borderBottomWidth), fontWeight: cs.fontWeight,
+      // Colour and the first font family: what the client's own article actually looks like, compared exactly (see compareBodyMeasures).
+      color: cs.color, fontFamily: String(cs.fontFamily || '').split(',')[0].replace(/["']/g, '').trim().toLowerCase(),
     };
   };
   const paras = [...region.querySelectorAll('p')].filter((p) => (p.textContent || '').trim().length > 40);
@@ -132,6 +134,8 @@ export function measureBodyInPage(mark) {
     h2: stat(region.querySelector('h2')),
     h3: stat(region.querySelector('h3')),
     p: pStat,
+    // The first link inside a body paragraph: its colour and underline are part of the client's article typography.
+    link: (() => { const a = firstP ? firstP.querySelector('a') : null; if (!a) return null; const cs = getComputedStyle(a); return { color: cs.color, underline: String(cs.textDecorationLine || '').includes('underline') }; })(),
     paragraphGap: gaps.length ? gaps[Math.floor(gaps.length / 2)] : null,
     // ~0.5em is the average glyph width, so this is characters per line.
     lineChars: pStat && pStat.fontSize ? Math.round(pWidth / (pStat.fontSize * 0.5)) : null,
@@ -156,7 +160,7 @@ export function injectBodyInPage(html) {
 // headings against 28px) is far outside. A ratio, not an absolute: a site's
 // own scale is the only valid yardstick.
 export const TOLERANCES = Object.freeze({
-  h2FontSize: 0.15, pFontSize: 0.10, lineHeight: 0.12, paragraphGap: 0.35, lineChars: 0.25,
+  h2FontSize: 0.15, pFontSize: 0.10, lineHeight: 0.12, paragraphGap: 0.35, lineChars: 0.25, headingSpacing: 0.35,
 });
 
 const off = (a, b, tol) => (a > 0 && b > 0 ? Math.abs(b - a) / a > tol : false);
@@ -169,6 +173,8 @@ export function compareBodyMeasures(ref, draft, viewport = { name: 'desktop' }, 
   const add = (kind, expected, actual) => out.push({ kind, expected, actual, viewport: viewport.name });
 
   if (ref.h2 && draft.h2 && off(ref.h2.fontSize, draft.h2.fontSize, tol.h2FontSize)) add('heading-scale', ref.h2.fontSize, draft.h2.fontSize);
+  // H3 is held to the client's own article exactly like H2 (same tolerance, same viewports): a sub-subheading must not be the one heading left unchecked.
+  if (ref.h3 && draft.h3 && off(ref.h3.fontSize, draft.h3.fontSize, tol.h2FontSize)) add('subheading-scale', ref.h3.fontSize, draft.h3.fontSize);
   if (ref.p && draft.p && off(ref.p.fontSize, draft.p.fontSize, tol.pFontSize)) add('body-size', ref.p.fontSize, draft.p.fontSize);
   if (ref.p && draft.p && off(ref.p.lineHeightRatio, draft.p.lineHeightRatio, tol.lineHeight)) add('line-height', ref.p.lineHeightRatio, draft.p.lineHeightRatio);
   // +4px absolute slack: two paragraph gaps of 14 and 17px are not a defect.
@@ -180,6 +186,25 @@ export function compareBodyMeasures(ref, draft, viewport = { name: 'desktop' }, 
   // A rule under headings is a site convention: present on the reference and
   // gone from the draft (or the reverse) breaks the flow.
   if (ref.h2 && draft.h2 && (ref.h2.borderBottom > 0) !== (draft.h2.borderBottom > 0)) add('heading-rule', ref.h2.borderBottom, draft.h2.borderBottom);
+  // EXACT-MATCH properties, read from the client's own live article at this viewport (never a default, never another client's). A colour or a typeface
+  // is not "close": it is the client's or it is not. Compared only when both pages have the element, and on the same representative paragraph the size
+  // check uses (the most common body size, not a lead paragraph), so a styled intro can never cause a false alarm.
+  if (ref.p?.color && draft.p?.color && ref.p.color !== draft.p.color) add('body-color', ref.p.color, draft.p.color);
+  if (ref.p?.fontFamily && draft.p?.fontFamily && ref.p.fontFamily !== draft.p.fontFamily) add('body-font', ref.p.fontFamily, draft.p.fontFamily);
+  for (const [lvl, key] of [['h2', 'heading'], ['h3', 'subheading']]) {
+    const r = ref[lvl]; const d = draft[lvl];
+    if (!r || !d) continue;
+    if (r.color && d.color && r.color !== d.color) add(`${key}-color`, r.color, d.color);
+    if (r.fontWeight && d.fontWeight && String(r.fontWeight) !== String(d.fontWeight)) add(`${key}-weight`, r.fontWeight, d.fontWeight);
+    if (r.fontFamily && d.fontFamily && r.fontFamily !== d.fontFamily) add(`${key}-font`, r.fontFamily, d.fontFamily);
+  }
+  // Space above a heading is what separates the sections of the client's article. A reference with real spacing (more than a few px) and a draft that
+  // has none, or far more or less, breaks the rhythm: held to the same 35% as paragraph spacing, with 4px of slack.
+  if (ref.h2 && draft.h2 && ref.h2.marginTop > 8 && Math.abs(draft.h2.marginTop - ref.h2.marginTop) > 4 && Math.abs(draft.h2.marginTop - ref.h2.marginTop) / ref.h2.marginTop > tol.headingSpacing) add('heading-spacing', ref.h2.marginTop, draft.h2.marginTop);
+  if (ref.link && draft.link) {
+    if (ref.link.color !== draft.link.color) add('link-color', ref.link.color, draft.link.color);
+    if (ref.link.underline !== draft.link.underline) add('link-underline', ref.link.underline, draft.link.underline);
+  }
   if (draft.horizontalOverflow && !ref.horizontalOverflow) add('horizontal-overflow', false, true);
   return out;
 }

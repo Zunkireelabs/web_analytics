@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { findBareMarkupIssues, findBareNewPageMarkupIssues } from './rendered-markup-guard.js';
+import { findBareMarkupIssues, findBareNewPageMarkupIssues, articleHeadingStandard, headingsOf, headingStructureIssues } from './rendered-markup-guard.js';
 
 const REAL_PROFILE = {
   typography: {
@@ -205,9 +205,10 @@ describe('findBareNewPageMarkupIssues', () => {
     assert.deepEqual(issues, []);
   });
 
-  test('a blog-outline post with real typography evidence renders fully grounded — no issues', () => {
+  test('a blog-outline post for a client WITH a captured article of its own renders fully grounded — no issues', () => {
     const content = { title: 'Post Title', sections: [{ heading: 'Intro', body: 'Real intro text.' }] };
-    const { issues } = findBareNewPageMarkupIssues('blog-outline', content, site(REAL_PROFILE));
+    const s = site({ ...REAL_PROFILE, pageTypePatterns: { 'blog-article': { sectionOrder: ['article'], textHierarchy: [] } } });
+    const { issues } = findBareNewPageMarkupIssues('blog-outline', content, s);
     assert.deepEqual(issues, []);
   });
 
@@ -233,7 +234,8 @@ describe('findBareNewPageMarkupIssues', () => {
     // configures a `filename` (directory-per-post) target; this guard never
     // attempts that variant regardless of site shape, so a TSX-only site
     // still gets 0 issues here rather than a crash on markdown-shaped regexes.
-    const { issues } = findBareNewPageMarkupIssues('blog-outline', { title: 'Post', sections: [] }, site(REAL_PROFILE));
+    const tsx = site(REAL_PROFILE); tsx.url_file_map.newContentTargets = { 'blog-outline': { dir: 'src/app', filename: 'page.tsx', extension: '.tsx' } };
+    const { issues } = findBareNewPageMarkupIssues('blog-outline', { title: 'Post', sections: [] }, tsx);
     assert.deepEqual(issues, []);
   });
 
@@ -241,5 +243,124 @@ describe('findBareNewPageMarkupIssues', () => {
     const badContent = { get headline() { throw new Error('boom'); }, sections: [] };
     const { issues } = findBareNewPageMarkupIssues('landing-page', badContent, site(REAL_PROFILE));
     assert.deepEqual(issues, []);
+  });
+});
+
+
+// EVERY CLIENT HELD TO ITS OWN ARTICLE STANDARD. One fixture per kind of evidence the six real clients have (the shape of their recorded profiles; nothing is shared
+// between them): a layout that styles prose, a captured article with no subheading class, a captured article WITH its own subheading class, and no captured article.
+describe('articles are held to the client\'s own article standard (never a default, never another client\'s)', () => {
+  const TYPO = { body: 'text-lg', heading: { section: 'text-3xl font-bold', item: 'text-xl' } };
+  const withProfile = (extra, siteRoot = {}) => ({ url_file_map: { siteRoot: { ...siteRoot, designProfile: { typography: TYPO, ...extra } } } });
+  const CLIENTS = {
+    zunkiree: withProfile({ pageTypePatterns: { 'blog-article': { textHierarchy: [] } } }, { inlineProse: 'layout' }),                                   // layout styles the prose
+    chayce: withProfile({ pageTypePatterns: { 'blog-article': { textHierarchy: [{ role: 'title', classes: 'v2-h2' }] } } }),                              // article captured, no subheading class
+    admizz: withProfile({ pageTypePatterns: { 'blog-article': { textHierarchy: [] } } }),
+    mobilise: withProfile({ pageTypePatterns: { 'blog-article': { textHierarchy: [] } } }),
+    superrank: withProfile({ pageTypePatterns: { 'blog-article': { textHierarchy: [{ role: 'subheading', classes: 'h2' }] } } }),                         // its own subheading class
+    zennly: withProfile({ pageTypePatterns: { 'blog-article': { textHierarchy: [{ role: 'subheading', classes: 'v2-mm__aside-title' }] } } }),
+  };
+  const post = { title: 'Post', sections: [{ heading: 'Intro', body: 'Real text.' }, { heading: 'More', body: 'More real text.' }] };
+  const kinds = (issues) => issues.map((i) => i.patternId);
+
+  test('the standard is read from each client\'s own evidence', () => {
+    assert.equal(articleHeadingStandard(CLIENTS.zunkiree).mode, 'layout');
+    for (const k of ['chayce', 'admizz', 'mobilise']) assert.equal(articleHeadingStandard(CLIENTS[k]).mode, 'inherit', k);
+    assert.deepEqual(articleHeadingStandard(CLIENTS.superrank), { mode: 'grounded', classes: 'h2' });
+    // Zennly's recorded "subheading" class came from a navigation mega-menu panel: untrusted, so it is IGNORED and the article is held to the page's own styling (never "unknown": a reference exists)
+    assert.deepEqual(articleHeadingStandard(CLIENTS.zennly), { mode: 'inherit', ignoredClass: 'v2-mm__aside-title' });
+    assert.equal(articleHeadingStandard(withProfile({})).mode, 'unknown');
+  });
+
+  test('layout and inherit clients: markdown headings are their format, and a well-formed article has no issues', () => {
+    for (const k of ['zunkiree', 'chayce', 'admizz', 'mobilise']) assert.deepEqual(kinds(findBareNewPageMarkupIssues('blog-outline', post, CLIENTS[k]).issues), [], k);
+  });
+
+  const RAW = '---\ntitle: Post\n---\n\n## Raw heading survived\n\nText.\n';
+  const force = (body) => ({ renderBody: () => body });
+
+  test('a client with its OWN subheading class: a raw "#" that survived is flagged, naming that client\'s class (the check is not skipped for articles)', () => {
+    CLIENTS.observed = withProfile({ pageTypePatterns: { 'blog-article': { textHierarchy: [{ role: 'subheading', classes: 'article-h2', observed: 6, observedInBody: true }] } } });
+    for (const k of ['superrank', 'observed']) {
+      const issues = findBareNewPageMarkupIssues('blog-outline', post, CLIENTS[k], force(RAW)).issues;
+      const f = issues.find((i) => i.patternId === 'ungrounded-heading-markdown');
+      assert.ok(f && f.blocking, k); assert.match(f.detail, new RegExp(articleHeadingStandard(CLIENTS[k]).classes), `${k}: names its own class`);
+    }
+    assert.match(findBareNewPageMarkupIssues('blog-outline', post, CLIENTS.superrank, force(RAW)).issues.find((i) => i.patternId === 'ungrounded-heading-markdown').detail, /"h2"/);
+  });
+  test('layout and inherit clients: the same raw heading is their own format, not flagged', () => {
+    for (const k of ['zunkiree', 'chayce', 'admizz', 'mobilise', 'zennly']) assert.ok(!kinds(findBareNewPageMarkupIssues('blog-outline', post, CLIENTS[k], force(RAW)).issues).includes('ungrounded-heading-markdown'), k);
+  });
+  test('a structurally broken article is flagged for EVERY client, whatever its standard', () => {
+    const BAD = '---\ntitle: P\n---\n\n# Own H1\n\n## A\n\n#### Jumped\n';
+    for (const k of Object.keys(CLIENTS)) {
+      const issues = findBareNewPageMarkupIssues('blog-outline', post, CLIENTS[k], force(BAD)).issues.filter((i) => i.patternId === 'heading-structure');
+      assert.equal(issues.length, 2, `${k}: extra H1 and a skipped level`); assert.ok(issues.every((i) => i.blocking));
+    }
+  });
+  test('NO captured article for the client: not assumed acceptable, flagged for review', () => {
+    const issues = findBareNewPageMarkupIssues('blog-outline', post, withProfile({})).issues;
+    assert.ok(kinds(issues).includes('article-standard-not-established')); assert.ok(issues.find((i) => i.patternId === 'article-standard-not-established').blocking);
+  });
+  test('and it is flagged even for a client with no typography evidence at all (the earlier early return would have let it through)', () => {
+    const issues = findBareNewPageMarkupIssues('blog-outline', post, { url_file_map: { siteRoot: { designProfile: {} } } }).issues;
+    assert.deepEqual(kinds(issues), ['article-standard-not-established']);
+  });
+
+  test('other page types never get the article standard; their class check is unchanged', () => {
+    const none = withProfile({});
+    assert.ok(!kinds(findBareNewPageMarkupIssues('landing-page', { headline: 'H', sections: [{ heading: 'S', body: 'b' }] }, none).issues).includes('article-standard-not-established'));
+    const raw = findBareNewPageMarkupIssues('landing-page', { headline: 'H', sections: [] }, none, force('# H\n\n## Raw survived\n')).issues;
+    assert.ok(raw.some((i) => i.patternId === 'ungrounded-heading-markdown'), 'a landing page is still checked against the section-heading class');
+  });
+  test('a landing page with two H1s or a skipped level is flagged too: structure applies to everything generated', () => {
+    const bad = findBareNewPageMarkupIssues('landing-page', { headline: 'H', sections: [] }, withProfile({}), force('# A\n\n# B\n\n#### C\n')).issues.filter((i) => i.patternId === 'heading-structure');
+    assert.equal(bad.length, 2);
+  });
+});
+
+describe('heading structure of every generated page body', () => {
+  const lv = (body, o) => headingStructureIssues(body, o).map((i) => i.detail);
+  test('headings are read from markdown and HTML, in order, ignoring code fences', () => {
+    assert.deepEqual(headingsOf('## A\n\n<h3 class="x">B</h3>\n```\n# not a heading\n```\n### C').map((h) => [h.level, h.text]), [[2, 'A'], [3, 'B'], [3, 'C']]);
+  });
+  test('an article: H2 then H3 is fine; the title is the layout\'s H1', () => assert.deepEqual(lv('## A\n\n### B\n\n## C', { article: true }), []));
+  test('an article with its own H1 in the body is flagged (the layout already supplies one)', () => assert.match(lv('# Title\n\n## A', { article: true })[0], /another H1/));
+  test('an article that starts at H3, or jumps H2 to H4, is flagged: levels are never skipped', () => {
+    assert.match(lv('### A', { article: true })[0], /skipped/); assert.match(lv('## A\n\n#### B', { article: true })[0], /skipped/);
+  });
+  test('a page with two H1s is flagged; one H1 then H2 is fine', () => {
+    assert.match(lv('# A\n\n# B')[0], /one H1/); assert.deepEqual(lv('# A\n\n## B\n\n### C'), []);
+  });
+  test('an empty heading is flagged', () => assert.match(lv('## A\n\n##\n\ntext', { article: true })[0], /empty/));
+  test('going back up (H3 to H2) is allowed', () => assert.deepEqual(lv('## A\n\n### B\n\n## C\n\n### D', { article: true }), []));
+});
+
+
+describe('articleHeadingStandard: evidence must be a body heading, never a menu', () => {
+  const prof = (entry, extra = {}) => ({ url_file_map: { siteRoot: { designProfile: { pageTypePatterns: { 'blog-article': { textHierarchy: [entry] } }, ...extra } } } });
+  test('a BARE finding is the inherit standard (the layout styles the headings), explicitly', () => {
+    assert.deepEqual(articleHeadingStandard(prof({ role: 'subheading', classes: null, bare: true, observed: 6, observedInBody: true })), { mode: 'inherit', bare: true });
+  });
+  test('a class observed on a body heading is grounded', () => {
+    assert.deepEqual(articleHeadingStandard(prof({ role: 'subheading', classes: 'post-h2', observed: 5, observedInBody: true })), { mode: 'grounded', classes: 'post-h2' });
+  });
+  test('an explicit "not observed in the body" class is never accepted, even with a clean-looking name', () => {
+    assert.equal(articleHeadingStandard(prof({ role: 'subheading', classes: 'post-h2', observedInBody: false })).mode, 'inherit');
+  });
+  test('a legacy class (recorded before the evidence existed) is accepted only while its name does not read like navigation', () => {
+    assert.equal(articleHeadingStandard(prof({ role: 'subheading', classes: 'h2' })).mode, 'grounded');
+    for (const chrome of ['v2-mm__aside-title', 'nav-mega-title', 'sidebar-heading', 'dropdown-title']) assert.equal(articleHeadingStandard(prof({ role: 'subheading', classes: chrome })).mode, 'inherit', chrome);
+  });
+  test('an untrusted class falls back to inherit when ANY reference article exists (a captured article page counts), and to unknown only when none does', () => {
+    const entry = { role: 'subheading', classes: 'v2-mm__aside-title' };
+    const noPattern = { url_file_map: { siteRoot: { designProfile: { pageTypePatterns: {}, pages: [{ pageType: 'blog-article', url: 'https://x.test/blog/p' }] } } } };
+    assert.equal(articleHeadingStandard({ url_file_map: { siteRoot: { designProfile: { pageTypePatterns: { 'blog-article': { textHierarchy: [entry] } }, pages: [] } } } }).mode, 'inherit', 'pattern exists');
+    assert.equal(articleHeadingStandard(noPattern).mode, 'inherit', 'captured article page exists');
+    assert.equal(articleHeadingStandard({ url_file_map: { siteRoot: { designProfile: { pageTypePatterns: {}, pages: [] } } } }).mode, 'unknown');
+  });
+  test('layout opt-in still wins', () => {
+    const p = prof({ role: 'subheading', classes: 'post-h2', observedInBody: true }); p.url_file_map.siteRoot.inlineProse = 'layout';
+    assert.equal(articleHeadingStandard(p).mode, 'layout');
   });
 });

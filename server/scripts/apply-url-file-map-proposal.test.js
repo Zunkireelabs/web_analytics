@@ -148,6 +148,11 @@ describe('planProposal — Chayce phase 2 (city actions, on top of the applied b
   test('it refuses to run before the engine is deployed', () => {
     assert.match(checkGuards({ site: 8864, proposalName: 'chayce-8864-phase2-city-actions-map.json', engineDeployed: false }), /engine change deployed/);
     assert.equal(checkGuards({ site: 8864, proposalName: 'chayce-8864-phase2-city-actions-map.json', engineDeployed: true }), null);
+    // Zennly (8872) accepts only its Eleventy-source map proposal; no other site's proposal may be pointed at it, and its proposal may not be pointed at another site.
+    assert.equal(checkGuards({ site: 8872, proposalName: 'zennly-8872-eleventy-source-map-proposed.json', engineDeployed: false }), null);
+    assert.match(checkGuards({ site: 8872, proposalName: 'chayce-8864-proposed-map.json', engineDeployed: false }), /accepts only the zennly-8872-eleventy-source-map proposal/);
+    assert.match(checkGuards({ site: 8872, proposalName: 'zennly-8872-areas-map-v2.json', engineDeployed: false }), /accepts only/);
+    assert.match(checkGuards({ site: 8864, proposalName: 'zennly-8872-eleventy-source-map-proposed.json', engineDeployed: false }), /does not belong to site 8864/);
   });
 });
 
@@ -204,10 +209,11 @@ describe('planProposal — Admizz phase 5 (new-page targets), merged against the
 });
 
 describe('checkGuards', () => {
-  test('only sites 1, 8862, 8864 and 8874 (hold-back only) are allowed', () => {
-    assert.deepEqual([...ALLOWED_SITES].sort((a, b) => a - b), [1, 8862, 8864, 8874]);
+  test('only sites 1, 8862, 8864, 8872 (its Eleventy-source proposal only) and 8874 (hold-back only) are allowed', () => {
+    assert.deepEqual([...ALLOWED_SITES].sort((a, b) => a - b), [1, 8862, 8864, 8872, 8874]);
     assert.match(checkGuards({ site: 8871, proposalName: 'zunkiree-1-proposed-map.json' }), /not allowed/);
-    assert.match(checkGuards({ site: 8872, proposalName: 'chayce-8864-proposed-map.json' }), /not allowed/);
+    assert.match(checkGuards({ site: 8872, proposalName: 'chayce-8864-proposed-map.json' }), /accepts only the zennly-8872-eleventy-source-map proposal/);
+    assert.match(checkGuards({ site: 8873, proposalName: 'zennly-8872-eleventy-source-map-proposed.json' }), /not allowed/);
     assert.match(checkGuards({ site: 8874, proposalName: 'chayce-8864-proposed-map.json' }), /accepts only the mobilise-8874-section-order-off and mobilise-8874-blog-target/);
   });
   test('a proposal cannot be applied to the wrong site (multi-tenant isolation)', () => {
@@ -238,7 +244,7 @@ describe('site 8874 (MOBILISE): only the section-order hold-back may be applied'
   test('any other proposal, for 8874 or from 8874 on another site, is refused', () => {
     assert.match(checkGuards({ site: 8874, proposalName: 'mobilise-8874-pages-map.json', engineDeployed: false }), /accepts only the mobilise-8874-section-order-off and mobilise-8874-blog-target/);
     assert.match(checkGuards({ site: 8874, proposalName: 'admizz-8862-proposed-map.json', engineDeployed: false }), /accepts only/);
-    assert.match(checkGuards({ site: 8872, proposalName: 'mobilise-8874-section-order-off-map.json', engineDeployed: false }), /not allowed/);
+    assert.match(checkGuards({ site: 8872, proposalName: 'mobilise-8874-section-order-off-map.json', engineDeployed: false }), /accepts only the zennly-8872-eleventy-source-map proposal/);
   });
   test('the proposal changes only siteRoot.sectionOrder', () => {
     const base = load('mobilise-8874-base-rev31.json'); const prop = load('mobilise-8874-section-order-off-map.json');

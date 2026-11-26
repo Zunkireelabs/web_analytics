@@ -1,22 +1,41 @@
 import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { cyclePhase, splitHalf, nextBlogDays, isShippableKeyword, shapeForKeyword, followUpFor, orderKeywords } from './keyword-schedule.js';
+import { cyclePhase, splitHalf, splitCycle, evaluateKeyword, nextBlogDays, isShippableKeyword, shapeForKeyword, followUpFor, orderKeywords } from './keyword-schedule.js';
 
 const start = new Date('2026-10-01T00:00:00Z');
 const at = (n) => new Date(start.getTime() + (n - 1) * 86400000); // day n of the programme
 
 describe('which phase a project is in', () => {
-  test('days 1-30 only gather', () => {
-    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: null, now: at(1) }).phase, 'gather');
-    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: null, now: at(30) }).phase, 'gather');
+  test('a project with no cycle yet ships on its first day: no 30-day wait', () => {
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: null, now: at(1) }).phase, 'ship');
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: null, now: at(22) }).phase, 'ship');
   });
-  test('day 31 ships the first half', () => assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: null, now: at(31) }).phase, 'ship'));
-  test('days 31-44 only track, day 45 ships the next half', () => {
-    const last = at(31);
-    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: last, now: at(32) }).phase, 'wait');
-    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: last, now: at(44) }).phase, 'wait');
-    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: last, now: at(45) }).phase, 'ship');
+  test('days 2-15 only track, day 16 (15 days after the ship day) ships and evaluates again', () => {
+    const last = at(1);
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: last, now: at(2) }).phase, 'wait');
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: last, now: at(15) }).phase, 'wait');
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: last, now: at(16) }).phase, 'ship');
+  });
+});
+
+describe('one cycle never floods a client', () => {
+  const gaps = Array.from({ length: 30 }, (_, i) => ({ id: i + 1, priority: 'medium', search_volume: i }));
+  test('at most KEYWORD_CYCLE_MAX ship, best first; the rest wait', () => {
+    const { now, later } = splitCycle(gaps, 10);
+    assert.equal(now.length, 10); assert.equal(later.length, 20);
+    assert.equal(now[0].id, 30);
+  });
+});
+
+describe('the day-15 verdict uses measured numbers only', () => {
+  test('retain: enough impressions and a click', () => assert.equal(evaluateKeyword({ impressions: 40, clicks: 2, position: 35 }).decision, 'retain'));
+  test('retain: enough impressions and a good position, before clicks', () => assert.equal(evaluateKeyword({ impressions: 40, clicks: 0, position: 12 }).decision, 'retain'));
+  test('weak first time: improve', () => assert.equal(evaluateKeyword({ impressions: 3, clicks: 0, position: 60, round: 0 }).decision, 'improve'));
+  test('plenty of impressions but nowhere near ranking: improve, not retain', () => assert.equal(evaluateKeyword({ impressions: 50, clicks: 0, position: 55 }).decision, 'improve'));
+  test('still weak after its fix: replace', () => assert.equal(evaluateKeyword({ impressions: 2, clicks: 0, position: null, round: 1 }).decision, 'replace'));
+  test('no Search Console data: never judged', () => {
+    assert.equal(evaluateKeyword({ impressions: 0, clicks: 0, position: null, round: 1, hasData: false }).decision, 'pending');
   });
 });
 
@@ -48,9 +67,12 @@ describe('what may ship', () => {
     assert.ok(isShippableKeyword({ source: 'trend_radar' }));
   });
   test('a found keyword needs relevance and a second sighting', () => {
-    assert.ok(isShippableKeyword({ source: 'internal_analysis', product_relevance: 'direct', observation_count: 2 }));
-    assert.ok(!isShippableKeyword({ source: 'internal_analysis', product_relevance: 'direct', observation_count: 1 }));
-    assert.ok(!isShippableKeyword({ source: 'internal_analysis', product_relevance: 'none', observation_count: 5 }));
+    assert.ok(isShippableKeyword({ source: 'claude_research', product_relevance: 'direct', coverage_status: 'opportunity', observation_count: 1 }));
+    assert.ok(isShippableKeyword({ source: 'claude_research', product_relevance: 'supporting', coverage_status: 'market_gap' }));
+    assert.ok(!isShippableKeyword({ source: 'claude_research', product_relevance: 'direct', coverage_status: 'covered' }));
+    assert.ok(!isShippableKeyword({ source: 'claude_research', product_relevance: 'direct', coverage_status: 'duplicate' }));
+    assert.ok(!isShippableKeyword({ source: 'claude_research', product_relevance: 'unrelated', coverage_status: 'opportunity' }));
+    assert.ok(!isShippableKeyword({ source: 'internal_analysis', product_relevance: 'none', coverage_status: 'opportunity' }));
   });
   test('three ways to ship, landing pages never', () => {
     assert.equal(shapeForKeyword({ generatorId: 'blog-outline' }), 'new_blog');
@@ -94,35 +116,38 @@ describe('the schedule on a real database', { skip }, () => {
     return (await dbm.query('SELECT * FROM sites WHERE id = $1', [site.id])).rows[0];
   }
   const addGap = (siteId, topic, source = 'internal_analysis') => dbm.query(
-    `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source, product_relevance, observation_count)
-     VALUES ($1,$2,'t','medium','pending_review',$3,'direct',3) RETURNING id`, [siteId, topic, source]).then((r) => r.rows[0].id);
+    `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source, product_relevance, observation_count, coverage_status)
+     VALUES ($1,$2,'t','medium','pending_review',$3,'direct',1,'opportunity') RETURNING id`, [siteId, topic, source]).then((r) => r.rows[0].id);
 
-  test('day 20 gathers and ships nothing, but a hand-added keyword is queued the same day', async () => {
+  test('day 20 ships at once (no 30-day gather): the qualified keyword and the hand-added one are both queued', async () => {
     const { runKeywordScheduleForSite } = await import('./keyword-schedule.js');
     const site = await makeSite(20);
     await addGap(site.id, 'found one');
-    const mine = await addGap(site.id, 'my own keyword', 'user_request');
-    const made = [];
-    const create = async (siteId, gap) => { made.push(gap.topic); return { recommendationId: null }; };
-    const out = await runKeywordScheduleForSite(site.id, site, { deps: { createRecommendation: create, serpMerge: NO_MERGE } });
-    assert.equal(out.phase, 'gather');
-    assert.deepEqual(made, ['my own keyword']);
-    assert.ok(mine);
-  });
-
-  test('day 31 ships half the found keywords and records the cycle', async () => {
-    const { runKeywordScheduleForSite } = await import('./keyword-schedule.js');
-    const site = await makeSite(31);
-    for (const t of ['a one', 'b two', 'c three', 'd four']) await addGap(site.id, t);
+    await addGap(site.id, 'covered already');
+    await dbm.query(`UPDATE keyword_gaps SET coverage_status = 'covered' WHERE site_id = $1 AND topic = 'covered already'`, [site.id]);
+    await addGap(site.id, 'my own keyword', 'user_request');
     const made = [];
     const create = async (siteId, gap) => { made.push(gap.topic); return { recommendationId: null }; };
     const out = await runKeywordScheduleForSite(site.id, site, { deps: { createRecommendation: create, serpMerge: NO_MERGE } });
     assert.equal(out.phase, 'ship');
-    assert.equal(made.length, 2);
+    assert.deepEqual([...made].sort(), ['found one', 'my own keyword'], 'a keyword the coverage check says is already covered is not shipped');
+  });
+
+  test('the first cycle ships the qualified keywords up to the cap and records the cycle; the rest wait one cycle', async () => {
+    const { runKeywordScheduleForSite } = await import('./keyword-schedule.js');
+    const site = await makeSite(31);
+    for (let i = 0; i < 14; i++) await addGap(site.id, `kw ${String(i).padStart(2, '0')}`);
+    const made = [];
+    const create = async (siteId, gap) => { made.push(gap.topic); return { recommendationId: null }; };
+    const out = await runKeywordScheduleForSite(site.id, site, { deps: { createRecommendation: create, serpMerge: NO_MERGE } });
+    assert.equal(out.phase, 'ship');
+    assert.equal(made.length, 10, 'KEYWORD_CYCLE_MAX (10) ship, not half of everything');
     const { rows: [s] } = await dbm.query('SELECT keyword_cycle_count FROM sites WHERE id = $1', [site.id]);
     assert.equal(s.keyword_cycle_count, 1);
     const { rows } = await dbm.query(`SELECT count(*)::int AS n FROM keyword_gaps WHERE site_id = $1 AND schedule_batch = 2`, [site.id]);
-    assert.equal(rows[0].n, 2, 'the other half is booked for the next cycle');
+    assert.equal(rows[0].n, 4, 'the other four are booked for the next cycle');
+    const again = await runKeywordScheduleForSite(site.id, { ...site, keyword_cycle_count: 1, keyword_cycle_last_at: new Date() }, { deps: { createRecommendation: create, serpMerge: NO_MERGE } });
+    assert.equal(again.phase, 'wait', 'the next cycle is 15 days later, not tomorrow');
   });
 
   test('open blogs get days 3 apart, at most five ahead, hand-added first', async () => {
@@ -160,7 +185,7 @@ describe('the schedule on a real database', { skip }, () => {
       const out = await runKeywordScheduleForSite(site.id, site, { deps: { createRecommendation: create, serpMerge } });
       assert.equal(out.merged, 1);
       assert.ok(!made.includes(folded.topic), 'the folded keyword was not queued');
-      assert.equal(made.length, 1, 'half of 4 is 2; one of them was folded away');
+      assert.equal(made.length, 3, 'all 4 qualify and ship (under the cap of 10); one of them was folded away');
       const { rows: [g] } = await dbm.query('SELECT status, followup_note FROM keyword_gaps WHERE id = $1', [folded.id]);
       assert.equal(g.status, 'dismissed');
       assert.match(g.followup_note, /^Merged into ".+": 9 of 10 pages are the same/);
@@ -175,7 +200,7 @@ describe('the schedule on a real database', { skip }, () => {
         const made = [];
         const create = async (siteId, gap) => { made.push(gap.topic); return { recommendationId: null }; };
         const out = await runKeywordScheduleForSite(site.id, site, { deps: { createRecommendation: create, serpMerge } });
-        assert.equal(made.length, 2); assert.equal(out.merged, 0);
+        assert.equal(made.length, 4); assert.equal(out.merged, 0);
         const { rows } = await dbm.query(`SELECT count(*)::int AS n FROM keyword_gaps WHERE site_id = $1 AND status = 'dismissed'`, [site.id]);
         assert.equal(rows[0].n, 0);
       }
