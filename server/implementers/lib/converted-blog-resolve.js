@@ -14,7 +14,18 @@ export function originFor(site) {
   return (/^https?:\/\//i.test(d) ? d : `https://${d}`).replace(/\/+$/, '');
 }
 
-export async function resolveConvertedBlogPost(site, content, cfg, { filePath, readFile, ref = 'main', today = new Date().toISOString().slice(0, 10) }) {
+
+const escFaq = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const FAQ_MARKERS = /(<!--\s*SEOAI:FAQ:START\s*-->)\s*(<!--\s*SEOAI:FAQ:END\s*-->)/;
+/** Puts the post's FAQ into the empty FAQ markers the site's posts carry, in the site's own FAQ design. Never adds a FAQ in a design the site does not have. */
+export function fillFaqMarkers(page, items, template) {
+  if (!items?.length || !template?.wrapper || !template?.row || !FAQ_MARKERS.test(page)) return { page, filled: false };
+  const rows = items.map((i) => template.row.replace('{{QUESTION}}', () => escFaq(i.question)).replace('{{ANSWER}}', () => escFaq(i.answer))).join('');
+  const block = template.wrapper.replace('{{ROWS}}', () => rows);
+  return { page: page.replace(FAQ_MARKERS, (_m, start, end) => `${start}${block}${end}`), filled: true };
+}
+
+export async function resolveConvertedBlogPost(site, content, cfg, { filePath, readFile, ref = 'main', learnFaq = null, today = new Date().toISOString().slice(0, 10) }) {
   const origin = originFor(site);
   if (!origin) return blocked('no-file-mapping', 'This site has no website domain recorded, so the new post\'s address cannot be written.');
   if (!cfg.referencePage) return blocked('no-file-mapping', 'newContentTargets["blog-outline"].referencePage is not set: name an existing post whose structure the new one should copy.');
@@ -44,6 +55,16 @@ export async function resolveConvertedBlogPost(site, content, cfg, { filePath, r
   const newHeadPath = `${headDir}/${built.headIncludePath}`;
   const extraFiles = [{ path: newHeadPath, content: built.head }];
   const notes = [];
+  // The post's FAQ, in the site's own FAQ design (read from the site's other pages in its repo), into the empty FAQ markers its posts carry.
+  let page = built.page;
+  const faqItems = (content.faqItems || []).filter((x) => x?.question && x?.answer);
+  if (faqItems.length) {
+    // Inside an async function so a throw from the injected learner, or from the import, is caught here too: a FAQ design that cannot be learned leaves the FAQ out, it never fails the whole post.
+    const template = await (async () => (learnFaq ? learnFaq() : (await import('../../generators/lib/site-faq-learn.js')).learnRepoFaqTemplate(site, { getFileContent: readFile, ref, blogDir: cfg.dir, withSection: true })))().catch(() => null);
+    const filled = fillFaqMarkers(page, faqItems, template);
+    page = filled.page;
+    if (!filled.filled) notes.push(template ? 'The FAQ was not added: the reference post has no FAQ placeholder to put it in.' : 'The FAQ was not added: no FAQ design was found on the site\'s other pages, and one is never added in a design the site does not have.');
+  }
   if (cfg.listingPage) {
     const listing = await readFile(site, cfg.listingPage, ref);
     if (!listing) notes.push(`The listing page ${cfg.listingPage} was not found, so the new post is not listed there.`);
@@ -56,5 +77,5 @@ export async function resolveConvertedBlogPost(site, content, cfg, { filePath, r
       else notes.push(`The new post was not added to ${cfg.listingPage} (${card.reason}); add its card by hand.`);
     }
   }
-  return { ok: true, filePath, body: built.page, contentFormat: 'html-page', extraFiles, ...(notes.length ? { notes } : {}) };
+  return { ok: true, filePath, body: page, contentFormat: 'html-page', extraFiles, ...(notes.length ? { notes } : {}) };
 }

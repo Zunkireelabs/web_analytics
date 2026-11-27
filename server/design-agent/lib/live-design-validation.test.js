@@ -319,6 +319,14 @@ test('REGRESSION: a simple static page with a few classed sections is READABLE; 
   assert.equal(isUnreadableFingerprint(computeLayoutFingerprint('<html><body><div id="root"></div></body></html>')), true);
 });
 
+test('REGRESSION: a plain text page (headings and paragraphs only, no classed sections) is READABLE; a near-empty shell with a few paragraphs is not', async () => {
+  const { isUnreadableFingerprint } = await import('./live-design-validation.js');
+  const legal = `<html><body><main class="legal-main"><span>Site</span><h1>Privacy policy</h1><p>Updated</p>${'<h2>Heading</h2><p>Text.</p>'.repeat(5)}<ul><li>a</li><li>b</li></ul></main></body></html>`;
+  assert.equal(isUnreadableFingerprint(computeLayoutFingerprint(legal)), false);
+  assert.equal(isUnreadableFingerprint(computeLayoutFingerprint('<html><body><main><h1>Loading</h1><p>Please wait</p></main></body></html>')), true);
+  assert.equal(isUnreadableFingerprint({ skeleton: [], count: 0 }), true, 'a fingerprint stored before contentBlocks existed behaves as before');
+});
+
 describe('a deleted group sample (404/410) does not hold the rest of the group', () => {
   // /blog/a is the group's recorded sample and has been deleted; /blog/b and /blog/redesigned are live members of the same layout.
   const goneWeb = (status = 404) => { const w = baseWeb(); delete w['/blog/a']; if (status !== 404) w['/blog/a'] = Object.assign(new Error(`HTTP ${status}`), { httpStatus: status }); return w; };

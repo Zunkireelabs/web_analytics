@@ -38,8 +38,9 @@ export async function routeCall({ generatorId } = {}, { env = process.env, onlin
 }
 
 /** Sends the call through the queue and waits for the worker's text. */
-export async function callViaWorker({ system, user, generatorId = null, siteId = null, maxTokens = null, tier = 'daily', pageUrl = null }, { env = process.env, enqueue = enqueueRequest, wait = waitForRequest } = {}) {
-  const timeoutMs = workerWaitMs(env);
+export async function callViaWorker({ system, user, generatorId = null, siteId = null, maxTokens = null, tier = 'daily', pageUrl = null, waitMs = null }, { env = process.env, enqueue = enqueueRequest, wait = waitForRequest } = {}) {
+  // A call a person is waiting on (the draft editor) passes its own, shorter wait; everything else keeps the long default.
+  const timeoutMs = waitMs ? Math.max(5_000, Number(waitMs)) : workerWaitMs(env);
   const id = await enqueue({ siteId, generatorId, system, user, options: { maxTokens, tier, pageUrl }, ttlMs: timeoutMs });
   const r = await wait(id, { timeoutMs });
   if (r.ok) return r.text;

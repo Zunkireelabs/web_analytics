@@ -64,8 +64,11 @@ export const DIFFERENT_SKELETON_BELOW = num(process.env.LIVE_DESIGN_DIFFERENT_SK
 // Share of a capture's recorded classes that must still exist on the live page
 // for the capture to count as current.
 export const MIN_CAPTURE_COVERAGE = num(process.env.LIVE_DESIGN_MIN_COVERAGE, 0.9);
-// No structural nodes, or a single classless wrapper: nothing to compare (client-rendered shell).
-export const isUnreadableFingerprint = (fp) => !fp || (fp.skeleton?.length || 0) < 2 && (fp.count || 0) < 2;
+// No structural nodes, or a single classless wrapper: nothing to compare (client-rendered shell). A plain text page (a privacy policy or terms page whose <main>
+// holds only headings and paragraphs) has no structural nodes either, but it is not an empty shell: the served HTML carries its whole content. Such a page counts as
+// readable once it has this many content blocks; a fingerprint stored before contentBlocks existed reads as 0 and behaves exactly as before.
+export const MIN_CONTENT_BLOCKS_FOR_READABLE = 8;
+export const isUnreadableFingerprint = (fp) => !fp || ((fp.skeleton?.length || 0) < 2 && (fp.count || 0) < 2 && (fp.contentBlocks || 0) < MIN_CONTENT_BLOCKS_FOR_READABLE);
 const MAX_DEPTH = 4;
 
 // Elements that hold CONTENT. Their classes (and text) never decide layout.
@@ -115,6 +118,7 @@ export function computeLayoutFingerprint(html) {
     classes: sorted,
     count: sorted.length,
     sectionCount,
+    contentBlocks: root.find('h1, h2, h3, h4, p, li').length,
     skeleton,
     hash: createHash('sha1').update(sorted.join(' ')).digest('hex').slice(0, 16),
     skeletonHash: createHash('sha1').update(skeleton.join('|')).digest('hex').slice(0, 16),

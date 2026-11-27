@@ -98,3 +98,39 @@ describe('discoverPaginationRoutes', () => {
     assert.deepEqual(routes, []);
   });
 });
+
+// The speed fix: one preview used to read ~920 template files from GitHub, one after another, every time.
+describe('discoverPaginationRoutes: cached and parallel', () => {
+  test('custom fetchers are never cached: every call reads fresh, and the route is found', async () => {
+    const github = await import('../../github/client.js');
+    const { discoverPaginationRoutes, clearPaginationRoutesCache } = await import('./pagination-routes.js');
+    assert.ok(github.getRepoTree && github.getFileContent);
+    // Custom fetchers (what every other test here passes) bypass the cache entirely.
+    let reads = 0;
+    const site = { id: 991, repo_owner: 'o', repo_name: 'r', default_branch: 'main' };
+    const tree = { files: ['src/a.njk', 'src/b.njk', 'src/_data/x.js'] };
+    const fetchTree = async () => tree;
+    const fetchFile = async (_s, f) => { reads++; return { content: f.endsWith('a.njk') ? '---\npagination:\n  data: items\n  alias: item\npermalink: /things/{{ item.id }}/\n---\nx' : '---\n---\nplain' }; };
+    clearPaginationRoutesCache();
+    const first = await discoverPaginationRoutes(site, { fetchTree, fetchFile });
+    const second = await discoverPaginationRoutes(site, { fetchTree, fetchFile });
+    assert.equal(first.length, 1);
+    assert.equal(first[0].routePrefix, '/things');
+    assert.deepEqual(second, first);
+    assert.equal(reads, 4, 'custom fetchers are read fresh every time (2 files x 2 calls)');
+  });
+
+  test('reads are parallel but the result keeps the tree order', async () => {
+    const { discoverPaginationRoutes } = await import('./pagination-routes.js');
+    const files = Array.from({ length: 30 }, (_, i) => `src/p${i}.njk`);
+    let live = 0; let peak = 0;
+    const fetchFile = async (_s, f) => {
+      live++; peak = Math.max(peak, live); await new Promise((r) => setTimeout(r, 5)); live--;
+      const i = Number(/p(\d+)/.exec(f)[1]);
+      return { content: `---\npagination:\n  data: d${i}\n  alias: x\npermalink: /fam${i}/{{ x.id }}/\n---\n` };
+    };
+    const routes = await discoverPaginationRoutes({ id: 992, repo_owner: 'o', repo_name: 'r' }, { fetchTree: async () => ({ files }), fetchFile });
+    assert.ok(peak > 1 && peak <= 12, `peak concurrency ${peak}`);
+    assert.deepEqual(routes.map((r) => r.template), files);
+  });
+});

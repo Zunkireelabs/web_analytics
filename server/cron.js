@@ -594,8 +594,18 @@ export function startCron() {
       console.log(`[nightly-recheck] running first in the worker's day, up to ${Math.round(budgetMs / 60_000)} min, before the fixes`);
       try { await runNightlyIssueRecheckForAllSites({ deadlineAt: Date.now() + budgetMs }); } catch (err) { console.error('[cron] nightly issue re-check error:', err.message); }
     });
+    // SATURDAY GATHERING (owner, 2026-11-27): the day before keywords go on the site (Sunday), the Claude worker gathers keywords for every project (its own Search Console
+    // queries, the paid volume check when due, and the phrases it researches from each project's pages). Once, on the first tick with the worker online that Saturday.
+    const gatherKeywords = oncePerDay(workerSessionTimezone(), async () => {
+      const { weekdayIn, GATHER_WEEKDAY } = await import('./agents/lib/keyword-schedule.js');
+      if (weekdayIn(workerSessionTimezone()) !== GATHER_WEEKDAY) return;
+      console.log('[keyword-gather] Saturday: gathering keywords for every project with the worker');
+      // A failure is logged by the caller below and thrown here, so the day is given back and the gather is retried after a pause instead of waiting for next Saturday.
+      await runKeywordDemandCheckIfDueForAllSites();
+    });
     cron.schedule(workerSessionCron(), () => locked('worker-session', async () => {
       await workerSessionTick({ timezone: workerSessionTimezone(), isOnline: workerOnline, runPass: async ({ windowEndsAt }) => { await recheckFirst(); return runAutoRemediationForAllSites({ windowEndsAt }); } });
+      try { if (await workerOnline()) await gatherKeywords(); } catch (err) { console.error('[cron] Saturday keyword gathering error:', err.message); }
       // Discovery that waited for the worker (it needs the laptop open) is retried here, inside the window, for the projects it was blocked for.
       try { if (await workerOnline()) { const r = await (await import('./lib/keyword-discovery-retry.js')).retryBlockedKeywordDiscovery({ run: runKeywordDemandCheckIfDueForAllSites, listSites: listConnectedSites }); if (r.retried?.length) console.log(`[cron] keyword discovery retried for project(s) ${r.retried.join(', ')}`); } } catch (err) { console.error('[cron] keyword discovery retry error:', err.message); }
     }), { timezone: workerSessionTimezone() });
@@ -644,6 +654,24 @@ export function startCron() {
   if (minuteOfDay(workerSessionTimezone()) >= SESSION_CUTOFF_MINUTE) {
     runDeliveryDayClose().catch((err) => console.error('[cron] startup delivery day close error:', err.message));
   }
+
+  // Every client's captured article page, kept warm: a draft preview or an idea then opens instantly instead of waiting for a browser to load the client's site (a slow one took
+  // two minutes). Captured shortly after the server starts, then every 4 hours (a capture is kept for 6), one client after another. A failed refresh keeps the good capture.
+  const warmPreviews = () => locked('preview-warm', async () => {
+    try {
+      const [{ warmArticleShells }, { getDesignProfile }, { pickReferencePage }, { listSites }] = await Promise.all([
+        import('./lib/draft-live-preview.js'), import('./implementers/lib/design-drift.js'), import('./generators/lib/newpage-render-gate.js'), import('./store/read.js'),
+      ]);
+      const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+      await warmArticleShells(sites, { getProfile: getDesignProfile, pick: pickReferencePage, force: true });
+    } catch (err) { console.error('[cron] preview warm error:', err.message); }
+  });
+  // PREVIEW_WARM=off: a development or test process that has real client data in its database must not open a browser on every client's site every few hours.
+  if (String(process.env.PREVIEW_WARM || '').toLowerCase() !== 'off') {
+    cron.schedule('17 */4 * * *', () => { warmPreviews(); }, { timezone: workerSessionTimezone() });
+    setTimeout(() => { warmPreviews(); }, 90_000).unref?.();
+    console.log('[cron] preview warm scheduled "17 */4 * * *" and 90 seconds after start');
+  } else console.log('[cron] preview warm is off (PREVIEW_WARM=off)');
 
   // Issue re-check: the agent re-reads the live page behind every open issue and closes what is fixed, so the list holds only
   // problems that are still there. Default 09:30 (site time): AFTER the 07:00 detection and the repair runs that follow it (done by

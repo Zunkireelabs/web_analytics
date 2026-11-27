@@ -2,7 +2,8 @@ import { resolveConvertedBlogPost } from './lib/converted-blog-resolve.js';
 import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget, resolveMissingPageTarget, slugifyTitle } from './lib/url-file-map.js';
 import { deriveNewContentContract, deriveContractFromSourceFile, missingRequiredKeys, findBetterBlogDirectory } from './lib/newcontent-contract.js';
 import { deriveLegalTarget, isPlaceholderDir } from './lib/legal-target.js';
-import { getFileContent } from '../github/client.js';
+import { getFileContent, getRepoTree } from '../github/client.js';
+import { loadSiteStyleRules, normalizeContent, styleViolations } from '../generators/lib/site-style-rules.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, resolveBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderBlogOutlineBodyTsx, renderTranslationBody, renderTranslationBodyTsx, renderDirectAnswerBody, renderDirectAnswerBodyTsx, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
 import { buildGradientCover } from '../generators/lib/gradient-cover.js';
@@ -84,7 +85,19 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
   }
 
   const actionType = draft.action_type;
-  const content = draft.content || {};
+  let content = draft.content || {};
+  // The client's own written content rules (its docs/seo-content-rules.md): wording is put right here, a title that is too long is refused with
+  // the reason instead of failing the client's Build after the push. The title is never cut here: the file name and URL come from it.
+  if (actionType === 'blog-outline') {
+    let rules;
+    try { rules = await (repoDeps.loadSiteStyleRules || ((x) => loadSiteStyleRules(x, { strict: true, ...(repoDeps.getFileContent ? { fetchFile: repoDeps.getFileContent } : {}) })))(site); }
+    catch { return { ok: false, reason: 'site-rules-unreadable', error: 'The site\'s own content rules could not be read from its repository just now, so the post was not checked and nothing was written. Try again in a moment.' }; }
+    if (rules) {
+      content = normalizeContent(content, rules, { shortenTitle: false });
+      const problems = styleViolations(content, rules);
+      if (problems.length) return { ok: false, reason: 'site-content-rules', error: `This post breaks the site's own content rules (${problems.join('; ')}). Nothing was written. Edit the draft and approve again.` };
+    }
+  }
 
   // The title each of the branches below slugifies into its file path — the
   // permalink must be resolved from the SAME title, or the page would be
@@ -168,13 +181,22 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     }
     const contract = await deriveNewContentContract(site, targetConfig, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'blog-outline') : contract.layout;
+    // The post's FAQ is published in the site's own FAQ design: learned from the FAQ blocks of its other posts (at least two with the same form), else a plain section.
+    let faqTemplate = null;
+    if ((content.faqItems || []).some((x) => x?.question && x?.answer)) {
+      const [{ loadSiblingMarkdown }, { learnHtmlFaqTemplate }] = await Promise.all([import('./lib/markdown-native.js'), import('../generators/lib/html-faq-learn.js')]);
+      const siblingTexts = await loadSiblingMarkdown(site, filePath, { getRepoTree: repoDeps.getRepoTree || getRepoTree, getFileContent: repoDeps.getFileContent || getFileContent, ref: baseBranch(site), limit: 40 }).catch(() => []);
+      faqTemplate = learnHtmlFaqTemplate(siblingTexts);
+      // A site whose blog posts carry no FAQ may still have a designed one on its pricing or home page: that is the site's FAQ design.
+      if (!faqTemplate) faqTemplate = await (repoDeps.learnSiteFaqTemplate || (await import('../generators/lib/site-faq-learn.js')).learnFaqDesign)(site).catch(() => null);
+    }
     // Opt-in generated gradient cover: an SVG committed next to the post in the
     // same atomic commit, referenced from its front matter. A site that did not
     // opt in gets null here and keeps whatever image the generator found. A
     // draft that already carries an image (an Insights post's Pexels photo under
     // `featuredImage: 'insights-only'`) keeps it: the cover is for posts without one.
     const cover = content.featuredImage ? null : buildGradientCover(site, { slug: filePath.split('/').pop().replace(/\.[^.]+$/, '') });
-    const boBody = renderBlogOutlineBody(cover ? { ...content, featuredImage: cover.featuredImage } : content, site, { permalink, layout, fieldNames: contract.fieldNames, frontMatterDefaults: { ...(contract.siblingConstants || {}), ...(frontMatterDefaultsFor(site, 'blog-outline') || {}) }, sourcesInFrontMatter: Boolean(contract.declaresSources), bodyStyle: contract.bodyStyle || null });
+    const boBody = renderBlogOutlineBody(cover ? { ...content, featuredImage: cover.featuredImage } : content, site, { faqTemplate, permalink, layout, fieldNames: contract.fieldNames, frontMatterDefaults: { ...(contract.siblingConstants || {}), ...(frontMatterDefaultsFor(site, 'blog-outline') || {}) }, sourcesInFrontMatter: Boolean(contract.declaresSources), bodyStyle: contract.bodyStyle || null });
     const boIncomplete = incompleteFrontMatter(boBody, contract, 'blog-outline');
     if (boIncomplete) return boIncomplete;
     return {
@@ -275,6 +297,18 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
         body: renderTranslationBodyTsx(content, site),
         contentFormat: 'jsx',
       };
+    }
+
+    // A WHOLE-POST translation (generators/lib/translate-post.js) is the complete translated source file, front matter included: written as it is, so the translated
+    // post has every section, table, FAQ, sources list, related links and call to action the source has, in the site's own markup.
+    if (typeof content.translatedFile === 'string' && content.translatedFile.trim()) {
+      // The reviewer may have corrected the title, meta description or body in the draft panel: those edits go into the file that is written.
+      const { applyEditsToTranslatedFile } = await import('../generators/lib/translate-post.js');
+      const file = applyEditsToTranslatedFile(content.translatedFile, { title: content.translatedTitle, description: content.translatedMetaDescription, body: content.translatedContent }, content.translatedFileParts || null);
+      // Translating the same page into the same language again must not silently replace a translation that is already in the repository (a person may have corrected it there).
+      const already = await (repoDeps.getFileContent || getFileContent)(site, filePath, baseBranch(site)).catch(() => null);
+      if (already?.content && already.content !== file) return { ok: false, reason: 'translation-exists', error: `A translation already exists at ${filePath}. Nothing was written, so it is not replaced. Edit that file, or remove it first and approve this draft again.` };
+      return { ok: true, filePath, body: file, contentFormat: 'markdown' };
     }
 
     // No permalink (see above), but a translated page is still a brand-new

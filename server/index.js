@@ -68,6 +68,9 @@ const app = express();
 // of the parsed object (key order/whitespace differences would break the
 // signature). Cheap enough to do unconditionally for every request rather
 // than special-casing just the webhook route's body parsing.
+// A brand document is uploaded as the file's own bytes (Word, PDF or text), so this one path reads a raw body up to 11 MB BEFORE the JSON parser below, which would refuse anything over 100 KB.
+// The route itself (routes/projects.js) checks the person's role before reading a byte of it.
+app.use('/api/projects/:siteId/brand/documents/upload', express.raw({ type: () => true, limit: '11mb' }));
 app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.set('trust proxy', 1); // behind Traefik
 

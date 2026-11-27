@@ -173,6 +173,19 @@ export const api = {
   project: {
     overview: (siteId) => req(`/projects/${siteId}/overview`),
     setGoal: (siteId, goal) => req(`/projects/${siteId}/goal`, { method: 'PUT', body: JSON.stringify(goal) }),
+    // Brand & topics tab: the project's own documents and the topics it wants blogs on, and its business profile (fields a person can correct).
+    brand: {
+      get: (siteId) => req(`/projects/${siteId}/brand`),
+      saveAbout: (siteId, about) => req(`/projects/${siteId}/brand/about`, { method: 'PUT', body: JSON.stringify({ about }) }),
+      // The file's own bytes (Word, PDF or text); the server reads the text out of it.
+      uploadDocument: (siteId, file) => req(`/projects/${siteId}/brand/documents/upload?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file, headers: { 'Content-Type': 'application/octet-stream' } }),
+      addDocument: (siteId, doc) => req(`/projects/${siteId}/brand/documents`, { method: 'POST', body: JSON.stringify(doc) }),
+      deleteDocument: (siteId, id) => req(`/projects/${siteId}/brand/documents/${id}`, { method: 'DELETE' }),
+      addTopic: (siteId, topic) => req(`/projects/${siteId}/brand/topics`, { method: 'POST', body: JSON.stringify({ topic }) }),
+      profile: (siteId) => req(`/projects/${siteId}/business-profile`),
+      reviewProfile: (siteId, edits) => req(`/projects/${siteId}/business-profile/review`, { method: 'POST', body: JSON.stringify({ edits }) }),
+      refreshProfile: (siteId) => req(`/projects/${siteId}/business-profile/refresh`, { method: 'POST' }),
+    },
     // Delete the project (a soft delete the server can undo). The exact name must be sent back as confirmation.
     // Named deleteProject, NOT remove: project.remove is already 'remove a person from this project'.
     deleteProject: (siteId, confirmName) => req(`/projects/${siteId}`, { method: 'DELETE', body: JSON.stringify({ confirmName }) }),
@@ -627,6 +640,11 @@ export const api = {
     draftCounts: (siteId) => req(withSite('/action-center/drafts/counts', siteId)),
     workerStatus: (siteId) => req(withSite('/action-center/worker-status', siteId)),
     articlePreview: (id, siteId) => req(withSite(`/action-center/drafts/${id}/article-preview`, siteId)),
+    livePreview: (id, siteId) => req(withSite(`/action-center/drafts/${id}/live-preview`, siteId)),
+    editFields: (id, siteId) => req(withSite(`/action-center/drafts/${id}/edit-fields`, siteId)),
+    rewriteField: (id, body, siteId) => req(withSite(`/action-center/drafts/${id}/rewrite-field`, siteId), { method: 'POST', body: JSON.stringify(body) }),
+    editContent: (id, body, siteId) => req(withSite(`/action-center/drafts/${id}/edit-content`, siteId), { method: 'POST', body: JSON.stringify(body) }),
+    editBlock: (id, body, siteId) => req(withSite(`/action-center/drafts/${id}/edit-block`, siteId), { method: 'POST', body: JSON.stringify(body) }),
     draft: (id, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId)),
     saveDraft: (id, content, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId), { method: 'PUT', body: JSON.stringify({ content }) }),
     deleteDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId), { method: 'DELETE' }),

@@ -462,3 +462,14 @@ describe('resolveNewContentNotApplicable (page types a site builds by hand)', ()
     assert.equal(resolveNewContentNotApplicable(null, 'cookie-policy'), null);
   });
 });
+
+import { resolveNewContentUrlForFile } from './url-file-map.js';
+test('the public URL of a written post comes from its file, so an edited title cannot move it', () => {
+  const flat = { url_file_map: { newContentTargets: { 'blog-outline': { dir: 'marketing/src/blog', extension: '.njk', urlPattern: '/businesses/blog/{slug}' } } } };
+  assert.equal(resolveNewContentUrlForFile(flat, 'blog-outline', 'marketing/src/blog/glp-1-and-fitness.njk'), '/businesses/blog/glp-1-and-fitness');
+  const dirPerPage = { url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/app', filename: 'page.tsx', urlPattern: '/{slug}' } } } };
+  assert.equal(resolveNewContentUrlForFile(dirPerPage, 'blog-outline', 'src/app/compex-guide/page.tsx'), '/compex-guide');
+  assert.equal(resolveNewContentUrlForFile(flat, 'blog-outline', null), null);
+  assert.equal(resolveNewContentUrlForFile({ url_file_map: { newContentTargets: { 'blog-outline': { dir: 'x' } } } }, 'blog-outline', 'x/a.md'), null);
+  assert.equal(resolveNewContentUrlForFile(flat, 'blog-outline', 'marketing/src/blog/bad name!.njk'), null);
+});

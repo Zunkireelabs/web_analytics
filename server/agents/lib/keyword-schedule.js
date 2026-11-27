@@ -1,9 +1,11 @@
 import { growthStageFor, ACCELERATION_DAYS } from '../../lib/growth-stage.js';
 
 // THE KEYWORD SCHEDULE (owner's plan, revised 2026-11-26). One queue and one calendar per project, run by the daily cron
-// (job.js runKeywordScheduleForAllSites). A 15-day cycle, starting the first day a project has qualified keywords (no 30-day wait):
+// (job.js runKeywordScheduleForAllSites). A FIXED WEEKLY CALENDAR (owner, 2026-11-27): Saturday the Claude worker gathers keywords and
+// blog topics for every client; Sunday the best are put on the site (every second Sunday per project, the first Sunday it has any);
+// the 14 days after are tracking; the next ship Sunday evaluates and ships the keywords gathered the day before:
 //
-//   day 1       SHIP the best qualified keywords now (at most KEYWORD_CYCLE_MAX, default 10). A keyword an existing page covers is
+//   ship Sunday SHIP the best qualified keywords now (at most KEYWORD_CYCLE_MAX, default 10). A keyword an existing page covers is
 //               added to that page; one that needs a page becomes a blog, given a day 3 apart (the project's blog gap).
 //   days 1-14   TRACK: each shipped keyword's impressions, clicks and average position are counted from Search Console over the
 //               14 days after it went live. Nothing is estimated: no Search Console data in the window = not evaluated yet.
@@ -15,7 +17,11 @@ import { growthStageFor, ACCELERATION_DAYS } from '../../lib/growth-stage.js';
 // Everything here is a recommendation in Action Center; auto-remediation drafts and opens the PR on or after its day, and a
 // person still merges it. Strict client isolation: every query below is scoped by site_id.
 
-export const CYCLE_DAYS = 15;
+export const CYCLE_DAYS = 15; // a ship Sunday is at least CYCLE_DAYS - 1 = 14 days after the last one
+export const SHIP_WEEKDAY = 0; // Sunday
+export const cycleAnchor = (env = process.env) => (/^\d{4}-\d{2}-\d{2}$/.test(env.KEYWORD_CYCLE_ANCHOR || '') ? env.KEYWORD_CYCLE_ANCHOR : '2026-11-29'); // the first ship Sunday; every second Sunday after it is one too
+export const GATHER_WEEKDAY = 6; // Saturday: the worker gathers the keywords (and topics) the day before they go on the site
+export const weekdayIn = (tz, now = new Date()) => ({ Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 })[new Intl.DateTimeFormat('en-US', { timeZone: safeZone(tz), weekday: 'short' }).format(now)];
 export const BLOG_GAP_DEFAULT_DAYS = 3;
 export const LOW_IMPRESSIONS = 10; // fewer than this in the 14 days after shipping = not (yet) a success
 export const GOOD_POSITION = 20;  // average position at or above this (1 is best) counts as ranking, even before clicks arrive
@@ -31,10 +37,30 @@ const addDays = (iso, n) => dayOnly(new Date(`${iso}T00:00:00Z`).getTime() + n *
  *   ship    no cycle has run yet, or the last one was CYCLE_DAYS or more ago
  *   wait    between cycles (the 14 days of tracking)
  */
-export function cyclePhase({ growthStartedAt, lastCycleAt, now = new Date() }) {
+// A timezone string that Intl rejects (a typo in sites.timezone) must not stop the whole schedule run: it is read as UTC.
+const safeZone = (tz) => { try { new Intl.DateTimeFormat('en-CA', { timeZone: tz || 'UTC' }); return tz || 'UTC'; } catch { return 'UTC'; } };
+export function cyclePhase({ growthStartedAt, lastCycleAt, now = new Date(), timezone: tzIn = 'UTC', anchor = cycleAnchor() }) {
+  const timezone = safeZone(tzIn);
   const g = growthStageFor(growthStartedAt, now);
-  const since = lastCycleAt ? Math.floor((now.getTime() - new Date(lastCycleAt).getTime()) / MS_DAY) : Infinity;
-  return since >= CYCLE_DAYS ? { phase: 'ship', day: g.day } : { phase: 'wait', day: g.day, daysToNextShip: CYCLE_DAYS - since };
+  // ONE calendar for every client (owner, 2026-11-27): Saturday gather, Sunday ship, and the ship Sundays are the SAME dates for all projects: the anchor
+  // Sunday and every second Sunday after it. A project that has never shipped may also start on any Sunday (a new project joins the next one); no project
+  // ships twice on the same day.
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: timezone || 'UTC' }).format(now);
+  const daysFromAnchor = Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${anchor}T00:00:00Z`)) / MS_DAY);
+  const sunday = weekdayIn(timezone, now) === SHIP_WEEKDAY;
+  const shippedToday = lastCycleAt && new Intl.DateTimeFormat('en-CA', { timeZone: timezone || 'UTC' }).format(new Date(lastCycleAt)) === today;
+  const onCalendar = daysFromAnchor >= 0 && daysFromAnchor % (CYCLE_DAYS - 1) === 0;
+  // The 14 days after a ship are its tracking window: a project that joined off the calendar must not ship again on the next calendar Sunday if that is
+  // less than 14 days after its last ship, or the evaluation runs on a window that has not closed.
+  const lastDay = lastCycleAt ? new Intl.DateTimeFormat('en-CA', { timeZone: timezone || 'UTC' }).format(new Date(lastCycleAt)) : null;
+  const daysSinceLast = lastDay ? Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${lastDay}T00:00:00Z`)) / MS_DAY) : null;
+  // The anchor Sunday itself is the one exception (owner, 2026-11-27): everyone ships on it, even a project that shipped a few days before, so every client joins the same calendar.
+  const windowClosed = daysSinceLast === null || daysSinceLast >= CYCLE_DAYS - 1 || daysFromAnchor === 0;
+  if (sunday && !shippedToday && windowClosed && (onCalendar || !lastCycleAt)) return { phase: 'ship', day: g.day };
+  // Days until the next ship Sunday: the next calendar Sunday that is also at least 14 days after the last ship.
+  let toNext = daysFromAnchor < 0 ? -daysFromAnchor : (CYCLE_DAYS - 1) - (daysFromAnchor % (CYCLE_DAYS - 1));
+  if (daysSinceLast !== null) while (daysSinceLast + toNext < CYCLE_DAYS - 1) toNext += CYCLE_DAYS - 1;
+  return { phase: 'wait', day: g.day, daysToNextShip: toNext };
 }
 
 /** Pure. Best first (priority, then search volume), then the first ceil(n/2) ship now and the rest are next cycle's. */
@@ -171,7 +197,7 @@ export async function runKeywordScheduleForSite(siteId, site, { now = new Date()
   const { getKeywordGaps, updateKeywordGapStatus } = await import('../../store/data-analyst.js');
   const { createActionCenterRecommendationForGap } = await import('./analyst-seo-mapping.js');
   const create = deps.createRecommendation || createActionCenterRecommendationForGap;
-  const phase = cyclePhase({ growthStartedAt: s.growth_started_at, lastCycleAt: s.keyword_cycle_last_at, now });
+  const phase = cyclePhase({ growthStartedAt: s.growth_started_at, lastCycleAt: s.keyword_cycle_last_at, now, timezone: s.timezone });
   const out = { siteId, ...phase, queued: 0, carried: 0, deferred: 0, booked: 0, merged: 0 };
 
   const queueOne = async (g, cycle) => {

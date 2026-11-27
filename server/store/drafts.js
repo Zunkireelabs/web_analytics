@@ -246,6 +246,22 @@ export async function updateDraft(siteId, id, { content }) {
   return rows[0] || null;
 }
 
+// A person's edit of one part of a draft waiting for approval (the click-to-edit box): the new content is saved and the draft stays where it is in the approval flow. updateDraft above
+// only takes drafts nobody has submitted yet and turns them into 'edited'; a client reviewing a draft is looking at a 'submitted_for_approval' one, so an edit there saved nothing.
+// The prepared file (rendered_body, target_file_path) is cleared so it is rebuilt from the new content, and approving still re-validates everything.
+// `expectedUpdatedAt` (the draft's updated_at as the editor read it) is a version check: if the draft was saved by someone else, or moved on, since then, nothing is written and the
+// caller reports "this draft changed", instead of the second save silently replacing the first one's edit. Millisecond precision is compared (a JS Date cannot carry more).
+export async function updateDraftContentInPlace(siteId, id, { content, expectedUpdatedAt = null }) {
+  const { rows } = await query(
+    `UPDATE drafts SET content = $1, updated_at = now(), rendered_body = NULL, target_file_path = NULL
+     WHERE site_id = $2 AND id = $3 AND status IN ('draft', 'edited', 'revision_requested', 'submitted_for_approval')
+       AND ($4::timestamptz IS NULL OR date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $4::timestamptz))
+     RETURNING *`,
+    [JSON.stringify(content), siteId, id, expectedUpdatedAt ? new Date(expectedUpdatedAt).toISOString() : null]
+  );
+  return rows[0] || null;
+}
+
 // Guarded like every other draft-mutating function above — an 'implemented'
 // draft is the only record that a real, live production change came from
 // this app at all (the file change itself lives on in the merged GitHub PR

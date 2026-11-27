@@ -181,9 +181,12 @@ function pageUrlFor(draft) {
 // Decides, once, how a given merged draft is to be re-checked. Returns
 // { method, target, expected, reason } — `reason` is only ever set for
 // UNVERIFIABLE, and is the text recorded on the row.
-export function verificationMethodFor(draft, { siteOrigin = null } = {}) {
+export function verificationMethodFor(draft, { siteOrigin = null, newPageUrl = null } = {}) {
   const type = draft?.action_type;
-  const page = pageUrlFor(draft);
+  // A brand-new page (a blog post) has no URL on the draft itself; the caller works it out from the site's own URL pattern. Without it the check
+  // fell through to "no public URL", which is how Zennly's merged blogs were recorded as fine while zennly.io still returned 404 for them.
+  let page = pageUrlFor(draft);
+  if (!page && newPageUrl && siteOrigin) { try { page = new URL(newPageUrl, siteOrigin).href; } catch { /* leave null */ } }
 
   if (REPORT_ONLY_GENERATORS[type]) {
     return { method: VERIFICATION_METHOD.UNVERIFIABLE, reason: REPORT_ONLY_GENERATORS[type] };
@@ -325,11 +328,11 @@ export async function hasVerificationForDraft(siteId, draftId) {
 // row — recorded immediately with its reason, so "we cannot check this"
 // is visible in the same place as every real outcome instead of being an
 // absence nobody can see.
-export async function scheduleVerificationForDraft(siteId, draft, { watchlistItemId = null, siteOrigin = null, deploymentId = null } = {}) {
+export async function scheduleVerificationForDraft(siteId, draft, { watchlistItemId = null, siteOrigin = null, deploymentId = null, newPageUrl = null } = {}) {
   if (!draft?.id) return null;
   if (await hasVerificationForDraft(siteId, draft.id)) return null;
 
-  const plan = verificationMethodFor(draft, { siteOrigin });
+  const plan = verificationMethodFor(draft, { siteOrigin, newPageUrl });
   const row = await createPendingVerification(siteId, {
     watchlistItemId,
     findingId: draft.finding_id || `${draft.action_type}:draft:${draft.id}`,

@@ -1,6 +1,6 @@
 import { test, describe, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveConvertedBlogPost, originFor } from './converted-blog-resolve.js';
+import { resolveConvertedBlogPost, originFor, fillFaqMarkers } from './converted-blog-resolve.js';
 import { fmValue } from './converted-blog-page.js';
 
 const ORIGIN = 'https://client.example';
@@ -63,4 +63,43 @@ describe('resolveConvertedBlogPost', () => {
     assert.equal(bad.reason, 'invalid-edit'); assert.match(bad.error, /New post not written/);
   });
   test('originFor', () => { assert.equal(originFor({ website_domain: 'a.com/' }), 'https://a.com'); assert.equal(originFor({ website_domain: 'https://a.com' }), 'https://a.com'); assert.equal(originFor({}), null); });
+});
+
+// The post's FAQ is published in the site's own FAQ design, into the empty FAQ markers the site's posts carry.
+describe('a converted post publishes its FAQ', () => {
+  const TEMPLATE = { wrapper: '<section class="faq-sec" id="faq"><div class="container"><span class="eyebrow">FAQ</span><h2>Frequently asked questions</h2>{{ROWS}}</div></section>', row: '<details><summary>{{QUESTION}}</summary><p>{{ANSWER}}</p></details>' };
+  const withFaq = { faqItems: [{ question: 'Is it free?', answer: 'Yes, & it costs $5 later.' }, { question: 'Who?', answer: 'Anyone.' }] };
+  // The site's real posts carry the empty FAQ placeholders just before </main>.
+  const readWithMarkers = async (_s, p) => (p === 'src/blog/old-ref/index.njk' ? { content: REF.replace('</main>', '<!-- SEOAI:FAQ:START --><!-- SEOAI:FAQ:END -->\n</main>') } : readFile(_s, p));
+  const runWith = (learnFaq, over = withFaq) => resolveConvertedBlogPost(site, { ...content, ...over }, cfg, { filePath: 'src/blog/why-teams-stall/index.njk', readFile: readWithMarkers, today: '2026-11-25', learnFaq });
+
+  test('the FAQ goes in the site\'s FAQ band, between the markers, escaped, and the rest of the page is as before', async () => {
+    const r = await runWith(async () => TEMPLATE);
+    assert.equal(r.ok, true);
+    assert.match(r.body, /<!-- SEOAI:FAQ:START --><section class="faq-sec" id="faq"><div class="container"><span class="eyebrow">FAQ<\/span><h2>Frequently asked questions<\/h2><details><summary>Is it free\?<\/summary><p>Yes, &amp; it costs \$5 later\.<\/p><\/details><details><summary>Who\?<\/summary>/);
+    assert.match(r.body, /<\/section><!-- SEOAI:FAQ:END -->/);
+    assert.equal(r.notes, undefined);
+  });
+  test('a reference post with no FAQ placeholder: the post is written without a FAQ and says why', async () => {
+    const r = await resolveConvertedBlogPost(site, { ...content, ...withFaq }, cfg, { filePath: 'src/blog/why-teams-stall/index.njk', readFile, today: '2026-11-25', learnFaq: async () => TEMPLATE });
+    assert.equal(r.ok, true);
+    assert.doesNotMatch(r.body, /<details>/);
+    assert.match(r.notes.join(' '), /no FAQ placeholder/);
+  });
+  test('no FAQ design anywhere on the site: nothing is added, and it says why', async () => {
+    const r = await runWith(async () => null);
+    assert.equal(r.ok, true);
+    assert.doesNotMatch(r.body, /<details>/);
+    assert.match(r.notes.join(' '), /no FAQ design was found/);
+  });
+  test('a post with no FAQ items is written exactly as before', async () => {
+    const r = await runWith(async () => { throw new Error('must not be asked'); }, {});
+    assert.equal(r.ok, true);
+    assert.equal(r.notes, undefined);
+  });
+  test('fillFaqMarkers: needs the markers, items and a design', () => {
+    assert.equal(fillFaqMarkers('<p>no markers</p>', [{ question: 'q', answer: 'a' }], TEMPLATE).filled, false);
+    assert.equal(fillFaqMarkers('<!-- SEOAI:FAQ:START --><!-- SEOAI:FAQ:END -->', [], TEMPLATE).filled, false);
+    assert.equal(fillFaqMarkers('<!-- SEOAI:FAQ:START --><!-- SEOAI:FAQ:END -->', [{ question: 'q', answer: 'a' }], null).filled, false);
+  });
 });

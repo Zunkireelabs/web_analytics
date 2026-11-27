@@ -6,6 +6,7 @@ import { submitDraftForApproval, updateDraft } from '../../store/drafts.js';
 import { listChosenDesignChoices, markDesignChoiceStatus } from '../../store/design-choices.js';
 import { generateDraft, approveAndPublishDraftUnattended } from '../../routes/action-center.js';
 import { instructionFor } from '../../lib/content-options.js';
+import { instructionWithNotes } from '../../lib/pick-notes.js';
 
 // The next-run job for content picks. A person's one click on an option (landing page, translation, blog post) is
 // their approval and was only SAVED at the time; this is what builds it. For each saved pick it runs the same chain a
@@ -49,7 +50,8 @@ export async function buildSavedContentPicks(site, deps = {}) {
     const id = pick.finding_id;
     try {
       const rec = await d.getRecommendationByFindingId(site.id, id);
-      const instruction = instructionFor(pick.generator_id, pick.option_key);
+      const base = instructionFor(pick.generator_id, pick.option_key);
+      const instruction = base ? instructionWithNotes(base, pick.notes) : base; // the person's own requested changes ride with the structure they chose
       if (!rec || !instruction) { await d.setPickStatus(site.id, id, 'withdrawn', ['saved']); out.withdrawn += 1; continue; }
       if (!(await d.setPickStatus(site.id, id, 'building', ['saved']))) continue; // the person changed or cleared it meanwhile
 

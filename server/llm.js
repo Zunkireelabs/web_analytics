@@ -176,7 +176,7 @@ export const MODEL_DEFAULTS = {
 // calling generator's own meta.id. This is the automatic RETRIEVE step of
 // the platform-wide learning loop: every generator gets it for free just by
 // passing its own id, with no separate opt-in per generator.
-async function callLLMUntracked(system, user, { model, maxTokens = 500, tier = 'daily', generatorId, siteId, pageUrl, modelRole, task } = {}) {
+async function callLLMUntracked(system, user, { model, maxTokens = 500, tier = 'daily', generatorId, siteId, pageUrl, modelRole, task, workerWaitMs = null } = {}) {
   system = await withAgentMemory(system, generatorId, siteId);
   // Shared design-intelligence layer (server/implementers/lib/design-drift.js) —
   // real site design/voice grounding for every website-facing generator, the
@@ -193,7 +193,7 @@ async function callLLMUntracked(system, user, { model, maxTokens = 500, tier = '
   // the mode is off, uses the API providers below exactly as before.
   // Loaded on demand: the worker module reaches the database layer, whose import loads .env, and llm.js must not do that at import time.
   const { workerMode, routeCall, callViaWorker } = String(process.env.LLM_WORKER_MODE || '').toLowerCase() === 'on' ? await import('./lib/claude-worker-provider.js') : {};
-  if (workerMode && await routeCall({ generatorId }) === 'worker') return callViaWorker({ system, user, generatorId, siteId, maxTokens, tier, pageUrl });
+  if (workerMode && await routeCall({ generatorId }) === 'worker') return callViaWorker({ system, user, generatorId, siteId, maxTokens, tier, pageUrl, waitMs: workerWaitMs });
   // A model promoted through the evaluated registry for this call's ROLE (only decision-engine calls pass one; a model tuned to
   // decide is never used to write page content). Used only when it belongs to the provider in use and no model was forced.
   const promoted = !model && modelRole ? await activeModelFor(modelRole) : null;
@@ -410,10 +410,11 @@ export function extractJson(raw) {
 // "not valid JSON" one. Defaults to accept-anything so existing callers are
 // unaffected.
 export async function callLLMForJson(system, user, options = {}) {
-  const { validate = () => true, ...llmOptions } = options;
+  const { validate = () => true, retry = true, ...llmOptions } = options;
   const raw = await callLLM(system, user, llmOptions);
   const parsed = extractJson(raw);
   if (parsed !== null && validate(parsed)) return parsed;
+  if (!retry) throw Object.assign(new Error('The writer did not return a usable answer. Try again, or type the text yourself.'), { status: 502 });
 
   console.warn('[llm] first response was not valid JSON (or failed shape validation), retrying once with a corrective nudge…');
   const retryUser = `${user}\n\nYour previous response was not valid JSON. Respond with ONLY the raw JSON — no markdown code fences, no explanation, no text before or after it.`;

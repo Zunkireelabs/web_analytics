@@ -60,7 +60,7 @@ export default function Content() {
       if (!alive) return;
       setCatalog(r?.catalog || {});
       setBuiltToday(!!r?.builtToday);
-      setPicks(Object.fromEntries((r?.picks || []).map((p) => [p.finding_id, { optionKey: p.option_key, status: p.status }])));
+      setPicks(Object.fromEntries((r?.picks || []).map((p) => [p.finding_id, { optionKey: p.option_key, status: p.status, notes: p.notes || [] }])));
     }).catch(() => { if (alive) setError('Your picks could not be loaded just now.'); });
     return () => { alive = false; };
   }, [siteId]);
@@ -96,19 +96,25 @@ export default function Content() {
     setError(null);
     setSelected((all) => {
       const next = { ...all };
-      if (next[id]?.optionKey === optionKey) delete next[id]; else next[id] = { generatorId: item.generatorId, optionKey };
+      if (next[id]?.optionKey === optionKey) delete next[id]; else next[id] = { generatorId: item.generatorId, optionKey, notes: next[id]?.notes || picks[id]?.notes || [] };
       return next;
     });
+  };
+  // What the person asks to change on an idea (a part clicked on the page, or the whole piece). It rides with the option they pick and is approved with it; nothing is built until then.
+  const setNotes = (item, optionKey, notes) => {
+    const id = findingOf(item);
+    setError(null);
+    setSelected((all) => ({ ...all, [id]: { generatorId: item.generatorId, optionKey: all[id]?.optionKey || optionKey, notes } }));
   };
 
   // The one Approve button: everything selected is approved together (and only then saved).
   const approveAll = async () => {
-    const list = Object.entries(selected).map(([findingId, v]) => ({ findingId, generatorId: v.generatorId, optionKey: v.optionKey }));
+    const list = Object.entries(selected).map(([findingId, v]) => ({ findingId, generatorId: v.generatorId, optionKey: v.optionKey, notes: v.notes || [] }));
     if (!list.length) return;
     setBusy('all'); setError(null);
     try {
       const r = await api.actionCenter.approveContentPicks(list, siteId);
-      setPicks((p) => ({ ...p, ...Object.fromEntries((r.saved || []).map((x) => [x.finding_id, { optionKey: x.option_key, status: x.status }])) }));
+      setPicks((p) => ({ ...p, ...Object.fromEntries((r.saved || []).map((x) => [x.finding_id, { optionKey: x.option_key, status: x.status, notes: x.notes || [] }])) }));
       setSelected({});
     } catch (e) { setError(e.message || 'These could not be approved. Nothing was saved.'); } finally { setBusy(null); }
   };
@@ -233,8 +239,8 @@ export default function Content() {
         const t = TYPES.find((x) => x.generatorId === idea.item.generatorId) || TYPES[0];
         const id = findingOf(idea.item);
         return <IdeaPanel idea={{ item: idea.item, startKey: idea.startKey, generatorId: t.generatorId, siteId, title: titleOf(idea.item), url: urlOf(idea.item), options: catalog[t.generatorId]?.options || [], previews: previews[t.generatorId] || {},
-          selectedKey: selected[id]?.optionKey || (picks[id] && picks[id].status !== 'withdrawn' ? picks[id].optionKey : null), locked: Boolean(picks[id] && picks[id].status !== 'saved' && picks[id].status !== 'withdrawn') }}
-          onClose={() => setIdea(null)} onPick={(key) => select(idea.item, key)} />;
+          selectedKey: selected[id]?.optionKey || (picks[id] && picks[id].status !== 'withdrawn' ? picks[id].optionKey : null), notes: selected[id]?.notes || picks[id]?.notes || [], locked: Boolean(picks[id] && picks[id].status !== 'saved' && picks[id].status !== 'withdrawn') }}
+          onClose={() => setIdea(null)} onPick={(key) => select(idea.item, key)} onNotes={(key, notes) => setNotes(idea.item, key, notes)} />;
       })()}
 
       <ApproveBar builtToday={builtToday} selected={selectedCount} approved={savedCount} busy={busy === 'all'} onApprove={approveAll} onClear={() => setSelected({})} noun="idea" />

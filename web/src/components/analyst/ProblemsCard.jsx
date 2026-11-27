@@ -29,7 +29,7 @@ function Stepper({ problem }) {
   );
 }
 
-export default function ProblemsCard({ problems, loading, onApprove, approving }) {
+export default function ProblemsCard({ problems, loading, onApprove, approving, onEdit }) {
   const [filter, setFilter] = useState('all');
   const counts = filterCounts(problems);
   const shown = filterProblems(problems, filter);
@@ -59,7 +59,10 @@ export default function ProblemsCard({ problems, loading, onApprove, approving }
           </div>
           <Stepper problem={p} />
           {p.stage === 'needs-ok' && (
-            <div className="mt-2"><Button write size="sm" variant="primary" disabled={approving} onClick={() => onApprove(p.id)}>Approve this fix</Button></div>
+            <div className="mt-2 flex items-center gap-2">
+              {p.draftId && onEdit && <Button size="sm" variant="light" onClick={() => onEdit(p.draftId)}>Review and edit</Button>}
+              <Button write size="sm" variant="primary" disabled={approving} onClick={() => onApprove(p.id)}>Approve this fix</Button>
+            </div>
           )}
         </div>
       ))}

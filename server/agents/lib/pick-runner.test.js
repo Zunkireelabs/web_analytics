@@ -196,3 +196,15 @@ function describe_blog_day_picks() {
     assert.equal(built.length, 6);
   });
 }
+
+test('the changes the person asked for on the idea reach the writer with the structure they chose; a pick with none is built exactly as before', async () => {
+  const withNotes = harness({ picks: [{ finding_id: 'f1', generator_id: 'landing-page', option_key: 'B', chosen_by: 42, notes: [{ part: 'The headline', text: 'mention the free trial' }, { part: null, text: 'friendlier tone' }] }] });
+  await buildSavedContentPicks(site, withNotes.deps);
+  const text = withNotes.log.generate[0].params.designCorrections;
+  assert.match(text, /"Form first"/);
+  assert.match(text, /- Part \[The headline\]: mention the free trial/);
+  assert.match(text, /- Whole piece: friendlier tone/);
+  const plain = harness();
+  await buildSavedContentPicks(site, plain.deps);
+  assert.doesNotMatch(plain.log.generate[0].params.designCorrections, /ALSO ASKED FOR THESE CHANGES/);
+});

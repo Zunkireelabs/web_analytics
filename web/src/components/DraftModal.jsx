@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api.js';
 import DraftPreview from './DraftPreview.jsx';
-import ArticlePreview from './ArticlePreview.jsx';
+import LivePreview from './LivePreview.jsx';
+import DraftFieldsEditor from './content/DraftFieldsEditor.jsx';
 import Button from './Button.jsx';
 import Badge from './Badge.jsx';
 import {
@@ -290,6 +291,7 @@ function FileDiffPreview({ result }) {
 export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(() => JSON.stringify(draft.content, null, 2));
+  const [baseText, setBaseText] = useState(() => JSON.stringify(draft.content, null, 2)); // the draft as it was when the JSON editor was opened: a save from an older copy must not overwrite a newer one
   const [saving, setSaving] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
   const [copyLabel, setCopyLabel] = useState('Copy');
@@ -431,9 +433,13 @@ export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted 
     }
   };
 
-  const startEdit = () => { setText(JSON.stringify(draft.content, null, 2)); setError(null); setEditing(true); };
+  const startEdit = () => { const now = JSON.stringify(draft.content, null, 2); setText(now); setBaseText(now); setError(null); setEditing(true); };
 
   const save = async () => {
+    if (editing && JSON.stringify(draft.content, null, 2) !== baseText) {
+      setError('This draft changed after you opened the editor (it was saved elsewhere, or the writer changed it), so saving now would overwrite that change. Cancel, then open the editor again.');
+      return;
+    }
     let parsed;
     try {
       parsed = JSON.parse(text);
@@ -633,7 +639,13 @@ export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted 
               <>
                 <DraftPreview actionType={draft.action_type} content={draft.content}
                   onSelectTitle={draft.action_type === 'meta-title' && draft.status !== 'implemented' ? selectTitle : undefined} />
-                {draft.action_type === 'blog-outline' && <ArticlePreview draftId={draft.id} siteId={siteId} />}
+                {draft.action_type === 'blog-outline' && <LivePreview draftId={draft.id} siteId={siteId} onSaved={onSaved} />}
+                {['draft', 'edited', 'submitted_for_approval', 'revision_requested'].includes(draft.status) && (
+                  <details className="rounded-control border border-border bg-white">
+                    <summary className="px-4 py-3 text-sm font-medium text-fg cursor-pointer">Edit the wording (type it, or tell the writer what to change)</summary>
+                    <div className="px-4 pb-4"><DraftFieldsEditor draftId={draft.id} siteId={siteId} onSaved={onSaved} /></div>
+                  </details>
+                )}
 
                 {/* GitHub File Diff Preview Section — for an implemented draft
                     this shows the real, currently-live content instead of a

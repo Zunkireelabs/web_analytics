@@ -44,6 +44,14 @@ describe('a call through the queue', () => {
     assert.deepEqual([queued.system, queued.user, queued.generatorId, queued.siteId], ['S', 'U', 'meta-title', 8862]);
     assert.equal(queued.options.maxTokens, 400);
   });
+  test('a call a person is waiting on can ask for a shorter wait than the 10-minute default', async () => {
+    let waited; let queued;
+    await callViaWorker({ system: 'S', user: 'U', generatorId: 'draft-edit', waitMs: 100000 }, { env: on, enqueue: async (r) => { queued = r; return 1; }, wait: async (id, o) => { waited = o.timeoutMs; return { ok: true, text: 'x' }; } });
+    assert.equal(waited, 100000);
+    assert.equal(queued.ttlMs, 100000);
+    await callViaWorker({ system: 'S', user: 'U', generatorId: 'faq' }, { env: on, enqueue: async (r) => { queued = r; return 2; }, wait: async (id, o) => { waited = o.timeoutMs; return { ok: true, text: 'x' }; } });
+    assert.equal(waited, 600000, 'every other call keeps the long default');
+  });
   test('no answer in time is an outage that names the cause, never a generator defect', async () => {
     const err = await callViaWorker({ system: 'S', user: 'U', generatorId: 'faq' }, { env: on, enqueue: async () => 7, wait: async () => ({ ok: false, reason: 'expired', error: 'x' }) }).catch((e) => e);
     assert.equal(err.workerReason, 'expired');

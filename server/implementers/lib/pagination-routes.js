@@ -58,10 +58,30 @@ export function parsePaginationFrontMatter(source) {
 }
 
 // Every paginating template in the repo, with what each one generates.
-// One repo-tree read plus one fetch per candidate template; callers should
-// cache the result for a whole refresh rather than calling this per page.
-export async function discoverPaginationRoutes(site, { fetchTree = getRepoTree, fetchFile = getFileContent } = {}) {
+// One repo-tree read plus one fetch per candidate template. It used to run on EVERY preview and read each of a repo's candidate templates (about 920 for
+// zunkireelabs-web) one after another: 929 GitHub reads and about 4 minutes for one trivial meta-title preview (measured 2026-11-27), when the answer almost
+// never changes. Now: the answer is kept per project and branch for an hour, concurrent callers share one read, and a first read fetches 12 files at a time.
+// A caller with its own fetchers (the tests) always gets a fresh, uncached read.
+const ROUTES_TTL_MS = 60 * 60 * 1000;
+const READ_CONCURRENCY = 12;
+const routesCache = new Map(); // `${siteId}:${branch}` -> { at, promise }
+export const clearPaginationRoutesCache = () => routesCache.clear();
+
+export async function discoverPaginationRoutes(site, { fetchTree = getRepoTree, fetchFile = getFileContent, now = Date.now() } = {}) {
   if (!site?.repo_owner || !site?.repo_name) return [];
+  const cacheable = fetchTree === getRepoTree && fetchFile === getFileContent;
+  if (!cacheable) return readPaginationRoutes(site, fetchTree, fetchFile);
+  const key = `${site.id}:${baseBranch(site)}`;
+  const hit = routesCache.get(key);
+  if (hit && now - hit.at < ROUTES_TTL_MS) return hit.promise;
+  const promise = readPaginationRoutes(site, fetchTree, fetchFile);
+  routesCache.set(key, { at: now, promise });
+  // A failed read is never kept: the next caller reads again.
+  promise.catch(() => { if (routesCache.get(key)?.promise === promise) routesCache.delete(key); });
+  return promise;
+}
+
+async function readPaginationRoutes(site, fetchTree, fetchFile) {
   const branch = baseBranch(site);
   const tree = await fetchTree(site, branch);
 
@@ -72,10 +92,20 @@ export async function discoverPaginationRoutes(site, { fetchTree = getRepoTree, 
     && !f.includes('/_data/') && !f.includes('/_includes/') && !f.startsWith('node_modules/')
   ));
 
+  // Read in parallel (12 at a time), keep the tree's own order for the result.
+  const sources = new Array(candidates.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(READ_CONCURRENCY, candidates.length) }, async () => {
+    while (next < candidates.length) {
+      const i = next++;
+      try { sources[i] = (await fetchFile(site, candidates[i], branch))?.content; } catch { sources[i] = null; }
+    }
+  }));
+
   const routes = [];
-  for (const file of candidates) {
-    let source;
-    try { source = (await fetchFile(site, file, branch))?.content; } catch { continue; }
+  for (let i = 0; i < candidates.length; i++) {
+    const file = candidates[i];
+    const source = sources[i];
     if (!source || !source.includes('pagination:')) continue;
 
     const fm = parsePaginationFrontMatter(source);

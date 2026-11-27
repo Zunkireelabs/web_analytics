@@ -748,3 +748,40 @@ describe('renderBlogOutlineBody — verified sources (blog standard)', () => {
     assert.doesNotMatch(out, /sources|Sources/);
   });
 });
+
+// A markdown site's blog post used to be written WITHOUT its FAQ answers (they stayed on the draft). Now the FAQ is in the published file.
+describe('a blog post publishes its FAQ', async () => {
+  const { renderBlogOutlineBody, renderFaqBlock } = await import('./newpage-render.js');
+  const SITE = { id: 1, url_file_map: {} };
+  const CONTENT = { title: 'T', metaDescription: 'D', sections: [{ heading: 'One', body: 'Text one.' }], faqItems: [{ question: 'How long?', answer: 'About a week & a day.' }, { question: 'Who?', answer: 'Anyone.' }], sources: [{ label: 'GOV.UK', url: 'https://www.gov.uk/x' }] };
+  const TEMPLATE = { wrapper: '<div class="faq"><h3 class="h">Frequently asked questions</h3>{{ROWS}}</div>', row: '<div class="row"><p class="q">{{QUESTION}}</p><p>{{ANSWER}}</p></div>' };
+
+  test('with the site\'s own FAQ design: its wrapper and row, filled in, between the FAQ markers', () => {
+    const body = renderBlogOutlineBody(CONTENT, SITE, { faqTemplate: TEMPLATE });
+    assert.match(body, /<!-- SEOAI:FAQ:START --><div class="faq"><h3 class="h">Frequently asked questions<\/h3><div class="row"><p class="q">How long\?<\/p><p>About a week &amp; a day\.<\/p><\/div>/);
+    assert.match(body, /<\/div><!-- SEOAI:FAQ:END -->/);
+  });
+  test('with no learned design: a plain Frequently asked questions section, still between the markers', () => {
+    const body = renderBlogOutlineBody(CONTENT, SITE, {});
+    assert.match(body, /<!-- SEOAI:FAQ:START -->\n\n## Frequently asked questions\n\n### How long\?\n\nAbout a week & a day\./);
+    assert.match(body, /<!-- SEOAI:FAQ:END -->/);
+  });
+  test('the FAQ comes after the sections and before the sources', () => {
+    const body = renderBlogOutlineBody(CONTENT, SITE, {});
+    assert.ok(body.indexOf('## One') < body.indexOf('SEOAI:FAQ:START') && body.indexOf('SEOAI:FAQ:END') < body.indexOf('## Sources'));
+  });
+  test('a post with no FAQ items is written exactly as before', () => {
+    const body = renderBlogOutlineBody({ ...CONTENT, faqItems: [] }, SITE, { faqTemplate: TEMPLATE });
+    assert.ok(!body.includes('SEOAI:FAQ'));
+    assert.equal(renderFaqBlock([{ question: 'q', answer: 'a' }]).includes('## Frequently asked questions'), true);
+  });
+});
+
+import { renderFaqBlock as renderFaqSafe } from './newpage-render.js';
+test('a $ in a FAQ question or answer is written as typed, and cannot pull the template placeholders in', () => {
+  const template = { wrapper: '<div>{{ROWS}}</div>', row: '<p>{{QUESTION}}</p><p>{{ANSWER}}</p>' };
+  const out = renderFaqSafe([{ question: 'Cost in US$$?', answer: "It is $& for $' and $$5." }], template);
+  assert.match(out, /<p>Cost in US\$\$\?<\/p>/);
+  assert.match(out, /It is \$&amp; for \$' and \$\$5\./);
+  assert.doesNotMatch(out, /\{\{(ANSWER|QUESTION|ROWS)\}\}/);
+});

@@ -209,7 +209,7 @@ export function placeMarkdownMarker(fileContent, markerName, { placeBefore = nul
 const cache = new Map();
 export async function loadSiblingMarkdown(site, filePath, { getRepoTree, getFileContent, ref, limit = 8, now = Date.now() } = {}) {
   const dir = String(filePath).split('/').slice(0, -1).join('/');
-  const key = `${site?.id}:${ref}:${dir}`;
+  const key = `${site?.id}:${ref}:${dir}:${limit}`;
   const hit = cache.get(key);
   if (hit && now - hit.at < 3600_000) return hit.texts;
   const tree = await getRepoTree(site, ref);
@@ -217,12 +217,14 @@ export async function loadSiblingMarkdown(site, filePath, { getRepoTree, getFile
     .filter((p) => p !== filePath && isMarkdownFile(p) && p.split('/').slice(0, -1).join('/') === dir)
     .slice(0, limit);
   const texts = [];
+  let failed = 0;
   for (const p of candidates) {
     // eslint-disable-next-line no-await-in-loop
-    const f = await getFileContent(site, p, ref).catch(() => null);
+    const f = await getFileContent(site, p, ref).catch(() => { failed += 1; return null; });
     if (f?.content) texts.push(f.content);
   }
-  cache.set(key, { at: now, texts });
+  // A result with read failures behind it (a rate-limited burst) is not kept: caching [] for an hour would stop the FAQ design being learned for the whole hour.
+  if (!failed || texts.length) cache.set(key, { at: now, texts });
   return texts;
 }
 

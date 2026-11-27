@@ -16,6 +16,7 @@ import { contentFocusLine } from '../lib/business-profile.js';
 import { attributionNote, globalGrowthNote, agencyCreditLine } from '../agents/lib/zunkireelabs-growth-policy.js';
 import { llmFailure } from './lib/llm-error.js';
 import { getFileContent } from '../github/client.js';
+import { loadSiteStyleRules, normalizeContent, styleRulesPrompt } from './lib/site-style-rules.js';
 import { acceptQuickAnswer, acceptFaqItems } from './lib/blog-contract-fields.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { verifyBlogTopic } from './lib/blog-topic-verifier.js';
@@ -288,9 +289,11 @@ export async function generate({ siteId, params }) {
   // 2026-09-11 Zunkireelabs growth policy: exactly one of these two notes is
   // ever non-empty for a given site, see zunkireelabs-growth-policy.js.
   const growthNote = attributionNote(site) + globalGrowthNote(site);
+  // This client's own written content rules (its repo's docs/seo-content-rules.md), told to the model up front and enforced again on the result below.
+  const styleRules = await loadSiteStyleRules(site).catch(() => null);
 
   const system = 'You are a content strategist writing a COMPLETE, publication-ready blog post covering the given ' +
-    `topic — this is a fresh piece, not based on an existing page. ` + industryFocus + noInventedDataNote + growthNote +
+    `topic — this is a fresh piece, not based on an existing page. ` + industryFocus + (!canonicalFocus && businessContext?.documentsText ? `${businessContext.documentsText} ` : '') + noInventedDataNote + growthNote + styleRulesPrompt(styleRules) +
     (groundingExcerpt
       ? 'Any claim about this specific business (its services, offerings, or policies) must be grounded ONLY in the ' +
         '"Real site content" text given below — never invent one. General topic knowledge not specific to this ' +
@@ -453,7 +456,7 @@ export async function generate({ siteId, params }) {
     )
     : null;
 
-  const content = {
+  const rawContent = {
     topic,
     title: parsed.title || '',
     metaDescription: parsed.metaDescription || '',
@@ -481,6 +484,7 @@ export async function generate({ siteId, params }) {
     // superlative pattern), not prose in general.
     groundingContext: [context, groundingExcerpt].filter(Boolean).join('\n\n'),
   };
+  const content = normalizeContent(rawContent, styleRules);
   return { content, summary: `Blog post draft for "${topic}" (${totalWords(sections)} words, ${sections.length} section(s))${serpBrief && serpBrief.format.key !== 'mixed' ? `, written as ${serpBrief.format.label} to match what ranks` : ''}` };
 }
 
