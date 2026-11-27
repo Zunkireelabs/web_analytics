@@ -115,3 +115,19 @@ describe('businessContextPrompt', () => {
     assert.match(text, /^About this company: /);
   });
 });
+
+describe('businessContextPrompt with the company\'s own documents', () => {
+  test('documents are included even when no profile is usable yet', () => {
+    const out = businessContextPrompt({ status: 'insufficient', documentsText: 'The company\'s own brand documents: [Voice] Friendly.' });
+    assert.match(out, /Voice\] Friendly/);
+  });
+  test('documents follow a canonical description', () => {
+    const out = businessContextPrompt({ status: 'canonical', state: 'confirmed', description: 'A salon app.', documentsText: 'DOCS-HERE' });
+    assert.match(out, /^About this company: A salon app\./);
+    assert.match(out, /DOCS-HERE/);
+  });
+  test('no documents leaves the prompt exactly as it was', () => {
+    assert.equal(businessContextPrompt({ status: 'canonical', state: 'confirmed', description: 'A salon app.' }), 'About this company: A salon app.');
+    assert.equal(businessContextPrompt({ status: 'insufficient' }), '');
+  });
+});

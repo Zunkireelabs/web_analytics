@@ -220,6 +220,8 @@ async function applyGapPlan(siteId, gapId, plan) {
   return { plan, actionCenter };
 }
 
+export { applyGapPlan };
+
 router.post('/internal/keywords/:siteId/gaps/:gapId/plan', async (req, res, next) => {
   try {
     const { plan } = req.body || {};

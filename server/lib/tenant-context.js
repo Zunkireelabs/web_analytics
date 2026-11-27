@@ -246,8 +246,11 @@ export async function loadBusinessContext(siteId, { agent = 'all', refresh = fal
   // Sibling awareness: a site that shares its domain with another project (marketplace + business) is told the other section exists.
   // Empty, and the description untouched, for every site with no path scope.
   const siblingNote = await siblingNoteFor(ctx.site);
+  // What the project's own people wrote about their brand (Project settings, Brand & topics). Soft: any failure is "no documents".
+  const documentsText = await import('../store/brand.js').then((m) => m.brandDocumentsPrompt(siteId)).catch(() => '');
   return {
     siblingNote,
+    documentsText,
     status: resolved.status,
     siteId,
     agent,
@@ -287,8 +290,10 @@ async function siblingNoteFor(site) {
 // Prompt text for a resolved business context. '' unless a profile is canonical: until one exists every agent keeps the prompt it had,
 // and once one exists it replaces the bare industry label with the five separated concepts.
 export function businessContextPrompt(bc) {
-  if (bc && bc.status !== 'canonical' && bc.siblingNote) return bc.siblingNote; // a scoped site is told about its sibling even before its profile is usable
-  if (!bc || bc.status !== 'canonical' || !bc.description) return '';
+  // The company's own documents apply whether or not a profile is usable: a person wrote them for this project.
+  const docs = bc?.documentsText ? ` ${bc.documentsText} ` : '';
+  if (bc && bc.status !== 'canonical' && bc.siblingNote) return bc.siblingNote + docs; // a scoped site is told about its sibling even before its profile is usable
+  if (!bc || bc.status !== 'canonical' || !bc.description) return docs ? docs.trim() + ' ' : '';
   const note = bc.state === 'confirmed' ? '' : ' (detected from the company\'s own website; not yet confirmed by a person)';
-  return `About this company${note}: ${bc.description}`;
+  return `About this company${note}: ${bc.description}${docs}`;
 }

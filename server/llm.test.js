@@ -165,3 +165,16 @@ describe('isRetryable', () => {
     assert.equal(isRetryable({ status: 400 }), false);
   });
 });
+
+describe('callLLMWithImages with the Claude worker on', () => {
+  test('never falls back to a paid vision API: refused as provider-unavailable unless LLM_WORKER_FALLBACK=api', async () => {
+    const was = [process.env.LLM_WORKER_MODE, process.env.LLM_WORKER_FALLBACK];
+    process.env.LLM_WORKER_MODE = 'on'; delete process.env.LLM_WORKER_FALLBACK;
+    try {
+      await assert.rejects(() => callLLMWithImages('s', 'u', ['aW1n'], {}), (e) => e.workerUnavailable === true && e.llmProvider === true && e.status === 502);
+    } finally {
+      if (was[0] === undefined) delete process.env.LLM_WORKER_MODE; else process.env.LLM_WORKER_MODE = was[0];
+      if (was[1] !== undefined) process.env.LLM_WORKER_FALLBACK = was[1];
+    }
+  });
+});

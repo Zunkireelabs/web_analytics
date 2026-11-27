@@ -13,6 +13,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>WORKER_RUN_UNTIL</key><string>23:30</string>
+    <key>WORKER_CONCURRENCY</key><string>4</string>
     <key>PATH</key><string>/Users/yukta/.nvm/versions/node/v20.19.4/bin:/Users/yukta/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key><true/>

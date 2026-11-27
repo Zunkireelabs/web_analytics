@@ -56,6 +56,14 @@ describe('content index against a real Postgres (migration 270)', { skip: !LOCAL
     assert.ok(!after.some((e) => e.draftId === d1));
   });
 
+  test('an entry with no tokens (the home page, a bare path) does not break the refresh for the whole project', async () => {
+    await db.query(`INSERT INTO page_inventory (site_id, page, discovered_via) VALUES ($1, 'https://ci-test.example/', $2)`, [SITE, MARK]);
+    await store.refreshContentIndex(SITE); // used to fail: NULL into content_index.tokens (NOT NULL), so the index stayed stale for every run
+    const rows = await db.query(`SELECT tokens FROM content_index WHERE site_id = $1 AND url = 'https://ci-test.example/'`, [SITE]);
+    assert.equal(rows.rows.length, 1);
+    assert.deepEqual(rows.rows[0].tokens, []);
+  });
+
   test('getFreshContentIndex refreshes an empty or old index and keeps a fresh one; a failing refresh returns what is stored, flagged stale', async () => {
     await clean();
     const first = await store.getFreshContentIndex(SITE, { maxAgeMs: 60_000 });

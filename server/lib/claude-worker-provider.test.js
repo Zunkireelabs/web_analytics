@@ -16,10 +16,11 @@ describe('where an AI call goes', () => {
   test('on: a call that names a generator goes to the worker when one is connected', async () => {
     assert.equal(await routeCall({ generatorId: 'expand-content' }, { env: on, online: async () => true }), 'worker');
   });
-  test('on: analysis and narration (no generator) go to the worker when one is connected, and to the API when none is', async () => {
+  test('on: analysis and narration (no generator) go to the worker when one is connected, and are refused (retried later) when none is, unless LLM_WORKER_FALLBACK=api', async () => {
     assert.equal(await routeCall({}, { env: on, online: async () => true }), 'worker');
     assert.equal(await routeCall({ generatorId: null }, { env: on, online: async () => true }), 'worker');
-    assert.equal(await routeCall({}, { env: on, online: async () => false }), 'api');
+    await assert.rejects(() => routeCall({}, { env: on, online: async () => false }), (e) => e.workerOffline === true && e.llmProvider === true);
+    assert.equal(await routeCall({}, { env: { ...on, LLM_WORKER_FALLBACK: 'api' }, online: async () => false }), 'api');
   });
   test('off: a call without a generator never asks whether a worker is online', async () => {
     assert.equal(await routeCall({}, { env: {}, online: async () => { throw new Error('must not be asked'); } }), 'api');
@@ -42,6 +43,14 @@ describe('a call through the queue', () => {
     assert.equal(text, '{"titles":["A"]}');
     assert.deepEqual([queued.system, queued.user, queued.generatorId, queued.siteId], ['S', 'U', 'meta-title', 8862]);
     assert.equal(queued.options.maxTokens, 400);
+  });
+  test('a call a person is waiting on can ask for a shorter wait than the 10-minute default', async () => {
+    let waited; let queued;
+    await callViaWorker({ system: 'S', user: 'U', generatorId: 'draft-edit', waitMs: 100000 }, { env: on, enqueue: async (r) => { queued = r; return 1; }, wait: async (id, o) => { waited = o.timeoutMs; return { ok: true, text: 'x' }; } });
+    assert.equal(waited, 100000);
+    assert.equal(queued.ttlMs, 100000);
+    await callViaWorker({ system: 'S', user: 'U', generatorId: 'faq' }, { env: on, enqueue: async (r) => { queued = r; return 2; }, wait: async (id, o) => { waited = o.timeoutMs; return { ok: true, text: 'x' }; } });
+    assert.equal(waited, 600000, 'every other call keeps the long default');
   });
   test('no answer in time is an outage that names the cause, never a generator defect', async () => {
     const err = await callViaWorker({ system: 'S', user: 'U', generatorId: 'faq' }, { env: on, enqueue: async () => 7, wait: async () => ({ ok: false, reason: 'expired', error: 'x' }) }).catch((e) => e);

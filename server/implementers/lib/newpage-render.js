@@ -124,7 +124,19 @@ export function renderLandingPageBody(content, site, { permalink = null, layout 
   return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink, { actionType: 'landing-page' })}\n`;
 }
 
-export function renderBlogOutlineBody(content, site, { permalink = null, layout = null, fieldNames = {}, frontMatterDefaults = null, sourcesInFrontMatter = false, bodyStyle = null } = {}) {
+const escFaq = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+/** One FAQ block for a markdown post: the site's learned design (`{wrapper, row}`, see html-faq-learn.js) or a plain section. */
+export function renderFaqBlock(items, template = null) {
+  if (template?.wrapper && template?.row) {
+    // Function replacers: a question or answer holding `$&`, `$'` or `$$` (a price, a currency) must be inserted as it is, never read as a replacement pattern.
+    // The answer is filled first so a question that happens to contain the text {{ANSWER}} cannot be filled in by mistake.
+    const rows = items.map((i) => template.row.replace('{{ANSWER}}', () => escFaq(i.answer)).replace('{{QUESTION}}', () => escFaq(i.question))).join('');
+    return `<!-- SEOAI:FAQ:START -->${template.wrapper.replace('{{ROWS}}', () => rows)}<!-- SEOAI:FAQ:END -->`;
+  }
+  return `<!-- SEOAI:FAQ:START -->\n\n## Frequently asked questions\n\n${items.map((i) => `### ${String(i.question).replace(/\s+/g, ' ').trim()}\n\n${String(i.answer).trim()}`).join('\n\n')}\n\n<!-- SEOAI:FAQ:END -->`;
+}
+
+export function renderBlogOutlineBody(content, site, { permalink = null, layout = null, fieldNames = {}, frontMatterDefaults = null, sourcesInFrontMatter = false, bodyStyle = null, faqTemplate = null } = {}) {
   // `fieldNames` maps a canonical field onto whatever THIS directory's
   // existing posts call it (newcontent-contract.js). The defaults below are
   // only what gets used when no sibling could be read — they are not a
@@ -166,6 +178,11 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
     if (!s?.heading) continue;
     parts.push(`## ${s.heading}\n\n${s.body || ''}`);
   }
+  // The post's FAQ, in the site's own FAQ design when its other posts have one (generators/lib/html-faq-learn.js), else as a plain "Frequently asked questions" section.
+  // Between the same SEOAI:FAQ markers the FAQ step uses, so that step sees this FAQ is there and never adds a second one. Before this a post's FAQ answers were
+  // written on the draft and never published by a markdown site.
+  const faqItems = (content.faqItems || []).filter((x) => x?.question && x?.answer);
+  if (faqItems.length) parts.push(renderFaqBlock(faqItems, faqTemplate));
   // Verified sources only (generators/lib/verified-sources.js). A site whose existing posts declare a `sources:` front-matter list gets one in the same
   // `- name / url` shape; every other site gets a visible "Sources" section at the end. Never both, never from anything the model merely said.
   const sources = (content.sources || []).filter((x) => x?.label && /^https:\/\//.test(x.url || ''));

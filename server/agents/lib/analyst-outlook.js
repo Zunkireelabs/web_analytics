@@ -158,7 +158,8 @@ export function buildFixes({ problems, measured, drafts, now = new Date() }) {
   const summary = solvedSummary(measured, now.getTime());
   return {
     counts: { ...counts, ...summary },
-    problems: sorted.map(({ draftId, ...p }) => p),
+    // The draft behind a problem that is waiting for a person is passed on, so it can be opened and edited right there (the Action Center draft panel). Every other problem keeps its draft private.
+    problems: sorted.map(({ draftId, ...p }) => (p.stage === 'needs-ok' && draftId ? { ...p, draftId } : p)),
     solved: buildSolved(measured.slice(0, 8)),
     week: buildWeek(drafts, now),
   };

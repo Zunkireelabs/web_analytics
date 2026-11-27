@@ -4,9 +4,11 @@ import { api, SELF } from '../api.js';
 import PageIntro from '../components/layout/PageIntro.jsx';
 import UnderlineTabs from '../components/settings/UnderlineTabs.jsx';
 import AnalystChatDrawer from '../components/AnalystChatDrawer.jsx';
-import OutlookTab from '../components/analyst/OutlookTab.jsx';
+import OutlookTab, { Notice } from '../components/analyst/OutlookTab.jsx';
 import FixesTab from '../components/analyst/FixesTab.jsx';
 import Badge from '../components/Badge.jsx';
+import DraftPanel from '../components/content/DraftPanel.jsx';
+import { shape as shapeDraft } from '../lib/content-history.js';
 import { fixesBadge } from '../lib/analyst-view.js';
 
 // Analyst: what the AI expects next week, and what it is already fixing, for THIS project. Two subpages:
@@ -24,6 +26,8 @@ export default function Analyst({ siteId, isPlatformAdmin = false }) {
   const [outlookError, setOutlookError] = useState(null);
   const [fixesError, setFixesError] = useState(null);
   const [approving, setApproving] = useState(false);
+  const [openError, setOpenError] = useState(null); // a draft that could not be opened from "Review and edit": shown above the list, never in place of it
+  const [panelItem, setPanelItem] = useState(null);  // a draft opened from "Review and edit": the same panel as everywhere else, with the touch-and-change box
   const [dashboard, setDashboard] = useState(null);  // only the staff chat drawer needs it
   // Only the newest request may commit, so a slow earlier response never overwrites a newer one.
   const outlookReq = useRef(0), fixesReq = useRef(0);
@@ -46,6 +50,8 @@ export default function Analyst({ siteId, isPlatformAdmin = false }) {
 
   // Both load up front so the Fixes tab badge is right before it is opened.
   useEffect(() => { loadOutlook(); loadFixes(); }, [loadOutlook, loadFixes]);
+  // Another project is a fresh start: a draft panel opened for the previous project must not stay open (its edits and Approve would go to the wrong project).
+  useEffect(() => { setPanelItem(null); setOpenError(null); }, [siteId]);
   useEffect(() => {
     if (!(isPlatformAdmin && siteId)) return;
     api.analyst.dashboard(SELF).then(setDashboard).catch(() => {});
@@ -73,8 +79,13 @@ export default function Analyst({ siteId, isPlatformAdmin = false }) {
         <OutlookTab outlook={outlook} loading={outlook === null && !outlookError} error={outlookError} onRetry={loadOutlook}
           onSeeFixes={() => setTab('fixes')} isPlatformAdmin={isPlatformAdmin} />
       ) : (
-        <FixesTab fixes={fixes} loading={fixes === null && !fixesError} error={fixesError} onRetry={() => loadFixes()} onApprove={approve} approving={approving} />
+        <>
+          {openError && <div className="mb-3"><Notice text={openError} action={<button type="button" className="underline" onClick={() => setOpenError(null)}>Dismiss</button>} /></div>}
+          <FixesTab fixes={fixes} loading={fixes === null && !fixesError} error={fixesError} onRetry={() => loadFixes()} onApprove={approve} approving={approving}
+            onEdit={(draftId) => { setOpenError(null); return api.actionCenter.draft(draftId, siteId).then((d) => setPanelItem(shapeDraft(d))).catch((e) => setOpenError(e.message || 'That draft could not be opened.')); }} />
+        </>
       )}
+      {panelItem && <DraftPanel item={panelItem} siteId={siteId} onClose={() => setPanelItem(null)} onChanged={() => loadFixes()} />}
 
       {isPlatformAdmin && siteId && <AnalystChatDrawer clientId={siteId} dashboard={dashboard} />}
     </div>

@@ -44,7 +44,17 @@ export async function run({ siteId, start, end, pageCache, params }) {
   }
 
   const fetchPage = pageCache || analyzePageUrl;
-  const fetched = await Promise.all(batch.map(async (page) => ({ page, result: await fetchPage(page) })));
+  // A re-check hands this agent only the pages that have an open issue (often 1 to 4), too few to know this site's own average, so it answered
+  // "insufficient-data" and the issue could never be closed or confirmed. Top the BASELINE up with the site's other candidate pages; the verdict is
+  // still only about the pages asked for (below), and nothing is written to the rotation.
+  const requested = params?.pages?.length ? new Set(params.pages) : null;
+  let baseline = batch;
+  if (requested && batch.length < MIN_PAGES_FOR_AVERAGE) {
+    const extra = await selectCandidatePages(siteId, 'internal-linking', { start, end, batchSize: MAX_PAGES, markPagesCheckedFn: async () => {} }).catch(() => null);
+    baseline = [...batch, ...(extra?.batch || []).filter((p) => !requested.has(p))].slice(0, MAX_PAGES);
+    for (const [k, v] of (extra?.impressionsByPage || [])) if (!impressionsByPage.has(k)) impressionsByPage.set(k, v);
+  }
+  const fetched = await Promise.all(baseline.map(async (page) => ({ page, result: await fetchPage(page) })));
   if (!params?.pages?.length) await markPagesChecked(siteId, 'internal-linking', batch);
 
   const reachable = fetched
@@ -63,7 +73,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // philosophy already used for CTR (ctr-anomaly.js) — a small marketing
   // site with naturally fewer internal links per page than a large content
   // hub shouldn't be judged against a generic industry number.
-  const deadEnds = flagBelowAverage(reachable, 'internalLinkCount', { thresholdPct: 50 });
+  const deadEnds = flagBelowAverage(reachable, 'internalLinkCount', { thresholdPct: 50 }).filter((r) => !requested || requested.has(r.page));
   // priorityByRank needs its input pre-sorted worst-first; rank by real
   // traffic impact (impressions) rather than by how far below average the
   // link count is, so priority reflects business impact, not just deviation size.

@@ -59,12 +59,33 @@ const QUESTION_SYSTEM = 'You are a senior growth analyst answering a specific qu
 // and one on the page that does are indistinguishable without it. Passed in
 // rather than loaded here so this function stays free of a database read,
 // and '' for every tenant until the flag is on.
+// What the model is shown for the briefing, bounded. Every finding of every agent used to be sent whole (evidence blobs included): about 100,000 characters for one
+// site's "short" briefing. Findings go most urgent first; each keeps its id, priority, why-it-matters and action label, with evidence cut to a short excerpt; the total stays
+// under MAX_FINDINGS_PROMPT_CHARS. The returned findings and the stored run are unchanged: only the prompt is bounded.
+export const MAX_FINDINGS_PROMPT_CHARS = 40000;
+const PROMPT_PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
+export function boundFindingsForPrompt(findings, { maxChars = MAX_FINDINGS_PROMPT_CHARS } = {}) {
+  if (!Array.isArray(findings)) return findings;
+  const ranked = findings.map((f, i) => ({ f, i })).sort((a, b) => (PROMPT_PRIORITY_RANK[a.f?.priority] ?? 4) - (PROMPT_PRIORITY_RANK[b.f?.priority] ?? 4) || a.i - b.i);
+  const out = []; let used = 2;
+  for (const { f } of ranked) {
+    let ev = f?.evidence;
+    if (ev != null && typeof ev !== 'string') { const j = JSON.stringify(ev); ev = j.length > 400 ? `${j.slice(0, 400)}…` : ev; }
+    else if (typeof ev === 'string' && ev.length > 400) ev = `${ev.slice(0, 400)}…`;
+    const item = { id: f?.id, priority: f?.priority, whyItMatters: typeof f?.whyItMatters === 'string' ? f.whyItMatters.slice(0, 400) : f?.whyItMatters, action: f?.recommendedAction?.label, evidence: ev };
+    const len = JSON.stringify(item).length + 1;
+    if (out.length && used + len > maxChars) break;
+    out.push(item); used += len;
+  }
+  return out;
+}
+
 export async function synthesizeFindings(findings, perAgent, question, systemOverride = null, { tenantContext = '' } = {}) {
   if (!findings.length) return null;
   const system = systemOverride || (question ? QUESTION_SYSTEM : BRIEFING_SYSTEM);
   const user = (question ? `Question: ${question}\n` : '') +
     (tenantContext ? `${tenantContext}\n\n` : '') +
-    `Findings: ${JSON.stringify(findings)}\nAgent statuses: ${JSON.stringify(perAgent)}`;
+    `Findings: ${JSON.stringify(boundFindingsForPrompt(findings))}\nAgent statuses: ${JSON.stringify(perAgent)}`;
   return callLLM(system, user, { maxTokens: 450 })
     .catch((err) => { console.warn('[orchestrator] synthesis failed:', err.message); return null; });
 }

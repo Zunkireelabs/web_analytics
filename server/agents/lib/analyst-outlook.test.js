@@ -113,6 +113,12 @@ describe('fixes', () => {
     assert.ok(!('draftId' in f.problems[0]));
     assert.equal(fixLabel('nope'), 'Improve the page');
   });
+  test('only a problem waiting for a person carries its draft, so it can be opened and edited', () => {
+    const waiting = buildProblems([issue(2, '/b')], { drafts: [draft(11, '/b', 'submitted_for_approval')] });
+    const f = buildFixes({ problems: waiting, measured: [], drafts: [] });
+    assert.equal(f.problems[0].stage, 'needs-ok');
+    assert.equal(f.problems[0].draftId, 11);
+  });
 });
 
 describe('field shifts', () => {

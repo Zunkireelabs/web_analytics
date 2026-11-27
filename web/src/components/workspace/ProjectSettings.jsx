@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import { Activity, BarChart3, ArrowLeftRight, Check, ChevronsUpDown, Globe, KeyRound, MapPin, PlugZap, Search, Settings as SettingsIcon, Store, Target, Users, UserPlus, X } from 'lucide-react';
+import { Activity, BookText, BarChart3, ArrowLeftRight, Check, ChevronsUpDown, Globe, KeyRound, MapPin, PlugZap, Search, Settings as SettingsIcon, Store, Target, Users, UserPlus, X } from 'lucide-react';
 import { api, timeAgo } from '../../api.js';
 import Avatar from '../Avatar.jsx';
 import Badge from '../Badge.jsx';
@@ -19,6 +19,7 @@ import PlacesFields from './PlacesFields.jsx';
 import { GBP_LABELS } from './BusinessProfileFields.jsx';
 import GiveAccessModal from './GiveAccessModal.jsx';
 import MonitoringTab from './MonitoringTab.jsx';
+import BrandTab from './BrandTab.jsx';
 import TokensTab from './TokensTab.jsx';
 import TransferProjectModal from './TransferProjectModal.jsx';
 import { STATUS } from '../../lib/palette.js';
@@ -30,6 +31,7 @@ import { ROLE_LABELS, SCOPED_PERMISSIONS, goalLine } from '../../lib/workspace.j
 const PROJECT_TABS = [
   { key: 'general', label: 'General', icon: SettingsIcon },
   { key: 'business', label: 'Business', icon: Store },
+  { key: 'brand', label: 'Brand & topics', icon: BookText },
   { key: 'connections', label: 'Connections', icon: PlugZap, manage: true },
   { key: 'people', label: 'People', icon: Users },
   { key: 'tokens', label: 'API tokens', icon: KeyRound, manage: true },
@@ -229,6 +231,7 @@ export default function ProjectSettings({ projects, project, email, tab, onTab, 
             </SettingsCard>
           </div>
         )}
+        {active === 'brand' && <BrandTab project={project} manage={manage} />}
         {active === 'business' && (() => {
           const verified = (offer?.verified || []).map((v) => v.name);
           const toReview = offer?.proposed?.length || 0;

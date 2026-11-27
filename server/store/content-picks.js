@@ -5,22 +5,22 @@ import { query } from '../db.js';
 
 export async function listContentPicks(siteId) {
   const { rows } = await query(
-    'SELECT finding_id, generator_id, option_key, status, chosen_at FROM content_picks WHERE site_id = $1 ORDER BY chosen_at DESC',
+    'SELECT finding_id, generator_id, option_key, status, chosen_at, notes FROM content_picks WHERE site_id = $1 ORDER BY chosen_at DESC',
     [siteId]
   );
   return rows;
 }
 
 // Choosing again replaces the earlier choice and puts it back to 'saved' so the next run builds the new one.
-export async function saveContentPick(siteId, { findingId, generatorId, optionKey, userId = null }) {
+export async function saveContentPick(siteId, { findingId, generatorId, optionKey, userId = null, notes = [] }) {
   const { rows } = await query(
-    `INSERT INTO content_picks (site_id, finding_id, generator_id, option_key, chosen_by)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO content_picks (site_id, finding_id, generator_id, option_key, chosen_by, notes)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb)
      ON CONFLICT (site_id, finding_id) DO UPDATE
-       SET generator_id = EXCLUDED.generator_id, option_key = EXCLUDED.option_key, chosen_by = EXCLUDED.chosen_by,
+       SET generator_id = EXCLUDED.generator_id, option_key = EXCLUDED.option_key, chosen_by = EXCLUDED.chosen_by, notes = EXCLUDED.notes,
            status = 'saved', chosen_at = now(), updated_at = now()
-     RETURNING finding_id, generator_id, option_key, status, chosen_at`,
-    [siteId, findingId, generatorId, optionKey, userId]
+     RETURNING finding_id, generator_id, option_key, status, chosen_at, notes`,
+    [siteId, findingId, generatorId, optionKey, userId, JSON.stringify(notes || [])]
   );
   return rows[0];
 }
@@ -37,7 +37,7 @@ export async function clearContentPick(siteId, findingId) {
 // What the next run builds.
 export async function listSavedPicks(siteId) {
   const { rows } = await query(
-    "SELECT finding_id, generator_id, option_key FROM content_picks WHERE site_id = $1 AND status = 'saved' ORDER BY chosen_at",
+    "SELECT finding_id, generator_id, option_key, chosen_by, notes FROM content_picks WHERE site_id = $1 AND status = 'saved' ORDER BY chosen_at",
     [siteId]
   );
   return rows;

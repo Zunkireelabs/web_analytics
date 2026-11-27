@@ -110,3 +110,14 @@ describe('a finished answer survives the server restarting at the moment it is h
     assert.deepEqual(waits, [2000, 4000, 8000, 16000]);
   });
 });
+
+describe('modelForRequest: light model for mechanical jobs only', () => {
+  test('meta titles and other mechanical jobs use the light model; blog posts, narratives and unknown jobs keep the default', async () => {
+    const { modelForRequest } = await import('../../tools/claude-code-worker/lib.mjs');
+    assert.equal(modelForRequest({ generatorId: 'meta-title' }, { model: null }), 'haiku');
+    assert.equal(modelForRequest({ generatorId: 'blog-outline' }, { model: null }), null);
+    assert.equal(modelForRequest({ generatorId: null }, { model: 'sonnet' }), 'sonnet');
+    assert.equal(modelForRequest({ generatorId: 'meta-title' }, { model: 'sonnet', lightModel: 'off' }), 'sonnet');
+    assert.equal(modelForRequest({ generatorId: 'faq' }, { model: null, lightGenerators: ['faq'] }), 'haiku');
+  });
+});

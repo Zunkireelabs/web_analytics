@@ -659,6 +659,19 @@ export function resolveNewContentUrl(site, actionType, title) {
   return url;
 }
 
+// The public URL of a page that was ACTUALLY written, from the file it went to: the file name is the slug the site's own router uses, so this stays right when the title was
+// edited or its spelling was put right after the file name was chosen. Null when the site has no urlPattern or the path has no usable name.
+export function resolveNewContentUrlForFile(site, actionType, filePath) {
+  const cfg = site?.url_file_map?.newContentTargets?.[actionType];
+  if (!cfg?.urlPattern || !String(cfg.urlPattern).includes('{slug}') || typeof filePath !== 'string' || !filePath) return null;
+  const parts = filePath.split('/').filter(Boolean);
+  // A directory-per-page target (blog/<slug>/page.tsx) names the page by its folder; a flat target (blog/<slug>.md) by the file.
+  const raw = cfg.filename ? parts[parts.length - 2] : (parts[parts.length - 1] || '').replace(/\.[^.]+$/, '');
+  if (!raw || !/^[a-z0-9][a-z0-9-_]*$/i.test(raw)) return null;
+  const url = String(cfg.urlPattern).replace('{slug}', raw);
+  return url.startsWith('/') && !url.includes('..') && !url.includes('//') ? url : null;
+}
+
 // Where a page that SHOULD exist at `href` would have to be written, derived
 // from the real files of its already-existing siblings rather than from
 // per-target config.

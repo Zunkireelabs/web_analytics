@@ -1373,4 +1373,79 @@ router.delete('/projects/:siteId', requireAuth, requireProjectRole('owner'), asy
   } catch (e) { next(e); }
 });
 
+// ── Brand & topics: what the project's own people tell the agents (the Project settings "Brand & topics" tab) ──────────────────────
+// Reading needs member access; adding and removing need a project admin, the same gate as the business profile review. Every query is scoped to req.projectId.
+router.get('/projects/:siteId/brand', requireAuth, requireProjectRole('member'), async (req, res, next) => {
+  try {
+    const { listBrandDocuments, listRequestedTopics, getBrandAbout, MAX_ABOUT_CHARS } = await import('../store/brand.js');
+    const [documents, topics, about] = await Promise.all([listBrandDocuments(req.projectId), listRequestedTopics(req.projectId), getBrandAbout(req.projectId)]);
+    res.json({ documents, topics, about: about.about, aboutUpdatedAt: about.updated_at, maxAboutChars: MAX_ABOUT_CHARS, canEdit: req.projectRole !== 'member' });
+  } catch (err) { next(err); }
+});
+
+router.put('/projects/:siteId/brand/about', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const { setBrandAbout, MAX_ABOUT_CHARS } = await import('../store/brand.js');
+    const about = typeof req.body?.about === 'string' ? req.body.about.replace(/\u0000/g, '').trim() : null;
+    if (about === null) return res.status(400).json({ error: 'Send the text about the brand.' });
+    if (about.length > MAX_ABOUT_CHARS) return res.status(400).json({ error: `That is too long (${about.length} characters; the limit is ${MAX_ABOUT_CHARS}). Put the detail in a document instead.` });
+    const saved = await setBrandAbout(req.projectId, about, req.userId);
+    recordAuditEvent(req, { action: 'brand.about_saved', targetType: 'site', targetId: String(req.projectId), tenantSiteId: req.projectId, tenantName: req.project.name, success: true });
+    res.json({ about: saved.about, aboutUpdatedAt: saved.updated_at });
+  } catch (err) { next(err); }
+});
+
+// A document sent as the file itself (Word, PDF or text): the text is read out of it and saved; the file is not kept.
+router.post('/projects/:siteId/brand/documents/upload', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const [{ addBrandDocument, MAX_DOC_CHARS }, { extractDocumentText }] = await Promise.all([import('../store/brand.js'), import('../lib/document-text.js')]);
+    const fileName = typeof req.query?.name === 'string' ? req.query.name.trim().slice(0, 200) : '';
+    if (!fileName) return res.status(400).json({ error: 'The file has no name.' });
+    const text = await extractDocumentText({ name: fileName, buffer: Buffer.isBuffer(req.body) ? req.body : null });
+    if (text.length > MAX_DOC_CHARS) return res.status(400).json({ error: `That file has ${text.length.toLocaleString()} characters of text; the limit for one document is ${MAX_DOC_CHARS.toLocaleString()}. Split it into parts.` });
+    const name = fileName.replace(/\.[^.]+$/, '').slice(0, 120) || fileName;
+    const doc = await addBrandDocument(req.projectId, { name, content: text }, req.userId);
+    recordAuditEvent(req, { action: 'brand.document_added', targetType: 'site', targetId: String(req.projectId), tenantSiteId: req.projectId, tenantName: req.project.name, success: true });
+    res.status(201).json({ ...doc, chars: text.length });
+  } catch (err) { if (err.status) return res.status(err.status).json({ error: err.message }); next(err); }
+});
+
+router.post('/projects/:siteId/brand/documents', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const { addBrandDocument, MAX_DOC_CHARS } = await import('../store/brand.js');
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 120) : '';
+    const content = typeof req.body?.content === 'string' ? req.body.content.replace(/\u0000/g, '').trim() : '';
+    if (!name) return res.status(400).json({ error: 'Give the document a name.' });
+    if (!content) return res.status(400).json({ error: 'The document is empty.' });
+    if (content.length > MAX_DOC_CHARS) return res.status(400).json({ error: `That document is too long (${content.length} characters; the limit is ${MAX_DOC_CHARS}). Add it in parts.` });
+    const doc = await addBrandDocument(req.projectId, { name, content }, req.userId);
+    recordAuditEvent(req, { action: 'brand.document_added', targetType: 'site', targetId: String(req.projectId), tenantSiteId: req.projectId, tenantName: req.project.name, success: true });
+    res.status(201).json(doc);
+  } catch (err) { if (err.status) return res.status(err.status).json({ error: err.message }); next(err); }
+});
+
+router.delete('/projects/:siteId/brand/documents/:id', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const { deleteBrandDocument } = await import('../store/brand.js');
+    const ok = await deleteBrandDocument(req.projectId, Number(req.params.id));
+    if (!ok) return res.status(404).json({ error: 'Not found.' });
+    recordAuditEvent(req, { action: 'brand.document_deleted', targetType: 'site', targetId: String(req.projectId), tenantSiteId: req.projectId, tenantName: req.project.name, success: true });
+    res.json({ deleted: true });
+  } catch (err) { next(err); }
+});
+
+// A topic the person wants a blog on: it enters the keyword queue as their own request and is planned as a blog right away, so the daily run drafts it.
+router.post('/projects/:siteId/brand/topics', requireAuth, requireProjectRole('admin'), async (req, res, next) => {
+  try {
+    const topic = typeof req.body?.topic === 'string' ? req.body.topic.replace(/\s+/g, ' ').trim() : '';
+    if (!topic) return res.status(400).json({ error: 'Type the topic you want a blog on.' });
+    if (topic.length > 200) return res.status(400).json({ error: 'A topic must be 200 characters or fewer.' });
+    const [{ createUserKeywordGap }, { applyGapPlan }] = await Promise.all([import('../store/data-analyst.js'), import('./keywords.js')]);
+    const gap = await createUserKeywordGap(req.projectId, topic, 'Added on the Brand & topics tab as a topic to write a blog on.');
+    const planned = await applyGapPlan(req.projectId, gap.id, 'blog');
+    recordAuditEvent(req, { action: 'brand.topic_added', targetType: 'site', targetId: String(req.projectId), tenantSiteId: req.projectId, tenantName: req.project.name, success: true });
+    res.status(gap.alreadyQueued ? 200 : 201).json({ ...gap, planned });
+  } catch (err) { if (err.status) return res.status(err.status).json({ error: err.message }); next(err); }
+});
+
 export default router;

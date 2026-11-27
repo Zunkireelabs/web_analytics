@@ -84,6 +84,38 @@ function layoutOf(body) {
   return m ? m[1] : null;
 }
 
+// A markdown blog publishes its FAQ in the site's own FAQ design, learned from its other posts.
+describe('resolveTargetAndBody: a markdown blog post publishes its FAQ', () => {
+  const faqBlock = (q) => `<!-- SEOAI:FAQ:START --><div class="mt-10 p-6"><h3 class="faq-h">Frequently asked questions</h3><div class="space-y-6"><div><p class="q">${q}?</p><p class="a">An answer for ${q}.</p></div><div><p class="q">${q} too?</p><p class="a">Another answer for ${q}.</p></div></div></div><!-- SEOAI:FAQ:END -->`;
+  const BLOG_SITE = { id: 77, repo_owner: 'o', repo_name: 'r', repo_default_branch: 'main', url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md' } } } };
+  const POSTS = {
+    'src/blog/a.md': `---\ntitle: "A"\n---\n\n## One\n\ntext\n\n${faqBlock('Why a')}\n`,
+    'src/blog/b.md': `---\ntitle: "B"\n---\n\n## One\n\ntext\n\n${faqBlock('Why b')}\n`,
+    'src/blog/c.md': `---\ntitle: "C"\n---\n\n## One\n\ntext\n\n${faqBlock('Why c')}\n`,
+  };
+  const draft = { action_type: 'blog-outline', content: { title: 'My post', metaDescription: 'd', sections: [{ heading: 'Intro', body: 'Hello there.' }], faqItems: [{ question: 'Is it free', answer: 'Yes it is.' }] } };
+
+  test('with other posts that carry a FAQ, the new post\'s FAQ is drawn in the same design', async () => {
+    const r = await resolveTargetAndBody(BLOG_SITE, draft, repoDeps(POSTS));
+    assert.equal(r.ok, true);
+    assert.match(r.body, /<h3 class="faq-h">Frequently asked questions<\/h3>/);
+    assert.match(r.body, /<p class="q">Is it free<\/p><p class="a">Yes it is\.<\/p>/);
+  });
+
+  test('with no post to learn from, the FAQ is still published as a plain section', async () => {
+    const r = await resolveTargetAndBody({ ...BLOG_SITE, id: 78 }, draft, { ...repoDeps({ 'src/blog/x.md': '---\ntitle: "X"\n---\n\ntext\n' }), learnSiteFaqTemplate: async () => null });
+    assert.equal(r.ok, true);
+    assert.match(r.body, /## Frequently asked questions\n\n### Is it free\n\nYes it is\./);
+  });
+
+  test('a site whose blog posts have no FAQ but whose other pages do (SuperRank\'s pricing page) publishes it in that design', async () => {
+    const siteFaq = { wrapper: '<div class="faq-x__in"><h2 class="faq-x__h">Frequently asked questions</h2><div class="faq-x__l">{{ROWS}}</div></div>', row: '<details><summary>{{QUESTION}}</summary><p>{{ANSWER}}</p></details>', learnedFrom: 'https://s.example/pricing' };
+    const r = await resolveTargetAndBody({ ...BLOG_SITE, id: 79 }, draft, { ...repoDeps({ 'src/blog/x.md': '---\ntitle: "X"\n---\n\ntext\n' }), learnSiteFaqTemplate: async () => siteFaq });
+    assert.equal(r.ok, true);
+    assert.match(r.body, /<div class="faq-x__in"><h2 class="faq-x__h">Frequently asked questions<\/h2><div class="faq-x__l"><details><summary>Is it free<\/summary><p>Yes it is\.<\/p><\/details>/);
+  });
+});
+
 // One bug, five net-new-content branches. blog-outline and direct-answer were
 // fixed first; these are the three that were still resolving `layout` from
 // per-site config and so still writing a page out of its own template.
@@ -113,6 +145,37 @@ describe('resolveTargetAndBody — layout comes from the repo, not from config',
     // Not base.njk (config) and not null (what a majority vote over src/pages
     // would have said, since most pages there declare none) — /about's own.
     assert.equal(layoutOf(result.body), 'page.njk');
+  });
+
+  test('a whole-post translation is written exactly as translated: front matter, table, FAQ, sources and all', async () => {
+    const file = '---\ntitle: "Über uns"\n---\n\n## Wir\n\n| A | B |\n| --- | --- |\n\n<!-- SEOAI:FAQ:START --><div>F</div>\n\n## Quellen\n\n<ul><li><a href="https://x.org">X</a></li></ul>\n';
+    const draft = { action_type: 'translation', content: { page: 'https://example.com/about/', targetLanguage: 'Spanish', translatedTitle: 'Über uns', translatedContent: 'Wir', translatedFile: file } };
+    const result = await resolveTargetAndBody(SITE, draft, repoDeps(REPO));
+    assert.equal(result.ok, true);
+    assert.equal(result.filePath, 'src/pages/about.es.njk');
+    assert.equal(result.body, file);
+    assert.equal(result.contentFormat, 'markdown');
+  });
+
+  test('a reviewer\'s correction to a whole-post translation is what gets written', async () => {
+    const file = '---\ntitle: "Uber uns"\n---\n\nWir sind hier.\n';
+    const parts = { title: 'Uber uns', description: '', body: 'Wir sind hier.\n' };
+    const draft = { action_type: 'translation', content: { page: 'https://example.com/about/', targetLanguage: 'German', translatedTitle: 'Über uns', translatedContent: 'Wir sind hier, in Nepal.\n', translatedFile: file, translatedFileParts: parts } };
+    const result = await resolveTargetAndBody(SITE, draft, repoDeps(REPO));
+    assert.equal(result.ok, true);
+    assert.match(result.body, /title: "Über uns"/);
+    assert.match(result.body, /Wir sind hier, in Nepal\./);
+    assert.doesNotMatch(result.body, /Uber uns/);
+  });
+
+  test('a whole-post translation never replaces a translation that is already in the repository', async () => {
+    const file = '---\ntitle: "Über uns"\n---\n\nWir.\n';
+    const draft = { action_type: 'translation', content: { page: 'https://example.com/about/', targetLanguage: 'Spanish', translatedTitle: 'Über uns', translatedContent: 'Wir.\n', translatedFile: file } };
+    const taken = await resolveTargetAndBody(SITE, draft, repoDeps({ ...REPO, 'src/pages/about.es.njk': '---\ntitle: "Sobre nosotros"\n---\n\nNosotros.\n' }));
+    assert.equal(taken.ok, false);
+    assert.equal(taken.reason, 'translation-exists');
+    const same = await resolveTargetAndBody(SITE, draft, repoDeps({ ...REPO, 'src/pages/about.es.njk': file }));
+    assert.equal(same.ok, true, 'the very same file already there is not a conflict');
   });
 
   test('a translation whose source page is unreadable keeps the configured layout', async () => {

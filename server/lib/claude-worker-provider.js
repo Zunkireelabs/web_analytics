@@ -6,8 +6,8 @@ import { enqueueRequest, waitForRequest, workerOnline } from '../store/llm-reque
 // (store/llm-requests.js) and answered by Claude Code running on a person's laptop, instead of by a paid AI API. Everything else is unchanged: the server's
 // quality and design checks, the repo write and the pull request.
 //
-// A call that names a generator MUST go to the worker. Agents' own analysis, narration and synthesis (no generatorId) go to the worker whenever one is connected,
-// and use the API providers only when none is, because they run on timers all day and must not sit waiting for a laptop. AI-visibility probes (they must ask the
+// A call that names a generator MUST go to the worker. Agents' own analysis, narration and synthesis (no generatorId) go to the worker too (2026-11-27: they no longer fall back to the paid API when no worker is connected,
+// unless LLM_WORKER_FALLBACK=api). AI-visibility probes (they must ask the
 // real provider) and image calls never come here.
 //
 // Off unless LLM_WORKER_MODE=on, so deploying this changes nothing by itself. When on and no worker is connected:
@@ -30,15 +30,17 @@ export function workerUnavailable(message, extra = {}) {
  */
 export async function routeCall({ generatorId } = {}, { env = process.env, online = workerOnline } = {}) {
   if (!workerMode(env)) return 'api';
-  if (!generatorId) return (await online()) ? 'worker' : 'api'; // analysis/narration: worker when the laptop is open, otherwise as before
+  // Analysis/narration/synthesis (no generatorId) follow the same rule as a fix: ALL AI goes through the worker. With the laptop closed the call does not fall back to a paid API
+  // (owner's rule, 2026-11-27): it fails as "provider unavailable", is retried when the worker is back, and never closes an issue. LLM_WORKER_FALLBACK=api restores the old fall-back.
   if (await online()) return 'worker';
   if (workerFallback(env) === 'api') return 'api';
   throw workerUnavailable('The Claude Code worker is not connected, so no fix can be written right now. It runs when the laptop is open; this is retried on the next pass.', { workerOffline: true });
 }
 
 /** Sends the call through the queue and waits for the worker's text. */
-export async function callViaWorker({ system, user, generatorId = null, siteId = null, maxTokens = null, tier = 'daily', pageUrl = null }, { env = process.env, enqueue = enqueueRequest, wait = waitForRequest } = {}) {
-  const timeoutMs = workerWaitMs(env);
+export async function callViaWorker({ system, user, generatorId = null, siteId = null, maxTokens = null, tier = 'daily', pageUrl = null, waitMs = null }, { env = process.env, enqueue = enqueueRequest, wait = waitForRequest } = {}) {
+  // A call a person is waiting on (the draft editor) passes its own, shorter wait; everything else keeps the long default.
+  const timeoutMs = waitMs ? Math.max(5_000, Number(waitMs)) : workerWaitMs(env);
   const id = await enqueue({ siteId, generatorId, system, user, options: { maxTokens, tier, pageUrl }, ttlMs: timeoutMs });
   const r = await wait(id, { timeoutMs });
   if (r.ok) return r.text;

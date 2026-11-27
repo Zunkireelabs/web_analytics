@@ -112,3 +112,20 @@ describe('excerpt selection', () => {
     assert.ok(!needle.startsWith('aaa'));
   });
 });
+
+describe('verificationMethodFor — a brand-new blog post is checked on its live URL', () => {
+  const post = { action_type: 'blog-outline', finding_id: 'f-9', source: 'auto-remediation', input: {}, content: { title: 'T', sections: [{ heading: 'H', body: 'A reasonably long paragraph of generated blog prose that should be findable on the live page.' }] } };
+  test('with the URL worked out from the site pattern, the live page is fetched', () => {
+    const plan = verificationMethodFor(post, { siteOrigin: 'https://zennly.io', newPageUrl: '/businesses/blog/t' });
+    assert.equal(plan.method, VERIFICATION_METHOD.PAGE_CONTENT);
+    assert.equal(plan.target, 'https://zennly.io/businesses/blog/t');
+  });
+  test('without it the old behaviour is unchanged (no public URL, so not checkable)', () => {
+    const plan = verificationMethodFor(post, { siteOrigin: 'https://zennly.io' });
+    assert.equal(plan.method, VERIFICATION_METHOD.UNVERIFIABLE);
+  });
+  test('a draft that already names its page keeps that page', () => {
+    const plan = verificationMethodFor({ ...post, input: { page: 'https://zennly.io/x' } }, { siteOrigin: 'https://zennly.io', newPageUrl: '/businesses/blog/t' });
+    assert.equal(plan.target, 'https://zennly.io/x');
+  });
+});

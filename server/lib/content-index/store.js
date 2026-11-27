@@ -32,7 +32,7 @@ export async function refreshContentIndex(siteId, { query = defaultQuery, listin
     const part = entries.slice(i, i + CHUNK);
     await query(
       `INSERT INTO content_index (site_id, ref_key, kind, state, url, title, topic_key, tokens, source, draft_id, branch_name, pr_url, file_path, content_hash)
-       SELECT $1, ref_key, kind, state, url, title, topic_key, string_to_array(NULLIF(tokens, ''), ' '), source, draft_id, branch_name, pr_url, file_path, content_hash
+       SELECT $1, ref_key, kind, state, url, title, topic_key, COALESCE(string_to_array(NULLIF(tokens, ''), ' '), ARRAY[]::text[]), source, draft_id, branch_name, pr_url, file_path, content_hash
          FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::int[], $11::text[], $12::text[], $13::text[], $14::text[])
               AS t(ref_key, kind, state, url, title, topic_key, tokens, source, draft_id, branch_name, pr_url, file_path, content_hash)
        ON CONFLICT (site_id, ref_key) DO UPDATE SET kind = EXCLUDED.kind, state = EXCLUDED.state, url = EXCLUDED.url, title = EXCLUDED.title, topic_key = EXCLUDED.topic_key,

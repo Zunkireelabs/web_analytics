@@ -47,14 +47,24 @@ export function minuteOfDay(timezone, now = new Date()) {
  * Wraps `fn` so it runs at most once per calendar day in `timezone`, the first time it is called that day (a later call the same day returns undefined). Used to put the day's issue
  * re-check in front of the day's first fix pass: the laptop (and so the worker) is only on from about 10:30, so the re-check runs the moment the worker is up and the fixes follow it.
  */
-export function oncePerDay(timezone, fn, { now = () => new Date() } = {}) {
+export function oncePerDay(timezone, fn, { now = () => new Date(), retryAfterMs = 30 * 60_000 } = {}) {
   let doneFor = null;
+  let retryAt = 0;
   return async (...args) => {
     const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(now());
     const day = `${parts.find((p) => p.type === 'year').value}-${parts.find((p) => p.type === 'month').value}-${parts.find((p) => p.type === 'day').value}`;
     if (doneFor === day) return undefined;
-    doneFor = day;
-    return fn(...args);
+    if (retryAt && now().getTime() < retryAt) return undefined;
+    doneFor = day; // taken before the run so an overlapping call the same day cannot start a second one
+    try {
+      const r = await fn(...args);
+      retryAt = 0;
+      return r;
+    } catch (err) {
+      // A run that threw did not happen: the day is given back, and it is tried again after a pause (not on every tick), so one failure does not cost the whole day.
+      doneFor = null; retryAt = now().getTime() + retryAfterMs;
+      throw err;
+    }
   };
 }
 

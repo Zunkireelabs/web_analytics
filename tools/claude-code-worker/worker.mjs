@@ -5,7 +5,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir, hostname, homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
-import { buildClaudeArgs, parseClaudeOutput, workerIdFrom, backoffMs, logLine, decideClaimFailure, deliverWithRetry } from './lib.mjs';
+import { buildClaudeArgs, modelForRequest, parseClaudeOutput, workerIdFrom, backoffMs, logLine, decideClaimFailure, deliverWithRetry } from './lib.mjs';
 
 const env = process.env;
 const SERVER = String(env.SUPERRANK_URL || '').replace(/\/+$/, '');
@@ -50,13 +50,13 @@ async function api(path, body, { timeoutMs = 40_000, method = 'POST' } = {}) {
 }
 
 /** Runs Claude Code on one request: system prompt in a file, user prompt on stdin, answer from its JSON output. */
-function runClaude({ system, user }) {
+function runClaude({ system, user, model = MODEL }) {
   const dir = mkdtempSync(join(tmpdir(), 'srw-'));   // an empty directory: nothing to read, nothing to leak
   const systemFile = join(dir, 'system.txt');
   writeFileSync(systemFile, system);
   if (CONFIG_DIR) mkdirSync(CONFIG_DIR, { recursive: true });
   return new Promise((resolve) => {
-    const child = spawn(CLAUDE_BIN, buildClaudeArgs({ systemFile, model: MODEL }), { cwd: dir, env: CONFIG_DIR ? { ...env, CLAUDE_CONFIG_DIR: CONFIG_DIR } : (({ CLAUDE_CONFIG_DIR: _drop, ...rest }) => rest)(env), stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(CLAUDE_BIN, buildClaudeArgs({ systemFile, model }), { cwd: dir, env: CONFIG_DIR ? { ...env, CLAUDE_CONFIG_DIR: CONFIG_DIR } : (({ CLAUDE_CONFIG_DIR: _drop, ...rest }) => rest)(env), stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = ''; let stderr = ''; let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, TIMEOUT_MS);
     child.stdout.on('data', (d) => { stdout += d; }); child.stderr.on('data', (d) => { stderr += d; });
@@ -71,7 +71,7 @@ async function handle(req) {
   say({ type: 'claimed', id: req.id, generatorId: req.generatorId, siteId: req.siteId });
   stats.active++; held.add(req.id);
   try {
-    const out = await runClaude({ system: req.system, user: req.user });
+    const out = await runClaude({ system: req.system, user: req.user, model: modelForRequest(req, { model: MODEL, lightModel: env.WORKER_LIGHT_MODEL === undefined ? 'haiku' : env.WORKER_LIGHT_MODEL, lightGenerators: env.WORKER_LIGHT_GENERATORS ? env.WORKER_LIGHT_GENERATORS.split(',').map((x) => x.trim()).filter(Boolean) : undefined }) });
     if (out.ok) {
       // The answer is already paid for: hand it over even if the server is restarting right now (see deliverWithRetry).
       const sent = await deliverWithRetry(() => api(`/requests/${req.id}/complete`, { text: out.text }), { onRetry: ({ error, attempt, ms }) => say({ type: 'server-error', error: `could not hand over #${req.id}: ${error.message} (attempt ${attempt}, keeping the answer)`, ms }) });

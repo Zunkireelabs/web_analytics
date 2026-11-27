@@ -151,3 +151,15 @@ test('oncePerDay: runs the first call of a calendar day (in its own time zone) a
   t = new Date('2026-11-27T18:30:00Z');                       // 00:15 on 28 Nov in Nepal: a new day
   assert.equal(await f(), 'ran'); assert.equal(calls, 2);
 });
+
+test('oncePerDay: a run that threw is not counted as the day\'s run; it is retried after a pause, not on every tick', async () => {
+  const { oncePerDay } = await import('./worker-session.js');
+  let t = new Date('2026-11-28T05:00:00Z'); let calls = 0;
+  const f = oncePerDay('Asia/Kathmandu', async () => { calls++; if (calls === 1) throw new Error('worker dropped'); return 'ran'; }, { now: () => t, retryAfterMs: 30 * 60_000 });
+  await assert.rejects(f(), /worker dropped/);
+  assert.equal(await f(), undefined, 'inside the pause: not again');
+  t = new Date(t.getTime() + 31 * 60_000);
+  assert.equal(await f(), 'ran', 'after the pause: tried again the same day');
+  assert.equal(await f(), undefined, 'and then done for the day');
+  assert.equal(calls, 2);
+});

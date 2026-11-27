@@ -22,6 +22,15 @@ export function buildClaudeArgs({ systemFile, model = null }) {
   return args;
 }
 
+// WHICH MODEL ANSWERS A REQUEST. Mechanical jobs (a 60-character meta title, a page-type label, a schema block, a pass/fail QA) do not need the strongest model, and
+// each call costs about 10 seconds of Claude Code start-up either way: the light model is faster and uses far less of the plan. Everything else, blog posts and the
+// analysis and narratives included, keeps WORKER_MODEL (Claude Code's default when unset). WORKER_LIGHT_MODEL=off turns this off; WORKER_LIGHT_GENERATORS replaces the list.
+export const DEFAULT_LIGHT_GENERATORS = ['meta-title', 'page-content-classifier', 'gap-coverage', 'schema', 'qa-content', 'internal-links'];
+export function modelForRequest(req, { model = null, lightModel = 'haiku', lightGenerators = DEFAULT_LIGHT_GENERATORS } = {}) {
+  if (!lightModel || String(lightModel).toLowerCase() === 'off') return model;
+  return req?.generatorId && lightGenerators.includes(req.generatorId) ? lightModel : model;
+}
+
 const LIMIT = /usage limit|limit reached|rate.?limit|too many requests|quota|overloaded|capacity|try again (later|in)|resets? (at|in)/i;
 const AUTH = /not logged in|please (run )?\/?login|invalid api key|authentication|unauthori[sz]ed|credential/i;
 const TRANSIENT = /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network|fetch failed|timed out|timeout|5\d\d\b/i;

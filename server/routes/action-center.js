@@ -4,7 +4,9 @@ import { shipStep, mergeStagePr } from '../lib/ship-flow.js';
 import { promoteMergedStageBatches } from '../lib/stage-promotion.js';
 import { classify } from '../agents/lib/recommendation-taxonomy.js';
 import { describeSession, sessionState, workerSessionTimezone } from '../lib/worker-session.js';
-import { previewDraftInSiteArticle, previewOptionInSiteTemplate } from '../lib/draft-article-preview.js';
+import { previewDraftInSiteArticle, previewOptionInSiteTemplate, previewOptionLive, previewDraftLive, editDraftBlock, INTERACTIVE_WAIT_MS } from '../lib/draft-article-preview.js';
+import { editableFields, editDraftContent, rewriteDraftField } from '../lib/draft-content-edit.js';
+import { cleanPickNotes } from '../lib/pick-notes.js';
 import { workerOnline } from '../store/llm-requests.js';
 import { requireAuth } from './login.js';
 import { runOrchestration } from '../agents/orchestrator.js';
@@ -46,7 +48,7 @@ import { evaluateApprovalGate } from './lib/approval-gate.js';
 import { validateRendering, validateRenderingBatch, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
 import { reviewPrChecks, generatedFilePaths, AGENT_REVIEW_STATE } from '../implementers/lib/pr-self-review.js';
 import {
-  createDraft, saveDraftPageClassification, getDraftByFindingId, listDrafts, listDraftsForBoard, countDraftsByLifecycle, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
+  createDraft, saveDraftPageClassification, getDraftByFindingId, listDrafts, listDraftsForBoard, countDraftsByLifecycle, getDraft, updateDraft, updateDraftContentInPlace, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, recordPrMerge, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, markCmsDraftPublished, recordAgentReviewState, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds, countDesignDeferralsForFinding,
 } from '../store/drafts.js';
@@ -65,7 +67,7 @@ import { hasProfileLevelMismatch, repairProfileLevelMismatch } from '../generato
 import { repairDesignProfileRolesForSites } from '../scripts/repair-design-profile-roles.js';
 import { FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
-import { resolveFile } from '../implementers/lib/url-file-map.js';
+import { resolveFile, resolveNewContentUrl, resolveNewContentUrlForFile } from '../implementers/lib/url-file-map.js';
 import { triggerCmsRebuild } from '../sanity/rebuild.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
 import { resolvePageSource } from '../implementers/lib/page-resolution.js';
@@ -2451,6 +2453,11 @@ async function finalizeImplemented(siteId, draftId, site, { deployment = null } 
       await scheduleVerificationForDraft(siteId, draft, {
         siteOrigin: siteOriginFor(site),
         deploymentId: deployment?.id ?? null,
+        // Where a new blog post must be live, from the site's own URL pattern, so the check can fetch the real page.
+        // The file the post was really written to decides its URL; the title is only the fallback when no file was recorded.
+        newPageUrl: draft.action_type === 'blog-outline'
+          ? (resolveNewContentUrlForFile(site, 'blog-outline', draft.target_file_path || draft.content?.appliedFiles?.[0]?.filePath) || resolveNewContentUrl(site, 'blog-outline', draft.content?.title || draft.content?.topic))
+          : null,
       });
       if (deployment?.id) await attachDeploymentToDraftVerifications(siteId, draft.id, deployment.id);
     } catch (err) {
@@ -2567,6 +2574,74 @@ router.get('/action-center/drafts/:id/design-preview', async (req, res, next) =>
 
 // A blog draft placed into a real article page of the client's site and photographed (desktop and phone). Reads only. 422 when the draft is not an article
 // or the site has no captured article yet; 502 when the browser could not draw it.
+// The LIVE preview: the draft as a real page of the site (an iframe document, not a picture), with every part of it clickable (see lib/draft-live-preview.js).
+// 422 when the draft is not a blog post or the site has no captured article yet; 502 when the article could not be captured.
+router.get('/action-center/drafts/:id/live-preview', async (req, res, next) => {
+  try {
+    const draft = await getDraft(req.siteId, req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    const site = await getSiteById(req.siteId);
+    const r = await previewDraftLive(site, draft);
+    if (r.ok) return res.json(r);
+    res.status(['not-an-article', 'no-reference-article'].includes(r.reason) ? 422 : 502).json({ error: r.error, reason: r.reason });
+  } catch (e) { next(e); }
+});
+
+// The wording of ANY draft in plain fields, so a client can edit it (a meta title, an Open Graph card, a FAQ, a blog post...). GET lists what can be edited; POST { edits: { path: newText } } saves
+// it. Only the text a reader would see can change, never the structure; the change must pass the same checks as a new draft, and only a draft nobody has approved yet can be edited.
+router.get('/action-center/drafts/:id/edit-fields', async (req, res, next) => {
+  try {
+    const draft = await getDraft(req.siteId, req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    res.json({ editable: ['draft', 'edited', 'submitted_for_approval', 'revision_requested'].includes(draft.status), fields: editableFields(draft.content, draft.action_type) });
+  } catch (e) { next(e); }
+});
+router.post('/action-center/drafts/:id/edit-content', async (req, res, next) => {
+  try {
+    const draft = await getDraft(req.siteId, req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    const site = await getSiteById(req.siteId);
+    const r = await editDraftContent(site, draft, (req.body || {}).edits, {
+      runGate: (content) => runQualityGate(content, draft.action_type, req.siteId, { site, page: draft.content?.page || draft.input?.page || null, pageType: draft.input?.pageType || null, pageClassification: draft.input?.pageClassification || null }),
+      save: (content) => updateDraftContentInPlace(req.siteId, draft.id, { content, expectedUpdatedAt: draft.updated_at }),
+    });
+    if (r.ok) return res.json(r);
+    res.status(r.status || 400).json({ error: r.error, reason: r.reason, issues: r.issues });
+  } catch (e) { next(e); }
+});
+
+// "Tell the writer what to change" on ANY draft: { path, instruction } (a path from edit-fields). The Claude worker rewrites that one field; the result goes through the same checks and in-place save as typed text.
+router.post('/action-center/drafts/:id/rewrite-field', async (req, res, next) => {
+  try {
+    const draft = await getDraft(req.siteId, req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    const site = await getSiteById(req.siteId);
+    const r = await rewriteDraftField(site, draft, req.body || {}, {
+      runGate: (content) => runQualityGate(content, draft.action_type, req.siteId, { site, page: draft.content?.page || draft.input?.page || null, pageType: draft.input?.pageType || null, pageClassification: draft.input?.pageClassification || null }),
+      save: (content) => updateDraftContentInPlace(req.siteId, draft.id, { content, expectedUpdatedAt: draft.updated_at }),
+      callJson: async (system, user, opts) => (await import('../llm.js')).callLLMForJson(system, user, { ...opts, task: 'content', generatorId: 'draft-edit', workerWaitMs: INTERACTIVE_WAIT_MS, retry: false, siteId: req.siteId }),
+    });
+    if (r.ok) return res.json(r);
+    res.status(r.status || 400).json({ error: r.error, reason: r.reason, issues: r.issues });
+  } catch (e) { next(e); }
+});
+
+// Change ONE block of a draft: { blockId, instruction } (the Claude worker rewrites it) or { blockId, value } (the person typed it). The change must pass the same Quality Gate
+// the draft passed when it was written, or nothing is saved and the reasons come back. Only a draft nobody has approved yet can be edited.
+router.post('/action-center/drafts/:id/edit-block', async (req, res, next) => {
+  try {
+    const draft = await getDraft(req.siteId, req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    const site = await getSiteById(req.siteId);
+    const r = await editDraftBlock(site, draft, req.body || {}, {
+      runGate: (content) => runQualityGate(content, draft.action_type, req.siteId, { site, page: draft.content?.page || draft.input?.page || null, pageType: draft.input?.pageType || null, pageClassification: draft.input?.pageClassification || null }),
+      save: (content) => updateDraftContentInPlace(req.siteId, draft.id, { content, expectedUpdatedAt: draft.updated_at }),
+    });
+    if (r.ok) return res.json(r);
+    res.status(r.status || 400).json({ error: r.error, reason: r.reason, issues: r.issues });
+  } catch (e) { next(e); }
+});
+
 router.get('/action-center/drafts/:id/article-preview', async (req, res, next) => {
   try {
     const draft = await getDraft(req.siteId, req.params.id);
@@ -3120,7 +3195,7 @@ async function builtTodayFor(siteId) {
 router.get('/action-center/content-picks/blog-preview', async (req, res, next) => {
   try {
     const site = await getSiteById(req.siteId);
-    const r = await previewOptionInSiteTemplate(site, { generatorId: String(req.query.generatorId || 'blog-outline'), optionKey: String(req.query.option || ''), title: String(req.query.title || ''), pageUrl: req.query.url ? String(req.query.url) : null });
+    const r = await previewOptionLive(site, { generatorId: String(req.query.generatorId || 'blog-outline'), optionKey: String(req.query.option || ''), title: String(req.query.title || ''), pageUrl: req.query.url ? String(req.query.url) : null });
     if (r.ok) return res.json(r);
     res.status(['not-an-article', 'no-reference-article'].includes(r.reason) ? 422 : 502).json({ error: r.error, reason: r.reason });
   } catch (e) { next(e); }
@@ -3164,7 +3239,10 @@ router.put('/action-center/content-picks', async (req, res, next) => {
     const check = validatePickBatch(list);
     if (!check.ok) return res.status(400).json({ error: check.error, index: check.index });
     const saved = [];
-    for (const p of list) saved.push(await saveContentPick(req.siteId, { findingId: p.findingId, generatorId: p.generatorId, optionKey: p.optionKey, userId: req.userId || null }));
+    const cleaned = list.map((p) => cleanPickNotes(p.notes));
+    const badNotes = cleaned.findIndex((c) => !c.ok);
+    if (badNotes >= 0) return res.status(400).json({ error: cleaned[badNotes].error, index: badNotes });
+    for (const [i, p] of list.entries()) saved.push(await saveContentPick(req.siteId, { findingId: p.findingId, generatorId: p.generatorId, optionKey: p.optionKey, userId: req.userId || null, notes: cleaned[i].notes }));
     res.json({ saved });
   } catch (e) { next(e); }
 });
@@ -3174,7 +3252,9 @@ router.put('/action-center/content-picks/:findingId', async (req, res, next) => 
     const { generatorId, optionKey } = req.body || {};
     const check = validatePick({ generatorId, optionKey });
     if (!check.ok) return res.status(400).json({ error: check.error });
-    res.json(await saveContentPick(req.siteId, { findingId: req.params.findingId, generatorId, optionKey, userId: req.userId || null }));
+    const notes = cleanPickNotes((req.body || {}).notes);
+    if (!notes.ok) return res.status(400).json({ error: notes.error });
+    res.json(await saveContentPick(req.siteId, { findingId: req.params.findingId, generatorId, optionKey, userId: req.userId || null, notes: notes.notes }));
   } catch (e) { next(e); }
 });
 

@@ -15,6 +15,8 @@ import re
 
 from openai import AsyncOpenAI
 
+from app.llm import worker_queue
+
 from app.config import settings
 from app.llm.controls import LlmUnavailable, controls
 
@@ -36,6 +38,13 @@ def _parse_json_response(raw: str | None) -> dict | None:
 
 
 async def call_json(system: str, user: str, max_tokens: int = 800) -> dict | None:
+    # All AI goes through the Claude worker (see app/llm/worker_queue.py): with LLM_WORKER_MODE=on the paid API is not used here.
+    if worker_queue.worker_mode_on() and not worker_queue.paid_api_fallback():
+        try:
+            return _parse_json_response((await worker_queue.ask(system, user)).strip())
+        except worker_queue.WorkerUnavailable as e:
+            logger.warning("keyword-clustering LLM call skipped: %s", e)
+            return None
     try:
         resp = await controls.run("json_completion", lambda: _client.chat.completions.create(
             model=MODEL, max_tokens=max_tokens,

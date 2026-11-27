@@ -6,16 +6,38 @@ import { cyclePhase, splitHalf, splitCycle, evaluateKeyword, nextBlogDays, isShi
 const start = new Date('2026-10-01T00:00:00Z');
 const at = (n) => new Date(start.getTime() + (n - 1) * 86400000); // day n of the programme
 
-describe('which phase a project is in', () => {
-  test('a project with no cycle yet ships on its first day: no 30-day wait', () => {
-    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: null, now: at(1) }).phase, 'ship');
-    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: null, now: at(22) }).phase, 'ship');
+describe('which phase a project is in (one calendar for every client: gather Saturday, ship the same Sundays)', () => {
+  const sun1 = new Date('2026-11-29T05:00:00Z'); // the anchor Sunday
+  const day = (n) => new Date(sun1.getTime() + n * 86400000);
+  test('every client ships on the anchor Sunday, even one that shipped three days before', () => {
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: null, now: sun1 }).phase, 'ship');
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: new Date('2026-11-26T05:00:00Z'), now: sun1 }).phase, 'ship');
   });
-  test('days 2-15 only track, day 16 (15 days after the ship day) ships and evaluates again', () => {
-    const last = at(1);
-    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: last, now: at(2) }).phase, 'wait');
-    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: last, now: at(15) }).phase, 'wait');
-    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: last, now: at(16) }).phase, 'ship');
+  test('Saturday and weekdays only gather and track', () => {
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: null, now: day(-1) }).phase, 'wait');
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: sun1, now: day(3) }).phase, 'wait');
+  });
+  test('the next ship Sunday is two weeks later, the Sunday between is tracking', () => {
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: sun1, now: day(7) }).phase, 'wait');
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: sun1, now: day(14) }).phase, 'ship');
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: day(14), now: day(28) }).phase, 'ship');
+  });
+  test('no project ships twice on one day', () => {
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: new Date('2026-11-29T02:00:00Z'), now: sun1 }).phase, 'wait');
+  });
+  test('a project that joined off the calendar waits out its 14 days of tracking before the next calendar Sunday ships it again', () => {
+    // the calendar ships on day(0), day(14), day(28); this project shipped on day(7) (off-calendar).
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: day(7), now: day(14) }).phase, 'wait', 'only 7 days after its last ship');
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: day(7), now: day(28) }).phase, 'ship', '21 days after, on the calendar');
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: day(7), now: day(14) }).daysToNextShip, 14);
+  });
+  test('a brand-new project that has never shipped joins the next Sunday, off-calendar too', () => {
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: null, now: day(7) }).phase, 'ship');
+  });
+  test("the weekday is read in the project's own time zone", () => {
+    const lateSat = new Date('2026-11-28T20:00:00Z'); // Sunday 01:45 in Nepal, still Saturday in UTC
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: null, now: lateSat, timezone: 'Asia/Kathmandu' }).phase, 'ship');
+    assert.equal(cyclePhase({ growthStartedAt: start, lastCycleAt: null, now: lateSat, timezone: 'UTC' }).phase, 'wait');
   });
 });
 
@@ -215,4 +237,12 @@ describe('the schedule on a real database', { skip }, () => {
     });
   });
 
+});
+
+describe('a bad timezone value', () => {
+  test('is read as UTC instead of stopping the schedule run', () => {
+    const sun = new Date('2026-11-29T05:00:00Z');
+    assert.doesNotThrow(() => cyclePhase({ growthStartedAt: new Date('2026-11-01T00:00:00Z'), lastCycleAt: null, now: sun, timezone: 'Not/AZone' }));
+    assert.equal(cyclePhase({ growthStartedAt: new Date('2026-11-01T00:00:00Z'), lastCycleAt: null, now: sun, timezone: 'Not/AZone' }).phase, 'ship');
+  });
 });
