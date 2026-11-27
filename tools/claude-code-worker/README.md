@@ -52,9 +52,11 @@ Stop with Ctrl+C: it finishes what it is writing (up to a minute), gives back an
 
 | Variable | Default |
 |---|---|
-| `WORKER_CONCURRENCY` | 2 (max 4) requests at a time |
+| `WORKER_CONCURRENCY` | 2 (max 4) requests at a time; the launchd plist sets 4 |
 | `WORKER_TIMEOUT_MS` | 240000: longest one request may take |
 | `WORKER_MODEL` | Claude Code's default |
+| `WORKER_LIGHT_MODEL` | `haiku`: the model for mechanical jobs (meta titles, page-type labels, schema, QA, internal links); `off` uses `WORKER_MODEL` for everything |
+| `WORKER_LIGHT_GENERATORS` | `meta-title,page-content-classifier,gap-coverage,schema,qa-content,internal-links` |
 | `WORKER_CLAUDE_CONFIG_DIR` | `~/.superrank-worker/claude` |
 | `CLAUDE_BIN` | `claude` |
 

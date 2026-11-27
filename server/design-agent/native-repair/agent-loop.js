@@ -18,10 +18,13 @@
 // authentication method" — this deployment only has a real OPENAI_API_KEY
 // configured, but the loop was hardcoded to Anthropic with no fallback.
 import Anthropic from '@anthropic-ai/sdk';
+import { paidApiAllowed } from '../../lib/worker-only-ai.js';
 import { readSandboxFile, writeSandboxFile, listSandboxFiles, runSandboxCommand } from './sandbox.js';
 
 export function pickProvider() {
   if (process.env.NATIVE_REPAIR_PROVIDER) return process.env.NATIVE_REPAIR_PROVIDER.toLowerCase();
+  // All AI goes through the Claude worker (owner's rule, 2026-11-27): with it on, the loop runs as text turns on the worker, never on a paid API.
+  if (!paidApiAllowed()) return 'worker';
   const oa = process.env.OPENAI_API_KEY;
   // LLM_OPENAI_PAUSED (see llm.js openAiPaused): OpenAI's spend limit is hit, so go straight to Claude instead of failing a whole repair
   // run on a 429 first. Same rule as llm.js; duplicated because this module must not import llm.js (see the note above extractJson).
@@ -51,6 +54,52 @@ function extractJson(raw) {
   const lastBrace = Math.max(stripped.lastIndexOf('}'), stripped.lastIndexOf(']'));
   if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) return null;
   try { return JSON.parse(stripped.slice(firstBrace, lastBrace + 1)); } catch { return null; }
+}
+
+// THE WORKER PROVIDER. The Claude worker answers plain text and has no tools, so each turn of the loop is one text request: the whole conversation so far goes
+// in, one JSON action comes back, THIS process runs the tool inside the sandbox (same executeTool, same allowlists, same independent validate()), and the result
+// goes into the next request. Claude Code never touches a file. A turn takes about as long as one worker call, so a repair takes minutes, not seconds.
+const WORKER_PROTOCOL = 'You work through a text conversation, one step per reply. Each reply must be ONE JSON object and nothing else (no markdown, no prose). ' +
+  'To use a tool reply {"tool": "<name>", "input": {...}} with one of these tools: ' +
+  '__TOOLS__. To finish reply {"done": true, "final": <the final JSON the task asked for>}. After each tool call you will be shown its result as a "TOOL RESULT" message.';
+const OLD_RESULT_CHARS = 1200; // tool results older than the last few turns are shortened so the transcript does not grow without bound
+const RECENT_MESSAGES = 8;
+
+function workerSystem(systemPrompt) {
+  const tools = TOOL_DEFS.map((t) => `${t.name} ${JSON.stringify(t.parameters.properties)} (${t.description})`).join('; ');
+  return `${systemPrompt}\n\n${WORKER_PROTOCOL.replace('__TOOLS__', tools)}`;
+}
+
+function flattenForWorker(messages) {
+  return messages.map((m, i) => {
+    const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+    if (i === 0) return text;
+    if (m.role === 'assistant') return `YOUR PREVIOUS REPLY:\n${text}`;
+    const old = i < messages.length - RECENT_MESSAGES && text.length > OLD_RESULT_CHARS;
+    return old ? `${text.slice(0, OLD_RESULT_CHARS)}\n[…shortened, the file or output is unchanged on disk]` : text;
+  }).join('\n\n');
+}
+
+async function callViaWorker({ client, systemPrompt, messages }) {
+  const raw = await client.complete({ system: workerSystem(systemPrompt), user: flattenForWorker(messages) });
+  const obj = extractJson(raw);
+  const rawMessage = { role: 'assistant', content: raw };
+  if (obj && !Array.isArray(obj) && typeof obj.tool === 'string' && TOOL_DEFS.some((t) => t.name === obj.tool)) {
+    return { text: '', toolCalls: [{ id: `w${messages.length}`, name: obj.tool, input: obj.input && typeof obj.input === 'object' ? obj.input : {} }], rawMessage };
+  }
+  // Finished: {"done": true, "final": ...}, or the final JSON given bare. Either way the task's own validate() judges the result, never the model's word.
+  const final = obj && !Array.isArray(obj) && 'final' in obj ? (typeof obj.final === 'string' ? obj.final : JSON.stringify(obj.final)) : raw;
+  return { text: final, toolCalls: [], rawMessage };
+}
+
+// llm.js is loaded only here (it pulls in the OpenAI SDK), and only in worker mode.
+function makeWorkerClient() {
+  return {
+    complete: async ({ system, user }) => {
+      const { callLLM } = await import('../../llm.js');
+      return callLLM(system, user, { generatorId: 'design-repair', maxTokens: MAX_TOKENS, tier: 'monthly' });
+    },
+  };
 }
 
 // One declarative tool vocabulary, mapped to each provider's own wire shape
@@ -83,6 +132,7 @@ const TOOL_DEFS = [
 ];
 
 function buildTools(provider) {
+  if (provider === 'worker') return TOOL_DEFS;
   if (provider === 'openai') {
     return TOOL_DEFS.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }));
   }
@@ -127,6 +177,7 @@ async function executeTool(sandbox, toolName, input, { allowlist, fileAllowlist 
 // by the caller (each provider's own wire format for "what the assistant
 // said" differs and must round-trip exactly for the next turn to parse).
 async function callModel({ provider, client, model, systemPrompt, tools, messages }) {
+  if (provider === 'worker') return callViaWorker({ client, systemPrompt, messages });
   if (provider === 'openai') {
     const res = await client.chat.completions.create({
       model, max_tokens: MAX_TOKENS, tools,
@@ -152,6 +203,10 @@ async function callModel({ provider, client, model, systemPrompt, tools, message
 // message wrapping every tool_result block from this turn together.
 function appendToolTurn(provider, messages, rawMessage, toolCalls, results) {
   messages.push(rawMessage);
+  if (provider === 'worker') {
+    messages.push({ role: 'user', content: `${toolCalls.map((tc, i) => `TOOL RESULT for ${tc.name}:\n${results[i]}`).join('\n\n')}\n\nContinue: reply with the next JSON action.` });
+    return;
+  }
   if (provider === 'openai') {
     for (let i = 0; i < toolCalls.length; i++) {
       messages.push({ role: 'tool', tool_call_id: toolCalls[i].id, content: results[i] });
@@ -225,7 +280,7 @@ export async function runAgentLoop(args) {
 
 async function runAgentLoopOnce({
   systemPrompt, taskPrompt, sandbox, allowlist, fileAllowlist = null, maxTurns = 20, maxFixRounds = 2,
-  validate, model, anthropicClient, openaiClient, provider: providerOverride,
+  validate, model, anthropicClient, openaiClient, workerClient, provider: providerOverride,
 }) {
   // Explicit override takes precedence over env auto-detection — lets a
   // caller that already knows which client it's injecting (every test in
@@ -246,7 +301,7 @@ async function runAgentLoopOnce({
   // from every test that imports this module transitively (e.g.
   // auto-remediation.test.js), even ones that only ever exercise the
   // Anthropic path.
-  const client = provider === 'openai'
+  const client = provider === 'worker' ? (workerClient || makeWorkerClient()) : provider === 'openai'
     ? (openaiClient || new (await import('openai')).default({ apiKey: process.env.OPENAI_API_KEY }))
     : (anthropicClient || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }));
   const resolvedModel = (providerOverride === 'anthropic' && model && /^gpt-|^o\d/.test(model)) ? DEFAULT_MODEL.anthropic : (model || DEFAULT_MODEL[provider]);
@@ -259,7 +314,7 @@ async function runAgentLoopOnce({
       // eslint-disable-next-line no-await-in-loop
       finalText = await runTurns({ provider, client, model: resolvedModel, systemPrompt, tools, messages, sandbox, allowlist, fileAllowlist, maxTurns });
     } catch (err) {
-      return { status: 'error', detail: err.message, stage: err.stage || 'agent_run', limit: isProviderLimitError(err) };
+      return { status: 'error', detail: err.message, stage: err.stage || 'agent_run', limit: isProviderLimitError(err), ...(err.workerUnavailable ? { workerUnavailable: true } : {}) };
     }
 
     // eslint-disable-next-line no-await-in-loop

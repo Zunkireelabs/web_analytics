@@ -176,3 +176,20 @@ describe('decision-engine — exported constants', () => {
     assert.ok(MIN_EVIDENCE_TO_DECIDE >= 1);
   });
 });
+
+describe('boundEvidenceForPrompt', () => {
+  test('a huge evidence set is cut to a bounded prompt, in the gathered order, with long summaries shortened', async () => {
+    const { boundEvidenceForPrompt, MAX_EVIDENCE_PROMPT_CHARS } = await import('./decision-engine.js');
+    const big = Array.from({ length: 400 }, (_, i) => ({ source: 's', summary: `item ${i} ` + 'x'.repeat(5000), ref: `r${i}` }));
+    const out = boundEvidenceForPrompt(big);
+    assert.ok(JSON.stringify(out).length <= MAX_EVIDENCE_PROMPT_CHARS);
+    assert.equal(out[0].ref, 'r0');
+    assert.ok(out[0].summary.length < 800);
+    assert.ok(out.length >= 2 && out.length < big.length);
+  });
+  test('a small evidence set passes through untouched', async () => {
+    const { boundEvidenceForPrompt } = await import('./decision-engine.js');
+    const small = [{ source: 'a', summary: 'short', ref: 'x' }, { source: 'b', summary: 'also short', ref: 'y' }];
+    assert.deepEqual(boundEvidenceForPrompt(small), small);
+  });
+});

@@ -16,10 +16,11 @@ describe('where an AI call goes', () => {
   test('on: a call that names a generator goes to the worker when one is connected', async () => {
     assert.equal(await routeCall({ generatorId: 'expand-content' }, { env: on, online: async () => true }), 'worker');
   });
-  test('on: analysis and narration (no generator) go to the worker when one is connected, and to the API when none is', async () => {
+  test('on: analysis and narration (no generator) go to the worker when one is connected, and are refused (retried later) when none is, unless LLM_WORKER_FALLBACK=api', async () => {
     assert.equal(await routeCall({}, { env: on, online: async () => true }), 'worker');
     assert.equal(await routeCall({ generatorId: null }, { env: on, online: async () => true }), 'worker');
-    assert.equal(await routeCall({}, { env: on, online: async () => false }), 'api');
+    await assert.rejects(() => routeCall({}, { env: on, online: async () => false }), (e) => e.workerOffline === true && e.llmProvider === true);
+    assert.equal(await routeCall({}, { env: { ...on, LLM_WORKER_FALLBACK: 'api' }, online: async () => false }), 'api');
   });
   test('off: a call without a generator never asks whether a worker is online', async () => {
     assert.equal(await routeCall({}, { env: {}, online: async () => { throw new Error('must not be asked'); } }), 'api');

@@ -107,13 +107,30 @@ function isValidDecisionShape(parsed) {
   return true;
 }
 
+// What the model is shown, bounded. One decision used to send ~275,000 characters of gathered evidence (every record the correlation step found) for a single
+// finding. Each item's summary is cut to MAX_EVIDENCE_SUMMARY_CHARS and items are kept in their gathered order until MAX_EVIDENCE_PROMPT_CHARS is reached, so the
+// strongest-first order of the gatherer still decides what survives. Only the PROMPT is bounded: the stored decision keeps the full evidence.
+export const MAX_EVIDENCE_PROMPT_CHARS = 30000;
+export const MAX_EVIDENCE_SUMMARY_CHARS = 700;
+export function boundEvidenceForPrompt(evidence, { maxChars = MAX_EVIDENCE_PROMPT_CHARS, maxSummary = MAX_EVIDENCE_SUMMARY_CHARS } = {}) {
+  if (!Array.isArray(evidence)) return evidence;
+  const out = []; let used = 2;
+  for (const e of evidence) {
+    const item = e && typeof e.summary === 'string' && e.summary.length > maxSummary ? { ...e, summary: `${e.summary.slice(0, maxSummary)}…` } : e;
+    const len = JSON.stringify(item).length + 1;
+    if (out.length && used + len > maxChars) break;
+    out.push(item); used += len;
+  }
+  return out;
+}
+
 // Dependency-injection factory (same shape as recommendation-gates.js's
 // createRecommendationGates) so decide() is testable without a real DB or a
 // real LLM call — tests pass a stub callLLMForJsonFn/insertDecisionFn.
 // The exact prompt and shape check the engine uses, exported so a candidate model is EVALUATED on the same task it would serve
 // (lib/model-adaptation.js liveDecisionPredictor). No second prompt to drift from the real one.
 export function decisionPromptFor(situation, evidence) {
-  return { system: SYSTEM_PROMPT, user: `Situation: ${situation}\n\nEvidence:\n${JSON.stringify(evidence)}`, validate: isValidDecisionShape };
+  return { system: SYSTEM_PROMPT, user: `Situation: ${situation}\n\nEvidence:\n${JSON.stringify(boundEvidenceForPrompt(evidence))}`, validate: isValidDecisionShape };
 }
 
 export function createDecisionEngine({
@@ -147,7 +164,7 @@ export function createDecisionEngine({
       });
     }
 
-    const user = `Situation: ${situation}\n\nEvidence:\n${JSON.stringify(evidence)}`;
+    const user = `Situation: ${situation}\n\nEvidence:\n${JSON.stringify(boundEvidenceForPrompt(evidence))}`;
     const parsed = await callLLMForJsonFn(SYSTEM_PROMPT, user, {
       maxTokens: 900,
       modelRole: 'decision', // lets a model promoted through the evaluated registry serve decisions (lib/model-override.js); null/unchanged until one is

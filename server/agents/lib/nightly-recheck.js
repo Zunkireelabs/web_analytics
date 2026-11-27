@@ -73,7 +73,7 @@ export async function recheckOpenIssuesForSite(siteId, { deps = {}, deadlineAt =
   const recheckLink = deps.recheckLink || (await import('./technical-seo-analysis.js')).recheckLink;
   const close = deps.close || (await import('../../store/recommendations.js')).closeRecommendation;
   const keyOf = (f) => coord.recommendationPageKey({ generatorId: f.recommendedAction.generatorId, params: f.recommendedAction.params });
-  const out = { siteId, checked: 0, fixed: 0, stillOpen: 0, unverified: 0, errors: 0, deadlineHit: false };
+  const out = { siteId, checked: 0, fixed: 0, stillOpen: 0, unverified: 0, notCheckable: 0, errors: 0, deadlineHit: false };
   const now = deps.now || Date.now;
   const pastDeadline = () => deadlineAt != null && now() >= deadlineAt;
 
@@ -93,7 +93,7 @@ export async function recheckOpenIssuesForSite(siteId, { deps = {}, deadlineAt =
       out.checked++;
       if (!res.broken) { await close(r.id); out.fixed++; } else out.stillOpen++;
       await touch([r.id]);
-    } catch { out.errors++; }
+    } catch (err) { out.errors++; console.warn(`[nightly-recheck] site ${siteId}: link re-check failed: ${String(err?.message || err).slice(0, 200)}`); }
   }
   const providerFailures = deps.providerFailureCount || (await import('../../lib/provider-health.js')).providerFailureCount;
   out.degraded = 0;
@@ -117,8 +117,10 @@ export async function recheckOpenIssuesForSite(siteId, { deps = {}, deadlineAt =
       }
       await touch(touched);
     } catch (err) {
-      // An agent that is not a per-page agent (a whole-site scan) or that failed: leave its issues exactly as they are.
-      out.errors++;
+      // Leave its issues exactly as they are. An agent the runner does not know (growth-opportunities, faq-onboarding-check, ... raise
+      // issues but have no page re-check) is not a failure: count it as "not checkable", not as an error. A real failure keeps its reason.
+      if (/^Unknown agent /.test(err?.message || '')) out.notCheckable += g.recs.length;
+      else { out.errors++; console.warn(`[nightly-recheck] site ${siteId}: agent ${g.agent} failed: ${String(err?.message || err).slice(0, 200)}`); }
     }
   }
   return out;

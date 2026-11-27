@@ -277,3 +277,67 @@ describe('runAgentLoop — OpenAI limit exceeded falls back to Claude for the SA
     } finally { restore(); }
   });
 });
+
+// The worker provider: each turn is a text request, the tools still run HERE in the sandbox, and validate() still decides.
+describe('runAgentLoop — worker provider (no paid API, text turns)', () => {
+  const scripted = (replies) => { const seen = []; let i = 0; return { seen, complete: async (req) => { seen.push(req); if (i >= replies.length) throw new Error('ran out of replies'); return replies[i++]; } }; };
+
+  test('a JSON action is run as a tool in the sandbox, its result goes into the next request, and "done" ends it', async () => {
+    const sandbox = await freshSandbox();
+    const worker = scripted([
+      '{"tool": "write_file", "input": {"path": "w.js", "content": "const y = 2;\\n"}}',
+      '```json\n{"done": true, "final": {"summary": "wrote w.js"}}\n```',
+    ]);
+    const result = await runAgentLoop({
+      systemPrompt: 'sys', taskPrompt: 'task', sandbox, allowlist: ['node'], provider: 'worker', workerClient: worker,
+      validate: async () => ({ ok: true, output: 'ok', filesChanged: [{ path: 'w.js', newContent: 'const y = 2;\n', patch: 'p' }] }),
+    });
+    assert.equal(result.status, 'ok');
+    assert.equal(result.summary, 'wrote w.js');
+    const { readSandboxFile } = await import('./sandbox.js');
+    assert.equal(await readSandboxFile(sandbox, 'w.js'), 'const y = 2;\n');
+    assert.match(worker.seen[0].system, /ONE JSON object/);
+    assert.match(worker.seen[1].user, /TOOL RESULT for write_file/);
+  });
+
+  test('the file scope is still enforced: an out-of-scope write is refused and the model is told so', async () => {
+    const sandbox = await freshSandbox();
+    const worker = scripted(['{"tool": "write_file", "input": {"path": "OUT.js", "content": "x"}}', '{"done": true, "final": "{\\"summary\\": \\"d\\"}"}']);
+    await runAgentLoop({
+      systemPrompt: 's', taskPrompt: 't', sandbox, allowlist: ['node'], fileAllowlist: ['ok.js'], provider: 'worker', workerClient: worker,
+      validate: async () => ({ ok: true, output: '', filesChanged: [] }),
+    });
+    assert.match(worker.seen[1].user, /Refused: this task may only write to ok\.js/);
+  });
+
+  test('the worker saying it is done changes nothing by itself: a failing validation sends it back for another round', async () => {
+    const sandbox = await freshSandbox();
+    const worker = scripted(['{"done": true, "final": {"summary": "one"}}', '{"done": true, "final": {"summary": "two"}}']);
+    let n = 0;
+    const result = await runAgentLoop({
+      systemPrompt: 's', taskPrompt: 't', sandbox, allowlist: ['node'], provider: 'worker', workerClient: worker,
+      validate: async () => (++n === 1 ? { ok: false, output: 'test failed' } : { ok: true, output: 'ok', filesChanged: [] }),
+    });
+    assert.equal(result.status, 'ok');
+    assert.equal(result.summary, 'two');
+    assert.match(worker.seen[1].user, /Validation failed/);
+  });
+
+  test('worker offline: a clean error flagged workerUnavailable, no paid API', async () => {
+    const sandbox = await freshSandbox();
+    const offline = { complete: async () => { throw Object.assign(new Error('The Claude Code worker is not connected'), { workerUnavailable: true, status: 502 }); } };
+    const result = await runAgentLoop({ systemPrompt: 's', taskPrompt: 't', sandbox, allowlist: ['node'], provider: 'worker', workerClient: offline, validate: async () => ({ ok: true }) });
+    assert.equal(result.status, 'error');
+    assert.equal(result.workerUnavailable, true);
+    assert.equal(result.limit, false);
+  });
+
+  test('with the worker mode on and no provider pinned, the loop picks the worker, not a paid API', async () => {
+    const { pickProvider } = await import('./agent-loop.js');
+    const was = [process.env.LLM_WORKER_MODE, process.env.NATIVE_REPAIR_PROVIDER, process.env.LLM_WORKER_FALLBACK];
+    process.env.LLM_WORKER_MODE = 'on'; delete process.env.NATIVE_REPAIR_PROVIDER; delete process.env.LLM_WORKER_FALLBACK;
+    try { assert.equal(pickProvider(), 'worker'); } finally {
+      for (const [k, v] of [['LLM_WORKER_MODE', was[0]], ['NATIVE_REPAIR_PROVIDER', was[1]], ['LLM_WORKER_FALLBACK', was[2]]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
+  });
+});

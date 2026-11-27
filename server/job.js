@@ -55,6 +55,7 @@ import { countShippedFileEditsTodayAllSites } from './store/shipping-queue.js';
 import { AUTONOMOUS_DRAFT_SOURCES } from './lib/autonomous-quota.js';
 import { isShippable, isActiveSite, isShipCatchupOwed, checkShipStall, shouldNotifyStaffOfStall, SHIP_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './lib/ship-window.js';
 import { rateLimitKey } from './github/client.js';
+import { runSitesConcurrently } from './lib/site-pool.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
 
 import { syncWatchlist } from './agents/lib/watchlist.js';
@@ -340,13 +341,19 @@ export async function runDailyJobForSite(site, { isAborted = () => false } = {})
 
   if (abandoned('the narrative')) return { site, reportDate, narrative: '', abandoned: true };
   let narrative = '';
+  let narrativeWaitsForWorker = false;
   try {
     narrative = await generateNarrative(site, reportDate);
     await saveNarrative(site.id, reportDate, narrative);
     console.log(`[report] site ${site.id} narrative saved for ${reportDate}`);
   } catch (err) {
-    const { message } = safeMessage(`job.runDailyJobForSite.narrative[site ${site.id}]`, err, 'narrative generation failed');
-    stepErrors.push(new Error(message));
+    // All AI goes through the Claude worker. With the laptop closed (the 07:00 run) the narrative is not written and not an error: the hourly guard
+    // writes it once the worker is online, and sends the day's email then, so no client gets an email without its narrative.
+    if (err?.workerUnavailable) { narrativeWaitsForWorker = true; console.log(`[report] site ${site.id} narrative waits for the Claude worker (${reportDate})`); }
+    else {
+      const { message } = safeMessage(`job.runDailyJobForSite.narrative[site ${site.id}]`, err, 'narrative generation failed');
+      stepErrors.push(new Error(message));
+    }
   }
 
   const day = await getDay(site.id, reportDate);
@@ -357,6 +364,8 @@ export async function runDailyJobForSite(site, { isAborted = () => false } = {})
     // Email idempotency: only send once per report date, even across restarts/catch-ups.
     if (existing?.emailed_at) {
       console.log(`[report] site ${site.id} email already sent for ${reportDate} — skipping.`);
+    } else if (narrativeWaitsForWorker) {
+      console.log(`[report] site ${site.id} email held until the narrative is written by the worker (${reportDate}).`);
     } else {
       const sent = await sendDailyEmail(site, reportDate, day, narrative);
       if (sent) await saveNarrative(site.id, reportDate, narrative, new Date().toISOString());
@@ -1066,7 +1075,14 @@ export async function runHourlyCatchupForAllSites(tz) {
         console.log(`[job] hourly guard: site ${site.id} "${site.name}" (${reportDate}) analysis done, narrative missing — retrying the narrative only`);
         try {
           const narrative = await generateNarrative(site, reportDate);
-          if (narrative) await saveNarrative(site.id, reportDate, narrative);
+          if (narrative) {
+            await saveNarrative(site.id, reportDate, narrative);
+            // The 07:00 run held this day's email until the narrative existed (the worker was offline): send it now, once.
+            if (!existing?.emailed_at) {
+              const day = await getDay(site.id, reportDate);
+              if (await sendDailyEmail(site, reportDate, day, narrative)) await saveNarrative(site.id, reportDate, narrative, new Date().toISOString());
+            }
+          }
         } catch (err) {
           safeMessage(`job.hourlyGuard.narrative[site ${site.id}]`, err, 'narrative retry failed');
         }
@@ -1653,7 +1669,9 @@ async function shipWithDeadline(site, globalRemaining, { drainOnly = false } = {
   return run.value;
 }
 
-const SHIP_SITE_TIMEOUT_MS = Number(process.env.SHIP_SITE_TIMEOUT_MS) || 30 * 60 * 1000;
+// 60 minutes per project per pass (was 30). An item takes about 8 minutes end to end (2026-11-27: the design preview alone is about 6), so 30 minutes ended a pass after 4 of a
+// project's 60 queued items. Projects now run up to SHIP_SITE_CONCURRENCY at a time, so a longer slice no longer makes the others wait for it.
+const SHIP_SITE_TIMEOUT_MS = Number(process.env.SHIP_SITE_TIMEOUT_MS) || 60 * 60 * 1000;
 async function shipSiteWithLocks(site, globalRemaining, { deadlineAt = null, drainOnly = false } = {}) {
   const { ran: credRan, result } = await withJobLock(
     jobKeyFor(GITHUB_CREDENTIAL_LOCK_JOB_NAME, rateLimitKey(site)),
@@ -1773,18 +1791,12 @@ export async function runAutoRemediationForAllSites({ windowEndsAt = null, drain
   const results = [];
   let globalRemaining = await globalRemainingSeed();
   const unreachable = [];
-  for (const [index, site] of sites.entries()) {
-    if (windowClosed(windowEndsAt)) {
-      const left = sites.length - results.length - unreachable.length;
-      console.log(`[job] auto-remediation: the morning window is closed — ${left} site(s) not started this run; the hourly catch-up picks them up and they go earlier tomorrow.`);
-      for (const notStarted of sites.slice(index)) await recordSkippedShipRun(notStarted, SKIP_REASON.WINDOW_CLOSED, 'The morning shipping window closed before this project was reached.', { drainOnly });
-      break;
-    }
-    if (globalRemaining <= 0) {
-      console.log(`[job] auto-remediation: platform-wide daily ceiling reached — skipping remaining ${sites.length - results.length} site(s) this run.`);
-      for (const notStarted of sites.slice(index)) await recordSkippedShipRun(notStarted, SKIP_REASON.CEILING_REACHED, 'The platform-wide daily ceiling was already reached.', { drainOnly });
-      break;
-    }
+  // UP TO SHIP_SITE_CONCURRENCY (default 3, max 4) PROJECTS AT ONCE. One project after another gave each a 30-minute slice and about four passes a day, so a project
+  // with 60 items queued got through 4 (2026-11-27) while the Claude worker's lanes sat idle. Each project already has its own ship lock and its own time limit; two
+  // projects that share one GitHub credential are never run together (their rate-limit tracking would blind-side each other, see shipSiteWithLocks). With a finite platform-wide
+  // daily ceiling the run stays one project at a time, because several in flight could each spend the same remaining budget. SHIP_SITE_CONCURRENCY=1 restores the old order.
+  const concurrency = Number.isFinite(globalRemaining) ? 1 : Math.max(1, Math.min(Number(process.env.SHIP_SITE_CONCURRENCY) || 3, 4));
+  const processSite = async (site) => {
     try {
       // Per-SITE lock nested inside a per-CREDENTIAL lock (shipSiteWithLocks
       // above). The work this protects (a GitHub App token's budget, one
@@ -1798,14 +1810,14 @@ export async function runAutoRemediationForAllSites({ windowEndsAt = null, drain
       // still cannot ship the same site, or spend the same credential's
       // budget, at the same time.
       const outcome = await shipWithDeadline(site, globalRemaining, { drainOnly });
-      if (outcome.timedOut) { await recordSkippedShipRun(site, SKIP_REASON.TIMED_OUT, 'The project\'s shipping run exceeded its time limit and was left behind.', { drainOnly }); results.push({ siteId: site.id, error: 'timed-out' }); globalRemaining = await globalRemainingSeed(); continue; }
+      if (outcome.timedOut) { await recordSkippedShipRun(site, SKIP_REASON.TIMED_OUT, 'The project\'s shipping run exceeded its time limit and was left behind.', { drainOnly }); results.push({ siteId: site.id, error: 'timed-out' }); globalRemaining = await globalRemainingSeed(); return; }
       const { ran, reason, result } = outcome;
       if (!ran) {
         console.log(`[job] auto-remediation site ${site.id} "${site.name}" skipped — ${reason === 'credential-locked' ? 'another site sharing its GitHub credential is shipping right now' : "another process holds this site's shipping lock"}`);
         await recordSkippedShipRun(site, reason === 'credential-locked' ? SKIP_REASON.CREDENTIAL_LOCKED : SKIP_REASON.SITE_LOCKED,
           reason === 'credential-locked' ? 'Another project sharing this project\'s GitHub credential was shipping at the time.' : 'Another process held this project\'s shipping lock.', { drainOnly });
         results.push({ siteId: site.id, skipped: reason === 'credential-locked' ? 'credential-locked' : 'locked' });
-        continue;
+        return;
       }
       globalRemaining -= result.shipped || 0;
       if (result.stoppedReason === 'onboarding-analysis-pending') await alertIfDesignCaptureHeld(site);
@@ -1815,7 +1827,7 @@ export async function runAutoRemediationForAllSites({ windowEndsAt = null, drain
       if (result.stoppedReason === 'site-unreachable') {
         // Everyone else goes first; this client's site is tried again below.
         unreachable.push(site);
-        continue;
+        return;
       }
       await alertIfShipStalled(site, result.shipped || 0);
       results.push({ siteId: site.id, ...result });
@@ -1824,7 +1836,20 @@ export async function runAutoRemediationForAllSites({ windowEndsAt = null, drain
       await recordSkippedShipRun(site, SKIP_REASON.RUN_ERROR, err.message, { drainOnly });
       results.push({ siteId: site.id, error: err.message });
     }
-  }
+  };
+  await runSitesConcurrently({
+    sites, concurrency, keyOf: rateLimitKey, processSite,
+    halt: () => (windowClosed(windowEndsAt) ? 'window' : (globalRemaining <= 0 ? 'ceiling' : null)),
+    onError: (site, err) => console.error(`[job] auto-remediation: unexpected error for site ${site.id}:`, err.message),
+    onHalt: async (reason, notStarted) => {
+      if (reason === 'window') console.log(`[job] auto-remediation: the morning window is closed — ${notStarted.length} site(s) not started this run; the hourly catch-up picks them up and they go earlier tomorrow.`);
+      else console.log(`[job] auto-remediation: platform-wide daily ceiling reached — skipping remaining ${notStarted.length} site(s) this run.`);
+      for (const site of notStarted) {
+        await recordSkippedShipRun(site, reason === 'window' ? SKIP_REASON.WINDOW_CLOSED : SKIP_REASON.CEILING_REACHED,
+          reason === 'window' ? 'The morning shipping window closed before this project was reached.' : 'The platform-wide daily ceiling was already reached.', { drainOnly }).catch(() => {});
+      }
+    },
+  });
   // One more look at sites that could not be reached the first time round.
   for (const site of unreachable) {
     if (globalRemaining <= 0 || windowClosed(windowEndsAt)) break;
@@ -2277,7 +2302,7 @@ export async function runNightlyIssueRecheckForAllSites({ deadlineAt = null } = 
       const r = await recheckOpenIssuesForSite(site.id, { deadlineAt });
       const ideas = await (await import('./agents/lib/nightly-recheck.js')).closeSatisfiedIdeasForSite(site.id).catch(() => ({ closed: 0 }));
       r.ideasClosed = ideas.closed;
-      console.log(`[nightly-recheck] site ${site.id}: ${r.fixed} fixed, ${r.stillOpen} still open, ${r.unverified} not verified (${r.degraded ?? 0} held because the AI provider failed during the check), ${r.ideasClosed} idea(s) already covered, ${r.errors} error(s)`);
+      console.log(`[nightly-recheck] site ${site.id}: ${r.fixed} fixed, ${r.stillOpen} still open, ${r.unverified} not verified, ${r.notCheckable ?? 0} with no page re-check (${r.degraded ?? 0} held because the AI provider failed during the check), ${r.ideasClosed} idea(s) already covered, ${r.errors} error(s)`);
       results.push(r);
     } catch (err) {
       console.error(`[nightly-recheck] site ${site.id} failed:`, err.message);

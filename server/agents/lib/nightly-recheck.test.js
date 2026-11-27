@@ -52,7 +52,16 @@ describe('one project, end to end with stand-ins', () => {
       getSiteById: async () => ({}), coord: { recommendationPageKey: () => '' },
       runAgent: async () => { throw new Error('Unknown agent seo'); }, recheckLink: async () => ({}), close: async (id) => closed.push(id),
     } });
-    assert.deepEqual(closed, []); assert.equal(out.errors, 1);
+    assert.deepEqual(closed, []); assert.equal(out.errors, 0); assert.equal(out.notCheckable, 1);
+  });
+  test('a real agent failure is an error and leaves its issues alone', async () => {
+    const closed = [];
+    const out = await recheckOpenIssuesForSite(9, { deps: {
+      query: async (sql) => (/^\s*SELECT/i.test(sql) ? { rows: [rec(1, '/a')] } : { rows: [] }),
+      getSiteById: async () => ({}), coord: { recommendationPageKey: () => '' },
+      runAgent: async () => { throw new Error('browser crashed'); }, recheckLink: async () => ({}), close: async (id) => closed.push(id),
+    } });
+    assert.deepEqual(closed, []); assert.equal(out.errors, 1); assert.equal(out.notCheckable, 0);
   });
 });
 

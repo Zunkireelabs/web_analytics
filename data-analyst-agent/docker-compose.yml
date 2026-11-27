@@ -9,6 +9,9 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # All AI goes through the Claude worker (app/llm/worker_queue.py): the paid OpenAI API is not used by the single-shot AI calls. The /ask chat stays on the API.
+      LLM_WORKER_MODE: "on"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 30s

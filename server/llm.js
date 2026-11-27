@@ -269,6 +269,12 @@ function warnIfTruncated(msg, model, maxTokens) {
 // extractJson() itself and treat a parse failure as "zero findings this
 // run" rather than pay for a second full vision round-trip.
 async function callLLMWithImagesUntracked(system, user, images, { model, maxTokens = 1500, tier = 'daily', generatorId, siteId, task } = {}) {
+  // The Claude worker takes text only, and every AI call except the AI-visibility probes goes through it (owner's rule, 2026-11-27). So with worker mode on, a screenshot
+  // check does NOT fall back to a paid vision API: it is refused as "provider unavailable" (its caller already treats that as "no result this run").
+  // LLM_WORKER_FALLBACK=api restores the paid call.
+  if (String(process.env.LLM_WORKER_MODE || '').toLowerCase() === 'on' && String(process.env.LLM_WORKER_FALLBACK || '').toLowerCase() !== 'api') {
+    throw Object.assign(new Error('Screenshot checks are not available through the Claude worker yet, so no paid vision API is used.'), { status: 502, llmProvider: true, workerUnavailable: true });
+  }
   system = await withAgentMemory(system, generatorId, siteId);
   system = await withDesignContext(system, generatorId, siteId);
   const { provider, model: resolvedModel } = resolveProviderAndModel({ task, tier, model });

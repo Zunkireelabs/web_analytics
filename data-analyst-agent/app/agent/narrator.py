@@ -8,12 +8,14 @@ itself. Mirrors the sibling Node app's server/llm.js: one shared wrapper
 with retry/backoff, called from everywhere an LLM is needed."""
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 
 import openai  # noqa: F401
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.llm import worker_queue
 from app.llm.controls import controls
 
 SYSTEM_PROMPT = (
@@ -64,6 +66,11 @@ async def call_llm(
     /ask conversational prompt above; callers with a different task pass
     their own. tool_choice lets a caller force a specific tool call for
     structured output instead of leaving it to the model."""
+    # All AI goes through the Claude worker (app/llm/worker_queue.py), except the /ask chat loop, which needs a model that calls tools turn by turn. Every other caller
+    # forces ONE tool call to get structured output, which the worker can do as plain JSON text. With no worker connected this raises WorkerUnavailable (the callers
+    # already treat any failure as "no AI result this run"); LLM_WORKER_FALLBACK=api keeps the paid call.
+    if tools and tool_choice and tool_choice.get("type") == "tool" and worker_queue.worker_mode_on() and not worker_queue.paid_api_fallback():
+        return await _call_via_worker(messages, tools, tool_choice, system)
     kwargs = {"model": MODEL, "messages": _to_openai_messages(system or SYSTEM_PROMPT, messages)}
     if tools:
         kwargs["tools"] = [_to_openai_tool(t) for t in tools]
@@ -135,3 +142,34 @@ def _from_openai_response(response) -> ChatResponse:
             args = {}
         blocks.append(ToolUseBlock(id=tc.id, name=tc.function.name, input=args))
     return ChatResponse(content=blocks)
+
+
+def _strip_fences(raw: str) -> str:
+    return re.sub(r"^```(?:json)?\s*|\s*```$", "", (raw or "").strip())
+
+
+def parse_tool_json(raw: str) -> dict:
+    """The worker's text as the forced tool's input. Tolerates a code fence or a sentence around the one JSON object; anything else is an error, never a guess."""
+    cleaned = _strip_fences(raw)
+    try:
+        value = json.loads(cleaned)
+    except json.JSONDecodeError:
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("the worker did not return a JSON object") from None
+        value = json.loads(cleaned[start:end + 1])
+    if not isinstance(value, dict):
+        raise ValueError("the worker did not return a JSON object")
+    return value
+
+
+async def _call_via_worker(messages: list[dict], tools: list[dict], tool_choice: dict, system: str | None):
+    tool = next((t for t in tools if t["name"] == tool_choice["name"]), tools[0])
+    schema = json.dumps(tool.get("input_schema") or {"type": "object", "properties": {}})
+    full_system = (
+        f"{system or SYSTEM_PROMPT}\n\nRespond with ONLY one JSON object, no prose and no markdown, that is the input for the tool `{tool['name']}` "
+        f"({tool.get('description', '')}). It must match this JSON schema exactly:\n{schema}"
+    )
+    user = "\n\n".join(m["content"] for m in messages if isinstance(m.get("content"), str))
+    raw = await worker_queue.ask(full_system, user)
+    return ChatResponse(content=[ToolUseBlock(id="worker", name=tool["name"], input=parse_tool_json(raw))])

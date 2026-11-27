@@ -84,3 +84,16 @@ describe('runOrchestration — one hung agent must never block the whole battery
     assert.equal(findings.length, 2);
   });
 });
+
+describe('boundFindingsForPrompt', () => {
+  test('the briefing prompt is bounded, most urgent first, with long evidence cut, and the input is not changed', async () => {
+    const { boundFindingsForPrompt, MAX_FINDINGS_PROMPT_CHARS } = await import(resolve('./orchestrator.js'));
+    const findings = Array.from({ length: 300 }, (_, i) => ({ id: `f${i}`, priority: i === 299 ? 'high' : 'low', whyItMatters: 'w'.repeat(2000), evidence: { blob: 'e'.repeat(9000) }, recommendedAction: { label: `act ${i}` } }));
+    const out = boundFindingsForPrompt(findings);
+    assert.ok(JSON.stringify(out).length <= MAX_FINDINGS_PROMPT_CHARS);
+    assert.equal(out[0].id, 'f299'); // the high-priority one jumps the queue
+    assert.ok(out[0].whyItMatters.length <= 400);
+    assert.equal(findings.length, 300);
+    assert.equal(findings[0].whyItMatters.length, 2000);
+  });
+});

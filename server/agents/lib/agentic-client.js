@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
+import { paidApiAllowed, paidApiRefused } from '../../lib/worker-only-ai.js';
 import { LLM_TIMEOUT_MS, MODEL_DEFAULTS, fallbackMaxTokens, openAiRoute, noteOpenAiQuotaExhausted, noteOpenAiHealthy, fallbackAvailable, isQuotaExhaustedError } from '../../llm.js';
 
 // A chat client for agentic-orchestrator.js's tool-calling loop that looks exactly like the OpenAI SDK's
@@ -90,6 +91,7 @@ export function makeAgenticClient({ openai, anthropic, env = process.env } = {})
     chat: {
       completions: {
         create: async (params) => {
+          if (!openai && !anthropic && !paidApiAllowed(env)) throw paidApiRefused('The agentic question loop');
           // No usable OpenAI key but an Anthropic one: answer with Claude.
           if (!oa) {
             if (!env.ANTHROPIC_API_KEY && !anthropic) throw new Error('No LLM key configured for the agentic loop.');
